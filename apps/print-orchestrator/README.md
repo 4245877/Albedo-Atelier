@@ -1,4 +1,4 @@
-# Print Orchestrator
+# Albedo Atelier
 
 Fastify service for future FDM and resin printer orchestration.
 

@@ -2,7 +2,7 @@
 
 Workspace for Atelier services.
 
-## Print Orchestrator
+## Albedo Atelier
 
 Start the local stack:
 
