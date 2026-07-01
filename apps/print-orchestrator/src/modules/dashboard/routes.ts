@@ -27,8 +27,16 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
   // Maintenance schedule per printer.
   app.get("/maintenance", async () => farmStore.getMaintenance());
 
-  // Recent events (live feed).
+  // Recent events (live feed). `/events/recent` is a spec alias of `/events`.
   app.get("/events", async () => farmStore.getFeed());
+  app.get("/events/recent", async () => farmStore.getFeed());
+
+  // Active print jobs — the printers currently printing or paused.
+  app.get("/jobs/active", async () => farmStore.listActivePrinters());
+
+  // Night-print window, candidates and current pick.
+  // Spec alias of `/api/queue/night`.
+  app.get("/night-print", async () => farmStore.getNight());
 
   // Critical events for today.
   app.get("/critical", async () => farmStore.getCritical());
