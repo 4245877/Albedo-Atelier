@@ -1,6 +1,9 @@
-import type { Printer } from "../printers/types";
+import type { PrinterView } from "../printers/types";
 import type { PrintJob } from "../jobs/types";
 
-export function selectPrinterForJob(printers: Printer[], _job: PrintJob): Printer | undefined {
-  return printers.find((printer) => printer.state === "idle");
+export function selectPrinterForJob(
+  printers: PrinterView[],
+  _job: PrintJob
+): PrinterView | undefined {
+  return printers.find((printer) => printer.status === "idle");
 }

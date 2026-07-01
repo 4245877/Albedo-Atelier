@@ -1,7 +1,10 @@
-import type { AutomationRule } from "../../domain/automation/rules";
+import { farmStore } from "../../infra/store/farmStore";
+import type { Automation, AutomationsSection } from "../../domain/dashboard/types";
 
-const rules: AutomationRule[] = [];
+export function listAutomations(): AutomationsSection {
+  return farmStore.getAutomations();
+}
 
-export async function listAutomationRules(): Promise<AutomationRule[]> {
-  return [...rules];
+export function toggleAutomation(id: string, on?: boolean): Automation {
+  return farmStore.toggleAutomation(id, on);
 }

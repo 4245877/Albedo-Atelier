@@ -1,8 +1,8 @@
-import type { Printer } from "./types";
+import type { PrinterView } from "./types";
 
 export class PrinterDomainService {
-  isAvailable(printer: Printer): boolean {
-    return printer.state === "idle";
+  isAvailable(printer: PrinterView): boolean {
+    return printer.status === "idle";
   }
 }
 

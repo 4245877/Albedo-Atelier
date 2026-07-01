@@ -1,5 +1,5 @@
 import type { PrintJob } from "../../../domain/jobs/types";
-import type { Printer, PrinterState } from "../../../domain/printers/types";
+import type { PrinterState, PrinterView } from "../../../domain/printers/types";
 import type { DriverConnectionConfig, PrinterDriver } from "./PrinterDriver";
 
 class UnavailablePrinterDriver implements PrinterDriver {
@@ -16,19 +16,19 @@ class UnavailablePrinterDriver implements PrinterDriver {
     return undefined;
   }
 
-  async getState(_printer: Printer): Promise<PrinterState> {
+  async getState(_printer: PrinterView): Promise<PrinterState> {
     return "offline";
   }
 
-  async startJob(_printer: Printer, _job: PrintJob): Promise<void> {
+  async startJob(_printer: PrinterView, _job: PrintJob): Promise<void> {
     throw new Error(`${this.name} driver is not implemented yet`);
   }
 
-  async pauseJob(_printer: Printer, _job: PrintJob): Promise<void> {
+  async pauseJob(_printer: PrinterView, _job: PrintJob): Promise<void> {
     throw new Error(`${this.name} driver is not implemented yet`);
   }
 
-  async cancelJob(_printer: Printer, _job: PrintJob): Promise<void> {
+  async cancelJob(_printer: PrinterView, _job: PrintJob): Promise<void> {
     throw new Error(`${this.name} driver is not implemented yet`);
   }
 }
