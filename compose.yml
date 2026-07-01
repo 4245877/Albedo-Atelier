@@ -1,0 +1,43 @@
+services:
+  print-orchestrator:
+    build:
+      context: ./apps/print-orchestrator
+    container_name: atelier-print-orchestrator
+    environment:
+      NODE_ENV: production
+      SERVICE_NAME: print-orchestrator
+      HOST: 0.0.0.0
+      PORT: 3100
+      LOG_LEVEL: info
+    ports:
+      - "0.0.0.0:3100:3100"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3100/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  print-dashboard:
+    build:
+      context: ./apps/print-dashboard
+    container_name: atelier-print-dashboard
+    depends_on:
+      print-orchestrator:
+        condition: service_healthy
+    ports:
+      - "0.0.0.0:8090:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped

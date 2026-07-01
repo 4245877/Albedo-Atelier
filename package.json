@@ -1,0 +1,12 @@
+{
+  "name": "atelier",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "build:print-orchestrator": "npm --workspace @atelier/print-orchestrator run build",
+    "start:print-orchestrator": "npm --workspace @atelier/print-orchestrator run start"
+  }
+}
