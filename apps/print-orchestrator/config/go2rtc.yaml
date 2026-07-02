@@ -10,5 +10,14 @@ streams:
 api:
   listen: ":1984"
 
+# WebRTC is the only transport that gets keyframes out of the Creality K2, so
+# the dashboard streams it over WebRTC. go2rtc listens on 8555 (published to the
+# host in compose) and advertises the host's LAN address as the ICE candidate,
+# so LAN browsers can reach the media plane directly.
+webrtc:
+  listen: ":8555"
+  candidates:
+    - ${GO2RTC_WEBRTC_CANDIDATE}
+
 log:
   level: info

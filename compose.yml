@@ -5,11 +5,20 @@ services:
     restart: unless-stopped
     environment:
       K2_CAMERA_SOURCE: "webrtc:http://192.168.0.132:8000/call/webrtc_local#format=creality"
+      # WebRTC ICE candidate the browser dials for media. Must be the host's
+      # LAN address (not the container IP) and match the published 8555 port
+      # below. Change this if the host IP changes.
+      GO2RTC_WEBRTC_CANDIDATE: "192.168.0.139:8555"
     volumes:
       - ./apps/print-orchestrator/config/go2rtc.yaml:/config/go2rtc.yaml:ro
     ports:
       # Avoids the fulfillment stack's 1984 while keeping the internal URL go2rtc:1984.
       - "0.0.0.0:1985:1984"
+      # WebRTC media (browser ↔ go2rtc). The Creality K2 only delivers keyframes
+      # over its native WebRTC, so this is the working live-video path. Published
+      # on both transports; UDP is the normal path, TCP the fallback.
+      - "0.0.0.0:8555:8555/tcp"
+      - "0.0.0.0:8555:8555/udp"
 
   print-orchestrator:
     build:

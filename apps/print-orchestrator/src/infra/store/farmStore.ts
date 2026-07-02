@@ -40,6 +40,7 @@ import {
   hasCameraSource,
   hasCameraStream,
   openCameraStream,
+  resolveWebrtcSource,
   type CameraFrame,
   type CameraStream
 } from "../printers/snapshot";
@@ -596,6 +597,7 @@ export class FarmStore {
           name: p.name,
           camera: view.camera,
           cameraStream: view.cameraStream,
+          cameraSrc: view.cameraSrc,
           light: false,
           status: view.status,
           snapshotAt: view.snapshotAt
@@ -760,6 +762,7 @@ export class FarmStore {
       swatch: printer.swatch || null,
       camera: hasCameraSource(printer) ? camera?.state ?? "offline" : "none",
       cameraStream: hasCameraStream(printer),
+      cameraSrc: resolveWebrtcSource(printer),
       light: null,
       snapshotAt: camera?.snapshotAt ?? null,
       ...(status?.error ? { error: status.error } : {})

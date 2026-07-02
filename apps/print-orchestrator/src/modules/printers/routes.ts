@@ -59,9 +59,21 @@ export async function registerPrinterRoutes(app: FastifyInstance): Promise<void>
 
   app.get<{ Params: PrinterParams }>("/:id/camera.mp4", async (request, reply) => {
     const stream = await getPrinterCameraStream(request.params.id);
+
+    // Tear the upstream fetch down as soon as the client goes away (tab closed,
+    // player reconnect) so we do not leak sockets to go2rtc. `close` is
+    // idempotent, so wiring it to both the response and request is safe.
     reply.raw.on("close", stream.close);
+    request.raw.on("close", stream.close);
+
+    // Live video should reach the browser frame-by-frame: disable Nagle so small
+    // fMP4 chunks are flushed immediately instead of being coalesced into fewer,
+    // larger, laggier packets.
+    reply.raw.socket?.setNoDelay(true);
+
     return reply
       .header("Cache-Control", "no-store")
+      .header("X-Accel-Buffering", "no")
       .type(stream.mime)
       .send(stream.body);
   });

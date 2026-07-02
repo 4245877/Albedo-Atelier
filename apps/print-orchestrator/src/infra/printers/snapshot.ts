@@ -69,6 +69,25 @@ export function hasCameraStream(printer: PrinterConfig): boolean {
   return Boolean(resolveStreamUrl(printer));
 }
 
+/**
+ * The go2rtc stream name for a printer's WebRTC view, parsed from a go2rtc-style
+ * stream URL (e.g. `…/api/stream.mp4?src=k2` → `"k2"`). Returns null when the
+ * stream is not a go2rtc source — WebRTC (which the browser reaches directly via
+ * the `/go2rtc/` proxy) is the only transport that gets keyframes out of the
+ * Creality K2, so this name is what the dashboard streams over WebRTC.
+ */
+export function resolveWebrtcSource(printer: PrinterConfig): string | null {
+  const explicit = printer.streamUrl.trim();
+  if (!explicit || !/\/api\//.test(explicit)) return null;
+  const match = /[?&]src=([^&]+)/.exec(explicit);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
 /** True when the printer has any camera source we can try. */
 export function hasCameraSource(printer: PrinterConfig): boolean {
   if (resolveSnapshotUrl(printer)) return true;
@@ -214,11 +233,15 @@ export async function openCameraStream(
   if (!url) return null;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  // The timeout guards only connection setup — negotiating the source and
+  // receiving the response headers. Once frames start flowing the stream must
+  // never be torn down on a timer, so the timer is cleared the moment headers
+  // arrive; the ongoing stream lives until the client disconnects.
+  const connectTimer = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
   try {
     const response = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
+    clearTimeout(connectTimer);
 
     if (!response.ok || !response.body) {
       controller.abort();
@@ -239,13 +262,24 @@ export async function openCameraStream(
       return null;
     }
 
-    return {
-      body: Readable.fromWeb(response.body),
-      mime: contentType || "video/mp4",
-      close: () => controller.abort()
+    const body = Readable.fromWeb(response.body);
+    // Aborting the fetch (client disconnect) or an upstream reset surfaces as an
+    // 'error' on the Node stream. A dropped live stream is expected — the client
+    // reconnects — so swallow it here instead of letting it bubble as an
+    // unhandled error and spam the logs or crash the process.
+    body.on("error", () => {});
+
+    let closed = false;
+    const close = (): void => {
+      if (closed) return;
+      closed = true;
+      controller.abort();
+      body.destroy();
     };
+
+    return { body, mime: contentType || "video/mp4", close };
   } catch {
-    clearTimeout(timeout);
+    clearTimeout(connectTimer);
     controller.abort();
     return null;
   }

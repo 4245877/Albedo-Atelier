@@ -348,29 +348,39 @@ const PRINTER_SVG = `
     <path d="M30 46 L70 46" stroke-dasharray="3 4" opacity=".8"/>
   </svg>`;
 
-function camBlock(p) {
+function camBlock(p, ctx) {
   if (p.camera === "none") {
     return `<div class="cam"><div class="cam-offline">камера не настроена</div></div>`;
   }
+
+  // Live-трансляция (WebRTC через go2rtc): в разметку кладём только стабильную
+  // точку крепления. Сам <camera-stream> живёт в постоянном реестре (см.
+  // reconcileCameras), переживает перерисовку доски — обновление телеметрии
+  // больше не рвёт поток — и сам переподключается при обрыве. Состояние связи
+  // показывает сам плеер, поэтому статус снапшот-пробы здесь не решает.
+  if (p.cameraSrc) {
+    const slot = `${p.id}::${ctx}`;
+    return `
+      <div class="cam ${p.light ? "cam-lit" : ""}">
+        ${PRINTER_SVG}
+        <div class="cam-mount" data-cam-slot="${esc(slot)}" data-cam-src="${esc(p.cameraSrc)}"></div>
+        <span class="cam-flash" data-flash="${p.id}"></span>
+      </div>`;
+  }
+
+  // Камера только со снимками: реальный JPEG-кадр либо заглушка «нет сигнала»,
+  // когда проба сейчас не отвечает. При ошибке загрузки остаётся svg-заглушка.
   if (p.camera === "offline") {
     return `<div class="cam"><div class="cam-offline">нет сигнала</div>
       ${p.snapshotAt ? `<span class="cam-tag"><i class="dot"></i>снимок ${p.snapshotAt}</span>` : ""}</div>`;
   }
-  // Камера online — для настроенных live-stream показываем поток с backend,
-  // иначе оставляем реальный JPEG-кадр. При ошибке загрузки остаётся svg-заглушка.
-  const live = Boolean(p.cameraStream);
-  const media = live
-    ? `<video class="cam-img cam-video" aria-label="Камера ${esc(p.name)}" autoplay muted playsinline preload="metadata"
-        src="${API_BASE}/api/printers/${encodeURIComponent(p.id)}/camera.mp4"
-        onerror="this.remove()"></video>`
-    : `<img class="cam-img" alt="Камера ${esc(p.name)}" loading="lazy"
-        src="${API_BASE}/api/printers/${encodeURIComponent(p.id)}/camera.jpg?t=${encodeURIComponent(p.snapshotAt || Date.now())}"
-        onerror="this.remove()">`;
   return `
     <div class="cam ${p.light ? "cam-lit" : ""}">
       ${PRINTER_SVG}
-      ${media}
-      <span class="cam-tag ${live ? "live" : ""}"><i class="dot"></i>${live ? "LIVE" : `снимок ${p.snapshotAt || "—"}`}</span>
+      <img class="cam-img" alt="Камера ${esc(p.name)}" loading="lazy"
+        src="${API_BASE}/api/printers/${encodeURIComponent(p.id)}/camera.jpg?t=${encodeURIComponent(p.snapshotAt || Date.now())}"
+        onerror="this.remove()">
+      <span class="cam-tag"><i class="dot"></i>снимок ${p.snapshotAt || "—"}</span>
       <span class="cam-flash" data-flash="${p.id}"></span>
     </div>`;
 }
@@ -429,7 +439,7 @@ function printerCard(p) {
 
   return `
     <article class="printer-card ${p.status === "error" ? "is-error" : ""} ${dead ? "is-offline" : ""}">
-      ${camBlock(p)}
+      ${camBlock(p, "card")}
       <div class="printer-body">
         <div class="printer-top">
           <div>
@@ -611,7 +621,7 @@ function renderCameras() {
       ${cams.map((p) => `
         <div class="cam-thumb" data-act="open" data-id="${p.id}" title="Открыть ${esc(p.name)}">
           <span class="cam-thumb-name">${esc(p.name)}</span>
-          ${camBlock(p)}
+          ${camBlock(p, "thumb")}
         </div>`).join("") || `<ul class="row-list" style="grid-column:1/-1">${emptyRow("Ни у одного принтера не настроена камера (snapshotUrl в конфигурации)")}</ul>`}
     </div>`;
 }
@@ -917,6 +927,64 @@ function setupStickyOffsets() {
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(syncStickyOffsets);
 }
 
+/* ── Камеры: живые WebRTC-плееры ───────────────────────────── */
+/* K2 отдаёт keyframe только по родному WebRTC, поэтому живое видео берём через
+   go2rtc-компонент <camera-stream> (WebRTC → MSE), проксируемый nginx на
+   /go2rtc/ (см. camera-webrtc.js). Компонент сам ведёт переговоры,
+   переподключается при обрыве и ставит поток на паузу на скрытой вкладке.
+
+   Элементы живут в реестре по «слоту» (id принтера + место показа) и переносятся
+   в свежие крепления после каждой перерисовки доски — трансляция не рвётся при
+   обновлении телеметрии: у компонента есть 5-секундная фора на отсоединение от
+   DOM, а повторная вставка её отменяет. */
+
+const CAM_PLAYERS = new Map(); // slot -> <camera-stream>
+
+/** Привязать постоянные WebRTC-плееры к свежим креплениям камер после перерисовки. */
+function reconcileCameras() {
+  // Веб-компонент грузится отдельным модулем и может быть ещё не зарегистрирован
+  // (app.js — обычный скрипт, модули исполняются позже). Дождёмся определения и
+  // повторим; крепления к этому моменту уже в DOM.
+  if (!("customElements" in window)) return;
+  if (!customElements.get("camera-stream")) {
+    customElements.whenDefined("camera-stream").then(() => reconcileCameras());
+    return;
+  }
+
+  const mounts = document.querySelectorAll("[data-cam-slot]");
+  const seen = new Set();
+
+  mounts.forEach((mount) => {
+    const slot = mount.dataset.camSlot;
+    const src = mount.dataset.camSrc;
+    if (!slot || !src) return;
+    seen.add(slot);
+
+    let el = CAM_PLAYERS.get(slot);
+    if (!el) {
+      el = document.createElement("camera-stream");
+      el.className = "cam-live";
+      CAM_PLAYERS.set(slot, el);
+      mount.appendChild(el); // connectedCallback → создаёт внутренний <video>
+      // src задаём после вставки в DOM: onconnect у go2rtc-компонента требует,
+      // чтобы элемент уже был connected и <video> существовал. Относительный путь
+      // компонент сам превращает в ws://<origin>/go2rtc/api/ws?src=…
+      el.src = `/go2rtc/api/ws?src=${encodeURIComponent(src)}`;
+    } else if (el.parentNode !== mount) {
+      // Переносим в новое крепление; поток не прерывается (5-секундная фора
+      // компонента на отсоединение, отменяется этой же вставкой).
+      mount.appendChild(el);
+    }
+  });
+
+  for (const [slot, el] of CAM_PLAYERS) {
+    if (!seen.has(slot)) {
+      el.remove(); // компонент закроет соединение по истечении своей паузы
+      CAM_PLAYERS.delete(slot);
+    }
+  }
+}
+
 /* ── Загрузка данных и отрисовка ───────────────────────────── */
 
 function renderBoard() {
@@ -952,6 +1020,9 @@ function renderAll() {
   // старте, чтобы обновления данных не сбрасывали активную вкладку и позицию
   // горизонтальной прокрутки.
   renderBoard();
+  // Доска пересобрана — вернуть живые видеоплееры в новые крепления, чтобы
+  // трансляция не прерывалась при обновлении телеметрии.
+  reconcileCameras();
   renderTopbar();
   ensureReveal();
 }
