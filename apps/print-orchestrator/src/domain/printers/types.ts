@@ -44,7 +44,9 @@ export interface PrinterView {
   cameraSrc: string | null;
   /** Chamber light state; null — the device does not expose light control. */
   light: boolean | null;
-  /** Whether policy currently allows switching the light on manually. */
+  /** Whether this printer has a configured light command. */
+  lightSupported: boolean;
+  /** Whether the schedule currently wants the light on. */
   lightAllowed: boolean;
   snapshotAt: string | null;
   error?: string;

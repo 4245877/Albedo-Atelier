@@ -18,6 +18,7 @@ export type StoreLogger = {
 
 const COMPLETE_RE = /complete|finish|done/i;
 const CANCEL_RE = /cancel|abort|stop/i;
+const MANUAL_LIGHT_OVERRIDE_MS = 5 * 60 * 1000;
 
 function looksComplete(status: PrinterLiveStatus): boolean {
   if (status.stateText && CANCEL_RE.test(status.stateText)) return false;
@@ -50,6 +51,8 @@ export class PrinterPoller {
   private warnedInvalidNightWindow = false;
   /** Last light target successfully requested per printer. */
   private lightTargets = new Map<string, boolean>();
+  /** Until this timestamp, scheduled light policy must not override manual changes. */
+  private manualLightOverrides = new Map<string, number>();
   /** Last light policy failure signature per printer, used to avoid feed spam. */
   private lightFailureKeys = new Map<string, string>();
 
@@ -113,6 +116,13 @@ export class PrinterPoller {
     this.statuses.set(id, status);
   }
 
+  /** Temporarily lets an operator's explicit light command win over the schedule. */
+  noteManualLightChange(id: string, on: boolean): void {
+    this.lightTargets.set(id, on);
+    this.lightFailureKeys.delete(id);
+    this.manualLightOverrides.set(id, Date.now() + MANUAL_LIGHT_OVERRIDE_MS);
+  }
+
   getChangedAt(id: string): string | undefined {
     return this.changedAt.get(id);
   }
@@ -160,6 +170,7 @@ export class PrinterPoller {
     targetOn: boolean
   ): Promise<void> {
     if (!supportsPrinterLight(printer)) return;
+    if (this.isManualLightOverrideActive(printer.id)) return;
 
     const status = this.statuses.get(printer.id);
     if (!status?.online) return;
@@ -207,6 +218,14 @@ export class PrinterPoller {
         "night light policy failed"
       );
     }
+  }
+
+  private isManualLightOverrideActive(id: string): boolean {
+    const until = this.manualLightOverrides.get(id);
+    if (!until) return false;
+    if (until > Date.now()) return true;
+    this.manualLightOverrides.delete(id);
+    return false;
   }
 
   // ── Transition tracking (real events only) ──────────────────────────────

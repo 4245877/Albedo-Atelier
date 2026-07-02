@@ -1,6 +1,4 @@
 import { JobError, PrinterConnectionError, PrinterOfflineError } from "../../core/errors";
-import { env } from "../../shared/env";
-import { isWithinLocalTimeWindow } from "../../shared/time";
 import type { PrinterView } from "../../domain/printers/types";
 import type { PrinterConfig } from "../printers/config";
 import {
@@ -72,16 +70,12 @@ export class PrinterCommandService {
     if (!supportsPrinterLight(printer)) {
       throw new JobError(`Управление подсветкой для «${printer.name}» не настроено`);
     }
-    if (on && !isWithinLocalTimeWindow(env.nightWindow)) {
-      throw new JobError(
-        `Подсветку «${printer.name}» можно включать только ночью (${env.nightWindow}); днём она выключается автоматически`
-      );
-    }
 
     await this.dispatchLight(printer, on);
+    this.poller.noteManualLightChange(printer.id, on);
     this.events.push(
       on ? "☾" : "☀",
-      `<b>${printer.name}</b>: подсветка ${on ? "включена" : "выключена"} оператором`,
+      `<b>${printer.name}</b>: подсветка ${on ? "включена" : "выключена"} оператором; расписание вернётся через 5 минут`,
       "info"
     );
     return this.refresh(printer);

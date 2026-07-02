@@ -98,17 +98,19 @@ function printerCard(p) {
     dead ? esc(p.error ? `Нет связи: ${p.error}` : "Нет связи с принтером") :
     "Свободен — готов принять задание";
 
-  // light === null: устройство не поддерживает управление подсветкой.
+  // light === null: состояние неизвестно; lightSupported говорит, можно ли отправлять команды.
   const lightUnknown = p.light == null;
-  const lightOnDisabled = lightUnknown || p.light || dead || !p.lightAllowed;
-  const lightOnTitle = !lightUnknown && !p.lightAllowed ? ' title="Подсветка включается только ночью"' : "";
+  const lightSupported = Boolean(p.lightSupported) || !lightUnknown;
+  const lightTitle = lightUnknown && lightSupported ? ' title="Состояние подсветки неизвестно — команда будет отправлена вручную"' : "";
+  const lightOnDisabled = !lightSupported || p.light === true || dead;
+  const lightOffDisabled = !lightSupported || p.light === false || dead;
   const actions = `
     <button class="btn btn-sm" data-act="open" data-id="${p.id}">Открыть</button>
     <button class="btn btn-sm" data-act="pause" data-id="${p.id}" ${p.status !== "printing" ? "disabled" : ""}>⏸ Пауза</button>
     <button class="btn btn-sm" data-act="resume" data-id="${p.id}" ${p.status !== "paused" ? "disabled" : ""}>▶ Продолжить</button>
     <button class="btn btn-sm btn-danger" data-act="cancel" data-id="${p.id}" ${!busy ? "disabled" : ""}>✕ Отмена</button>
-    <button class="btn btn-sm" data-act="light-on" data-id="${p.id}"${lightOnTitle} ${lightOnDisabled ? "disabled" : ""}>☀ Подсветка</button>
-    <button class="btn btn-sm" data-act="light-off" data-id="${p.id}" ${lightUnknown || !p.light || dead ? "disabled" : ""}>☾ Погасить</button>
+    <button class="btn btn-sm" data-act="light-on" data-id="${p.id}"${lightTitle} ${lightOnDisabled ? "disabled" : ""}>☀ Подсветка</button>
+    <button class="btn btn-sm" data-act="light-off" data-id="${p.id}"${lightTitle} ${lightOffDisabled ? "disabled" : ""}>☾ Погасить</button>
     <button class="btn btn-sm" data-act="snapshot" data-id="${p.id}" ${p.camera !== "online" || dead || p.cameraSrc ? "disabled" : ""}>◉ Снимок</button>`;
 
   const progressBlock = !busy ? "" : p.progress != null ? `

@@ -3,7 +3,7 @@ import { env } from "../../shared/env";
 import { isWithinLocalTimeWindow } from "../../shared/time";
 import { hasCameraSource, hasCameraStream, resolveWebrtcSource } from "../printers/camera";
 import type { PrinterConfig } from "../printers/config";
-import type { PrinterLiveStatus } from "../printers/status";
+import { supportsPrinterLight, type PrinterLiveStatus } from "../printers/status";
 import type { CameraEntry } from "./cameraService";
 
 export function isBusyStatus(status: PrinterView["status"]): boolean {
@@ -50,6 +50,7 @@ export function buildPrinterView(
     cameraStream: cameraOnline && hasCameraStream(printer),
     cameraSrc: cameraOnline ? webrtcSource : null,
     light: status?.light ?? null,
+    lightSupported: supportsPrinterLight(printer),
     lightAllowed: isWithinLocalTimeWindow(env.nightWindow),
     snapshotAt: camera?.snapshotAt ?? null,
     ...(status?.error ? { error: status.error } : {})
