@@ -64,9 +64,14 @@
   font-family: var(--font-body);
   color: var(--ink);
   background: var(--bg);
+
+  /* Смещение для якорной навигации под липкие шапку+навигацию.
+     Реальную высоту проставляет JS (--stack-h); 130px — запасной вариант. */
+  scroll-padding-top: var(--stack-h, 130px);
 }
 
 * { box-sizing: border-box; }
+* { -webkit-tap-highlight-color: transparent; }
 
 body {
   margin: 0;
@@ -201,7 +206,7 @@ body {
 
 .section-nav {
   position: sticky;
-  top: 66px;
+  top: var(--topbar-h, 66px);
   z-index: 30;
   display: flex;
   gap: 8px;
@@ -261,7 +266,6 @@ body {
   box-shadow: var(--shadow);
   padding: 20px 22px 22px;
   transition: box-shadow 0.3s ease, transform 0.3s ease;
-  scroll-margin-top: 130px;
 }
 
 .card:hover { box-shadow: var(--shadow-hover); }
@@ -336,7 +340,6 @@ body {
   grid-template-columns: minmax(280px, 1.2fr) minmax(300px, 1fr);
   gap: clamp(20px, 3vw, 40px);
   align-items: center;
-  scroll-margin-top: 130px;
 }
 
 @media (max-width: 900px) {
@@ -687,13 +690,11 @@ body {
 
 .printer-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  /* min(100%, 300px): на узком экране колонка сжимается до ширины контейнера,
+     поэтому не переполняет его и без отдельного медиа-запроса. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
   gap: 16px;
   margin-top: 14px;
-}
-
-@media (max-width: 380px) {
-  .printer-grid { grid-template-columns: 1fr; }
 }
 
 .printer-card {
@@ -1209,6 +1210,28 @@ body {
 .toast-danger { border-left-color: var(--danger); }
 .toast-ok { border-left-color: var(--ok); }
 
+/* ── Фокус и тактильный отклик (клавиатура + тач) ───────────── */
+
+:focus-visible {
+  outline: 2px solid var(--gold-deep);
+  outline-offset: 2px;
+}
+
+.card-night :focus-visible { outline-color: var(--topaz); }
+
+/* Отклик на нажатие для тач-устройств, где :hover не срабатывает. */
+.nav-chip:active {
+  transform: translateY(0) scale(0.96);
+  color: var(--gold-deep);
+  border-color: var(--gold-line);
+  background: var(--gold-soft);
+}
+.stat-tile:active { transform: scale(0.98); border-color: var(--gold-line); }
+.quick:active { transform: scale(0.98); border-color: var(--gold-line); background: var(--gold-soft); }
+.row:active { border-color: var(--gold-line); background: #f6f0f0; }
+.cam-thumb:active { transform: scale(0.98); }
+.printer-card:active { box-shadow: var(--shadow-hover); }
+
 /* ── Анимации ───────────────────────────────────────────────── */
 
 @keyframes pulse {
@@ -1258,4 +1281,30 @@ body {
     transition-duration: 0.01ms !important;
   }
   .reveal { opacity: 1; transform: none; }
+}
+
+/* ── Тач-устройства: крупнее цели нажатия, тише фоновая анимация ── */
+
+@media (pointer: coarse) {
+  .btn { min-height: 44px; }
+  .btn-sm { min-height: 38px; padding: 8px 12px; }
+  .nav-chip { padding: 9px 15px; }
+  .quick { padding: 15px 14px; }
+
+  .toggle { width: 46px; height: 28px; }
+  .toggle::after { top: 4px; left: 4px; width: 20px; height: 20px; }
+  .toggle.on::after { transform: translateX(18px); }
+
+  /* Крупные постоянные вращения — лишняя нагрузка на батарею мобильных. */
+  .brand-sigil, .hero-sigil { animation: none; }
+}
+
+/* ── Мобильная раскладка шапки ───────────────────────────────── */
+
+@media (max-width: 560px) {
+  .topbar { flex-wrap: wrap; gap: 8px 10px; }
+  .topbar-side { width: 100%; justify-content: flex-start; }
+  .pill { padding: 5px 11px; font-size: 12.5px; }
+  .clock { margin-left: auto; }
+  .card:not(.card-clear) { padding: 18px 16px; }
 }

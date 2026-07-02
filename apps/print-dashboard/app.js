@@ -17,6 +17,9 @@ let state = null;
 let backendReachable = false;
 let everLoaded = false;
 let revealed = false;
+/* Снимок последних отрисованных данных: если новый ответ идентичен,
+   DOM не пересобираем (камеры не мигают, нет лишних перекачек кадров). */
+let lastRenderedJson = null;
 
 /* ── Клиент API ────────────────────────────────────────────── */
 
@@ -273,7 +276,7 @@ function camBlock(p) {
     <div class="cam ${p.light ? "cam-lit" : ""}">
       ${PRINTER_SVG}
       <img class="cam-img" alt="Камера ${esc(p.name)}" loading="lazy"
-        src="${API_BASE}/api/printers/${encodeURIComponent(p.id)}/camera.jpg?t=${Date.now()}"
+        src="${API_BASE}/api/printers/${encodeURIComponent(p.id)}/camera.jpg?t=${encodeURIComponent(p.snapshotAt || Date.now())}"
         onerror="this.remove()">
       <span class="cam-tag ${live ? "live" : ""}"><i class="dot"></i>${live ? "LIVE" : `снимок ${p.snapshotAt || "—"}`}</span>
       <span class="cam-flash" data-flash="${p.id}"></span>
@@ -368,9 +371,9 @@ function renderCritical() {
     <ul class="row-list">
       ${state.critical.map((e) => `
         <li class="row ${e.level === "err" ? "row-danger" : "row-warn"}">
-          <span class="row-icon">${e.icon}</span>
+          <span class="row-icon">${esc(e.icon)}</span>
           <div class="grow"><div class="row-title" style="font-weight:600">${esc(e.text)}</div></div>
-          <span class="row-time">${e.time}</span>
+          <span class="row-time">${esc(e.time)}</span>
         </li>`).join("") || emptyRow("Критических событий нет")}
     </ul>`;
 }
@@ -378,15 +381,18 @@ function renderCritical() {
 /* ── 6 · Материалы ─────────────────────────────────────────── */
 
 function matItem(m) {
-  const ratio = m.have / m.full;
-  const lvl = ratio < 0.18 ? "crit" : ratio < 0.4 ? "low" : "";
+  // full может быть 0/undefined (учёт неизвестен) — тогда не считаем уровень,
+  // чтобы не показать пустую полосу как «критический» остаток и не получить NaN.
+  const full = Number(m.full) > 0 ? Number(m.full) : 0;
+  const ratio = full ? Math.min(1, Math.max(0, m.have / full)) : 0;
+  const lvl = full ? (ratio < 0.18 ? "crit" : ratio < 0.4 ? "low" : "") : "";
   return `
     <div class="mat-item ${m.low ? "mat-low" : ""}">
       <div class="grow">
-        <div class="mat-name"><span class="swatch" style="background:${m.swatch}"></span>${esc(m.name)}</div>
-        <div class="level mat-level ${lvl}"><i style="width:${Math.min(100, ratio * 100)}%"></i></div>
+        <div class="mat-name"><span class="swatch" style="background:${esc(m.swatch)}"></span>${esc(m.name)}</div>
+        <div class="level mat-level ${lvl}"><i style="width:${(ratio * 100).toFixed(0)}%"></i></div>
       </div>
-      <span class="mat-qty">${m.have} ${m.unit}${m.need ? ` / нужно ${m.need}` : ""}</span>
+      <span class="mat-qty">${esc(m.have)} ${esc(m.unit)}${m.need ? ` / нужно ${esc(m.need)}` : ""}</span>
     </div>`;
 }
 
@@ -592,8 +598,8 @@ function renderFeed() {
     <ul class="feed-list">
       ${state.feed.slice(0, 8).map((e) => `
         <li class="feed-item f-${e.kind}">
-          <div class="feed-text">${e.icon} ${e.text}</div>
-          <div class="feed-time">${e.time}</div>
+          <div class="feed-text">${esc(e.icon)} ${esc(e.text)}</div>
+          <div class="feed-time">${esc(e.time)}</div>
         </li>`).join("") || `<li class="feed-item f-info"><div class="feed-text">Событий пока нет — лента заполняется реальными переходами статусов принтеров</div></li>`}
     </ul>`;
 }
@@ -608,7 +614,7 @@ function renderWarnings() {
     <ul class="row-list">
       ${state.warnings.map((w) => `
         <li class="row ${w.level === "err" ? "row-danger" : w.level === "warn" ? "row-warn" : ""}">
-          <span class="row-icon">${w.icon}</span>
+          <span class="row-icon">${esc(w.icon)}</span>
           <div class="grow">
             <div class="row-title" style="font-weight:600">${esc(w.text)}</div>
             <div class="row-sub">${esc(w.hint)}</div>
@@ -787,6 +793,33 @@ function ensureReveal() {
   setupReveal();
 }
 
+/* ── Смещения под липкие шапку и навигацию ─────────────────── */
+/* Высота шапки на мобильных зависит от переноса пилюль, поэтому меряем её
+   в рантайме и отдаём в CSS-переменные — навигация липнет ровно под шапкой,
+   а якорный скролл не прячет заголовки секций. */
+
+function syncStickyOffsets() {
+  const topbar = $(".topbar");
+  if (!topbar) return;
+  const nav = $(".section-nav");
+  const topH = Math.ceil(topbar.getBoundingClientRect().height);
+  const navH = nav ? Math.ceil(nav.getBoundingClientRect().height) : 0;
+  const root = document.documentElement.style;
+  root.setProperty("--topbar-h", `${topH}px`);
+  root.setProperty("--stack-h", `${topH + navH + 12}px`);
+}
+
+function setupStickyOffsets() {
+  syncStickyOffsets();
+  const topbar = $(".topbar");
+  if (topbar && "ResizeObserver" in window) {
+    new ResizeObserver(syncStickyOffsets).observe(topbar);
+  }
+  window.addEventListener("resize", syncStickyOffsets);
+  // Веб-шрифты меняют высоту бренда — пересчитываем после их загрузки.
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(syncStickyOffsets);
+}
+
 /* ── Загрузка данных и отрисовка ───────────────────────────── */
 
 function renderBoard() {
@@ -810,6 +843,14 @@ function renderBoard() {
 
 function renderAll() {
   if (!state) return;
+  const snapshot = JSON.stringify(state);
+  if (snapshot === lastRenderedJson) {
+    // Данные не изменились — трогаем только шапку (статус связи), DOM доски
+    // оставляем как есть, чтобы не пересоздавать <img> камер (без мерцания).
+    renderTopbar();
+    return;
+  }
+  lastRenderedJson = snapshot;
   renderNav();
   renderBoard();
   renderTopbar();
@@ -854,6 +895,12 @@ renderNav();
 renderTopbar();
 tickClock();
 setInterval(tickClock, 1000);
+
+// Видимость секций не должна зависеть от загрузки данных: если backend
+// недоступен на первом заходе, доска (и сообщение об ошибке в hero) всё равно
+// проявляется, а не остаётся с opacity:0.
+ensureReveal();
+setupStickyOffsets();
 
 refresh({ silent: false });
 setInterval(() => { void refresh(); }, 6000);
