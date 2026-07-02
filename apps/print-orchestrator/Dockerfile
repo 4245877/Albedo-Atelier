@@ -21,6 +21,8 @@ COPY package*.json ./
 RUN npm install --omit=dev && npm cache clean --force
 
 COPY --from=build /app/dist ./dist
+# Default real-printer config; a compose volume can override /app/config.
+COPY config ./config
 
 EXPOSE 3100
 

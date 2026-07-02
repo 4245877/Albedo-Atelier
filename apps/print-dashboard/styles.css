@@ -711,6 +711,15 @@ body {
 
 .cam svg { position: absolute; inset: 12% 20%; width: 60%; height: 76%; opacity: 0.8; }
 
+/* Реальный кадр с камеры принтера; лежит поверх svg-заглушки. */
+.cam-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 .cam-tag {
   position: absolute;
   left: 10px;

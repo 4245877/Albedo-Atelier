@@ -9,6 +9,13 @@ services:
       HOST: 0.0.0.0
       PORT: 3100
       LOG_LEVEL: info
+      PRINTERS_CONFIG_PATH: /app/config/printers.json
+      PRINTER_POLL_INTERVAL_MS: 10000
+    env_file:
+      - .env
+    volumes:
+      # Real printer config; edit on the host, restart the service to apply.
+      - ./apps/print-orchestrator/config:/app/config:ro
     ports:
       - "0.0.0.0:3100:3100"
     healthcheck:

@@ -68,11 +68,17 @@ const STATUS = {
   error: { label: "ошибка", badge: "badge-error", pulse: true },
   offline: { label: "offline", badge: "badge-offline" },
   maintenance: { label: "обслуживание", badge: "badge-maint" },
+  unknown: { label: "неизвестно", badge: "badge-offline" },
 };
 
 function badge(status) {
-  const s = STATUS[status] || STATUS.idle;
+  const s = STATUS[status] || STATUS.unknown;
   return `<span class="badge ${s.badge}"><i class="dot${s.pulse ? " dot-pulse" : ""}"></i>${s.label}</span>`;
+}
+
+/** Пустое состояние секции: данных реально нет — не подставляем выдуманные. */
+function emptyRow(text) {
+  return `<li class="row"><div class="grow row-sub">${esc(text)}</div></li>`;
 }
 
 /* ── Тосты ─────────────────────────────────────────────────── */
@@ -180,17 +186,17 @@ function renderQueue() {
           ${active.map((p) => `
             <li class="row">
               <div class="grow">
-                <div class="row-title">${esc(p.job)}</div>
+                <div class="row-title">${esc(p.job || "задание не определено")}</div>
                 <div class="row-sub">${esc(p.name)} · осталось ${fmtLeft(p.minutesLeft)}</div>
-                <div class="progress ${p.status === "paused" ? "is-paused" : ""}" style="margin-top:7px"><i style="width:${p.progress}%"></i></div>
+                ${p.progress != null ? `<div class="progress ${p.status === "paused" ? "is-paused" : ""}" style="margin-top:7px"><i style="width:${p.progress}%"></i></div>` : ""}
               </div>
-              <span class="row-time">${Math.round(p.progress)}%</span>
-            </li>`).join("") || `<li class="row"><div class="grow row-sub">Нет активных печатей</div></li>`}
+              <span class="row-time">${p.progress != null ? `${Math.round(p.progress)}%` : "—"}</span>
+            </li>`).join("") || emptyRow("Нет активных печатей")}
         </ul>
       </div>
       <div>
         <p class="sub-head">Очередь <span class="count">${state.queue.length}</span></p>
-        <ul class="row-list">${state.queue.map(queueRow).join("")}</ul>
+        <ul class="row-list">${state.queue.map(queueRow).join("") || emptyRow("Очередь пуста")}</ul>
       </div>
     </div>
     ${next ? `
@@ -210,7 +216,8 @@ function renderNight() {
   const n = state.night;
   const c = n.candidates[n.pick];
   $("#night-window").textContent = `окно ${n.window}`;
-  $("#night-body").innerHTML = `
+
+  const reco = c ? `
     <div class="night-reco">
       <span class="night-lbl">Рекомендуемая деталь на ночь</span>
       <div class="night-part">${esc(c.title)}</div>
@@ -222,15 +229,20 @@ function renderNight() {
           <span>цель &lt; 35%</span>
         </div>
       </div>
-    </div>
+    </div>` : `
+    <div class="night-reco">
+      <span class="night-lbl">Рекомендуемая деталь на ночь</span>
+      <div class="night-part-sub" style="margin-top:6px">Кандидатов нет — планировщик ночной печати пока не подключён. Добавьте задания в очередь.</div>
+    </div>`;
+
+  $("#night-body").innerHTML = `
+    ${reco}
     <div class="night-facts">
       <span class="badge">☾ окно: ${esc(n.window)}</span>
-      <span class="badge">◉ камера активна</span>
-      <span class="badge">⚗ авто-снимки каждые 10 мин</span>
     </div>
     <div class="night-actions">
-      <button class="btn btn-ghost" data-act="night-pick">Подобрать задание на ночь</button>
-      <button class="btn btn-primary" data-act="night-start">☾ Запустить ночную печать</button>
+      <button class="btn btn-ghost" data-act="night-pick" ${c ? "" : "disabled"}>Подобрать задание на ночь</button>
+      <button class="btn btn-primary" data-act="night-start" ${c ? "" : "disabled"}>☾ Запустить ночную печать</button>
     </div>`;
 }
 
@@ -250,25 +262,39 @@ function camBlock(p) {
   if (p.camera === "none") {
     return `<div class="cam"><div class="cam-offline">камера не настроена</div></div>`;
   }
-  if (p.camera === "offline" || p.status === "offline") {
+  if (p.camera === "offline") {
     return `<div class="cam"><div class="cam-offline">нет сигнала</div>
       ${p.snapshotAt ? `<span class="cam-tag"><i class="dot"></i>снимок ${p.snapshotAt}</span>` : ""}</div>`;
   }
+  // Камера online — показываем реальный кадр с backend; при ошибке загрузки
+  // остаётся заглушка-силуэт (снимок мог устареть между опросами).
   const live = p.status === "printing";
   return `
     <div class="cam ${p.light ? "cam-lit" : ""}">
       ${PRINTER_SVG}
+      <img class="cam-img" alt="Камера ${esc(p.name)}" loading="lazy"
+        src="${API_BASE}/api/printers/${encodeURIComponent(p.id)}/camera.jpg?t=${Date.now()}"
+        onerror="this.remove()">
       <span class="cam-tag ${live ? "live" : ""}"><i class="dot"></i>${live ? "LIVE" : `снимок ${p.snapshotAt || "—"}`}</span>
       <span class="cam-flash" data-flash="${p.id}"></span>
     </div>`;
 }
 
+/** Температура вида «тек/цель»; цель может быть неизвестна — тогда только текущая. */
+function tempCell(pair) {
+  const target = pair[1] != null ? `<span style="color:var(--ink-faint)">/${pair[1]}°</span>` : "";
+  return `${pair[0]}°${target}`;
+}
+
 function teleBlock(p) {
   const cells = [];
-  if (p.nozzle) cells.push(["Сопло", `${p.nozzle[0]}°<span style="color:var(--ink-faint)">/${p.nozzle[1]}°</span>`]);
-  if (p.bed) cells.push(["Стол", `${p.bed[0]}°<span style="color:var(--ink-faint)">/${p.bed[1]}°</span>`]);
+  if (p.nozzle) cells.push(["Сопло", tempCell(p.nozzle)]);
+  if (p.bed) cells.push(["Стол", tempCell(p.bed)]);
   if (p.chamber != null) cells.push(["Камера", `${p.chamber}°`]);
   cells.push(["Осталось", fmtLeft(p.minutesLeft)]);
+  if (cells.length === 1 && p.minutesLeft == null) {
+    return `<div class="telemetry"><div class="tele"><span class="t-lbl">Телеметрия</span><span class="t-val">недоступна</span></div></div>`;
+  }
   return `<div class="telemetry">${cells
     .map(([l, v]) => `<div class="tele"><span class="t-lbl">${l}</span><span class="t-val">${v}</span></div>`)
     .join("")}</div>`;
@@ -279,18 +305,32 @@ function printerCard(p) {
   const dead = p.status === "offline";
   const jobLine =
     busy && p.job ? `Печатает: <b>${esc(p.job)}</b>` :
+    busy ? "Печатает — название задания не определено" :
     p.status === "error" ? `<span style="color:var(--danger);font-weight:700">${esc(p.error || "Ошибка")}</span>` :
     p.status === "maintenance" ? esc(p.note || "На обслуживании") :
-    dead ? "Нет связи с принтером" : "Свободен — готов принять задание";
+    p.status === "unknown" ? esc(p.error || "Состояние неизвестно — принтер ещё не ответил") :
+    dead ? esc(p.error ? `Нет связи: ${p.error}` : "Нет связи с принтером") :
+    "Свободен — готов принять задание";
 
+  // light === null: устройство не поддерживает управление подсветкой.
+  const lightUnknown = p.light == null;
   const actions = `
     <button class="btn btn-sm" data-act="open" data-id="${p.id}">Открыть</button>
     <button class="btn btn-sm" data-act="pause" data-id="${p.id}" ${p.status !== "printing" ? "disabled" : ""}>⏸ Пауза</button>
     <button class="btn btn-sm" data-act="resume" data-id="${p.id}" ${p.status !== "paused" ? "disabled" : ""}>▶ Продолжить</button>
     <button class="btn btn-sm btn-danger" data-act="cancel" data-id="${p.id}" ${!busy ? "disabled" : ""}>✕ Отмена</button>
-    <button class="btn btn-sm" data-act="light-on" data-id="${p.id}" ${p.light || dead ? "disabled" : ""}>☀ Подсветка</button>
-    <button class="btn btn-sm" data-act="light-off" data-id="${p.id}" ${!p.light || dead ? "disabled" : ""}>☾ Погасить</button>
+    <button class="btn btn-sm" data-act="light-on" data-id="${p.id}" ${lightUnknown || p.light || dead ? "disabled" : ""}>☀ Подсветка</button>
+    <button class="btn btn-sm" data-act="light-off" data-id="${p.id}" ${lightUnknown || !p.light || dead ? "disabled" : ""}>☾ Погасить</button>
     <button class="btn btn-sm" data-act="snapshot" data-id="${p.id}" ${p.camera !== "online" || dead ? "disabled" : ""}>◉ Снимок</button>`;
+
+  const progressBlock = !busy ? "" : p.progress != null ? `
+    <div class="printer-progress">
+      <div class="progress ${p.status === "paused" ? "is-paused" : ""}"><i style="width:${p.progress}%"></i></div>
+      <div class="progress-caption"><b>${Math.round(p.progress)}%</b><span>осталось ${fmtLeft(p.minutesLeft)}</span></div>
+    </div>` : `
+    <div class="printer-progress">
+      <div class="progress-caption"><b>—%</b><span>прогресс не сообщается принтером</span></div>
+    </div>`;
 
   return `
     <article class="printer-card ${p.status === "error" ? "is-error" : ""} ${dead ? "is-offline" : ""}">
@@ -299,18 +339,14 @@ function printerCard(p) {
         <div class="printer-top">
           <div>
             <h3 class="printer-name">${esc(p.name)}<span class="type-chip ${p.type === "FDM" ? "type-fdm" : "type-resin"}">${p.type}</span></h3>
-            <div class="printer-model">${esc(p.model)}</div>
+            <div class="printer-model">${esc(p.model || "модель не указана")}</div>
           </div>
           ${badge(p.status)}
         </div>
         <div class="printer-job">${jobLine}</div>
-        ${busy ? `
-          <div class="printer-progress">
-            <div class="progress ${p.status === "paused" ? "is-paused" : ""}"><i style="width:${p.progress}%"></i></div>
-            <div class="progress-caption"><b>${Math.round(p.progress)}%</b><span>осталось ${fmtLeft(p.minutesLeft)}</span></div>
-          </div>` : ""}
+        ${progressBlock}
         ${teleBlock(p)}
-        <div class="printer-material"><span class="swatch" style="background:${p.swatch}"></span>${esc(p.material)}</div>
+        <div class="printer-material">${p.swatch ? `<span class="swatch" style="background:${esc(p.swatch)}"></span>` : ""}${esc(p.material || "материал не указан")}</div>
         <div class="printer-actions">${actions}</div>
       </div>
     </article>`;
@@ -320,13 +356,14 @@ function renderPrinters() {
   const p = state.printers;
   $("#printers-meta").textContent =
     `${p.filter((x) => x.status === "printing").length} печатают · ${p.filter((x) => x.status === "idle").length} свободны · ${p.length} всего`;
-  $("#printer-grid").innerHTML = p.map(printerCard).join("");
+  $("#printer-grid").innerHTML = p.map(printerCard).join("") ||
+    `<div class="row"><div class="grow row-sub">Принтеры не настроены — добавьте их в config/printers.json на backend</div></div>`;
 }
 
 /* ── 5 · Критические события ───────────────────────────────── */
 
 function renderCritical() {
-  $("#critical-meta").textContent = `${state.critical.length} за сегодня`;
+  $("#critical-meta").textContent = state.critical.length ? `${state.critical.length} сейчас` : "нет проблем";
   $("#critical-body").innerHTML = `
     <ul class="row-list">
       ${state.critical.map((e) => `
@@ -334,7 +371,7 @@ function renderCritical() {
           <span class="row-icon">${e.icon}</span>
           <div class="grow"><div class="row-title" style="font-weight:600">${esc(e.text)}</div></div>
           <span class="row-time">${e.time}</span>
-        </li>`).join("")}
+        </li>`).join("") || emptyRow("Критических событий нет")}
     </ul>`;
 }
 
@@ -355,26 +392,34 @@ function matItem(m) {
 
 function renderMaterials() {
   const mats = state.materials;
+  const hasStock = mats.filament.length > 0 || mats.resin.length > 0;
   const low = [...mats.filament, ...mats.resin].filter((m) => m.low);
-  $("#materials-meta").textContent = `${low.length} заканчиваются`;
+  $("#materials-meta").textContent = hasStock ? `${low.length} заканчиваются` : "учёт не подключён";
 
   const perPrinter = state.printers
-    .map((p) => `<span class="badge badge-plain"><span class="swatch" style="background:${p.swatch};width:9px;height:9px"></span>${esc(p.name)}: ${esc(p.material)}</span>`)
-    .join("");
+    .map((p) => `<span class="badge badge-plain">${p.swatch ? `<span class="swatch" style="background:${esc(p.swatch)};width:9px;height:9px"></span>` : ""}${esc(p.name)}: ${esc(p.material || "не указан")}</span>`)
+    .join("") || `<span class="badge badge-plain">нет настроенных принтеров</span>`;
 
-  $("#materials-body").innerHTML = `
+  const stockBlock = hasStock ? `
     <div class="mat-cols">
       <div><p class="sub-head">Филамент</p>${mats.filament.map(matItem).join("")}</div>
       <div><p class="sub-head">Смола</p>${mats.resin.map(matItem).join("")}</div>
-    </div>
+    </div>` : `
+    <ul class="row-list">${emptyRow("Остатки материалов неизвестны — учёт склада пока не подключён к backend")}</ul>`;
+
+  const needsBlock = (mats.queueNeeds || []).length ? `
     <div>
       <p class="sub-head">Нужно для очереди</p>
       <div class="chip-line">
-        ${(mats.queueNeeds || []).map((q) => `<span class="badge ${q.status === "ok" ? "badge-idle" : "badge-paused"}">${esc(q.text)}</span>`).join("")}
+        ${mats.queueNeeds.map((q) => `<span class="badge ${q.status === "ok" ? "badge-idle" : "badge-paused"}">${esc(q.text)}</span>`).join("")}
       </div>
-    </div>
+    </div>` : "";
+
+  $("#materials-body").innerHTML = `
+    ${stockBlock}
+    ${needsBlock}
     <div>
-      <p class="sub-head">В принтерах</p>
+      <p class="sub-head">В принтерах (по конфигурации)</p>
       <div class="chip-line">${perPrinter}</div>
     </div>
     ${mats.mismatch.map((m) => `
@@ -393,12 +438,13 @@ function renderToday() {
   const t = state.today;
   const d = new Date();
   $("#today-date").textContent = d.toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long" });
+  // done/failed — реально замеченные backend'ом переходы; null-поля неизвестны.
   const tiles = [
-    { n: t.done, l: "завершено", tone: "tone-ok" },
+    { n: t.done, l: "завершено (с запуска)", tone: "tone-ok" },
     { n: t.active, l: "выполняется", tone: "tone-gold" },
-    { n: t.failed, l: "провалено", tone: "tone-danger" },
-    { n: `${t.hoursUsed} ч`, l: "часов печати", tone: "" },
-    { n: `≈${t.hoursQueued} ч`, l: "осталось в очереди", tone: "" },
+    { n: t.failed, l: "с ошибкой (с запуска)", tone: "tone-danger" },
+    { n: t.hoursUsed != null ? `${t.hoursUsed} ч` : "—", l: "часов печати", tone: "" },
+    { n: t.hoursQueued != null ? `≈${t.hoursQueued} ч` : "—", l: "осталось в очереди", tone: "" },
   ];
   $("#today-body").innerHTML = tiles
     .map((x) => `<div class="stat-tile ${x.tone}"><span class="num">${x.n}</span><span class="lbl">${x.l}</span></div>`)
@@ -410,22 +456,23 @@ function renderToday() {
 function renderPerf() {
   const p = state.perf;
   const R = 46, C = 2 * Math.PI * R;
+  const load = p.load != null ? p.load : 0;
   $("#perf-body").innerHTML = `
     <div class="perf-load">
-      <div class="gauge" role="img" aria-label="Загрузка фермы ${p.load}%">
+      <div class="gauge" role="img" aria-label="Загрузка фермы ${p.load != null ? `${p.load}%` : "неизвестна"}">
         <svg viewBox="0 0 108 108">
           <circle class="track" cx="54" cy="54" r="${R}" fill="none" stroke-width="9"/>
           <circle class="fill" cx="54" cy="54" r="${R}" fill="none" stroke-width="9"
-            stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - p.load / 100)}"/>
+            stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - load / 100)}"/>
         </svg>
-        <span class="gauge-num">${p.load}%</span>
+        <span class="gauge-num">${p.load != null ? `${p.load}%` : "—"}</span>
       </div>
       <div class="perf-side">
         <div class="kv"><span class="k">Свободны</span><span class="v">${p.free}</span></div>
         <div class="kv"><span class="k">Заняты</span><span class="v">${p.busy}</span></div>
         <div class="kv"><span class="k">Обслуживание</span><span class="v">${p.maintenance}</span></div>
-        <div class="kv"><span class="k">Среднее время печати</span><span class="v">${p.avgPrint}</span></div>
-        <div class="kv"><span class="k">Успешных печатей</span><span class="v" style="color:var(--ok)">${p.successRate}%</span></div>
+        <div class="kv"><span class="k">Среднее время печати</span><span class="v">${p.avgPrint != null ? esc(p.avgPrint) : "нет данных"}</span></div>
+        <div class="kv"><span class="k">Успешных печатей</span><span class="v" ${p.successRate != null ? 'style="color:var(--ok)"' : ""}>${p.successRate != null ? `${p.successRate}%` : "нет данных"}</span></div>
       </div>
     </div>`;
 }
@@ -434,7 +481,9 @@ function renderPerf() {
 
 function renderAutomations() {
   const on = state.automations.filter((a) => a.on).length;
-  $("#auto-meta").textContent = `${on} из ${state.automations.length} активны`;
+  $("#auto-meta").textContent = state.automations.length
+    ? `${on} из ${state.automations.length} активны`
+    : "не настроены";
   $("#auto-body").innerHTML = `
     ${state.automations.map((a) => `
       <div class="rule">
@@ -444,11 +493,10 @@ function renderAutomations() {
           <div class="row-title">${esc(a.name)}</div>
           <div class="row-sub">${esc(a.desc)}</div>
         </div>
-      </div>`).join("")}
+      </div>`).join("") || `<ul class="row-list">${emptyRow("Правила автоматизации не настроены — движок автоматизаций ещё не подключён")}</ul>`}
     <div class="row">
       <span class="row-icon">⚗</span>
-      <div class="grow"><div class="row-sub">Последний запуск: <b>${esc(state.automationLastRun)}</b></div></div>
-      <button class="btn btn-sm" data-act="goto-page" data-page="автоматизации">Открыть автоматизации</button>
+      <div class="grow"><div class="row-sub">Последний запуск: <b>${esc(state.automationLastRun || "нет данных")}</b></div></div>
     </div>`;
 }
 
@@ -456,18 +504,17 @@ function renderAutomations() {
 
 function renderCameras() {
   const cams = state.printers.filter((p) => p.camera !== "none");
-  const online = cams.filter((p) => p.camera === "online" && p.status !== "offline");
-  $("#cameras-meta").textContent = `${online.length} online · ${cams.length - online.length} offline`;
+  const online = cams.filter((p) => p.camera === "online");
+  $("#cameras-meta").textContent = cams.length
+    ? `${online.length} online · ${cams.length - online.length} offline`
+    : "не настроены";
   $("#cameras-body").innerHTML = `
     <div class="cam-grid">
       ${cams.map((p) => `
         <div class="cam-thumb" data-act="open" data-id="${p.id}" title="Открыть ${esc(p.name)}">
           <span class="cam-thumb-name">${esc(p.name)}</span>
           ${camBlock(p)}
-        </div>`).join("")}
-    </div>
-    <div style="display:flex;justify-content:flex-end">
-      <button class="btn btn-sm" data-act="goto-page" data-page="камеры">Смотреть все камеры →</button>
+        </div>`).join("") || `<ul class="row-list" style="grid-column:1/-1">${emptyRow("Ни у одного принтера не настроена камера (snapshotUrl в конфигурации)")}</ul>`}
     </div>`;
 }
 
@@ -475,6 +522,11 @@ function renderCameras() {
 
 function renderMaintenance() {
   const rows = state.maintenance;
+  if (!rows.length) {
+    $("#maint-meta").textContent = "нет данных";
+    $("#maint-body").innerHTML = `<ul class="row-list">${emptyRow("История обслуживания не ведётся — реальный учёт пока не подключён")}</ul>`;
+    return;
+  }
   const due = rows.filter((m) => m.due);
   $("#maint-meta").textContent = due.length ? `${due.length} требуют внимания` : "всё в порядке";
   $("#maint-body").innerHTML = `
@@ -542,14 +594,16 @@ function renderFeed() {
         <li class="feed-item f-${e.kind}">
           <div class="feed-text">${e.icon} ${e.text}</div>
           <div class="feed-time">${e.time}</div>
-        </li>`).join("")}
+        </li>`).join("") || `<li class="feed-item f-info"><div class="feed-text">Событий пока нет — лента заполняется реальными переходами статусов принтеров</div></li>`}
     </ul>`;
 }
 
 /* ── 15 · Предупреждения ───────────────────────────────────── */
 
 function renderWarnings() {
-  $("#warnings-meta").textContent = `${state.warnings.length} требуют внимания`;
+  $("#warnings-meta").textContent = state.warnings.length
+    ? `${state.warnings.length} требуют внимания`
+    : "всё спокойно";
   $("#warnings-body").innerHTML = `
     <ul class="row-list">
       ${state.warnings.map((w) => `
@@ -559,7 +613,7 @@ function renderWarnings() {
             <div class="row-title" style="font-weight:600">${esc(w.text)}</div>
             <div class="row-sub">${esc(w.hint)}</div>
           </div>
-        </li>`).join("")}
+        </li>`).join("") || emptyRow("Предупреждений нет")}
     </ul>`;
 }
 
@@ -567,15 +621,19 @@ function renderWarnings() {
 
 function renderPlan() {
   const pl = state.plan;
-  $("#plan-meta").textContent = `очередь завершится ${pl.queueEta}`;
-  $("#plan-body").innerHTML = `
+  $("#plan-meta").textContent = pl.queueEta ? `очередь завершится ${pl.queueEta}` : "план не рассчитан";
+
+  const nextBlock = pl.next ? `
     <div class="plan-next">
       <span class="when">${esc(pl.next.at)}</span>
       <div class="grow">
         <div class="row-title">Следующая печать: ${esc(pl.next.title)}</div>
-        <div class="row-sub">${esc(pl.next.printer)} · материал заправлен, стол свободен</div>
+        <div class="row-sub">${esc(pl.next.printer)}</div>
       </div>
-    </div>
+    </div>` : `
+    <ul class="row-list">${emptyRow("Следующая печать не запланирована — планировщик пока не подключён, задания запускаются вручную")}</ul>`;
+
+  const upcomingBlock = pl.upcoming.length ? `
     <div>
       <p class="sub-head">Следующие задания</p>
       <ul class="row-list">
@@ -586,16 +644,21 @@ function renderPlan() {
             <span class="row-time">${esc(u.at)}</span>
           </li>`).join("")}
       </ul>
-    </div>
-    <div class="chip-line">
-      <span class="badge badge-teal">☾ На ночь: ${esc(pl.nightReady)}</span>
-    </div>
+    </div>` : "";
+
+  const manualBlock = pl.manual.length ? `
     <div>
       <p class="sub-head">Требует ручной подготовки</p>
       <ul class="row-list">
         ${pl.manual.map((m) => `<li class="row row-warn"><span class="row-icon">✎</span><div class="grow row-sub" style="color:var(--ink)">${esc(m)}</div></li>`).join("")}
       </ul>
-    </div>`;
+    </div>` : "";
+
+  $("#plan-body").innerHTML = `
+    ${nextBlock}
+    ${upcomingBlock}
+    ${pl.nightReady ? `<div class="chip-line"><span class="badge badge-teal">☾ На ночь: ${esc(pl.nightReady)}</span></div>` : ""}
+    ${manualBlock}`;
 }
 
 /* ── Действия (реальные вызовы backend) ────────────────────── */
@@ -625,7 +688,8 @@ const actions = {
   resume(p) { runAction(`/api/printers/${p.id}/resume`, null, `«${esc(p.name)}»: печать продолжена`); },
 
   cancel(p) {
-    if (!window.confirm(`Отменить печать «${p.job}» на ${p.name}?`)) return;
+    const jobLabel = p.job ? `«${p.job}»` : "текущего задания";
+    if (!window.confirm(`Отменить печать ${jobLabel} на ${p.name}?`)) return;
     runAction(`/api/printers/${p.id}/cancel`, null, `«${esc(p.name)}»: печать отменена`, "toast-danger");
   },
 
@@ -657,7 +721,7 @@ document.addEventListener("click", (e) => {
   const act = el.dataset.act;
 
   if (act === "goto-page") {
-    toast(`Раздел «${el.dataset.page}» появится вместе с backend — пока это витрина`);
+    toast(`Раздел «${el.dataset.page}» ещё в разработке`);
     return;
   }
   if (act === "night-pick") {

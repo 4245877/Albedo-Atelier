@@ -6,7 +6,9 @@ export type PrinterState =
   | "printing"
   | "paused"
   | "error"
-  | "maintenance";
+  | "maintenance"
+  /** The device is configured but has not reported a definite state yet. */
+  | "unknown";
 
 export type CameraState = "online" | "offline" | "none";
 
@@ -36,25 +38,30 @@ export interface PrinterConnection {
  * Live, dashboard-facing view of a printer. The keys here match the shape the
  * frontend renders 1:1 (`type`, `status`, `nozzle`/`bed` as `[current,target]`)
  * so the dashboard can display it without extra processing.
+ *
+ * Every telemetry field is nullable: `null` means the device did not report
+ * the value, and the dashboard must show it as unknown rather than invent one.
  */
 export interface PrinterView {
   id: string;
   name: string;
-  model: string;
+  model: string | null;
   type: PrinterTechnology;
   status: PrinterState;
   job: string | null;
-  progress: number;
-  /** `[current, target]` °C, or null for resin printers without a nozzle. */
-  nozzle: [number, number] | null;
-  /** `[current, target]` °C, or null for resin printers without a heated bed. */
-  bed: [number, number] | null;
+  progress: number | null;
+  /** `[current, target]` °C; target is null when the device does not report it. */
+  nozzle: [number, number | null] | null;
+  /** `[current, target]` °C; target is null when the device does not report it. */
+  bed: [number, number | null] | null;
   chamber: number | null;
-  minutesLeft: number;
-  material: string;
-  swatch: string;
+  minutesLeft: number | null;
+  /** Declared loaded material from config; null when not specified. */
+  material: string | null;
+  swatch: string | null;
   camera: CameraState;
-  light: boolean;
+  /** Chamber light state; null — the device does not expose light control. */
+  light: boolean | null;
   snapshotAt: string | null;
   error?: string;
   note?: string;

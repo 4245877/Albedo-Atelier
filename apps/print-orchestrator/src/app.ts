@@ -7,6 +7,7 @@ import Fastify, {
 import { AppError } from "./core/errors";
 import { getHealth } from "./infra/observability/health";
 import { getReadiness } from "./infra/observability/ready";
+import { farmStore } from "./infra/store/farmStore";
 import { registerAutomationRoutes } from "./modules/automation/routes";
 import { registerDashboardRoutes } from "./modules/dashboard/routes";
 import { registerPrinterRoutes } from "./modules/printers/routes";
@@ -71,6 +72,15 @@ export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
 
   app.get("/health", async () => getHealth());
   app.get("/ready", async () => getReadiness());
+
+  // Load the real printer config and start the live poll loop with the app;
+  // stop polling and close device connections (Bambu MQTT) on shutdown.
+  app.addHook("onReady", async () => {
+    await farmStore.start(app.log);
+  });
+  app.addHook("onClose", async () => {
+    farmStore.stop();
+  });
 
   // Dashboard read model + per-resource modules (some also accept actions).
   app.register(registerDashboardRoutes, { prefix: "/api" });

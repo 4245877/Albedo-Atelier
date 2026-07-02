@@ -81,21 +81,27 @@ export interface MaterialsSection {
   queueNeeds: MaterialQueueNeed[];
 }
 
+/**
+ * Real observed counters. `done`/`failed` count transitions the service has
+ * itself observed since it started (they reset with the process); the nullable
+ * fields are `null` until a real data source can provide them.
+ */
 export interface TodaySection {
   done: number;
   active: number;
   failed: number;
-  hoursUsed: number;
-  hoursQueued: number;
+  hoursUsed: number | null;
+  hoursQueued: number | null;
 }
 
 export interface PerformanceSection {
-  load: number;
+  /** Instantaneous busy share of the farm; null when no printers configured. */
+  load: number | null;
   free: number;
   busy: number;
   maintenance: number;
-  avgPrint: string;
-  successRate: number;
+  avgPrint: string | null;
+  successRate: number | null;
 }
 
 export interface Automation {
@@ -136,10 +142,11 @@ export interface PlanItem {
 }
 
 export interface PlanSection {
-  next: PlanItem;
+  /** Null while no scheduler feeds the plan — never a made-up "next print". */
+  next: PlanItem | null;
   upcoming: PlanItem[];
-  queueEta: string;
-  nightReady: string;
+  queueEta: string | null;
+  nightReady: string | null;
   manual: string[];
 }
 
@@ -165,7 +172,7 @@ export interface CameraView {
 
 export interface AutomationsSection {
   automations: Automation[];
-  lastRun: string;
+  lastRun: string | null;
 }
 
 /** The whole board in one payload — mirrors the frontend `state` object. */
@@ -179,7 +186,7 @@ export interface DashboardSnapshot {
   today: TodaySection;
   perf: PerformanceSection;
   automations: Automation[];
-  automationLastRun: string;
+  automationLastRun: string | null;
   system: SystemComponent[];
   feed: FeedEvent[];
   warnings: Warning[];
