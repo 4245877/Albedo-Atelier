@@ -482,10 +482,15 @@ body {
 
 .row:hover { border-color: var(--gold-line); background: #f6f0f0; }
 
-.row .grow { flex: 1; min-width: 0; }
+/* Растягивающийся столбец строки. min-width:0 обязателен, иначе длинный текст
+   не даёт flex-элементу сжаться и выталкивает соседей за край (гориз. overflow).
+   Правило общее (не только внутри .row): те же .grow есть в .next-job и .plan-next. */
+.grow { flex: 1; min-width: 0; }
 
-.row-title { font-weight: 700; font-size: 14px; }
-.row-sub { font-size: 12.5px; color: var(--ink-soft); margin-top: 1px; }
+/* Заголовки/подписи приходят с backend (имена заданий, файлов, материалов) —
+   длинный неразрывный токен обязан переноситься, иначе рвёт карточку по горизонтали. */
+.row-title { font-weight: 700; font-size: 14px; overflow-wrap: anywhere; }
+.row-sub { font-size: 12.5px; color: var(--ink-soft); margin-top: 1px; overflow-wrap: anywhere; }
 
 .row-time {
   font-size: 12px;
@@ -677,6 +682,7 @@ body {
   font-weight: 600;
   margin: 6px 0 2px;
   color: #f8f5fa;
+  overflow-wrap: anywhere;
 }
 
 .night-part-sub { font-size: 13px; color: #b8b4cc; }
@@ -704,7 +710,7 @@ body {
   transition: left 0.6s ease;
 }
 
-.risk-caption { display: flex; justify-content: space-between; font-size: 12px; color: #a29fb8; margin-top: 7px; }
+.risk-caption { display: flex; flex-wrap: wrap; gap: 2px 12px; justify-content: space-between; font-size: 12px; color: #a29fb8; margin-top: 7px; }
 
 .risk-value { font-weight: 800; color: #f8f5fa; }
 
@@ -821,12 +827,16 @@ body {
 
 .printer-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 
+/* Столбец с именем должен уметь сжиматься, иначе длинное имя выталкивает бейдж. */
+.printer-top > div { min-width: 0; }
+
 .printer-name {
   margin: 0;
   font-family: var(--font-display);
   font-size: 21px;
   font-weight: 700;
   line-height: 1.1;
+  overflow-wrap: anywhere;
 }
 
 .printer-model { font-size: 12.5px; color: var(--ink-soft); margin-top: 2px; }
@@ -851,6 +861,8 @@ body {
 
 .progress-caption {
   display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
   justify-content: space-between;
   font-size: 12px;
   color: var(--ink-faint);
@@ -910,9 +922,7 @@ body {
 
 .mat-item { display: flex; align-items: center; gap: 10px; padding: 7px 2px; }
 
-.mat-item .grow { flex: 1; min-width: 0; }
-
-.mat-name { font-size: 13.5px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.mat-name { font-size: 13.5px; font-weight: 700; display: flex; align-items: center; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
 
 .mat-level { margin-top: 5px; }
 
@@ -976,8 +986,6 @@ body {
 /* ── 9 · Автоматизации ──────────────────────────────────────── */
 
 .rule { display: flex; align-items: center; gap: 12px; padding: 9px 12px; background: var(--card-inner); border-radius: var(--radius-sm); }
-
-.rule .grow { flex: 1; min-width: 0; }
 
 .toggle {
   position: relative;
@@ -1168,7 +1176,7 @@ body {
 .feed-item.f-ok::before { border-color: var(--ok); }
 .feed-item.f-info::before { border-color: var(--slate); }
 
-.feed-text { font-size: 13.5px; }
+.feed-text { font-size: 13.5px; overflow-wrap: anywhere; }
 .feed-text b { font-weight: 800; }
 .feed-time { font-size: 11.5px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
 
