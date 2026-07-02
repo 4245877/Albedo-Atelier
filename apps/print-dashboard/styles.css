@@ -16,6 +16,15 @@
   --card-inner: rgb(244 238 226 / 4%);
   --track: #251e36;
 
+  /* Поверхности карточек и элементов управления */
+  --card-top: #191624;          /* верх градиента карточки */
+  --card-bot: #141020;          /* низ градиента карточки */
+  --edge-strong: #332a44;       /* усиленная грань (наведение) */
+  --btn-bg: #1b1727;
+  --btn-edge: #302941;
+  --toggle-off: #3a3150;
+  --table-line: #221c30;
+
   /* Слоновая кость платья · приглушённый пергамент */
   --ink: #ece6da;
   --ink-soft: #c6bfd2;
@@ -32,12 +41,10 @@
   /* Полуночный аметист */
   --amethyst: #9a76ac;
   --amethyst-soft: rgb(154 118 172 / 14%);
-  --amethyst-line: rgb(154 118 172 / 35%);
+  --amethyst-ink: #c3a3d3;      /* текст на аметистовом фоне */
 
-  /* Слоновая кость рогов · холодное кружево */
+  /* Слоновая кость рогов */
   --ivory: #e5ded0;
-  --lace: #a7aec2;
-  --lace-soft: rgb(167 174 194 / 10%);
 
   --ok: #6fbe8d;
   --ok-soft: rgb(111 190 141 / 12%);
@@ -45,6 +52,11 @@
   --warn-soft: rgb(210 154 68 / 13%);
   --danger: #cf6273;
   --danger-soft: rgb(207 98 115 / 13%);
+
+  /* Осветлённый текст статуса на его же приглушённом фоне */
+  --ok-ink: #8fd6ab;
+  --warn-ink: #e0b26a;
+  --danger-ink: #e08a99;
   --slate: #8b87b0;
   --slate-soft: rgb(139 135 176 / 14%);
   --offline: #7d7890;
@@ -72,8 +84,10 @@
   scroll-padding-top: var(--stack-h, 130px);
 }
 
-* { box-sizing: border-box; }
-* { -webkit-tap-highlight-color: transparent; }
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
 
 ::selection { background: rgb(201 162 75 / 35%); color: #f6efdf; }
 
@@ -205,9 +219,9 @@ body::before {
   white-space: nowrap;
 }
 
-.pill-ok    { color: #8fd6ab; background: var(--ok-soft); border-color: rgb(111 190 141 / 30%); }
-.pill-warn  { color: #e0b26a; background: var(--warn-soft); border-color: rgb(210 154 68 / 32%); }
-.pill-danger{ color: #e08a99; background: var(--danger-soft); border-color: rgb(207 98 115 / 32%); }
+.pill-ok    { color: var(--ok-ink); background: var(--ok-soft); border-color: rgb(111 190 141 / 30%); }
+.pill-warn  { color: var(--warn-ink); background: var(--warn-soft); border-color: rgb(210 154 68 / 32%); }
+.pill-danger{ color: var(--danger-ink); background: var(--danger-soft); border-color: rgb(207 98 115 / 32%); }
 .pill-gold  { color: var(--gold-bright); background: var(--gold-soft); border-color: var(--gold-line); }
 
 .dot {
@@ -241,7 +255,7 @@ body::before {
 .section-nav::-webkit-scrollbar { display: none; }
 
 /* Тень и золотая линия появляются при прокрутке — липкая навигация
-   «отрывается» от доски, оставаясь плотной (контент под ней не просвечивает). */
+   «отрывается» от доски (контент под ней размывается backdrop-фильтром). */
 :root.scrolled .section-nav {
   box-shadow:
     0 1px 0 rgb(201 162 75 / 12%),
@@ -313,7 +327,7 @@ body::before {
 /* ── Карточки-секции ────────────────────────────────────────── */
 
 .card {
-  background: linear-gradient(180deg, #191624 0%, #141020 100%);
+  background: linear-gradient(180deg, var(--card-top) 0%, var(--card-bot) 100%);
   border: 1px solid var(--card-edge);
   border-radius: var(--radius);
   box-shadow: var(--shadow), inset 0 1px 0 rgb(236 229 216 / 4%);
@@ -323,7 +337,7 @@ body::before {
 
 .card:hover {
   box-shadow: var(--shadow-hover), inset 0 1px 0 rgb(236 229 216 / 5%);
-  border-color: #332a44;
+  border-color: var(--edge-strong);
 }
 
 .card-clear { background: transparent; border: none; box-shadow: none; padding: 8px 0 0; }
@@ -417,6 +431,10 @@ body::before {
   .hero { grid-template-columns: 1fr; }
 }
 
+/* Текст держится над декоративным гербом и перьями (они позиционированы
+   абсолютно и рисуются позже, иначе золотые линии ложатся поверх заголовка). */
+.hero-main { position: relative; z-index: 1; }
+
 .eyebrow {
   margin: 0 0 10px;
   font-size: 12px;
@@ -472,7 +490,7 @@ body::before {
 
 .stat-tile {
   background: linear-gradient(180deg, rgb(244 238 226 / 5%), rgb(244 238 226 / 2%));
-  border: 1px solid #2c2438;
+  border: 1px solid var(--card-edge);
   border-radius: var(--radius-sm);
   padding: 12px 14px;
   transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
@@ -611,12 +629,12 @@ body::before {
 .badge .dot { width: 6px; height: 6px; }
 
 .badge-printing { color: var(--gold-bright); background: var(--gold-soft); }
-.badge-idle     { color: #8fd6ab; background: var(--ok-soft); }
-.badge-paused   { color: #e0b26a; background: var(--warn-soft); }
-.badge-error    { color: #e08a99; background: var(--danger-soft); }
+.badge-idle     { color: var(--ok-ink); background: var(--ok-soft); }
+.badge-paused   { color: var(--warn-ink); background: var(--warn-soft); }
+.badge-error    { color: var(--danger-ink); background: var(--danger-soft); }
 .badge-offline  { color: #a9a4bb; background: var(--offline-soft); }
 .badge-maint    { color: #b3aed8; background: var(--slate-soft); }
-.badge-teal     { color: #c3a3d3; background: var(--amethyst-soft); }
+.badge-amethyst { color: var(--amethyst-ink); background: var(--amethyst-soft); }
 .badge-plain    { color: var(--ink-soft); background: var(--card-inner); border: 1px solid var(--card-edge); }
 
 /* ── Кнопки ─────────────────────────────────────────────────── */
@@ -628,8 +646,8 @@ body::before {
   gap: 8px;
   padding: 9px 16px;
   border-radius: var(--radius-sm);
-  border: 1px solid #302941;
-  background: #1b1727;
+  border: 1px solid var(--btn-edge);
+  background: var(--btn-bg);
   color: var(--ink);
   font: 700 13.5px var(--font-body);
   cursor: pointer;
@@ -659,8 +677,8 @@ body::before {
 
 .btn-ghost { background: transparent; }
 
-.btn-danger { color: #e08a99; }
-.btn-danger:hover { border-color: rgb(207 98 115 / 40%); background: var(--danger-soft); color: #e08a99; }
+.btn-danger { color: var(--danger-ink); }
+.btn-danger:hover { border-color: rgb(207 98 115 / 40%); background: var(--danger-soft); color: var(--danger-ink); }
 
 .btn-sm { padding: 6px 11px; font-size: 12.5px; border-radius: 8px; }
 
@@ -822,7 +840,7 @@ body::before {
 }
 
 .printer-card {
-  background: linear-gradient(180deg, #191624 0%, #141020 100%);
+  background: linear-gradient(180deg, var(--card-top) 0%, var(--card-bot) 100%);
   border: 1px solid var(--card-edge);
   border-radius: var(--radius);
   box-shadow: var(--shadow), inset 0 1px 0 rgb(236 229 216 / 4%);
@@ -858,7 +876,7 @@ body::before {
   box-shadow: inset 0 -40px 80px rgb(217 198 94 / 24%);
 }
 
-.cam svg { position: absolute; inset: 12% 20%; width: 60%; height: 76%; opacity: 0.8; }
+.cam svg { position: absolute; top: 12%; left: 20%; width: 60%; height: 76%; opacity: 0.8; }
 
 /* Реальный кадр с камеры принтера; лежит поверх svg-заглушки. */
 .cam-img {
@@ -992,7 +1010,7 @@ body::before {
 }
 
 .type-fdm { color: var(--gold-bright); background: var(--gold-soft); }
-.type-resin { color: #c3a3d3; background: var(--amethyst-soft); }
+.type-resin { color: var(--amethyst-ink); background: var(--amethyst-soft); }
 
 .printer-job { font-size: 13px; color: var(--ink-soft); }
 .printer-job b { color: var(--ink); font-weight: 700; }
@@ -1136,7 +1154,7 @@ body::before {
   border-radius: 999px;
   border: none;
   cursor: pointer;
-  background: #3a3150;
+  background: var(--toggle-off);
   transition: background 0.25s;
 }
 
@@ -1213,7 +1231,7 @@ body::before {
 
 .table td {
   padding: 9px 10px;
-  border-bottom: 1px solid #221c30;
+  border-bottom: 1px solid var(--table-line);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
@@ -1361,8 +1379,8 @@ body::before {
 
 .footer-ornament { width: 200px; height: 12px; color: var(--gold); opacity: 0.8; }
 
-.footer em { font-family: var(--font-display); font-size: 18px; color: var(--ink-soft); }
-.footer-sig { font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--gold-deep); }
+.footer em { font-family: var(--font-display); font-weight: 500; font-size: 18px; color: var(--ink-soft); }
+.footer-sig { font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--gold); }
 
 /* ── Тосты ──────────────────────────────────────────────────── */
 
@@ -1494,6 +1512,8 @@ body::before {
 
   /* Постоянные фоновые анимации — лишняя нагрузка на батарею мобильных. */
   .brand-sigil, .hero-crest { animation: none; }
+  .dot-pulse, .cam-tag.live .dot, .sys-warn .dot, .sys-err .dot { animation: none; }
+  .progress > i::after { animation: none; }
   .feather { display: none; }
 }
 

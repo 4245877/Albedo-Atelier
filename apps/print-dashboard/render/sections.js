@@ -419,6 +419,6 @@ export function renderPlan(state) {
   $("#plan-body").innerHTML = `
     ${nextBlock}
     ${upcomingBlock}
-    ${pl.nightReady ? `<div class="chip-line"><span class="badge badge-teal">☾ На ночь: ${esc(pl.nightReady)}</span></div>` : ""}
+    ${pl.nightReady ? `<div class="chip-line"><span class="badge badge-amethyst">☾ На ночь: ${esc(pl.nightReady)}</span></div>` : ""}
     ${manualBlock}`;
 }
