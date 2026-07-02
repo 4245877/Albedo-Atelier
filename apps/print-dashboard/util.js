@@ -37,7 +37,7 @@ export function emptyRow(text) {
 export function toast(msg, kind = "") {
   const el = document.createElement("div");
   el.className = `toast ${kind}`;
-  el.innerHTML = `<span class="star">✦</span><span>${msg}</span>`;
+  el.innerHTML = `<span class="star">❖</span><span>${msg}</span>`;
   $("#toasts").appendChild(el);
   setTimeout(() => {
     el.classList.add("out");

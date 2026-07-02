@@ -2,7 +2,7 @@
 
 Workspace for Atelier services.
 
-## Albedo Atelier
+## Albedo — Зал Верховного Надзора
 
 Start the local stack:
 

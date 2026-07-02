@@ -41,7 +41,7 @@ export function renderHero(state) {
   const svcOk = state.service.status === "ok";
   const beOk = state.service.backend === "ok";
   $("#hero-pills").innerHTML = `
-    <span class="pill ${svcOk ? "pill-ok" : "pill-danger"}"><i class="dot dot-pulse"></i>${svcOk ? "Все системы в норме" : "Есть проблемы"}</span>
+    <span class="pill ${svcOk ? "pill-ok" : "pill-danger"}"><i class="dot dot-pulse"></i>${svcOk ? "Порядок безупречен" : "Обнаружены отклонения"}</span>
     <span class="pill ${beOk ? "pill-ok" : "pill-danger"}"><i class="dot"></i>Backend: ${beOk ? "подключён" : "недоступен"}</span>
     <span class="pill pill-gold"><i class="dot"></i>${esc(state.service.version)}</span>`;
 }
@@ -92,7 +92,7 @@ export function renderQueue(state) {
     </div>
     ${next ? `
       <div class="next-job">
-        <span class="star">✦</span>
+        <span class="star">❖</span>
         <div class="grow">
           <div class="row-title">Следующее задание: ${esc(next.title)}</div>
           <div class="row-sub">${esc(next.printer)} · старт в ${esc(next.at)} · ${esc(next.eta)}</div>
@@ -140,7 +140,7 @@ export function renderNight(state) {
 /* ── 5 · Критические события ───────────────────────────────── */
 
 export function renderCritical(state) {
-  $("#critical-meta").textContent = state.critical.length ? `${state.critical.length} сейчас` : "нет проблем";
+  $("#critical-meta").textContent = state.critical.length ? `${state.critical.length} сейчас` : "нарушений нет";
   $("#critical-body").innerHTML = `
     <ul class="row-list">
       ${state.critical.map((e) => `
@@ -148,7 +148,7 @@ export function renderCritical(state) {
           <span class="row-icon">${esc(e.icon)}</span>
           <div class="grow"><div class="row-title" style="font-weight:600">${esc(e.text)}</div></div>
           <span class="row-time">${esc(e.time)}</span>
-        </li>`).join("") || emptyRow("Критических событий нет")}
+        </li>`).join("") || emptyRow("Критических событий нет — порядок соблюдён")}
     </ul>`;
 }
 
@@ -204,7 +204,7 @@ export function renderMaterials(state) {
     </div>
     ${mats.mismatch.map((m) => `
       <div class="row row-danger">
-        <span class="row-icon">⬡</span>
+        <span class="row-icon">◈</span>
         <div class="grow">
           <div class="row-title">Несоответствие материала</div>
           <div class="row-sub">«${esc(m.job)}» требует ${esc(m.needs)}, в ${esc(m.printer)} заправлен ${esc(m.loaded)}</div>
@@ -275,7 +275,7 @@ export function renderAutomations(state) {
         </div>
       </div>`).join("") || `<ul class="row-list">${emptyRow("Правила автоматизации не настроены — движок автоматизаций ещё не подключён")}</ul>`}
     <div class="row">
-      <span class="row-icon">⚗</span>
+      <span class="row-icon">✠</span>
       <div class="grow"><div class="row-sub">Последний запуск: <b>${esc(state.automationLastRun || "нет данных")}</b></div></div>
     </div>`;
 }
@@ -322,7 +322,7 @@ const QUICK = [
   ["☰", "Открыть очередь", "очередь"],
   ["☾", "Ночная печать", "ночная печать"],
   ["◉", "Камеры", "камеры"],
-  ["⬡", "Материалы", "материалы"],
+  ["◈", "Материалы", "материалы"],
   ["⚙", "Настройки", "настройки"],
 ];
 
@@ -365,7 +365,7 @@ export function renderFeed(state) {
 export function renderWarnings(state) {
   $("#warnings-meta").textContent = state.warnings.length
     ? `${state.warnings.length} требуют внимания`
-    : "всё спокойно";
+    : "всё под контролем";
   $("#warnings-body").innerHTML = `
     <ul class="row-list">
       ${state.warnings.map((w) => `

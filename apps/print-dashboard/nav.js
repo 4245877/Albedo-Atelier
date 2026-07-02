@@ -4,7 +4,7 @@ import { $ } from "./util.js";
 
 const NAV = [
   ["summary", "Статус"], ["queue", "Очередь"], ["night", "Ночь"], ["printers", "Принтеры"],
-  ["critical", "События"], ["materials", "Материалы"], ["today", "Сегодня"], ["performance", "Ферма"],
+  ["critical", "События"], ["materials", "Материалы"], ["today", "Сегодня"], ["performance", "Показатели"],
   ["automations", "Автоматизации"], ["cameras", "Камеры"], ["maintenance", "Обслуживание"],
   ["actions", "Действия"], ["system", "Система"], ["feed", "Лента"], ["warnings", "Внимание"], ["plan", "План"],
 ];
