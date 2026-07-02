@@ -41,7 +41,7 @@ export class ValidationError extends AppError {
 /** The printer is powered down / unreachable, so the action cannot run. */
 export class PrinterOfflineError extends AppError {
   constructor(printerId: string) {
-    super(`Printer "${printerId}" is offline`, "PRINTER_OFFLINE", 409, { printerId });
+    super(`Принтер «${printerId}» не в сети`, "PRINTER_OFFLINE", 409, { printerId });
     this.name = "PrinterOfflineError";
   }
 }
@@ -50,7 +50,7 @@ export class PrinterOfflineError extends AppError {
 export class PrinterConnectionError extends AppError {
   constructor(printerId: string, reason?: string) {
     super(
-      `Failed to reach printer "${printerId}"${reason ? `: ${reason}` : ""}`,
+      `Не удалось связаться с принтером «${printerId}»${reason ? `: ${reason}` : ""}`,
       "PRINTER_CONNECTION",
       502,
       { printerId, reason }

@@ -98,9 +98,11 @@ function printerCard(p) {
     dead ? esc(p.error ? `Нет связи: ${p.error}` : "Нет связи с принтером") :
     "Свободен — готов принять задание";
 
-  // light === null: состояние неизвестно; lightSupported говорит, можно ли отправлять команды.
+  // light === null: состояние подсветки неизвестно. Управляемость определяет
+  // ТОЛЬКО backend-флаг lightSupported — читаемость состояния не означает, что
+  // подсветкой можно управлять (иначе кнопка «включится», а backend вернёт ошибку).
   const lightUnknown = p.light == null;
-  const lightSupported = Boolean(p.lightSupported) || !lightUnknown;
+  const lightSupported = Boolean(p.lightSupported);
   const lightTitle = lightUnknown && lightSupported ? ' title="Состояние подсветки неизвестно — команда будет отправлена вручную"' : "";
   const lightOnDisabled = !lightSupported || p.light === true || dead;
   const lightOffDisabled = !lightSupported || p.light === false || dead;

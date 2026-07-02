@@ -21,13 +21,40 @@ read-only `DashboardReadModel`.
 Printer lights are governed by `NIGHT_PRINT_WINDOW` (default
 `23:00 – 07:30`) using the process local timezone (`TZ` in Docker). On each
 poll, supported lights are switched on inside that window and switched off
-outside it. Manual light commands are allowed at any time; after 5 minutes the
-scheduled policy is applied again. Bambu uses local MQTT `system.ledctrl`
-(`light.bambuNode`, default `chamber_light`). Moonraker
-uses `light.pin` to generate `SET_PIN PIN=<pin> VALUE=1/0` and reads
-`output_pin <pin>`; use explicit `light.onGcode`, `light.offGcode`,
-`light.statusObject` and `light.statusField` for custom setups. Creality
-WebSocket light control is not implemented.
+outside it.
+
+**Manual override.** A manual light command is allowed at any time. It is
+serialized with the scheduler through a per-printer light queue, so a manual
+command and a scheduled one can never interleave on the wire, and a stale
+scheduled command can never clobber a fresh manual one. After a manual command
+the chosen state is held for **5 minutes**; once that window passes the
+schedule takes over again — turning the light on if the night window says on,
+off if it says off. Two caveats:
+
+- The return to the schedule happens on the **next poll tick**, not exactly at
+  the 5-minute mark, so the effective hold is `5 min + up to
+  PRINTER_POLL_INTERVAL_MS` (default 10 s).
+- The override lives **in memory only**. Restarting the orchestrator drops it,
+  and the schedule may reassert the scheduled state on the first poll after
+  restart. This is intentional (there is no database); persist it only if that
+  ever becomes a requirement.
+
+If a scheduled light command is sent but the reported state never converges to
+the target (wrong `pin`, `SET_PIN` accepted but nothing physically changes, or
+`output_pin <pin>` reflecting a different device), the poller stops retrying
+after 3 attempts, backs off for 5 minutes, and logs/feeds **one** warning
+naming the pin to check in `printer.cfg` — instead of resending every tick and
+flapping the UI. The counter resets on convergence or on a manual command.
+
+**Per protocol.** Bambu uses local MQTT `system.ledctrl` (`light.bambuNode`,
+default `chamber_light`). Moonraker uses `light.pin` to generate
+`SET_PIN PIN=<pin> VALUE=1/0` and reads `output_pin <pin>`; use explicit
+`light.onGcode`, `light.offGcode`, `light.statusObject` and `light.statusField`
+for custom setups. **The Creality K2 in this deployment is driven over
+Moonraker**, not the Creality WebSocket adapter — its config uses
+`protocol: "moonraker"`, `port: 4408`, `light: { pin: "LED" }`, so its light is
+`SET_PIN PIN=LED VALUE=1/0` read back from `output_pin LED`. Creality
+**WebSocket** light control is not implemented for any model.
 
 ## Local development
 
@@ -93,7 +120,7 @@ Queue/night/automation features that have no engine yet return a clear error
 instead of fabricating a result.
 
 - `POST /api/printers/:id/pause` · `.../resume` · `.../cancel` · `.../snapshot`
-- `POST /api/printers/:id/light` — body `{ "on": boolean }`; manual state is kept for 5 minutes, then `NIGHT_PRINT_WINDOW` takes over again
+- `POST /api/printers/:id/light` — body `{ "on": boolean }`; manual state is kept for 5 minutes (in memory; ±one poll tick), then `NIGHT_PRINT_WINDOW` takes over again
 - `POST /api/queue` — add a job, body `{ title, printer?, material?, eta?, at?, night? }`
 - `POST /api/queue/start-next` · `POST /api/queue/night/start` · `POST /api/queue/night/pick`
 - `POST /api/automations/:id/toggle` — body `{ "on"?: boolean }` (omit to flip)

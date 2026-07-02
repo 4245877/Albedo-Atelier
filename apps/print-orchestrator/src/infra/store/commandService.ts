@@ -5,13 +5,12 @@ import {
   getPrinterLiveStatus,
   PrinterCommandError,
   sendPrinterCommand,
-  sendPrinterLight,
   supportsPrinterLight,
   type PrinterCommand
 } from "../printers/status";
 import type { CameraService } from "./cameraService";
 import type { EventFeed } from "./eventFeed";
-import type { PrinterPoller } from "./printerPoller";
+import type { PrinterPoller, StoreLogger } from "./printerPoller";
 import { buildPrinterView, isBusyStatus } from "./printerView";
 
 /**
@@ -20,12 +19,19 @@ import { buildPrinterView, isBusyStatus } from "./printerView";
  * re-polls the printer so the returned view reflects reality.
  */
 export class PrinterCommandService {
+  private logger: StoreLogger = {};
+
   constructor(
     private readonly configById: (id: string) => PrinterConfig,
     private readonly poller: PrinterPoller,
     private readonly cameras: CameraService,
     private readonly events: EventFeed
   ) {}
+
+  /** Wires the store logger in once it is available (after config load). */
+  useLogger(logger: StoreLogger): void {
+    this.logger = logger;
+  }
 
   async pause(id: string): Promise<PrinterView> {
     const printer = this.getReachableConfig(id);
@@ -71,8 +77,30 @@ export class PrinterCommandService {
       throw new JobError(`Управление подсветкой для «${printer.name}» не настроено`);
     }
 
-    await this.dispatchLight(printer, on);
-    this.poller.noteManualLightChange(printer.id, on);
+    // Route through the poller so the command is serialized with the schedule
+    // (no manual/scheduled interleaving) and it installs the 5-minute override.
+    try {
+      await this.poller.applyManualLight(printer, on);
+    } catch (error) {
+      this.logger.warn?.(
+        {
+          err: error,
+          printer: printer.id,
+          on,
+          reason: error instanceof Error ? error.message : String(error)
+        },
+        "manual light command failed"
+      );
+      if (error instanceof PrinterCommandError) {
+        throw new JobError(error.message);
+      }
+      throw new PrinterConnectionError(
+        printer.id,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+
+    this.logger.info?.({ printer: printer.id, on }, "manual light change");
     this.events.push(
       on ? "☾" : "☀",
       `<b>${printer.name}</b>: подсветка ${on ? "включена" : "выключена"} оператором; расписание вернётся через 5 минут`,
@@ -100,20 +128,6 @@ export class PrinterCommandService {
   private async dispatch(printer: PrinterConfig, command: PrinterCommand): Promise<void> {
     try {
       await sendPrinterCommand(printer, command);
-    } catch (error) {
-      if (error instanceof PrinterCommandError) {
-        throw new JobError(error.message);
-      }
-      throw new PrinterConnectionError(
-        printer.id,
-        error instanceof Error ? error.message : String(error)
-      );
-    }
-  }
-
-  private async dispatchLight(printer: PrinterConfig, on: boolean): Promise<void> {
-    try {
-      await sendPrinterLight(printer, on);
     } catch (error) {
       if (error instanceof PrinterCommandError) {
         throw new JobError(error.message);

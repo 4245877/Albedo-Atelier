@@ -67,6 +67,7 @@ export class FarmStore {
       "farm store started with real printer config"
     );
 
+    this.commands.useLogger(logger);
     await this.poller.start(logger);
   }
 

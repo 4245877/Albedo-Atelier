@@ -1,6 +1,4 @@
 import type { PrinterView } from "../../domain/printers/types";
-import { env } from "../../shared/env";
-import { isWithinLocalTimeWindow } from "../../shared/time";
 import { hasCameraSource, hasCameraStream, resolveWebrtcSource } from "../printers/camera";
 import type { PrinterConfig } from "../printers/config";
 import { supportsPrinterLight, type PrinterLiveStatus } from "../printers/status";
@@ -51,7 +49,6 @@ export function buildPrinterView(
     cameraSrc: cameraOnline ? webrtcSource : null,
     light: status?.light ?? null,
     lightSupported: supportsPrinterLight(printer),
-    lightAllowed: isWithinLocalTimeWindow(env.nightWindow),
     snapshotAt: camera?.snapshotAt ?? null,
     ...(status?.error ? { error: status.error } : {})
   };

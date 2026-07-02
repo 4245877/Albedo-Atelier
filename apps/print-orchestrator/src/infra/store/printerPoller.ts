@@ -19,6 +19,10 @@ export type StoreLogger = {
 const COMPLETE_RE = /complete|finish|done/i;
 const CANCEL_RE = /cancel|abort|stop/i;
 const MANUAL_LIGHT_OVERRIDE_MS = 5 * 60 * 1000;
+/** After this many consecutive ineffective/errored light commands, pause retries. */
+const MAX_LIGHT_ATTEMPTS = 3;
+/** How long the schedule stops retrying a light that will not converge. */
+const LIGHT_BACKOFF_MS = 5 * 60 * 1000;
 
 function looksComplete(status: PrinterLiveStatus): boolean {
   if (status.stateText && CANCEL_RE.test(status.stateText)) return false;
@@ -55,6 +59,16 @@ export class PrinterPoller {
   private manualLightOverrides = new Map<string, number>();
   /** Last light policy failure signature per printer, used to avoid feed spam. */
   private lightFailureKeys = new Map<string, string>();
+  /** Consecutive ineffective/errored scheduled light commands per printer. */
+  private lightFailureCounts = new Map<string, number>();
+  /** Until this timestamp the schedule stops retrying a non-converging light. */
+  private lightBackoffUntil = new Map<string, number>();
+  /**
+   * Per-printer serialization for every light operation (manual + schedule), so
+   * a manual command and a scheduled one can never interleave on the wire and a
+   * stale scheduled command can never clobber a fresh manual one.
+   */
+  private lightChain = new Map<string, Promise<unknown>>();
 
   /** Completions/failures the poller itself observed today. */
   private todayKey = dateKey();
@@ -90,6 +104,7 @@ export class PrinterPoller {
     this.polling = true;
     try {
       const enabled = this.enabledConfigs();
+      this.pruneStaleEntries(enabled);
       await Promise.all(
         enabled.map(async (printer) => {
           const status = await getPrinterLiveStatus(printer);
@@ -116,11 +131,40 @@ export class PrinterPoller {
     this.statuses.set(id, status);
   }
 
-  /** Temporarily lets an operator's explicit light command win over the schedule. */
-  noteManualLightChange(id: string, on: boolean): void {
-    this.lightTargets.set(id, on);
-    this.lightFailureKeys.delete(id);
-    this.manualLightOverrides.set(id, Date.now() + MANUAL_LIGHT_OVERRIDE_MS);
+  /**
+   * Serializes a light operation for one printer behind any in-flight one, so
+   * manual and scheduled commands run strictly one after another. Failures do
+   * not break the chain: the next task still runs.
+   */
+  private runLightExclusive<T>(id: string, task: () => Promise<T>): Promise<T> {
+    const prev = (this.lightChain.get(id) ?? Promise.resolve()).catch(() => {});
+    const next = prev.then(task);
+    this.lightChain.set(id, next.catch(() => {}));
+    return next;
+  }
+
+  /**
+   * An operator's explicit light command. Runs through the per-printer light
+   * chain so it can never interleave with a scheduled command, then holds the
+   * chosen state against the schedule for {@link MANUAL_LIGHT_OVERRIDE_MS}.
+   * Throws the underlying driver error (mapped by the command service).
+   */
+  async applyManualLight(printer: PrinterConfig, on: boolean): Promise<void> {
+    await this.runLightExclusive(printer.id, async () => {
+      await sendPrinterLight(printer, on);
+      this.lightTargets.set(printer.id, on);
+      this.resetLightFailure(printer.id);
+      this.manualLightOverrides.set(printer.id, Date.now() + MANUAL_LIGHT_OVERRIDE_MS);
+
+      const status = this.statuses.get(printer.id);
+      if (status) {
+        this.statuses.set(printer.id, {
+          ...status,
+          light: on,
+          updatedAt: new Date().toISOString()
+        });
+      }
+    });
   }
 
   getChangedAt(id: string): string | undefined {
@@ -139,6 +183,31 @@ export class PrinterPoller {
   getTodayFailed(): number {
     this.rolloverToday();
     return this.todayFailed;
+  }
+
+  /**
+   * Drops per-printer map entries for printers no longer in the enabled config
+   * (removed or disabled via a config change), so the maps do not grow without
+   * bound. There is no live config reload today, but this keeps the state honest
+   * if the enabled set ever shrinks at runtime.
+   */
+  private pruneStaleEntries(enabled: PrinterConfig[]): void {
+    const live = new Set(enabled.map((printer) => printer.id));
+    const maps: Map<string, unknown>[] = [
+      this.statuses,
+      this.changedAt,
+      this.lightTargets,
+      this.manualLightOverrides,
+      this.lightFailureKeys,
+      this.lightFailureCounts,
+      this.lightBackoffUntil,
+      this.lightChain
+    ];
+    for (const map of maps) {
+      for (const id of map.keys()) {
+        if (!live.has(id)) map.delete(id);
+      }
+    }
   }
 
   // ── Night light policy ─────────────────────────────────────────────────
@@ -178,46 +247,131 @@ export class PrinterPoller {
     const current = status.light;
     const lastTarget = this.lightTargets.get(printer.id);
     if (current === targetOn) {
+      // Converged to the scheduled target: clear the target and any failure/backoff bookkeeping.
       this.lightTargets.set(printer.id, targetOn);
-      this.lightFailureKeys.delete(printer.id);
+      this.resetLightFailure(printer.id);
       return;
     }
+    // State unknown and we already asked for this target — nothing new to do.
     if (current === null && lastTarget === targetOn) return;
+    // The light keeps ignoring us: back off instead of spamming SET_PIN every tick.
+    if (this.isLightBackoffActive(printer.id)) return;
 
-    try {
-      await sendPrinterLight(printer, targetOn);
-      this.lightTargets.set(printer.id, targetOn);
-      this.lightFailureKeys.delete(printer.id);
+    await this.runLightExclusive(printer.id, async () => {
+      // Re-check under the lock: a manual command may have just taken over.
+      if (this.isManualLightOverrideActive(printer.id)) return;
 
-      if (current !== null) {
-        this.statuses.set(printer.id, {
-          ...status,
-          light: targetOn,
-          updatedAt: new Date().toISOString()
-        });
+      const fresh = this.statuses.get(printer.id);
+      if (!fresh?.online) return;
+      if (fresh.light === targetOn) {
+        this.resetLightFailure(printer.id);
+        return;
       }
 
+      // Announce only when the target itself changed (day↔night), not on every
+      // retry of a light that has not physically converged yet.
+      const announce = lastTarget !== targetOn;
+
+      try {
+        await sendPrinterLight(printer, targetOn);
+        this.lightTargets.set(printer.id, targetOn);
+
+        if (fresh.light !== null) {
+          this.statuses.set(printer.id, {
+            ...fresh,
+            light: targetOn,
+            updatedAt: new Date().toISOString()
+          });
+        }
+
+        if (announce) {
+          this.events.push(
+            targetOn ? "☾" : "☀",
+            `<b>${printer.name}</b>: подсветка ${targetOn ? "включена на ночь" : "выключена на день"}`,
+            "info"
+          );
+        }
+
+        // The command was accepted; whether the pin actually moved is confirmed
+        // on the next poll (fresh.light === targetOn → resetLightFailure above).
+        this.noteLightNotConverging(printer, targetOn);
+      } catch (error) {
+        this.noteLightPolicyError(printer, targetOn, error);
+      }
+    });
+  }
+
+  /**
+   * Counts a scheduled command that was sent but has not (yet) moved the pin. If
+   * it keeps happening the pin is almost certainly misconfigured, so back off and
+   * warn once instead of resending forever. Reset on convergence or manual command.
+   */
+  private noteLightNotConverging(printer: PrinterConfig, targetOn: boolean): void {
+    const attempts = (this.lightFailureCounts.get(printer.id) ?? 0) + 1;
+    if (attempts >= MAX_LIGHT_ATTEMPTS) {
+      this.lightFailureCounts.set(printer.id, 0);
+      this.lightBackoffUntil.set(printer.id, Date.now() + LIGHT_BACKOFF_MS);
+      this.warnLightNotConverging(printer, targetOn);
+    } else {
+      this.lightFailureCounts.set(printer.id, attempts);
+    }
+  }
+
+  private warnLightNotConverging(printer: PrinterConfig, targetOn: boolean): void {
+    const failureKey = `converge:${targetOn}`;
+    if (this.lightFailureKeys.get(printer.id) === failureKey) return;
+    this.lightFailureKeys.set(printer.id, failureKey);
+    this.events.push(
+      "⚠",
+      `<b>${printer.name}</b>: подсветка не переключается (${targetOn ? "вкл" : "выкл"}) — проверьте пин «${printer.light.pin || "?"}» в printer.cfg (output_pin) на устройстве`,
+      "err"
+    );
+    // Cannot verify the physical wiring from here — surface the pin so an
+    // operator can confirm `output_pin <pin>` in Klipper matches the K2 light.
+    this.logger.warn?.(
+      {
+        printer: printer.id,
+        targetOn,
+        pin: printer.light.pin,
+        statusObject: printer.light.statusObject
+      },
+      "printer light not converging to target; verify Klipper output_pin config"
+    );
+  }
+
+  private noteLightPolicyError(printer: PrinterConfig, targetOn: boolean, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    const failureKey = `err:${targetOn}:${message}`;
+    if (this.lightFailureKeys.get(printer.id) !== failureKey) {
+      this.lightFailureKeys.set(printer.id, failureKey);
       this.events.push(
-        targetOn ? "☾" : "☀",
-        `<b>${printer.name}</b>: подсветка ${targetOn ? "включена на ночь" : "выключена на день"}`,
-        "info"
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const failureKey = `${targetOn}:${message}`;
-      if (this.lightFailureKeys.get(printer.id) !== failureKey) {
-        this.lightFailureKeys.set(printer.id, failureKey);
-        this.events.push(
-          "⚠",
-          `<b>${printer.name}</b>: не удалось ${targetOn ? "включить" : "выключить"} подсветку (${message})`,
-          "err"
-        );
-      }
-      this.logger.warn?.(
-        { err: error, printer: printer.id, targetOn },
-        "night light policy failed"
+        "⚠",
+        `<b>${printer.name}</b>: не удалось ${targetOn ? "включить" : "выключить"} подсветку (${message})`,
+        "err"
       );
     }
+    const attempts = (this.lightFailureCounts.get(printer.id) ?? 0) + 1;
+    if (attempts >= MAX_LIGHT_ATTEMPTS) {
+      this.lightFailureCounts.set(printer.id, 0);
+      this.lightBackoffUntil.set(printer.id, Date.now() + LIGHT_BACKOFF_MS);
+    } else {
+      this.lightFailureCounts.set(printer.id, attempts);
+    }
+    this.logger.warn?.({ err: error, printer: printer.id, targetOn }, "night light policy failed");
+  }
+
+  private resetLightFailure(id: string): void {
+    this.lightFailureKeys.delete(id);
+    this.lightFailureCounts.delete(id);
+    this.lightBackoffUntil.delete(id);
+  }
+
+  private isLightBackoffActive(id: string): boolean {
+    const until = this.lightBackoffUntil.get(id);
+    if (!until) return false;
+    if (until > Date.now()) return true;
+    this.lightBackoffUntil.delete(id);
+    return false;
   }
 
   private isManualLightOverrideActive(id: string): boolean {

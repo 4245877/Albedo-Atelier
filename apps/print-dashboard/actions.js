@@ -11,8 +11,21 @@ import { esc, toast } from "./util.js";
  * к текущему снимку фермы для поиска принтера по id.
  */
 export function installActions({ getState, refresh }) {
-  /** Выполнить действие, обновить состояние и показать тост об успехе/ошибке. */
-  async function runAction(path, body, okMsg, okKind = "toast-ok") {
+  // Ключи действий, запросы по которым сейчас выполняются. Защищает от повторных
+  // быстрых кликов: пока запрос в полёте, тот же action по тому же принтеру не
+  // отправляется второй раз (иначе несколько SET_PIN, спам в ленте и постоянный
+  // сброс 5-минутного override).
+  const inFlight = new Set();
+
+  /**
+   * Выполнить действие, обновить состояние и показать тост об успехе/ошибке.
+   * `key` защищает от повторной отправки того же действия, `el` блокирует кнопку
+   * на время запроса.
+   */
+  async function runAction(path, body, okMsg, okKind = "toast-ok", key, el) {
+    if (key && inFlight.has(key)) return null;
+    if (key) inFlight.add(key);
+    if (el) el.disabled = true;
     try {
       const res = await apiPost(path, body);
       await refresh();
@@ -21,34 +34,46 @@ export function installActions({ getState, refresh }) {
     } catch (err) {
       toast(esc(err.message), "toast-danger");
       return null;
+    } finally {
+      if (key) inFlight.delete(key);
+      // refresh() перерисовывает доску и заменяет кнопку; снимаем блокировку
+      // только если элемент ещё в DOM — иначе состояние задаёт перерисовка.
+      if (el && el.isConnected) el.disabled = false;
     }
   }
 
   const actions = {
     open(p) { toast(`Открываю страницу принтера «${esc(p.name)}» — раздел в разработке`); },
 
-    pause(p) { runAction(`/api/printers/${p.id}/pause`, null, `«${esc(p.name)}»: печать поставлена на паузу`); },
+    pause(p, el) { runAction(`/api/printers/${p.id}/pause`, null, `«${esc(p.name)}»: печать поставлена на паузу`, "toast-ok", `pause:${p.id}`, el); },
 
-    resume(p) { runAction(`/api/printers/${p.id}/resume`, null, `«${esc(p.name)}»: печать продолжена`); },
+    resume(p, el) { runAction(`/api/printers/${p.id}/resume`, null, `«${esc(p.name)}»: печать продолжена`, "toast-ok", `resume:${p.id}`, el); },
 
-    cancel(p) {
+    cancel(p, el) {
       const jobLabel = p.job ? `«${p.job}»` : "текущего задания";
       if (!window.confirm(`Отменить печать ${jobLabel} на ${p.name}?`)) return;
-      runAction(`/api/printers/${p.id}/cancel`, null, `«${esc(p.name)}»: печать отменена`, "toast-danger");
+      runAction(`/api/printers/${p.id}/cancel`, null, `«${esc(p.name)}»: печать отменена`, "toast-danger", `cancel:${p.id}`, el);
     },
 
-    "light-on"(p) { runAction(`/api/printers/${p.id}/light`, { on: true }, `«${esc(p.name)}»: подсветка включена ☀`); },
+    "light-on"(p, el) {
+      // Целевое состояние уже достигнуто — не шлём команду и не засоряем ленту.
+      if (p.light === true) return;
+      runAction(`/api/printers/${p.id}/light`, { on: true }, `«${esc(p.name)}»: подсветка включена ☀`, "toast-ok", `light:${p.id}`, el);
+    },
 
-    "light-off"(p) { runAction(`/api/printers/${p.id}/light`, { on: false }, `«${esc(p.name)}»: подсветка выключена ☾`); },
+    "light-off"(p, el) {
+      if (p.light === false) return;
+      runAction(`/api/printers/${p.id}/light`, { on: false }, `«${esc(p.name)}»: подсветка выключена ☾`, "toast-ok", `light:${p.id}`, el);
+    },
 
-    snapshot(p) {
+    snapshot(p, el) {
       const flash = document.querySelector(`[data-flash="${p.id}"]`);
       if (flash) {
         flash.classList.remove("go");
         void flash.offsetWidth;
         flash.classList.add("go");
       }
-      runAction(`/api/printers/${p.id}/snapshot`, null, `«${esc(p.name)}»: снимок сохранён ◉`);
+      runAction(`/api/printers/${p.id}/snapshot`, null, `«${esc(p.name)}»: снимок сохранён ◉`, "toast-ok", `snapshot:${p.id}`, el);
     },
   };
 
@@ -78,11 +103,11 @@ export function installActions({ getState, refresh }) {
       return;
     }
     if (act === "night-pick") {
-      runAction("/api/queue/night/pick", null, "Подобрано следующее безопасное задание на ночь ☾");
+      runAction("/api/queue/night/pick", null, "Подобрано следующее безопасное задание на ночь ☾", "toast-ok", "night-pick", el);
       return;
     }
     if (act === "night-start") {
-      runAction("/api/queue/night/start", null, null).then((res) => {
+      runAction("/api/queue/night/start", null, null, "toast-ok", "night-start", el).then((res) => {
         if (res?.candidate) {
           toast(`Ночная печать «${esc(res.candidate.title)}» запланирована на ${esc(String(res.window).split(" ")[0])}`, "toast-ok");
         }
@@ -90,19 +115,19 @@ export function installActions({ getState, refresh }) {
       return;
     }
     if (act === "start-next") {
-      runAction("/api/queue/start-next", null, null).then((res) => {
+      runAction("/api/queue/start-next", null, null, "toast-ok", "start-next", el).then((res) => {
         if (res?.job) toast(`Задание «${esc(res.job.title)}» отправлено на ${esc(res.job.printer)}`, "toast-ok");
       });
       return;
     }
     if (act === "rule") {
-      runAction(`/api/automations/${el.dataset.id}/toggle`, null, null).then((res) => {
+      runAction(`/api/automations/${el.dataset.id}/toggle`, null, null, "toast-ok", `rule:${el.dataset.id}`, el).then((res) => {
         if (res?.automation) toast(`Правило «${esc(res.automation.name)}» ${res.automation.on ? "включено" : "выключено"}`);
       });
       return;
     }
 
     const printer = findPrinter(el.dataset.id);
-    if (printer && actions[act]) actions[act](printer);
+    if (printer && actions[act]) actions[act](printer, el);
   });
 }

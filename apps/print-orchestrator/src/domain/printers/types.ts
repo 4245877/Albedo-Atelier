@@ -46,8 +46,6 @@ export interface PrinterView {
   light: boolean | null;
   /** Whether this printer has a configured light command. */
   lightSupported: boolean;
-  /** Whether the schedule currently wants the light on. */
-  lightAllowed: boolean;
   snapshotAt: string | null;
   error?: string;
   note?: string;
