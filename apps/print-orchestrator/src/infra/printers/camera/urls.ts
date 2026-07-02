@@ -39,6 +39,8 @@ export function resolveStreamUrl(printer: PrinterConfig): string | null {
 
 /** True when an HTTP live stream route is usable for this printer. */
 export function hasCameraStream(printer: PrinterConfig): boolean {
+  if (printer.protocol === "bambu" && Boolean(printer.accessCode.trim())) return true;
+
   if (!resolveStreamUrl(printer)) return false;
   return resolveWebrtcSource(printer) === null;
 }

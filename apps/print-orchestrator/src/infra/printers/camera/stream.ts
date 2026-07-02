@@ -1,7 +1,8 @@
 import { Readable } from "node:stream";
 
 import type { PrinterConfig } from "../config";
-import { DEFAULT_TIMEOUT_MS } from "./constants";
+import { openBambuCameraStream } from "./bambuCamera";
+import { DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT_MS } from "./constants";
 import type { CameraStream } from "./types";
 import { resolveStreamUrl } from "./urls";
 
@@ -10,6 +11,14 @@ export async function openCameraStream(
   printer: PrinterConfig,
   options: { timeoutMs?: number } = {}
 ): Promise<CameraStream | null> {
+  if (printer.protocol === "bambu" && printer.accessCode.trim()) {
+    return openBambuCameraStream(
+      printer,
+      options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      DEFAULT_MAX_BYTES
+    );
+  }
+
   const url = resolveStreamUrl(printer);
   if (!url) return null;
 

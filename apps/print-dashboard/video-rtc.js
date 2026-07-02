@@ -342,6 +342,11 @@ export class VideoRTC extends HTMLElement {
         this.video.srcObject = null;
     }
 
+    isWebRTCOnly() {
+        const modes = this.mode.split(',').map(mode => mode.trim()).filter(Boolean);
+        return modes.length > 0 && modes.every(mode => mode === 'webrtc' || mode === 'webrtc/tcp');
+    }
+
     /**
      * @returns {Array.<string>} of modes (mse, webrtc, etc.)
      */
@@ -531,8 +536,17 @@ export class VideoRTC extends HTMLElement {
 
                 video2.addEventListener('loadeddata', promote, {once: true});
                 video2.addEventListener('canplay', promote, {once: true});
-                video2.srcObject = new MediaStream(tracks);
-                video2.play().then(promote).catch(() => {
+                const stream = new MediaStream(tracks);
+                const videoTrack = stream.getVideoTracks()[0];
+                if (videoTrack) {
+                    if (videoTrack.muted) {
+                        videoTrack.addEventListener('unmute', promote, {once: true});
+                    } else {
+                        queueMicrotask(promote);
+                    }
+                }
+                video2.srcObject = stream;
+                video2.play().catch(() => {
                     if (video2.readyState >= 2) promote();
                 });
             } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
@@ -540,6 +554,12 @@ export class VideoRTC extends HTMLElement {
 
                 this.pcState = WebSocket.CLOSED;
                 this.pc = null;
+
+                this.wsState = WebSocket.CLOSED;
+                if (this.ws) {
+                    this.ws.close();
+                    this.ws = null;
+                }
 
                 this.onconnect();
             }
@@ -627,10 +647,12 @@ export class VideoRTC extends HTMLElement {
 
                 this.pcState = WebSocket.OPEN;
 
-                this.wsState = WebSocket.CLOSED;
-                if (this.ws) {
-                    this.ws.close();
-                    this.ws = null;
+                if (!this.isWebRTCOnly()) {
+                    this.wsState = WebSocket.CLOSED;
+                    if (this.ws) {
+                        this.ws.close();
+                        this.ws = null;
+                    }
                 }
             } else {
                 this.pcState = WebSocket.CLOSED;

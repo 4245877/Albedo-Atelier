@@ -778,6 +778,8 @@ body {
   object-fit: cover;
 }
 
+.cam-mjpeg { background: #11131a; }
+
 .cam-video {
   display: block;
   background: #11131a;
@@ -799,6 +801,7 @@ body {
 }
 /* Значок LIVE — только когда картинка реально идёт. */
 .cam-live:not(.is-live) .cam-tag { display: none; }
+.cam-stream:not(.is-live) .cam-tag.live { display: none; }
 
 /* Плашка состояния поверх видео: видна, пока картинка не пошла (подключение или
    потеря сигнала), и гаснет, когда поток ожил. */
@@ -821,6 +824,7 @@ body {
 }
 
 .cam-live.is-live .cam-state { opacity: 0; }
+.cam-stream.is-live .cam-state { opacity: 0; }
 
 .cam-tag {
   position: absolute;

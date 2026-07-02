@@ -33,6 +33,21 @@ export function camBlock(p, ctx) {
       </div>`;
   }
 
+  // Live-трансляция через backend MJPEG-прокси (Bambu A1): держим постоянный
+  // <img> в реестре, чтобы обновление доски не разрывало долгий HTTP-ответ.
+  if (p.cameraStream) {
+    const slot = `${p.id}::${ctx}`;
+    const src = `${API_BASE}/api/printers/${encodeURIComponent(p.id)}/camera.mp4`;
+    return `
+      <div class="cam cam-stream ${p.light ? "cam-lit" : ""}">
+        ${PRINTER_SVG}
+        <div class="cam-mount" data-cam-mjpeg-slot="${esc(slot)}" data-cam-mjpeg-src="${esc(src)}" data-cam-alt="Камера ${esc(p.name)}"></div>
+        <div class="cam-state">подключение…</div>
+        <span class="cam-tag live"><i class="dot"></i>LIVE</span>
+        <span class="cam-flash" data-flash="${p.id}"></span>
+      </div>`;
+  }
+
   // Камера только со снимками: реальный JPEG-кадр либо заглушка «нет сигнала»,
   // когда проба сейчас не отвечает. При ошибке загрузки остаётся svg-заглушка.
   if (p.camera === "offline") {

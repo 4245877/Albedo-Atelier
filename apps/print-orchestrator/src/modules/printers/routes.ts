@@ -19,7 +19,7 @@ interface LightBody {
  *   GET  /active          printers currently printing/paused
  *   GET  /:id             one printer
  *   GET  /:id/camera.jpg  live camera frame (real snapshot from the device)
- *   GET  /:id/camera.mp4  live camera stream
+ *   GET  /:id/camera.mp4  live camera stream (fMP4/MJPEG, depending on source)
  *
  * Actions (dispatched to real printer drivers):
  *   POST /:id/pause
@@ -56,8 +56,8 @@ export async function registerPrinterRoutes(app: FastifyInstance): Promise<void>
     request.raw.on("close", stream.close);
 
     // Live video should reach the browser frame-by-frame: disable Nagle so small
-    // fMP4 chunks are flushed immediately instead of being coalesced into fewer,
-    // larger, laggier packets.
+    // fMP4/MJPEG chunks are flushed immediately instead of being coalesced into
+    // fewer, larger, laggier packets.
     reply.raw.socket?.setNoDelay(true);
 
     return reply
