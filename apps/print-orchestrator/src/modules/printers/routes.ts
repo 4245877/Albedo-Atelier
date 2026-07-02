@@ -19,7 +19,10 @@ interface LightBody {
  *   GET  /active          printers currently printing/paused
  *   GET  /:id             one printer
  *   GET  /:id/camera.jpg  live camera frame (real snapshot from the device)
- *   GET  /:id/camera.mp4  live camera stream (fMP4/MJPEG, depending on source)
+ *   GET  /:id/camera.mp4  backend-proxied live stream for non-WebRTC cameras
+ *
+ * WebRTC cameras (Creality K2) are exposed in the printer view as `cameraSrc`
+ * and streamed by the dashboard through `/go2rtc/`, not through this MP4 route.
  *
  * Actions (dispatched to real printer drivers):
  *   POST /:id/pause

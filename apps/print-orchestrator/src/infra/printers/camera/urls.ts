@@ -37,8 +37,16 @@ export function resolveStreamUrl(printer: PrinterConfig): string | null {
   return `http://${hostWithoutPort(printer.host)}${path}`;
 }
 
-/** True when an HTTP live stream route is usable for this printer. */
+/** True when the dashboard has a browser-safe live stream for this printer. */
 export function hasCameraStream(printer: PrinterConfig): boolean {
+  if (resolveWebrtcSource(printer) !== null) return true;
+  if (printer.protocol === "bambu" && Boolean(printer.accessCode.trim())) return true;
+
+  return hasHttpCameraStream(printer);
+}
+
+/** True when the backend can proxy this camera over `GET /camera.mp4`. */
+export function hasHttpCameraStream(printer: PrinterConfig): boolean {
   if (printer.protocol === "bambu" && Boolean(printer.accessCode.trim())) return true;
 
   if (!resolveStreamUrl(printer)) return false;
@@ -66,6 +74,7 @@ export function resolveWebrtcSource(printer: PrinterConfig): string | null {
 
 /** True when the printer has any camera source we can try. */
 export function hasCameraSource(printer: PrinterConfig): boolean {
+  if (hasCameraStream(printer)) return true;
   if (resolveSnapshotUrl(printer)) return true;
   return printer.protocol === "bambu" && Boolean(printer.accessCode);
 }

@@ -12,6 +12,7 @@ export type { CameraFrame, CameraStream } from "./types";
 export {
   hasCameraSource,
   hasCameraStream,
+  hasHttpCameraStream,
   isGo2RtcCamera,
   resolveGo2RtcApiBase,
   resolveSnapshotUrl,

@@ -4,7 +4,7 @@ import { hhmm } from "../../shared/time";
 import {
   captureCameraFrame,
   hasCameraSource,
-  hasCameraStream,
+  hasHttpCameraStream,
   isGo2RtcCamera,
   openCameraStream,
   probeGo2RtcStream,
@@ -118,7 +118,11 @@ export class CameraService {
 
   /** A live camera stream for `GET /api/printers/:id/camera.mp4`. */
   async getStream(printer: PrinterConfig): Promise<CameraStream> {
-    if (!hasCameraStream(printer)) {
+    if (isGo2RtcCamera(printer)) {
+      throw new CameraError(printer.id, "трансляция доступна через WebRTC");
+    }
+
+    if (!hasHttpCameraStream(printer)) {
       throw new CameraError(printer.id, "трансляция не настроена");
     }
 
