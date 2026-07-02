@@ -1,3 +1,4 @@
+import { Readable } from "node:stream";
 import tls from "node:tls";
 
 import type { PrinterConfig } from "./config";
@@ -18,7 +19,15 @@ export interface CameraFrame {
   mime: string;
 }
 
-const DEFAULT_TIMEOUT_MS = 4000;
+export interface CameraStream {
+  body: Readable;
+  mime: string;
+  close: () => void;
+}
+
+// go2rtc can need several seconds to negotiate the Creality K2 WebRTC source
+// and wait for the first keyframe when the bridge is cold.
+const DEFAULT_TIMEOUT_MS = 8000;
 const DEFAULT_MAX_BYTES = 3_000_000;
 
 const BAMBU_CAMERA_PORT = 6000;
@@ -44,6 +53,20 @@ export function resolveSnapshotUrl(printer: PrinterConfig): string | null {
   if (printer.protocol === "creality") return `http://${host}:8080/?action=snapshot`;
 
   return null;
+}
+
+/** Resolves an explicitly configured live stream URL suitable for proxying. */
+export function resolveStreamUrl(printer: PrinterConfig): string | null {
+  const explicit = printer.streamUrl.trim();
+  if (!explicit) return null;
+
+  if (/^https?:\/\//i.test(explicit)) return explicit;
+  const path = explicit.startsWith("/") ? explicit : `/${explicit}`;
+  return `http://${hostWithoutPort(printer.host)}${path}`;
+}
+
+export function hasCameraStream(printer: PrinterConfig): boolean {
+  return Boolean(resolveStreamUrl(printer));
 }
 
 /** True when the printer has any camera source we can try. */
@@ -179,5 +202,51 @@ export async function captureCameraFrame(
     return null;
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+/** Opens a live camera stream. The caller owns closing the returned stream. */
+export async function openCameraStream(
+  printer: PrinterConfig,
+  options: { timeoutMs?: number } = {}
+): Promise<CameraStream | null> {
+  const url = resolveStreamUrl(printer);
+  if (!url) return null;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (!response.ok || !response.body) {
+      controller.abort();
+      return null;
+    }
+
+    const contentType = (response.headers.get("content-type") || "")
+      .split(";")[0]
+      .trim()
+      .toLowerCase();
+
+    if (
+      contentType &&
+      !contentType.startsWith("video/") &&
+      contentType !== "application/vnd.apple.mpegurl"
+    ) {
+      controller.abort();
+      return null;
+    }
+
+    return {
+      body: Readable.fromWeb(response.body),
+      mime: contentType || "video/mp4",
+      close: () => controller.abort()
+    };
+  } catch {
+    clearTimeout(timeout);
+    controller.abort();
+    return null;
   }
 }

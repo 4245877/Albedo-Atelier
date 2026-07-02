@@ -1,5 +1,5 @@
 import { farmStore } from "../../infra/store/farmStore";
-import type { CameraFrame } from "../../infra/printers/snapshot";
+import type { CameraFrame, CameraStream } from "../../infra/printers/snapshot";
 import type { PrinterView } from "../../domain/printers/types";
 
 /**
@@ -42,4 +42,8 @@ export function capturePrinterSnapshot(id: string): Promise<PrinterView> {
 
 export function getPrinterCameraFrame(id: string): Promise<CameraFrame> {
   return farmStore.getCameraFrame(id);
+}
+
+export function getPrinterCameraStream(id: string): Promise<CameraStream> {
+  return farmStore.getCameraStream(id);
 }

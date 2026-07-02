@@ -26,6 +26,8 @@ export interface PrinterConfig {
   swatch: string;
   /** Explicit camera snapshot URL; empty when the camera is not set up. */
   snapshotUrl: string;
+  /** Explicit live camera stream URL; empty when no browser-safe stream exists. */
+  streamUrl: string;
 
   enabled: boolean;
   apiKey: string;
@@ -102,6 +104,7 @@ export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
     material: asString(value.material),
     swatch: asString(value.swatch),
     snapshotUrl: asString(value.snapshotUrl),
+    streamUrl: asString(value.streamUrl),
 
     enabled: value.enabled !== false,
     apiKey: asString(value.apiKey),

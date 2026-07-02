@@ -1,0 +1,14 @@
+# Bridges the Creality K2 proprietary WebRTC camera into HTTP endpoints
+# reachable by print-orchestrator over the compose network:
+#   http://go2rtc:1984/api/frame.jpeg?src=k2
+#   http://go2rtc:1984/api/stream.mp4?src=k2
+#
+# The #format=creality suffix enables go2rtc's Creality signaling handshake.
+streams:
+  k2: ${K2_CAMERA_SOURCE}
+
+api:
+  listen: ":1984"
+
+log:
+  level: info

@@ -1,8 +1,22 @@
 services:
+  go2rtc:
+    image: alexxit/go2rtc:latest
+    container_name: atelier-go2rtc
+    restart: unless-stopped
+    environment:
+      K2_CAMERA_SOURCE: "webrtc:http://192.168.0.132:8000/call/webrtc_local#format=creality"
+    volumes:
+      - ./apps/print-orchestrator/config/go2rtc.yaml:/config/go2rtc.yaml:ro
+    ports:
+      # Avoids the fulfillment stack's 1984 while keeping the internal URL go2rtc:1984.
+      - "0.0.0.0:1985:1984"
+
   print-orchestrator:
     build:
       context: ./apps/print-orchestrator
     container_name: atelier-print-orchestrator
+    depends_on:
+      - go2rtc
     environment:
       NODE_ENV: production
       SERVICE_NAME: print-orchestrator

@@ -6,6 +6,7 @@ import {
   capturePrinterSnapshot,
   getPrinter,
   getPrinterCameraFrame,
+  getPrinterCameraStream,
   listActivePrinters,
   listPrinters,
   pausePrinter,
@@ -29,6 +30,7 @@ interface LightBody {
  *   GET  /active          printers currently printing/paused
  *   GET  /:id             one printer
  *   GET  /:id/camera.jpg  live camera frame (real snapshot from the device)
+ *   GET  /:id/camera.mp4  live camera stream
  *
  * Actions (dispatched to real printer drivers):
  *   POST /:id/pause
@@ -53,6 +55,15 @@ export async function registerPrinterRoutes(app: FastifyInstance): Promise<void>
       .header("Cache-Control", "no-store")
       .type(frame.mime)
       .send(frame.data);
+  });
+
+  app.get<{ Params: PrinterParams }>("/:id/camera.mp4", async (request, reply) => {
+    const stream = await getPrinterCameraStream(request.params.id);
+    reply.raw.on("close", stream.close);
+    return reply
+      .header("Cache-Control", "no-store")
+      .type(stream.mime)
+      .send(stream.body);
   });
 
   app.post<{ Params: PrinterParams }>("/:id/pause", async (request) => ({

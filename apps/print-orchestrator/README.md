@@ -44,6 +44,7 @@ with a stable `code` (`PRINTER_OFFLINE`, `PRINTER_CONNECTION`, `CAMERA_ERROR`,
 - `GET /api/dashboard` — the whole board in one payload
 - `GET /api/status` — overall service status
 - `GET /api/printers` · `GET /api/printers/active` · `GET /api/printers/:id`
+- `GET /api/printers/:id/camera.jpg` · `GET /api/printers/:id/camera.mp4`
 - `GET /api/queue` · `GET /api/queue/night`
 - `GET /api/materials` · `GET /api/cameras` · `GET /api/maintenance`
 - `GET /api/events` · `GET /api/critical` · `GET /api/warnings`

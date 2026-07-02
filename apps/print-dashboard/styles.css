@@ -778,6 +778,11 @@ body {
   object-fit: cover;
 }
 
+.cam-video {
+  display: block;
+  background: #11131a;
+}
+
 .cam-tag {
   position: absolute;
   left: 10px;

@@ -60,6 +60,8 @@ export interface PrinterView {
   material: string | null;
   swatch: string | null;
   camera: CameraState;
+  /** True when a live browser-safe camera stream is configured. */
+  cameraStream: boolean;
   /** Chamber light state; null — the device does not expose light control. */
   light: boolean | null;
   snapshotAt: string | null;

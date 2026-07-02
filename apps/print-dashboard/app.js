@@ -356,15 +356,20 @@ function camBlock(p) {
     return `<div class="cam"><div class="cam-offline">нет сигнала</div>
       ${p.snapshotAt ? `<span class="cam-tag"><i class="dot"></i>снимок ${p.snapshotAt}</span>` : ""}</div>`;
   }
-  // Камера online — показываем реальный кадр с backend; при ошибке загрузки
-  // остаётся заглушка-силуэт (снимок мог устареть между опросами).
-  const live = p.status === "printing";
+  // Камера online — для настроенных live-stream показываем поток с backend,
+  // иначе оставляем реальный JPEG-кадр. При ошибке загрузки остаётся svg-заглушка.
+  const live = Boolean(p.cameraStream);
+  const media = live
+    ? `<video class="cam-img cam-video" aria-label="Камера ${esc(p.name)}" autoplay muted playsinline preload="metadata"
+        src="${API_BASE}/api/printers/${encodeURIComponent(p.id)}/camera.mp4"
+        onerror="this.remove()"></video>`
+    : `<img class="cam-img" alt="Камера ${esc(p.name)}" loading="lazy"
+        src="${API_BASE}/api/printers/${encodeURIComponent(p.id)}/camera.jpg?t=${encodeURIComponent(p.snapshotAt || Date.now())}"
+        onerror="this.remove()">`;
   return `
     <div class="cam ${p.light ? "cam-lit" : ""}">
       ${PRINTER_SVG}
-      <img class="cam-img" alt="Камера ${esc(p.name)}" loading="lazy"
-        src="${API_BASE}/api/printers/${encodeURIComponent(p.id)}/camera.jpg?t=${encodeURIComponent(p.snapshotAt || Date.now())}"
-        onerror="this.remove()">
+      ${media}
       <span class="cam-tag ${live ? "live" : ""}"><i class="dot"></i>${live ? "LIVE" : `снимок ${p.snapshotAt || "—"}`}</span>
       <span class="cam-flash" data-flash="${p.id}"></span>
     </div>`;

@@ -165,6 +165,7 @@ export interface CameraView {
   id: string;
   name: string;
   camera: CameraState;
+  cameraStream: boolean;
   light: boolean;
   status: PrinterState;
   snapshotAt: string | null;

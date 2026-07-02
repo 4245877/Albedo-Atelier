@@ -35,7 +35,14 @@ import {
   type PrinterCommand,
   type PrinterLiveStatus
 } from "../printers/status";
-import { captureCameraFrame, hasCameraSource, type CameraFrame } from "../printers/snapshot";
+import {
+  captureCameraFrame,
+  hasCameraSource,
+  hasCameraStream,
+  openCameraStream,
+  type CameraFrame,
+  type CameraStream
+} from "../printers/snapshot";
 import { env } from "../../shared/env";
 import { hhmm } from "../../shared/time";
 
@@ -316,6 +323,22 @@ export class FarmStore {
     return frame;
   }
 
+
+  /** A live camera stream for `GET /api/printers/:id/camera.mp4`. */
+  async getCameraStream(id: string): Promise<CameraStream> {
+    const printer = this.getConfigOrThrow(id);
+    if (!hasCameraStream(printer)) {
+      throw new CameraError(id, "трансляция не настроена");
+    }
+
+    const stream = await openCameraStream(printer);
+    if (!stream) {
+      throw new CameraError(id, "нет видеопотока");
+    }
+
+    return stream;
+  }
+
   // ── Reads ────────────────────────────────────────────────────────────────
 
   getService(): ServiceStatus {
@@ -572,6 +595,7 @@ export class FarmStore {
           id: p.id,
           name: p.name,
           camera: view.camera,
+          cameraStream: view.cameraStream,
           light: false,
           status: view.status,
           snapshotAt: view.snapshotAt
@@ -735,6 +759,7 @@ export class FarmStore {
       material: printer.material || null,
       swatch: printer.swatch || null,
       camera: hasCameraSource(printer) ? camera?.state ?? "offline" : "none",
+      cameraStream: hasCameraStream(printer),
       light: null,
       snapshotAt: camera?.snapshotAt ?? null,
       ...(status?.error ? { error: status.error } : {})
