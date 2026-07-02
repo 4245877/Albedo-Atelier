@@ -2,9 +2,9 @@ import { VideoRTC } from "./video-rtc.js";
 
 /*
  * Живой видеоэлемент дашборда, построенный на go2rtc VideoRTC (см. video-rtc.js).
- * Порядок транспортов — WebRTC, затем MSE: камере Creality K2 keyframe удаётся
- * получить только по её родному WebRTC (HTTP/MP4 из go2rtc её не отдаёт), поэтому
- * WebRTC здесь основной путь.
+ * Камере Creality K2 keyframe удаётся получить только по её родному WebRTC
+ * (HTTP/MP4 и MSE из go2rtc её не отдают), поэтому этот компонент намеренно
+ * не запускает MSE/MP4 fallback.
  *
  * VideoRTC сам ведёт переговоры, переподключается при обрыве и ставит поток на
  * паузу, когда вкладка скрыта. Важно: при отсоединении от DOM он держит поток
@@ -16,11 +16,13 @@ import { VideoRTC } from "./video-rtc.js";
 class CameraStream extends VideoRTC {
   constructor() {
     super();
-    // Только транспорты, которым нужен один WebSocket и никакого UDP-фолбэка,
-    // ломающего низкую задержку. WebRTC — основной, MSE — запасной.
-    this.mode = "webrtc,mse";
+    // K2 отдаёт живой кадр только через WebRTC. MSE здесь создаёт лишний
+    // consumer в go2rtc и оставляет UI ждать кадр от нерабочего транспорта.
+    this.mode = "webrtc";
     // У камеры принтера нет звука — не запрашиваем аудио-трек.
     this.media = "video";
+    // Не держим параллельную сессию для превью, которое сейчас вне экрана.
+    this.visibilityThreshold = 0.1;
   }
 
   oninit() {
@@ -42,11 +44,16 @@ class CameraStream extends VideoRTC {
     this.tag.innerHTML = `<i class="dot"></i>LIVE`;
     this.appendChild(this.tag);
 
-    // Признак «идёт картинка» берём с самого <video> — работает и для WebRTC,
-    // и для MSE, в отличие от привязки к конкретному транспорту.
+    // Признак «идёт картинка» берём с самого <video>. В Firefox WebRTC может
+    // получить первый кадр до события playing, поэтому loadeddata/canplay тоже
+    // считаем живым кадром.
+    this.video.addEventListener("loadeddata", () => this.setLive(true));
+    this.video.addEventListener("canplay", () => this.setLive(true));
     this.video.addEventListener("playing", () => this.setLive(true));
     this.video.addEventListener("waiting", () => this.setLive(false, "подключение…"));
+    this.video.addEventListener("stalled", () => this.setLive(false, "ждём кадр…"));
     this.video.addEventListener("emptied", () => this.setLive(false, "подключение…"));
+    this.video.addEventListener("error", () => this.setLive(false, "ошибка видео"));
   }
 
   setLive(live, text) {
@@ -58,6 +65,12 @@ class CameraStream extends VideoRTC {
   onconnect() {
     const result = super.onconnect();
     if (result) this.setLive(false, "подключение…");
+    return result;
+  }
+
+  onclose() {
+    const result = super.onclose();
+    if (result) this.setLive(false, "переподключение…");
     return result;
   }
 

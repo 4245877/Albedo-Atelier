@@ -69,8 +69,10 @@ export function resolveStreamUrl(printer: PrinterConfig): string | null {
   return `http://${hostWithoutPort(printer.host)}${path}`;
 }
 
+/** True when an HTTP live stream route is usable for this printer. */
 export function hasCameraStream(printer: PrinterConfig): boolean {
-  return Boolean(resolveStreamUrl(printer));
+  if (!resolveStreamUrl(printer)) return false;
+  return resolveWebrtcSource(printer) === null;
 }
 
 /**

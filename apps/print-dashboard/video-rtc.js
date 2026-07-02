@@ -518,8 +518,23 @@ export class VideoRTC extends HTMLElement {
                     .map(tr => tr.receiver.track);
                 /** @type {HTMLVideoElement} */
                 const video2 = document.createElement('video');
-                video2.addEventListener('loadeddata', () => this.onpcvideo(video2), {once: true});
+                video2.muted = true;
+                video2.playsInline = true;
+                video2.autoplay = true;
+
+                let promoted = false;
+                const promote = () => {
+                    if (promoted) return;
+                    promoted = true;
+                    this.onpcvideo(video2);
+                };
+
+                video2.addEventListener('loadeddata', promote, {once: true});
+                video2.addEventListener('canplay', promote, {once: true});
                 video2.srcObject = new MediaStream(tracks);
+                video2.play().then(promote).catch(() => {
+                    if (video2.readyState >= 2) promote();
+                });
             } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
                 pc.close(); // stop next events
 
