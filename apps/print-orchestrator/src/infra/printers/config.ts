@@ -5,6 +5,22 @@ import type { PrinterTechnology } from "../../domain/printers/types";
 
 export type PrinterProtocol = "moonraker" | "bambu" | "creality";
 
+export interface PrinterLightConfig {
+  enabled: boolean;
+  /** Moonraker output pin name; produces SET_PIN commands when present. */
+  pin: string;
+  /** Explicit Moonraker G-code command for switching the light on. */
+  onGcode: string;
+  /** Explicit Moonraker G-code command for switching the light off. */
+  offGcode: string;
+  /** Moonraker object queried for state, e.g. "output_pin LED". */
+  statusObject: string;
+  /** Field inside the Moonraker status object; defaults to "value". */
+  statusField: string;
+  /** Bambu LED node passed to the local MQTT ledctrl command. */
+  bambuNode: string;
+}
+
 /**
  * Static config for one real printer. Same shape as apps/fulfillment's
  * `PrinterConfig` (data/printers.json), extended with the dashboard-only
@@ -33,6 +49,7 @@ export interface PrinterConfig {
   apiKey: string;
   serial: string;
   accessCode: string;
+  light: PrinterLightConfig;
 }
 
 export type PrinterConfigSourceKind = "file" | "env" | "none";
@@ -81,6 +98,24 @@ function normalizeType(value: unknown): PrinterTechnology {
   return String(value ?? "").trim().toLowerCase() === "resin" ? "Resin" : "FDM";
 }
 
+function normalizeLightConfig(value: unknown, protocol: PrinterProtocol): PrinterLightConfig {
+  const object = isObject(value) ? value : {};
+  const pin = asString(object.pin);
+  const onGcode = asString(object.onGcode) || (pin ? `SET_PIN PIN=${pin} VALUE=1` : "");
+  const offGcode = asString(object.offGcode) || (pin ? `SET_PIN PIN=${pin} VALUE=0` : "");
+  const statusObject = asString(object.statusObject) || (pin ? `output_pin ${pin}` : "");
+  const statusField = asString(object.statusField) || "value";
+  const bambuNode = asString(object.bambuNode) || "chamber_light";
+
+  const explicitEnabled = object.enabled;
+  const enabled =
+    typeof explicitEnabled === "boolean"
+      ? explicitEnabled
+      : protocol === "bambu" || (protocol === "moonraker" && Boolean(onGcode && offGcode));
+
+  return { enabled, pin, onGcode, offGcode, statusObject, statusField, bambuNode };
+}
+
 export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
   if (!isObject(value)) return null;
 
@@ -90,6 +125,7 @@ export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
   if (!id || !name || !host) return null;
 
   const portValue = Number(value.port);
+  const protocol = normalizeProtocol(value.protocol);
 
   return {
     id,
@@ -97,7 +133,7 @@ export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
     model: asString(value.model),
     type: normalizeType(value.type),
 
-    protocol: normalizeProtocol(value.protocol),
+    protocol,
     host,
     port: Number.isFinite(portValue) && portValue > 0 ? portValue : undefined,
 
@@ -109,7 +145,8 @@ export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
     enabled: value.enabled !== false,
     apiKey: asString(value.apiKey),
     serial: asString(value.serial),
-    accessCode: asString(value.accessCode)
+    accessCode: asString(value.accessCode),
+    light: normalizeLightConfig(value.light, protocol)
   };
 }
 

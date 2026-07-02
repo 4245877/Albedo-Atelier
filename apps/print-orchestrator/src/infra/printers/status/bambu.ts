@@ -55,6 +55,27 @@ function bambuPrintIdentity(print: Record<string, unknown>): string | null {
   );
 }
 
+function readBambuLightState(
+  printer: PrinterConfig,
+  print: Record<string, unknown>
+): boolean | null {
+  const reports = print.lights_report;
+  if (!Array.isArray(reports)) return null;
+
+  const wantedNode = printer.light.bambuNode.toLowerCase();
+  for (const report of reports) {
+    if (!isObject(report)) continue;
+
+    const node = firstText(report.node, report.led_node, report.name).toLowerCase();
+    if (node && node !== wantedNode) continue;
+
+    const mode = firstText(report.mode, report.led_mode, report.state).toLowerCase();
+    if (["on", "true", "1"].includes(mode)) return true;
+    if (["off", "false", "0"].includes(mode)) return false;
+  }
+  return null;
+}
+
 // Bambu MQTT reports are partial deltas; merge them into the last full state so
 // the status is always built from a complete snapshot. Reset when a different
 // print starts so a previous job's fields can't leak into the next one.
@@ -87,6 +108,7 @@ function buildBambuStatus(printer: PrinterConfig, payload: unknown): PrinterLive
   const bedTemp = firstFiniteNumber(print.bed_temper, print.bed_temperature);
   const bedTarget = firstFiniteNumber(print.bed_target_temper);
   const chamberTemp = firstFiniteNumber(print.chamber_temper);
+  const light = readBambuLightState(printer, print);
 
   const rawState = firstText(print.gcode_state, print.print_status, print.status, print.state);
   const printErrorCode = firstFiniteNumber(print.print_error, print.mc_print_error_code);
@@ -98,7 +120,8 @@ function buildBambuStatus(printer: PrinterConfig, payload: unknown): PrinterLive
     progressPct === null &&
     remainingMinutes === null &&
     nozzleTemp === null &&
-    bedTemp === null
+    bedTemp === null &&
+    light === null
   ) {
     return null;
   }
@@ -123,6 +146,7 @@ function buildBambuStatus(printer: PrinterConfig, payload: unknown): PrinterLive
     bedTemp: roundOrNull(bedTemp),
     bedTarget: roundOrNull(bedTarget),
     chamberTemp: roundOrNull(chamberTemp),
+    light,
     stateText: rawState || null,
     stateMessage: null,
     error: isError
@@ -152,6 +176,7 @@ function mergeBambuStatus(
     bedTemp: next.bedTemp ?? previous.bedTemp,
     bedTarget: next.bedTarget ?? previous.bedTarget,
     chamberTemp: next.chamberTemp ?? previous.chamberTemp,
+    light: next.light ?? previous.light,
     error: next.error,
     updatedAt: next.updatedAt
   };
@@ -246,6 +271,29 @@ export function sendBambuCommand(printer: PrinterConfig, command: PrinterCommand
     JSON.stringify({
       print: { sequence_id: String(Date.now()), command: bambuCommand, param: "" }
     })
+  );
+}
+
+export function sendBambuLightCommand(printer: PrinterConfig, on: boolean): void {
+  const client = bambuClients.get(printer.id);
+  if (!client || !client.connected) {
+    throw new PrinterCommandError("Нет активного MQTT-подключения к принтеру");
+  }
+
+  client.publish(
+    bambuRequestTopic(printer),
+    JSON.stringify({
+      system: {
+        sequence_id: String(Date.now()),
+        command: "ledctrl",
+        led_node: printer.light.bambuNode,
+        led_mode: on ? "on" : "off"
+      }
+    })
+  );
+  client.publish(
+    bambuRequestTopic(printer),
+    JSON.stringify({ pushing: { sequence_id: String(Date.now()), command: "pushall" } })
   );
 }
 

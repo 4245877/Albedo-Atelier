@@ -18,6 +18,16 @@ focused collaborators behind a facade (`src/infra/store/`): `PrinterPoller`,
 `CameraService`, `QueueStore`, `EventFeed`, `PrinterCommandService` and the
 read-only `DashboardReadModel`.
 
+Printer lights are governed by `NIGHT_PRINT_WINDOW` (default
+`23:00 – 07:30`) using the process local timezone (`TZ` in Docker). On each
+poll, supported lights are switched on inside that window and switched off
+outside it; manual `on` requests are rejected during the day. Bambu uses local
+MQTT `system.ledctrl` (`light.bambuNode`, default `chamber_light`). Moonraker
+uses `light.pin` to generate `SET_PIN PIN=<pin> VALUE=1/0` and reads
+`output_pin <pin>`; use explicit `light.onGcode`, `light.offGcode`,
+`light.statusObject` and `light.statusField` for custom setups. Creality
+WebSocket light control is not implemented.
+
 ## Local development
 
 Uses **pnpm** (via `corepack enable`).
@@ -82,7 +92,7 @@ Queue/night/automation features that have no engine yet return a clear error
 instead of fabricating a result.
 
 - `POST /api/printers/:id/pause` · `.../resume` · `.../cancel` · `.../snapshot`
-- `POST /api/printers/:id/light` — body `{ "on": boolean }`
+- `POST /api/printers/:id/light` — body `{ "on": boolean }`; `on: true` is accepted only inside `NIGHT_PRINT_WINDOW`
 - `POST /api/queue` — add a job, body `{ title, printer?, material?, eta?, at?, night? }`
 - `POST /api/queue/start-next` · `POST /api/queue/night/start` · `POST /api/queue/night/pick`
 - `POST /api/automations/:id/toggle` — body `{ "on"?: boolean }` (omit to flip)

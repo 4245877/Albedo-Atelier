@@ -1,8 +1,13 @@
 import type { PrinterConfig } from "../config";
-import { getBambuStatus, sendBambuCommand, shutdownBambuConnections } from "./bambu";
+import {
+  getBambuStatus,
+  sendBambuCommand,
+  sendBambuLightCommand,
+  shutdownBambuConnections
+} from "./bambu";
 import { getCrealityStatus } from "./creality";
 import { makeOfflineStatus } from "./mapper";
-import { getMoonrakerStatus, sendMoonrakerCommand } from "./moonraker";
+import { getMoonrakerStatus, sendMoonrakerCommand, sendMoonrakerLightCommand } from "./moonraker";
 import { PrinterCommandError, type PrinterCommand, type PrinterLiveStatus } from "./types";
 
 /**
@@ -35,6 +40,25 @@ export async function sendPrinterCommand(
   throw new PrinterCommandError(
     `Управление печатью для протокола «${printer.protocol}» пока не поддерживается`
   );
+}
+
+export function supportsPrinterLight(printer: PrinterConfig): boolean {
+  if (!printer.light.enabled) return false;
+  if (printer.protocol === "bambu") return Boolean(printer.light.bambuNode);
+  if (printer.protocol === "moonraker") {
+    return Boolean(printer.light.onGcode && printer.light.offGcode);
+  }
+  return false;
+}
+
+export async function sendPrinterLight(printer: PrinterConfig, on: boolean): Promise<void> {
+  if (!supportsPrinterLight(printer)) {
+    throw new PrinterCommandError(
+      `Управление подсветкой для протокола «${printer.protocol}» не настроено`
+    );
+  }
+  if (printer.protocol === "moonraker") return sendMoonrakerLightCommand(printer, on);
+  if (printer.protocol === "bambu") return sendBambuLightCommand(printer, on);
 }
 
 /** Closes all persistent device connections (Bambu MQTT clients, timers). */

@@ -16,6 +16,8 @@ export interface PrinterLiveStatus {
   bedTemp: number | null;
   bedTarget: number | null;
   chamberTemp: number | null;
+  /** Chamber/work-area light state; null when the device or adapter cannot report it. */
+  light: boolean | null;
   /** Raw device state string (e.g. moonraker "complete"/"cancelled"). */
   stateText: string | null;
   /** Human-readable reason (pause reason, error text) when the device gives one. */

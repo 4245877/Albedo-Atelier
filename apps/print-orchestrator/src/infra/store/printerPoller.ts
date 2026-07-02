@@ -1,7 +1,12 @@
 import { env } from "../../shared/env";
-import { hhmm } from "../../shared/time";
+import { hhmm, isWithinLocalTimeWindow, parseLocalTimeWindow } from "../../shared/time";
 import type { PrinterConfig } from "../printers/config";
-import { getPrinterLiveStatus, type PrinterLiveStatus } from "../printers/status";
+import {
+  getPrinterLiveStatus,
+  sendPrinterLight,
+  supportsPrinterLight,
+  type PrinterLiveStatus
+} from "../printers/status";
 import type { CameraService } from "./cameraService";
 import type { EventFeed } from "./eventFeed";
 
@@ -42,6 +47,11 @@ export class PrinterPoller {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
   private logger: StoreLogger = {};
+  private warnedInvalidNightWindow = false;
+  /** Last light target successfully requested per printer. */
+  private lightTargets = new Map<string, boolean>();
+  /** Last light policy failure signature per printer, used to avoid feed spam. */
+  private lightFailureKeys = new Map<string, string>();
 
   /** Completions/failures the poller itself observed today. */
   private todayKey = dateKey();
@@ -84,6 +94,7 @@ export class PrinterPoller {
           this.statuses.set(printer.id, status);
         })
       );
+      await this.applyNightLightPolicy(enabled);
       await Promise.all(enabled.map((printer) => this.cameras.probe(printer)));
       this.lastPollAt = Date.now();
     } catch (error) {
@@ -118,6 +129,84 @@ export class PrinterPoller {
   getTodayFailed(): number {
     this.rolloverToday();
     return this.todayFailed;
+  }
+
+  // ── Night light policy ─────────────────────────────────────────────────
+
+  private currentNightLightTarget(): boolean {
+    const window = parseLocalTimeWindow(env.nightWindow);
+    if (!window) {
+      if (!this.warnedInvalidNightWindow) {
+        this.warnedInvalidNightWindow = true;
+        this.logger.warn?.(
+          { window: env.nightWindow },
+          "invalid NIGHT_PRINT_WINDOW; printer lights will stay off"
+        );
+      }
+      return false;
+    }
+    return isWithinLocalTimeWindow(window);
+  }
+
+  private async applyNightLightPolicy(printers: PrinterConfig[]): Promise<void> {
+    const targetOn = this.currentNightLightTarget();
+    await Promise.all(
+      printers.map((printer) => this.applyNightLightPolicyToPrinter(printer, targetOn))
+    );
+  }
+
+  private async applyNightLightPolicyToPrinter(
+    printer: PrinterConfig,
+    targetOn: boolean
+  ): Promise<void> {
+    if (!supportsPrinterLight(printer)) return;
+
+    const status = this.statuses.get(printer.id);
+    if (!status?.online) return;
+
+    const current = status.light;
+    const lastTarget = this.lightTargets.get(printer.id);
+    if (current === targetOn) {
+      this.lightTargets.set(printer.id, targetOn);
+      this.lightFailureKeys.delete(printer.id);
+      return;
+    }
+    if (current === null && lastTarget === targetOn) return;
+
+    try {
+      await sendPrinterLight(printer, targetOn);
+      this.lightTargets.set(printer.id, targetOn);
+      this.lightFailureKeys.delete(printer.id);
+
+      if (current !== null) {
+        this.statuses.set(printer.id, {
+          ...status,
+          light: targetOn,
+          updatedAt: new Date().toISOString()
+        });
+      }
+
+      this.events.push(
+        targetOn ? "☾" : "☀",
+        `<b>${printer.name}</b>: подсветка ${targetOn ? "включена на ночь" : "выключена на день"}`,
+        "info"
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const failureKey = `${targetOn}:${message}`;
+      if (this.lightFailureKeys.get(printer.id) !== failureKey) {
+        this.lightFailureKeys.set(printer.id, failureKey);
+        this.events.push(
+          "⚠",
+          `<b>${printer.name}</b>: не удалось ${targetOn ? "включить" : "выключить"} подсветку (${message})`,
+          "err"
+        );
+      }
+      this.logger.warn?.(
+        { err: error, printer: printer.id, targetOn },
+        "night light policy failed"
+      );
+    }
   }
 
   // ── Transition tracking (real events only) ──────────────────────────────

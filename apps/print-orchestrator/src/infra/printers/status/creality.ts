@@ -78,6 +78,7 @@ export function getCrealityStatus(printer: PrinterConfig): Promise<PrinterLiveSt
           bedTemp: roundOrNull(toFiniteNumber(parsed.bedTemp0)),
           bedTarget: roundOrNull(firstFiniteNumber(parsed.targetBedTemp0, parsed.bedTemp0Target)),
           chamberTemp: null,
+          light: null,
           stateText: firstText(parsed.state) || null,
           stateMessage,
           error: mappedStatus === "error" ? stateMessage || "Принтер сообщил об ошибке" : null,

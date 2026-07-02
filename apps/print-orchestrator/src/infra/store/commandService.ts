@@ -1,10 +1,14 @@
 import { JobError, PrinterConnectionError, PrinterOfflineError } from "../../core/errors";
+import { env } from "../../shared/env";
+import { isWithinLocalTimeWindow } from "../../shared/time";
 import type { PrinterView } from "../../domain/printers/types";
 import type { PrinterConfig } from "../printers/config";
 import {
   getPrinterLiveStatus,
   PrinterCommandError,
   sendPrinterCommand,
+  sendPrinterLight,
+  supportsPrinterLight,
   type PrinterCommand
 } from "../printers/status";
 import type { CameraService } from "./cameraService";
@@ -63,9 +67,24 @@ export class PrinterCommandService {
     return this.refresh(printer);
   }
 
-  async setLight(id: string, _on: boolean): Promise<PrinterView> {
+  async setLight(id: string, on: boolean): Promise<PrinterView> {
     const printer = this.getReachableConfig(id);
-    throw new JobError(`Управление подсветкой для «${printer.name}» пока не поддерживается`);
+    if (!supportsPrinterLight(printer)) {
+      throw new JobError(`Управление подсветкой для «${printer.name}» не настроено`);
+    }
+    if (on && !isWithinLocalTimeWindow(env.nightWindow)) {
+      throw new JobError(
+        `Подсветку «${printer.name}» можно включать только ночью (${env.nightWindow}); днём она выключается автоматически`
+      );
+    }
+
+    await this.dispatchLight(printer, on);
+    this.events.push(
+      on ? "☾" : "☀",
+      `<b>${printer.name}</b>: подсветка ${on ? "включена" : "выключена"} оператором`,
+      "info"
+    );
+    return this.refresh(printer);
   }
 
   async snapshot(id: string): Promise<PrinterView> {
@@ -87,6 +106,20 @@ export class PrinterCommandService {
   private async dispatch(printer: PrinterConfig, command: PrinterCommand): Promise<void> {
     try {
       await sendPrinterCommand(printer, command);
+    } catch (error) {
+      if (error instanceof PrinterCommandError) {
+        throw new JobError(error.message);
+      }
+      throw new PrinterConnectionError(
+        printer.id,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+
+  private async dispatchLight(printer: PrinterConfig, on: boolean): Promise<void> {
+    try {
+      await sendPrinterLight(printer, on);
     } catch (error) {
       if (error instanceof PrinterCommandError) {
         throw new JobError(error.message);

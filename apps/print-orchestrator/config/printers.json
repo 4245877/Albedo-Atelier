@@ -14,7 +14,10 @@
     "enabled": true,
     "apiKey": "",
     "serial": "",
-    "accessCode": ""
+    "accessCode": "",
+    "light": {
+      "enabled": false
+    }
   },
   {
     "id": "creality-k2",
@@ -31,7 +34,10 @@
     "enabled": true,
     "apiKey": "",
     "serial": "",
-    "accessCode": ""
+    "accessCode": "",
+    "light": {
+      "pin": "LED"
+    }
   },
   {
     "id": "bambu-a1-combo",
@@ -48,6 +54,9 @@
     "enabled": true,
     "apiKey": "",
     "serial": "${BAMBU_A1_SERIAL}",
-    "accessCode": "${BAMBU_A1_ACCESS_CODE}"
+    "accessCode": "${BAMBU_A1_ACCESS_CODE}",
+    "light": {
+      "bambuNode": "chamber_light"
+    }
   }
 ]

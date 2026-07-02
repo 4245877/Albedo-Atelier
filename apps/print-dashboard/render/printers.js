@@ -99,12 +99,14 @@ function printerCard(p) {
 
   // light === null: устройство не поддерживает управление подсветкой.
   const lightUnknown = p.light == null;
+  const lightOnDisabled = lightUnknown || p.light || dead || !p.lightAllowed;
+  const lightOnTitle = !lightUnknown && !p.lightAllowed ? ' title="Подсветка включается только ночью"' : "";
   const actions = `
     <button class="btn btn-sm" data-act="open" data-id="${p.id}">Открыть</button>
     <button class="btn btn-sm" data-act="pause" data-id="${p.id}" ${p.status !== "printing" ? "disabled" : ""}>⏸ Пауза</button>
     <button class="btn btn-sm" data-act="resume" data-id="${p.id}" ${p.status !== "paused" ? "disabled" : ""}>▶ Продолжить</button>
     <button class="btn btn-sm btn-danger" data-act="cancel" data-id="${p.id}" ${!busy ? "disabled" : ""}>✕ Отмена</button>
-    <button class="btn btn-sm" data-act="light-on" data-id="${p.id}" ${lightUnknown || p.light || dead ? "disabled" : ""}>☀ Подсветка</button>
+    <button class="btn btn-sm" data-act="light-on" data-id="${p.id}"${lightOnTitle} ${lightOnDisabled ? "disabled" : ""}>☀ Подсветка</button>
     <button class="btn btn-sm" data-act="light-off" data-id="${p.id}" ${lightUnknown || !p.light || dead ? "disabled" : ""}>☾ Погасить</button>
     <button class="btn btn-sm" data-act="snapshot" data-id="${p.id}" ${p.camera !== "online" || dead || p.cameraSrc ? "disabled" : ""}>◉ Снимок</button>`;
 

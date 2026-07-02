@@ -416,7 +416,7 @@ export class DashboardReadModel {
           camera: view.camera,
           cameraStream: view.cameraStream,
           cameraSrc: view.cameraSrc,
-          light: false,
+          light: view.light ?? false,
           status: view.status,
           snapshotAt: view.snapshotAt
         };

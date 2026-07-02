@@ -75,6 +75,7 @@ export function makeOfflineStatus(printer: PrinterConfig, error: string): Printe
     bedTemp: null,
     bedTarget: null,
     chamberTemp: null,
+    light: null,
     stateText: null,
     stateMessage: null,
     error,
