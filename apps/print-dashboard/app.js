@@ -426,7 +426,7 @@ function printerCard(p) {
     <button class="btn btn-sm btn-danger" data-act="cancel" data-id="${p.id}" ${!busy ? "disabled" : ""}>✕ Отмена</button>
     <button class="btn btn-sm" data-act="light-on" data-id="${p.id}" ${lightUnknown || p.light || dead ? "disabled" : ""}>☀ Подсветка</button>
     <button class="btn btn-sm" data-act="light-off" data-id="${p.id}" ${lightUnknown || !p.light || dead ? "disabled" : ""}>☾ Погасить</button>
-    <button class="btn btn-sm" data-act="snapshot" data-id="${p.id}" ${p.camera !== "online" || dead ? "disabled" : ""}>◉ Снимок</button>`;
+    <button class="btn btn-sm" data-act="snapshot" data-id="${p.id}" ${p.camera !== "online" || dead || p.cameraSrc ? "disabled" : ""}>◉ Снимок</button>`;
 
   const progressBlock = !busy ? "" : p.progress != null ? `
     <div class="printer-progress">

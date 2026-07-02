@@ -39,7 +39,9 @@ import {
   captureCameraFrame,
   hasCameraSource,
   hasCameraStream,
+  isGo2RtcCamera,
   openCameraStream,
+  probeGo2RtcStream,
   resolveWebrtcSource,
   type CameraFrame,
   type CameraStream
@@ -283,6 +285,22 @@ export class FarmStore {
     const entry = this.cameras.get(printer.id);
     if (entry && Date.now() - entry.fetchedAt < CAMERA_PROBE_INTERVAL_MS) return;
 
+    // go2rtc/WebRTC cameras (Creality K2): liveness comes from go2rtc's fast
+    // /api/streams, never from pulling frame.jpeg — that request hangs because
+    // the K2 only emits a keyframe to a live WebRTC client. The browser shows
+    // the real picture over WebRTC; here we just keep the status honest and
+    // leave any previously captured snapshot untouched.
+    if (isGo2RtcCamera(printer)) {
+      const online = await probeGo2RtcStream(printer);
+      this.cameras.set(printer.id, {
+        state: online ? "online" : "offline",
+        snapshotAt: entry?.snapshotAt ?? null,
+        frame: entry?.frame ?? null,
+        fetchedAt: Date.now()
+      });
+      return;
+    }
+
     const frame = await captureCameraFrame(printer);
     this.cameras.set(printer.id, {
       state: frame ? "online" : "offline",
@@ -302,6 +320,15 @@ export class FarmStore {
     const entry = this.cameras.get(id);
     if (entry?.frame && Date.now() - entry.fetchedAt < CAMERA_FRAME_FRESH_MS) {
       return entry.frame;
+    }
+
+    // go2rtc/WebRTC cameras have no usable still-image endpoint (frame.jpeg
+    // hangs on the K2). The live picture is delivered to the browser over
+    // WebRTC; a JPEG snapshot is simply not available, so report that honestly
+    // instead of blocking the request for the full timeout.
+    if (isGo2RtcCamera(printer)) {
+      if (entry?.frame) return entry.frame;
+      throw new CameraError(id, "снимок недоступен — камера транслируется по WebRTC");
     }
 
     const frame = await captureCameraFrame(printer);

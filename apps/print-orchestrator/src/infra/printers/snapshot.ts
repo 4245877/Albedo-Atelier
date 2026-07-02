@@ -30,6 +30,10 @@ export interface CameraStream {
 const DEFAULT_TIMEOUT_MS = 8000;
 const DEFAULT_MAX_BYTES = 3_000_000;
 
+// Reading go2rtc's /api/streams is a cheap local JSON call — it must return
+// fast or the go2rtc bridge is effectively down, so keep the timeout tight.
+const GO2RTC_PROBE_TIMEOUT_MS = 2500;
+
 const BAMBU_CAMERA_PORT = 6000;
 const BAMBU_CAMERA_USERNAME = "bblp";
 const JPEG_SOI = Buffer.from([0xff, 0xd8]);
@@ -92,6 +96,85 @@ export function resolveWebrtcSource(printer: PrinterConfig): string | null {
 export function hasCameraSource(printer: PrinterConfig): boolean {
   if (resolveSnapshotUrl(printer)) return true;
   return printer.protocol === "bambu" && Boolean(printer.accessCode);
+}
+
+/**
+ * True when the camera is served by go2rtc and viewed over WebRTC (a go2rtc
+ * `…/api/…?src=…` stream URL). For these the browser reaches the live video
+ * directly over WebRTC, and liveness is probed via {@link probeGo2RtcStream} —
+ * never by pulling `frame.jpeg`, which hangs on the Creality K2 (it only emits
+ * a keyframe to an active WebRTC client, so a passive still-image request waits
+ * ~60s for an IDR that never comes without one).
+ */
+export function isGo2RtcCamera(printer: PrinterConfig): boolean {
+  return resolveWebrtcSource(printer) !== null;
+}
+
+/**
+ * The go2rtc API origin for a printer's camera, e.g. `http://go2rtc:1984`,
+ * parsed from its go2rtc-style stream (or snapshot) URL. Returns null when the
+ * printer is not a go2rtc source.
+ */
+export function resolveGo2RtcApiBase(printer: PrinterConfig): string | null {
+  for (const raw of [printer.streamUrl, printer.snapshotUrl]) {
+    const value = raw.trim();
+    if (!value || !/\/api\//.test(value)) continue;
+    try {
+      const parsed = new URL(value);
+      return `${parsed.protocol}//${parsed.host}`;
+    } catch {
+      // Not an absolute URL — try the next candidate.
+    }
+  }
+  return null;
+}
+
+/**
+ * A go2rtc stream counts as available when it is present and configured in
+ * `/api/streams`. go2rtc connects a producer to the upstream camera lazily —
+ * only while a consumer (a watching WebRTC client) is attached — so an
+ * idle-but-configured stream has an empty producer list. Presence of the stream
+ * entry therefore means go2rtc is up and the bridge is set up, which is the
+ * honest "reachable over WebRTC" signal; requiring an active producer would
+ * flap the status to offline whenever nobody happens to be watching.
+ */
+function isGo2RtcStreamLive(stream: unknown): boolean {
+  return Boolean(stream) && typeof stream === "object";
+}
+
+/**
+ * Fast liveness probe for a go2rtc/WebRTC camera. Reads `GET /api/streams` and
+ * reports online when go2rtc has the printer's stream configured. This never
+ * pulls a frame, so — unlike {@link captureCameraFrame} against `frame.jpeg` —
+ * it cannot stall the poll loop or leave idle consumers behind. Returns `false`
+ * (never throws) when go2rtc is unreachable or the stream is missing.
+ */
+export async function probeGo2RtcStream(
+  printer: PrinterConfig,
+  options: { timeoutMs?: number } = {}
+): Promise<boolean> {
+  const base = resolveGo2RtcApiBase(printer);
+  const src = resolveWebrtcSource(printer);
+  if (!base || !src) return false;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? GO2RTC_PROBE_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${base}/api/streams`, {
+      signal: controller.signal,
+      headers: { Accept: "application/json" }
+    });
+    if (!response.ok) return false;
+
+    const body = (await response.json()) as Record<string, unknown> | null;
+    if (!body || typeof body !== "object") return false;
+
+    return isGo2RtcStreamLive(body[src]);
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 /**
