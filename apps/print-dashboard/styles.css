@@ -105,7 +105,7 @@ body {
   gap: 16px;
   padding: 14px 4px;
   margin: 0 -4px;
-  background: linear-gradient(to bottom, var(--bg) 78%, transparent);
+  background: var(--bg);
 }
 
 .brand {
@@ -211,14 +211,35 @@ body {
   display: flex;
   gap: 8px;
   overflow-x: auto;
-  padding: 6px 4px 14px;
+  padding: 8px 4px 12px;
   margin: 0 -4px;
   scrollbar-width: none;
-  background: linear-gradient(to bottom, var(--bg) 60%, transparent);
-  mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+  background: var(--bg);
+  transition: box-shadow 0.35s ease;
 }
 
 .section-nav::-webkit-scrollbar { display: none; }
+
+/* Мягкая тень появляется только при прокрутке страницы — липкая навигация
+   «отрывается» от доски, оставаясь непрозрачной (контент под ней не просвечивает). */
+:root.scrolled .section-nav {
+  box-shadow: 0 18px 24px -22px rgb(22 20 29 / 40%);
+}
+
+/* Края затухают только с той стороны, куда ещё можно листать: понятный
+   аффорданс прокрутки вместо постоянно «обрезанных» крайних вкладок. */
+.section-nav.fade-left {
+  mask-image: linear-gradient(to right, transparent, #000 22px);
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 22px);
+}
+.section-nav.fade-right {
+  mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
+}
+.section-nav.fade-left.fade-right {
+  mask-image: linear-gradient(to right, transparent, #000 22px, #000 calc(100% - 22px), transparent);
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 22px, #000 calc(100% - 22px), transparent);
+}
 
 .nav-chip {
   flex: none;
@@ -238,6 +259,16 @@ body {
   background: var(--gold-soft);
   transform: translateY(-1px);
 }
+
+/* Текущий раздел — «вы здесь»: старинное золото Назарика вместо фарфора. */
+.nav-chip.is-active,
+.nav-chip.is-active:hover {
+  color: #2a2110;
+  background: linear-gradient(180deg, #d3a945, var(--gold));
+  border-color: var(--gold-deep);
+  box-shadow: 0 3px 9px -4px rgb(151 116 42 / 55%);
+}
+.nav-chip.is-active:hover { transform: translateY(-1px); }
 
 /* ── Сетка ──────────────────────────────────────────────────── */
 
