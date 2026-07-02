@@ -5,7 +5,9 @@ import Fastify, {
 } from "fastify";
 
 import { AppError } from "./core/errors";
+import { registerSecurity } from "./core/security";
 import { getHealth } from "./infra/observability/health";
+import { collectMetrics, METRICS_CONTENT_TYPE } from "./infra/observability/metrics";
 import { getReadiness } from "./infra/observability/ready";
 import { farmStore } from "./infra/store/farmStore";
 import { registerAutomationRoutes } from "./modules/automation/routes";
@@ -20,19 +22,9 @@ export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
     ...options
   });
 
-  // Permissive CORS. The dashboard is normally same-origin — nginx serves the
-  // page and proxies /api/print-orchestrator/* to this service — so this only
-  // matters when the API is called cross-origin (e.g. during development).
-  app.addHook("onRequest", (request, reply, done) => {
-    reply.header("Access-Control-Allow-Origin", "*");
-    reply.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    reply.header("Access-Control-Allow-Headers", "Content-Type");
-    if (request.method === "OPTIONS") {
-      reply.code(204).send();
-      return;
-    }
-    done();
-  });
+  // CORS (allowlisted, not wildcard) + shared-secret guard on state-changing
+  // requests. See ./core/security.
+  registerSecurity(app);
 
   // Map the domain error taxonomy to structured JSON: { error: { code, message, details } }.
   app.setErrorHandler((error: FastifyError, request, reply) => {
@@ -71,7 +63,20 @@ export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
   });
 
   app.get("/health", async () => getHealth());
-  app.get("/ready", async () => getReadiness());
+
+  // Real readiness: 503 until the first poll completes, or if the poll loop
+  // goes stale. A merely degraded farm still returns 200.
+  app.get("/ready", async (_request, reply) => {
+    const readiness = getReadiness();
+    reply.code(readiness.ready ? 200 : 503);
+    return readiness;
+  });
+
+  // Prometheus metrics drawn from the live farm state.
+  app.get("/metrics", async (_request, reply) => {
+    reply.header("Content-Type", METRICS_CONTENT_TYPE);
+    return collectMetrics();
+  });
 
   // Load the real printer config and start the live poll loop with the app;
   // stop polling and close device connections (Bambu MQTT) on shutdown.

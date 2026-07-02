@@ -4,24 +4,35 @@ Fastify service that backs the Albedo Atelier dashboard: printers, print jobs,
 queue, materials, cameras, automations, maintenance, events, warnings and
 system status.
 
-Data currently comes from a seeded in-memory store (`src/infra/store`), which is
-the single seam to replace with a database + real printer drivers later. The
-printer-integration patterns are adapted from `apps/fulfillment` (static
-connection config vs. live status, per-printer error isolation); driver stubs
-live in `src/infra/drivers`.
+Data is real, never seeded. Printer configs come from `config/printers.json`
+(or `PRINTERS_CONFIG_JSON`); live telemetry is polled from the devices —
+Moonraker over HTTP, Bambu over local MQTT, Creality over WebSocket (see
+`src/infra/printers/status/`, adapted from `apps/fulfillment`); camera frames are
+real snapshots (`src/infra/printers/camera/`). Anything the farm genuinely does
+not know (material stock, maintenance history, schedule) is returned empty/null
+and the dashboard shows it as unavailable rather than inventing numbers.
+
+State (the operator queue, the event feed, today's counters) is held in memory
+and resets with the process — there is no database. The store is composed of
+focused collaborators behind a facade (`src/infra/store/`): `PrinterPoller`,
+`CameraService`, `QueueStore`, `EventFeed`, `PrinterCommandService` and the
+read-only `DashboardReadModel`.
 
 ## Local development
 
+Uses **pnpm** (via `corepack enable`).
+
 ```bash
-npm install
-npm run dev        # tsx watch
-npm run typecheck  # tsc --noEmit
-npm run build      # emit dist/
+pnpm install
+pnpm run dev        # tsx watch
+pnpm run typecheck  # tsc --noEmit
+pnpm run build      # emit dist/
 ```
 
 ## Docker
 
-The service listens on `0.0.0.0:3100` by default.
+The service listens on `0.0.0.0:3100` inside the container but is **not** published
+to the host — the dashboard reaches it over the compose network.
 
 ```bash
 docker compose up -d --build print-orchestrator
@@ -36,8 +47,20 @@ with a stable `code` (`PRINTER_OFFLINE`, `PRINTER_CONNECTION`, `CAMERA_ERROR`,
 
 ### Observability
 
-- `GET /health`
-- `GET /ready`
+- `GET /health` — liveness + uptime
+- `GET /ready` — real readiness: `503` until the first poll completes and again
+  if the poll loop goes stale; a merely degraded farm (some printers offline)
+  still returns `200`
+- `GET /metrics` — Prometheus counters drawn from the live farm state
+  (`print_orchestrator_printers_online`, `_degraded`, `_queue_jobs`, …)
+
+### Security
+
+State-changing requests (everything below "Actions") are gated by an optional
+shared secret. Set `ORCHESTRATOR_API_TOKEN` and send it as
+`Authorization: Bearer <token>` (or `X-Api-Token`); reads stay open. When unset,
+the guard is disabled and a startup warning is logged. CORS is closed by default
+(no wildcard) — allow cross-origin callers via `CORS_ALLOW_ORIGINS`.
 
 ### Dashboard reads
 
@@ -53,8 +76,10 @@ with a stable `code` (`PRINTER_OFFLINE`, `PRINTER_CONNECTION`, `CAMERA_ERROR`,
 
 ### Actions
 
-These mutate the store today and are structured to dispatch to real printer
-drivers later (see the `// TODO(real driver)` seams in `src/infra/store`).
+Printer actions dispatch **real** commands to the device (Moonraker HTTP,
+Bambu local MQTT); unsupported combinations fail honestly rather than pretending.
+Queue/night/automation features that have no engine yet return a clear error
+instead of fabricating a result.
 
 - `POST /api/printers/:id/pause` · `.../resume` · `.../cancel` · `.../snapshot`
 - `POST /api/printers/:id/light` — body `{ "on": boolean }`

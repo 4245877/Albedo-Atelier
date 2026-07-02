@@ -2,11 +2,10 @@
   "name": "atelier",
   "version": "0.1.0",
   "private": true,
-  "workspaces": [
-    "apps/*"
-  ],
+  "packageManager": "pnpm@10.33.1",
   "scripts": {
-    "build:print-orchestrator": "npm --workspace @atelier/print-orchestrator run build",
-    "start:print-orchestrator": "npm --workspace @atelier/print-orchestrator run start"
+    "build:print-orchestrator": "pnpm -C apps/print-orchestrator run build",
+    "start:print-orchestrator": "pnpm -C apps/print-orchestrator run start",
+    "typecheck:print-orchestrator": "pnpm -C apps/print-orchestrator run typecheck"
   }
 }

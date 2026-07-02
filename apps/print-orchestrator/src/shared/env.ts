@@ -18,9 +18,18 @@ export const env = Object.freeze({
   host: process.env.HOST ?? "0.0.0.0",
   port: readInteger(process.env.PORT, 3100),
   logLevel: process.env.LOG_LEVEL ?? "info",
-  databaseUrl: process.env.DATABASE_URL,
   /** How often the farm polls real printers for live status. */
   printerPollIntervalMs: readInteger(process.env.PRINTER_POLL_INTERVAL_MS, 10000),
   /** Night-print window shown on the dashboard (config, not telemetry). */
-  nightWindow: process.env.NIGHT_PRINT_WINDOW ?? "23:00 – 07:30"
+  nightWindow: process.env.NIGHT_PRINT_WINDOW ?? "23:00 – 07:30",
+  /**
+   * Shared secret required on state-changing requests (pause/resume/cancel/…).
+   * Empty disables the guard — reads stay open either way.
+   */
+  apiToken: process.env.ORCHESTRATOR_API_TOKEN ?? "",
+  /** Cross-origin origins allowed to call the API; empty = same-origin only. */
+  corsAllowOrigins: (process.env.CORS_ALLOW_ORIGINS ?? "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean)
 });

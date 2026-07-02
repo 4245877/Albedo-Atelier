@@ -12,11 +12,13 @@ services:
     volumes:
       - ./apps/print-orchestrator/config/go2rtc.yaml:/config/go2rtc.yaml:ro
     ports:
-      # Avoids the fulfillment stack's 1984 while keeping the internal URL go2rtc:1984.
-      - "0.0.0.0:1985:1984"
+      # go2rtc HTTP API. The browser reaches it same-origin via the dashboard's
+      # /go2rtc/ nginx proxy (internal go2rtc:1984), so it does not need to be on
+      # the LAN — bind to localhost for host-side debugging only.
+      - "127.0.0.1:1985:1984"
       # WebRTC media (browser ↔ go2rtc). The Creality K2 only delivers keyframes
-      # over its native WebRTC, so this is the working live-video path. Published
-      # on both transports; UDP is the normal path, TCP the fallback.
+      # over its native WebRTC, so this is the working live-video path and it
+      # must stay reachable on the LAN. UDP is the normal path, TCP the fallback.
       - "0.0.0.0:8555:8555/tcp"
       - "0.0.0.0:8555:8555/udp"
 
@@ -39,8 +41,12 @@ services:
     volumes:
       # Real printer config; edit on the host, restart the service to apply.
       - ./apps/print-orchestrator/config:/app/config:ro
-    ports:
-      - "0.0.0.0:3100:3100"
+    # No host port: the control API (pause/resume/cancel/light) must not be
+    # exposed on the LAN. The dashboard reaches it over the compose network via
+    # nginx (proxy_pass http://print-orchestrator:3100). For host-side debugging
+    # add a temporary `ports: ["127.0.0.1:3100:3100"]`.
+    expose:
+      - "3100"
     healthcheck:
       test:
         [

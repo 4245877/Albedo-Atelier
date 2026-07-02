@@ -1,18 +1,7 @@
 import type { FastifyInstance } from "fastify";
 
 import { ValidationError } from "../../core/errors";
-import {
-  cancelPrinter,
-  capturePrinterSnapshot,
-  getPrinter,
-  getPrinterCameraFrame,
-  getPrinterCameraStream,
-  listActivePrinters,
-  listPrinters,
-  pausePrinter,
-  resumePrinter,
-  setPrinterLight
-} from "./service";
+import { farmStore } from "../../infra/store/farmStore";
 
 interface PrinterParams {
   id: string;
@@ -40,17 +29,17 @@ interface LightBody {
  *   POST /:id/light       body: { "on": boolean }
  */
 export async function registerPrinterRoutes(app: FastifyInstance): Promise<void> {
-  app.get("/", async () => listPrinters());
+  app.get("/", async () => farmStore.listPrinters());
 
   // Declared before "/:id" so the literal path wins unambiguously.
-  app.get("/active", async () => listActivePrinters());
+  app.get("/active", async () => farmStore.listActivePrinters());
 
   app.get<{ Params: PrinterParams }>("/:id", async (request) =>
-    getPrinter(request.params.id)
+    farmStore.getPrinter(request.params.id)
   );
 
   app.get<{ Params: PrinterParams }>("/:id/camera.jpg", async (request, reply) => {
-    const frame = await getPrinterCameraFrame(request.params.id);
+    const frame = await farmStore.getCameraFrame(request.params.id);
     reply
       .header("Cache-Control", "no-store")
       .type(frame.mime)
@@ -58,7 +47,7 @@ export async function registerPrinterRoutes(app: FastifyInstance): Promise<void>
   });
 
   app.get<{ Params: PrinterParams }>("/:id/camera.mp4", async (request, reply) => {
-    const stream = await getPrinterCameraStream(request.params.id);
+    const stream = await farmStore.getCameraStream(request.params.id);
 
     // Tear the upstream fetch down as soon as the client goes away (tab closed,
     // player reconnect) so we do not leak sockets to go2rtc. `close` is
@@ -80,22 +69,22 @@ export async function registerPrinterRoutes(app: FastifyInstance): Promise<void>
 
   app.post<{ Params: PrinterParams }>("/:id/pause", async (request) => ({
     ok: true,
-    printer: await pausePrinter(request.params.id)
+    printer: await farmStore.pausePrinter(request.params.id)
   }));
 
   app.post<{ Params: PrinterParams }>("/:id/resume", async (request) => ({
     ok: true,
-    printer: await resumePrinter(request.params.id)
+    printer: await farmStore.resumePrinter(request.params.id)
   }));
 
   app.post<{ Params: PrinterParams }>("/:id/cancel", async (request) => ({
     ok: true,
-    printer: await cancelPrinter(request.params.id)
+    printer: await farmStore.cancelPrinter(request.params.id)
   }));
 
   app.post<{ Params: PrinterParams }>("/:id/snapshot", async (request) => ({
     ok: true,
-    printer: await capturePrinterSnapshot(request.params.id)
+    printer: await farmStore.snapshotPrinter(request.params.id)
   }));
 
   app.post<{ Params: PrinterParams; Body: LightBody }>("/:id/light", async (request) => {
@@ -103,6 +92,6 @@ export async function registerPrinterRoutes(app: FastifyInstance): Promise<void>
     if (typeof on !== "boolean") {
       throw new ValidationError('Поле «on» обязательно и должно быть boolean');
     }
-    return { ok: true, printer: await setPrinterLight(request.params.id, on) };
+    return { ok: true, printer: await farmStore.setLight(request.params.id, on) };
   });
 }

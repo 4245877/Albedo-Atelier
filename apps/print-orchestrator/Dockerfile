@@ -2,12 +2,15 @@ FROM node:22-alpine AS build
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm install
+# Pin pnpm from the package.json "packageManager" field via corepack.
+RUN corepack enable
 
-COPY tsconfig.json knexfile.ts ./
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY tsconfig.json ./
 COPY src ./src
-RUN npm run build
+RUN pnpm run build
 
 FROM node:22-alpine AS production
 
@@ -17,8 +20,10 @@ ENV PORT=3100
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm install --omit=dev && npm cache clean --force
+RUN corepack enable
+
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --prod --frozen-lockfile && pnpm store prune
 
 COPY --from=build /app/dist ./dist
 # Default real-printer config; a compose volume can override /app/config.
