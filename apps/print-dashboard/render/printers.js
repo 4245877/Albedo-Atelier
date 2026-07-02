@@ -18,6 +18,11 @@ export function camBlock(p, ctx) {
     return `<div class="cam"><div class="cam-offline">камера не настроена</div></div>`;
   }
 
+  if (p.camera === "offline") {
+    return `<div class="cam"><div class="cam-offline">нет сигнала</div>
+      ${p.snapshotAt ? `<span class="cam-tag"><i class="dot"></i>снимок ${p.snapshotAt}</span>` : ""}</div>`;
+  }
+
   // Live-трансляция (WebRTC через go2rtc): в разметку кладём только стабильную
   // точку крепления. Сам <camera-stream> живёт в постоянном реестре (см.
   // reconcileCameras), переживает перерисовку доски — обновление телеметрии
@@ -48,12 +53,8 @@ export function camBlock(p, ctx) {
       </div>`;
   }
 
-  // Камера только со снимками: реальный JPEG-кадр либо заглушка «нет сигнала»,
-  // когда проба сейчас не отвечает. При ошибке загрузки остаётся svg-заглушка.
-  if (p.camera === "offline") {
-    return `<div class="cam"><div class="cam-offline">нет сигнала</div>
-      ${p.snapshotAt ? `<span class="cam-tag"><i class="dot"></i>снимок ${p.snapshotAt}</span>` : ""}</div>`;
-  }
+  // Камера только со снимками: реальный JPEG-кадр. При ошибке загрузки
+  // остаётся svg-заглушка.
   return `
     <div class="cam ${p.light ? "cam-lit" : ""}">
       ${PRINTER_SVG}

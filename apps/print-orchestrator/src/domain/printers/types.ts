@@ -38,9 +38,9 @@ export interface PrinterView {
   material: string | null;
   swatch: string | null;
   camera: CameraState;
-  /** True when a live browser-safe camera stream is configured. */
+  /** True when an online live browser-safe camera stream is available now. */
   cameraStream: boolean;
-  /** go2rtc stream name to view over WebRTC (via the `/go2rtc/` proxy), or null. */
+  /** Online go2rtc stream name to view over WebRTC (via `/go2rtc/`), or null. */
   cameraSrc: string | null;
   /** Chamber light state; null — the device does not expose light control. */
   light: boolean | null;

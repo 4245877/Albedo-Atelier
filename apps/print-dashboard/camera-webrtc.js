@@ -50,8 +50,10 @@ class CameraStream extends VideoRTC {
     this.video.addEventListener("loadeddata", () => this.setLive(true));
     this.video.addEventListener("canplay", () => this.setLive(true));
     this.video.addEventListener("playing", () => this.setLive(true));
-    this.video.addEventListener("waiting", () => this.setLive(false, "подключение…"));
-    this.video.addEventListener("stalled", () => this.setLive(false, "ждём кадр…"));
+    this.video.addEventListener("resize", () => this.setLive(true));
+    this.video.addEventListener("timeupdate", () => this.setLive(true));
+    this.video.addEventListener("waiting", () => this.setMaybeWaiting("подключение…"));
+    this.video.addEventListener("stalled", () => this.setMaybeWaiting("ждём кадр…"));
     this.video.addEventListener("emptied", () => this.setLive(false, "подключение…"));
     this.video.addEventListener("error", () => this.setLive(false, "ошибка видео"));
   }
@@ -60,6 +62,19 @@ class CameraStream extends VideoRTC {
     if (!this.overlay) return;
     this.classList.toggle("is-live", live);
     this.overlay.textContent = live ? "" : text || this.overlay.textContent;
+  }
+
+  setMaybeWaiting(text) {
+    if (this.video?.srcObject) return;
+    this.setLive(false, text);
+  }
+
+  onpcvideo(video2) {
+    const stream = video2.srcObject;
+    const hasVideo = Boolean(stream?.getVideoTracks?.().length);
+    const result = super.onpcvideo(video2);
+    if (hasVideo && this.video?.srcObject) this.setLive(true);
+    return result;
   }
 
   onconnect() {

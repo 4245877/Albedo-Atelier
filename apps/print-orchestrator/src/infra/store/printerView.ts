@@ -28,6 +28,10 @@ export function buildPrinterView(
         : "offline"
       : status.status;
 
+  const cameraState = hasCameraSource(printer) ? camera?.state ?? "offline" : "none";
+  const cameraOnline = cameraState === "online";
+  const webrtcSource = resolveWebrtcSource(printer);
+
   return {
     id: printer.id,
     name: printer.name,
@@ -42,9 +46,9 @@ export function buildPrinterView(
     minutesLeft: status?.remainingMinutes ?? null,
     material: printer.material || null,
     swatch: printer.swatch || null,
-    camera: hasCameraSource(printer) ? camera?.state ?? "offline" : "none",
-    cameraStream: hasCameraStream(printer),
-    cameraSrc: resolveWebrtcSource(printer),
+    camera: cameraState,
+    cameraStream: cameraOnline && hasCameraStream(printer),
+    cameraSrc: cameraOnline ? webrtcSource : null,
     light: status?.light ?? null,
     lightAllowed: isWithinLocalTimeWindow(env.nightWindow),
     snapshotAt: camera?.snapshotAt ?? null,
