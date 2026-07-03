@@ -4,3 +4,6 @@ dist/
 .env.*
 !.env.example
 npm-debug.log*
+# Local persisted state written by `pnpm dev` / `pnpm start` (STATE_FILE_PATH).
+# In Docker this lives on the named `orchestrator-data` volume instead.
+apps/print-orchestrator/data/

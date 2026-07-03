@@ -36,12 +36,17 @@ services:
       LOG_LEVEL: info
       PRINTERS_CONFIG_PATH: /app/config/printers.json
       PRINTER_POLL_INTERVAL_MS: 10000
+      # Durable state (operator queue, event feed, today counters). Lives on the
+      # named volume below so it survives `docker compose down` / recreation.
+      STATE_FILE_PATH: /app/data/state.json
       TZ: ${TZ:-Etc/UTC}
     env_file:
       - .env
     volumes:
       # Real printer config; edit on the host, restart the service to apply.
       - ./apps/print-orchestrator/config:/app/config:ro
+      # Persisted runtime state — must be writable and outlive the container.
+      - orchestrator-data:/app/data
     # No host port: the control API (pause/resume/cancel/light) must not be
     # exposed on the LAN. The dashboard reaches it over the compose network via
     # nginx (proxy_pass http://print-orchestrator:3100). For host-side debugging
@@ -78,3 +83,7 @@ services:
       retries: 5
       start_period: 5s
     restart: unless-stopped
+
+volumes:
+  # Durable orchestrator state (queue, events, today counters) as a JSON file.
+  orchestrator-data:

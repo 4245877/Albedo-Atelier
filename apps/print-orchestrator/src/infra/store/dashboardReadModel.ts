@@ -307,8 +307,12 @@ export class DashboardReadModel {
         val: camsConfigured > 0 ? `${camsOnline}/${camsConfigured} доступны` : "не настроены",
         ok: camsConfigured === 0 ? "warn" : camsOnline === camsConfigured ? "ok" : "warn"
       },
-      { name: "Очередь", val: `${this.queue.size()} заданий · в памяти сервиса`, ok: "ok" },
-      { name: "База данных", val: "не подключена — состояние хранится в памяти", ok: "warn" }
+      { name: "Очередь", val: `${this.queue.size()} заданий · сохраняется на диск`, ok: "ok" },
+      {
+        name: "База данных",
+        val: "JSON-файл · очередь, события и счётчики переживают рестарт",
+        ok: "ok"
+      }
     ];
   }
 

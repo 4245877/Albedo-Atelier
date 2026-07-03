@@ -9,6 +9,7 @@ import {
 } from "../printers/status";
 import type { CameraService } from "./cameraService";
 import type { EventFeed } from "./eventFeed";
+import type { PersistedToday } from "./stateStore";
 
 export type StoreLogger = {
   info?: (obj: unknown, message?: string) => void;
@@ -78,8 +79,24 @@ export class PrinterPoller {
   constructor(
     private readonly enabledConfigs: () => PrinterConfig[],
     private readonly cameras: CameraService,
-    private readonly events: EventFeed
-  ) {}
+    private readonly events: EventFeed,
+    private readonly persist: () => void = () => {},
+    initialToday?: PersistedToday
+  ) {
+    // Hydrate the counters from persisted state. rolloverToday() resets them on
+    // the first read if the persisted day is no longer today.
+    if (initialToday?.key) {
+      this.todayKey = initialToday.key;
+      this.todayDone = initialToday.done;
+      this.todayFailed = initialToday.failed;
+    }
+  }
+
+  /** The durable projection of today's counters (rolled over to the current day first). */
+  serializeToday(): PersistedToday {
+    this.rolloverToday();
+    return { key: this.todayKey, done: this.todayDone, failed: this.todayFailed };
+  }
 
   /** Runs the first poll, then starts the interval loop. */
   async start(logger: StoreLogger): Promise<void> {
@@ -411,6 +428,7 @@ export class PrinterPoller {
 
     if (next.status === "error" && prev.status !== "error") {
       this.todayFailed += 1;
+      this.persist();
       this.events.push("⚠", `${name}: ${next.error ?? "ошибка печати"}`, "err");
       return;
     }
@@ -433,6 +451,7 @@ export class PrinterPoller {
       }
       if (looksComplete(next)) {
         this.todayDone += 1;
+        this.persist();
         this.events.push("✔", `${name} завершил печать${job ? ` «${job}»` : ""}`, "ok");
         return;
       }

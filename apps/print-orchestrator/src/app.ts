@@ -84,7 +84,7 @@ export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
     await farmStore.start(app.log);
   });
   app.addHook("onClose", async () => {
-    farmStore.stop();
+    await farmStore.stop();
   });
 
   // Dashboard read model + per-resource modules (some also accept actions).

@@ -12,11 +12,21 @@ real snapshots (`src/infra/printers/camera/`). Anything the farm genuinely does
 not know (material stock, maintenance history, schedule) is returned empty/null
 and the dashboard shows it as unavailable rather than inventing numbers.
 
-State (the operator queue, the event feed, today's counters) is held in memory
-and resets with the process — there is no database. The store is composed of
-focused collaborators behind a facade (`src/infra/store/`): `PrinterPoller`,
-`CameraService`, `QueueStore`, `EventFeed`, `PrinterCommandService` and the
-read-only `DashboardReadModel`.
+State (the operator queue, the event feed, today's counters) is persisted to a
+single JSON file so it survives a restart — there is still no database. The path
+is `STATE_FILE_PATH` (default `<cwd>/data/state.json`; `/app/data/state.json` on
+the `orchestrator-data` volume in Docker). Writes are atomic (temp file +
+rename) and loading is tolerant: a missing file starts empty (first run) and a
+corrupt/hand-edited one degrades to empty defaults with a logged warning instead
+of crashing startup. The store is composed of focused collaborators behind a
+facade (`src/infra/store/`): `PrinterPoller`, `CameraService`, `QueueStore`,
+`EventFeed`, `StateStore` and the read-only `DashboardReadModel`.
+
+Live telemetry is deliberately **not** persisted — printer statuses and the
+manual light override are re-derived on the next poll, and persisting statuses
+would make a restart re-announce pre-existing conditions. Material stock,
+maintenance history and automations are still honest stubs with no runtime state
+yet; the persistence layer is structured to hold them once they are implemented.
 
 Printer lights are governed by `NIGHT_PRINT_WINDOW` (default
 `23:00 – 07:30`) using the process local timezone (`TZ` in Docker). On each

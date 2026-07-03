@@ -1,5 +1,6 @@
 import { JobError, NotFoundError } from "../../core/errors";
 import type { Automation, NightPrint } from "../../domain/dashboard/types";
+import { env } from "../../shared/env";
 import { loadPrintersConfig, type PrinterConfig, type PrinterConfigSource } from "../printers/config";
 import { shutdownPrinterConnections } from "../printers/status";
 import { CameraService } from "./cameraService";
@@ -8,6 +9,7 @@ import { DashboardReadModel } from "./dashboardReadModel";
 import { EventFeed } from "./eventFeed";
 import { PrinterPoller, type StoreLogger } from "./printerPoller";
 import { QueueStore, type NewQueueJobInput } from "./queueStore";
+import { StateStore } from "./stateStore";
 
 export type { NewQueueJobInput } from "./queueStore";
 export type { FarmReadiness, FarmMetrics } from "./dashboardReadModel";
@@ -19,42 +21,76 @@ export type { FarmReadiness, FarmMetrics } from "./dashboardReadModel";
  * frames are real snapshots; the event feed records transitions the poller saw.
  *
  * This class owns the printer config and wires the collaborators together — the
- * background {@link PrinterPoller}, {@link CameraService}, in-memory
- * {@link QueueStore}, {@link EventFeed}, {@link PrinterCommandService} and the
- * read-only {@link DashboardReadModel} — then exposes them as one API for the
- * HTTP routes. There is no seed data: anything the farm does not know is
- * returned empty/null and the dashboard shows it as unavailable.
+ * background {@link PrinterPoller}, {@link CameraService}, {@link QueueStore},
+ * {@link EventFeed}, {@link PrinterCommandService} and the read-only
+ * {@link DashboardReadModel} — then exposes them as one API for the HTTP routes.
+ * The durable slice of the state (queue, event feed, today counters) is loaded
+ * from and persisted to a JSON file via {@link StateStore}, so it survives a
+ * restart. There is no seed data: anything the farm does not know is returned
+ * empty/null and the dashboard shows it as unavailable.
  */
 export class FarmStore {
   private configs: PrinterConfig[] = [];
   private configSource: PrinterConfigSource = { kind: "none" };
   private readonly startedAt = Date.now();
 
-  private readonly events = new EventFeed();
+  private readonly state: StateStore;
+  private readonly events: EventFeed;
   private readonly cameras = new CameraService();
-  private readonly queue = new QueueStore(this.events);
-  private readonly poller = new PrinterPoller(() => this.enabledConfigs(), this.cameras, this.events);
-  private readonly commands = new PrinterCommandService(
-    (id) => this.configById(id),
-    this.poller,
-    this.cameras,
-    this.events
-  );
-  private readonly readModel = new DashboardReadModel(
-    () => this.enabledConfigs(),
-    (id) => this.configById(id),
-    () => this.configSource,
-    this.startedAt,
-    this.poller,
-    this.cameras,
-    this.queue,
-    this.events
-  );
+  private readonly queue: QueueStore;
+  private readonly poller: PrinterPoller;
+  private readonly commands: PrinterCommandService;
+  private readonly readModel: DashboardReadModel;
+
+  constructor(stateFilePath: string = env.stateFilePath) {
+    this.state = new StateStore(stateFilePath);
+    const persisted = this.state.load();
+    const persist = (): void => this.state.save();
+
+    this.events = new EventFeed(persisted.feed, persist);
+    this.queue = new QueueStore(this.events, persisted.queue, persist);
+    this.poller = new PrinterPoller(
+      () => this.enabledConfigs(),
+      this.cameras,
+      this.events,
+      persist,
+      persisted.today
+    );
+    this.commands = new PrinterCommandService(
+      (id) => this.configById(id),
+      this.poller,
+      this.cameras,
+      this.events
+    );
+    this.readModel = new DashboardReadModel(
+      () => this.enabledConfigs(),
+      (id) => this.configById(id),
+      () => this.configSource,
+      this.startedAt,
+      this.poller,
+      this.cameras,
+      this.queue,
+      this.events
+    );
+
+    // Snapshot the whole durable state on every save.
+    this.state.bind(() => ({
+      version: 1,
+      queue: this.queue.serialize(),
+      feed: this.events.list(),
+      today: this.poller.serializeToday()
+    }));
+  }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
 
   /** Loads the printer config and starts the background poll loop. */
   async start(logger: StoreLogger = {}): Promise<void> {
+    this.state.useLogger(logger);
+    if (this.state.loadWarning) {
+      logger.warn?.({ warning: this.state.loadWarning }, "state store problem");
+    }
+
     const { printers, source } = await loadPrintersConfig();
     this.configs = printers;
     this.configSource = source;
@@ -71,9 +107,15 @@ export class FarmStore {
     await this.poller.start(logger);
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.poller.stop();
     shutdownPrinterConnections();
+    await this.state.flush();
+  }
+
+  /** Awaits all pending state writes (used on shutdown and in tests). */
+  flush(): Promise<void> {
+    return this.state.flush();
   }
 
   pollOnce(): Promise<void> {

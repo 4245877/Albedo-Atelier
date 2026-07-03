@@ -24,6 +24,14 @@ API is reached at `http://localhost:8090/api/print-orchestrator/...`, e.g.:
 See `apps/print-orchestrator/README.md` for the full API (per-section reads and
 printer/queue/automation actions) and the `/health`, `/ready`, `/metrics` probes.
 
+### Persistence
+
+The orchestrator's mutable state — the operator queue, the event feed and
+today's counters — is written to a JSON file on the `orchestrator-data` Docker
+volume (`/app/data/state.json`), so it survives `docker compose down` and
+container recreation. Live telemetry is not persisted (it is re-polled). See the
+service README for details and `STATE_FILE_PATH`.
+
 ### Ports & security
 
 The **orchestrator control API is not published to the host** — it is reachable
@@ -40,7 +48,7 @@ Package manager: **pnpm** (`corepack enable`). The dashboard is static assets;
 
 
 
-Примерная палитра светлой темы:
+Примерная палитра светлой темы: 
 Жемчужный блик #FAF7FB
 Фарфоровая кожа #F3EEF2
 Холодная тень кожи  #D9CDD4

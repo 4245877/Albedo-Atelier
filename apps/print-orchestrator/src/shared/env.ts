@@ -1,3 +1,5 @@
+import path from "node:path";
+
 function readInteger(value: string | undefined, fallback: number): number {
   if (!value) {
     return fallback;
@@ -22,6 +24,13 @@ export const env = Object.freeze({
   printerPollIntervalMs: readInteger(process.env.PRINTER_POLL_INTERVAL_MS, 10000),
   /** Night-print window shown on the dashboard (config, not telemetry). */
   nightWindow: process.env.NIGHT_PRINT_WINDOW ?? "23:00 – 07:30",
+  /**
+   * JSON file the operator queue, event feed and today counters are persisted
+   * to, so they survive a restart. Defaults to `<cwd>/data/state.json`; in the
+   * container `<cwd>` is `/app`, and compose mounts a volume at `/app/data`.
+   */
+  stateFilePath:
+    process.env.STATE_FILE_PATH || path.resolve(process.cwd(), "data", "state.json"),
   /**
    * Shared secret required on state-changing requests (pause/resume/cancel/…).
    * Empty disables the guard — reads stay open either way.

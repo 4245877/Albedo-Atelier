@@ -1,6 +1,7 @@
 import { JobError, ValidationError } from "../../core/errors";
 import type { QueueJob } from "../../domain/dashboard/types";
 import type { EventFeed } from "./eventFeed";
+import type { PersistedQueue } from "./stateStore";
 
 export type NewQueueJobInput = {
   title?: unknown;
@@ -11,15 +12,31 @@ export type NewQueueJobInput = {
   night?: unknown;
 };
 
-/** Operator-created print jobs, held in memory (starts empty — never seeded). */
+/**
+ * Operator-created print jobs. Hydrated from persisted state on start (empty on
+ * first run — never seeded) and persisted again on every change, so the queue
+ * and its id sequence survive a restart.
+ */
 export class QueueStore {
-  private queue: QueueJob[] = [];
-  private queueSeq = 0;
+  private queue: QueueJob[];
+  private queueSeq: number;
 
-  constructor(private readonly events: EventFeed) {}
+  constructor(
+    private readonly events: EventFeed,
+    initial: PersistedQueue = { seq: 0, jobs: [] },
+    private readonly persist: () => void = () => {}
+  ) {
+    this.queue = initial.jobs.map((job) => ({ ...job }));
+    this.queueSeq = initial.seq;
+  }
 
   list(): QueueJob[] {
     return this.queue.map((job) => ({ ...job }));
+  }
+
+  /** The full durable projection: jobs plus the id sequence. */
+  serialize(): PersistedQueue {
+    return { seq: this.queueSeq, jobs: this.list() };
   }
 
   size(): number {
@@ -48,6 +65,7 @@ export class QueueStore {
 
     this.queue.push(job);
     this.events.push("＋", `Задание «${title}» добавлено в очередь`, "info");
+    this.persist();
     return { ...job };
   }
 
