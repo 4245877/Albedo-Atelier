@@ -19,6 +19,7 @@ import { reconcileCameras } from "./cameraPlayers.js";
 import { ensureReveal, renderNav, setupNav, setupStickyOffsets } from "./nav.js";
 import { renderBoard } from "./render/board.js";
 import { renderTopbar } from "./render/sections.js";
+import { setupTheme } from "./theme.js";
 import { $, esc, toast } from "./util.js";
 
 /* Состояние фермы — заполняется из GET /api/dashboard. До первой удачной
@@ -97,6 +98,7 @@ async function refresh({ silent = true } = {}) {
 
 installActions({ getState: () => state, refresh });
 
+setupTheme();
 renderNav();
 renderTopbar(state, backendReachable);
 tickClock();

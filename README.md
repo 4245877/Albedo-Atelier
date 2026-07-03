@@ -37,3 +37,19 @@ token on state-changing requests. See `.env.example`.
 
 Package manager: **pnpm** (`corepack enable`). The dashboard is static assets;
 `apps/print-orchestrator` is the only Node project.
+
+
+
+Примерная палитра светлой темы:
+Жемчужный блик #FAF7FB
+Фарфоровая кожа #F3EEF2
+Холодная тень кожи  #D9CDD4
+Обсидиановый волос #16141D
+Индиговый отлив #3E3A57
+Полуночное крыло #1F2430
+Слоновая кость рогов  #E5DED0
+Топазовый ирис  #D6C652
+Соборный белый #F8F5FA
+Кружевной серо-голубой `#BFC6D6
+Старинное золото  #C49A3A
+Аметистовая слива #6D4C78

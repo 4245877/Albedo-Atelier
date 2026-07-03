@@ -4,6 +4,25 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0d0b14" />
+    <!-- Облик зала до первой отрисовки: тьма/свет по сохранённому режиму и
+         часам (окно тьмы 21:30–7:30). Ставит data-theme синхронно, чтобы не
+         было вспышки чужой темы. Полную логику ведёт theme.js. -->
+    <script>
+      (function () {
+        try {
+          var m = localStorage.getItem("albedo-theme");
+          if (m !== "light" && m !== "dark" && m !== "auto") m = "auto";
+          var theme = m;
+          if (m === "auto") {
+            var d = new Date(), mins = d.getHours() * 60 + d.getMinutes();
+            theme = mins >= 1290 || mins < 450 ? "dark" : "light"; // 21:30–07:30 → тьма
+          }
+          document.documentElement.dataset.theme = theme;
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute("content", theme === "light" ? "#f4eef4" : "#0d0b14");
+        } catch (e) {}
+      })();
+    </script>
     <title>Albedo — Зал Верховного Надзора</title>
     <!-- Герб: рога и золотая печать на обсидиане -->
     <link
@@ -45,6 +64,10 @@
         <div class="topbar-side">
           <span class="pill pill-ok" id="pill-service"><i class="dot dot-pulse"></i>Сервис работает</span>
           <span class="pill pill-ok" id="pill-backend"><i class="dot"></i>Backend подключён</span>
+          <button type="button" class="theme-toggle" id="theme-toggle" title="Переключить тему">
+            <span class="theme-toggle-icon" aria-hidden="true"></span>
+            <span class="theme-toggle-label">Авто</span>
+          </button>
           <span class="clock" id="clock">—:—</span>
         </div>
       </header>
