@@ -27,6 +27,12 @@ export interface QueueJob {
   at?: string;
   night?: boolean;
   reason?: string;
+  /**
+   * Name of the print file already present on the target printer. Optional
+   * operator metadata; required for remote start (see FarmStore.startNext) —
+   * without it the farm cannot tell the device which job to run.
+   */
+  file?: string;
 }
 
 export interface NightCandidate {

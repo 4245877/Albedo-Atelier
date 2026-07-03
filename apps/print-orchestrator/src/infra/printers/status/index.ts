@@ -7,7 +7,12 @@ import {
 } from "./bambu";
 import { getCrealityStatus } from "./creality";
 import { makeOfflineStatus } from "./mapper";
-import { getMoonrakerStatus, sendMoonrakerCommand, sendMoonrakerLightCommand } from "./moonraker";
+import {
+  getMoonrakerStatus,
+  sendMoonrakerCommand,
+  sendMoonrakerLightCommand,
+  sendMoonrakerStart
+} from "./moonraker";
 import { PrinterCommandError, type PrinterCommand, type PrinterLiveStatus } from "./types";
 
 /**
@@ -39,6 +44,27 @@ export async function sendPrinterCommand(
   if (printer.protocol === "bambu") return sendBambuCommand(printer, command);
   throw new PrinterCommandError(
     `Управление печатью для протокола «${printer.protocol}» пока не поддерживается`
+  );
+}
+
+/**
+ * Whether remote start of an on-device file is implemented for this protocol.
+ * Only Moonraker exposes a simple, well-defined print-start endpoint; Bambu
+ * local start needs a full 3mf/AMS mapping and Creality control is unimplemented,
+ * so those are reported as unsupported rather than faked.
+ */
+export function supportsPrinterStart(printer: PrinterConfig): boolean {
+  return printer.protocol === "moonraker";
+}
+
+/**
+ * Starts a print of a file already on the printer. Supported for Moonraker;
+ * other protocols throw an honest {@link PrinterCommandError}.
+ */
+export async function sendPrinterStart(printer: PrinterConfig, filename: string): Promise<void> {
+  if (printer.protocol === "moonraker") return sendMoonrakerStart(printer, filename);
+  throw new PrinterCommandError(
+    `Удалённый запуск печати для протокола «${printer.protocol}» пока не поддерживается — запустите файл на самом принтере`
   );
 }
 

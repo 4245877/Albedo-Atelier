@@ -5,7 +5,9 @@ import {
   getPrinterLiveStatus,
   PrinterCommandError,
   sendPrinterCommand,
+  sendPrinterStart,
   supportsPrinterLight,
+  supportsPrinterStart,
   type PrinterCommand
 } from "../printers/status";
 import type { CameraService } from "./cameraService";
@@ -109,6 +111,33 @@ export class PrinterCommandService {
     return this.refresh(printer);
   }
 
+  /**
+   * Starts a print of a file already present on the printer. Refuses unless the
+   * device is online and genuinely idle (never interrupts a running print), and
+   * unless the protocol supports remote start. Re-polls so the returned view
+   * reflects the device actually beginning the job.
+   */
+  async startPrint(id: string, file: string): Promise<PrinterView> {
+    const printer = this.getReachableConfig(id);
+    if (!supportsPrinterStart(printer)) {
+      throw new JobError(
+        `Удалённый запуск печати для «${printer.name}» не поддерживается — запустите файл на самом принтере`
+      );
+    }
+
+    const status = this.poller.getStatus(id);
+    if (status && isBusyStatus(status.status)) {
+      throw new JobError(`«${printer.name}» уже занят печатью — дождитесь завершения`);
+    }
+    if (status && status.status !== "idle" && status.status !== "unknown") {
+      throw new JobError(`«${printer.name}» не готов к запуску (состояние: ${status.status})`);
+    }
+
+    await this.dispatchStart(printer, file);
+    this.events.push("▶", `Оператор запустил печать «${file}» на <b>${printer.name}</b>`, "ok");
+    return this.refresh(printer);
+  }
+
   async snapshot(id: string): Promise<PrinterView> {
     const printer = this.configById(id);
     await this.cameras.getFrame(printer);
@@ -128,6 +157,20 @@ export class PrinterCommandService {
   private async dispatch(printer: PrinterConfig, command: PrinterCommand): Promise<void> {
     try {
       await sendPrinterCommand(printer, command);
+    } catch (error) {
+      if (error instanceof PrinterCommandError) {
+        throw new JobError(error.message);
+      }
+      throw new PrinterConnectionError(
+        printer.id,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+
+  private async dispatchStart(printer: PrinterConfig, file: string): Promise<void> {
+    try {
+      await sendPrinterStart(printer, file);
     } catch (error) {
       if (error instanceof PrinterCommandError) {
         throw new JobError(error.message);

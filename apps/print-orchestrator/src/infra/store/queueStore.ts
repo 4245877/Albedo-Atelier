@@ -1,4 +1,4 @@
-import { JobError, ValidationError } from "../../core/errors";
+import { ValidationError } from "../../core/errors";
 import type { QueueJob } from "../../domain/dashboard/types";
 import type { EventFeed } from "./eventFeed";
 import type { PersistedQueue } from "./stateStore";
@@ -10,6 +10,7 @@ export type NewQueueJobInput = {
   eta?: unknown;
   at?: unknown;
   night?: unknown;
+  file?: unknown;
 };
 
 /**
@@ -50,6 +51,7 @@ export class QueueStore {
     }
 
     const printer = typeof input.printer === "string" ? input.printer.trim() : "";
+    const file = typeof input.file === "string" && input.file.trim() ? input.file.trim() : "";
     const job: QueueJob = {
       id: `q${++this.queueSeq}`,
       title,
@@ -60,7 +62,8 @@ export class QueueStore {
       at: typeof input.at === "string" && input.at.trim() ? input.at.trim() : "в очереди",
       status: printer ? "ready" : "review",
       ...(input.night === true ? { night: true } : {}),
-      ...(printer ? {} : { reason: "не задан принтер" })
+      ...(printer ? {} : { reason: "не задан принтер" }),
+      ...(file ? { file } : {})
     };
 
     this.queue.push(job);
@@ -69,16 +72,17 @@ export class QueueStore {
     return { ...job };
   }
 
-  startNext(): QueueJob {
+  /** The first job ready to run, or undefined when none are ready. */
+  findNextReady(): QueueJob | undefined {
     const next = this.queue.find((job) => job.status === "ready");
-    if (!next) {
-      throw new JobError("В очереди нет заданий, готовых к запуску");
-    }
-    // Starting a job requires the print file to be present on the printer;
-    // remote upload/start is not implemented, and pretending otherwise would
-    // mark queue entries as printing while the device stays idle.
-    throw new JobError(
-      "Удалённый запуск заданий пока не поддерживается — запустите файл на самом принтере"
-    );
+    return next ? { ...next } : undefined;
+  }
+
+  /** Removes a job by id (used once it has been dispatched to a printer). */
+  remove(id: string): void {
+    const index = this.queue.findIndex((job) => job.id === id);
+    if (index === -1) return;
+    this.queue.splice(index, 1);
+    this.persist();
   }
 }

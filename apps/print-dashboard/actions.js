@@ -1,4 +1,10 @@
 import { apiPost } from "./api.js";
+import {
+  initModals,
+  openInfoModal,
+  openJobForm,
+  openPrinterModal
+} from "./render/modals.js";
 import { setActiveNav } from "./nav.js";
 import { esc, toast } from "./util.js";
 
@@ -11,6 +17,10 @@ import { esc, toast } from "./util.js";
  * к текущему снимку фермы для поиска принтера по id.
  */
 export function installActions({ getState, refresh }) {
+  // Модальные окна (детали принтера, форма задания, справка) используют то же
+  // состояние и refresh, что и доска.
+  initModals({ getState, refresh });
+
   // Ключи действий, запросы по которым сейчас выполняются. Защищает от повторных
   // быстрых кликов: пока запрос в полёте, тот же action по тому же принтеру не
   // отправляется второй раз (иначе несколько SET_PIN, спам в ленте и постоянный
@@ -43,7 +53,7 @@ export function installActions({ getState, refresh }) {
   }
 
   const actions = {
-    open(p) { toast(`Открываю страницу принтера «${esc(p.name)}» — раздел в разработке`); },
+    open(p) { openPrinterModal(p.id); },
 
     pause(p, el) { runAction(`/api/printers/${p.id}/pause`, null, `«${esc(p.name)}»: печать поставлена на паузу`, "toast-ok", `pause:${p.id}`, el); },
 
@@ -98,10 +108,10 @@ export function installActions({ getState, refresh }) {
 
     const act = el.dataset.act;
 
-    if (act === "goto-page") {
-      toast(`Раздел «${el.dataset.page}» ещё в разработке`);
-      return;
-    }
+    if (act === "add-job") { openJobForm(); return; }
+    if (act === "add-printer") { openInfoModal("add-printer"); return; }
+    if (act === "upload-file") { openInfoModal("upload-file"); return; }
+    if (act === "settings") { openInfoModal("settings"); return; }
     if (act === "night-pick") {
       runAction("/api/queue/night/pick", null, "Подобрано следующее безопасное задание на ночь ☾", "toast-ok", "night-pick", el);
       return;

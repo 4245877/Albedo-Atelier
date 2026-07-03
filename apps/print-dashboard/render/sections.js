@@ -123,7 +123,7 @@ export function renderNight(state) {
     </div>` : `
     <div class="night-reco">
       <span class="night-lbl">Рекомендуемая деталь на ночь</span>
-      <div class="night-part-sub" style="margin-top:6px">Кандидатов нет — планировщик ночной печати пока не подключён. Добавьте задания в очередь.</div>
+      <div class="night-part-sub" style="margin-top:6px">Кандидатов нет — добавьте в очередь готовые задания (с принтером и файлом) или включите «Подсказки ночной печати» в разделе автоматизаций.</div>
     </div>`;
 
   $("#night-body").innerHTML = `
@@ -315,20 +315,27 @@ export function renderMaintenance(state) {
 
 /* ── 12 · Быстрые действия ─────────────────────────────────── */
 
+// Каждое быстрое действие ведёт к реальному результату: форма (data-act),
+// справочное окно (data-act) или прокрутка к существующей секции (data-goto).
 const QUICK = [
-  ["＋", "Добавить принтер", "добавление принтера"],
-  ["▦", "Добавить задание", "создание задания печати"],
-  ["⇪", "Загрузить файл", "загрузка файла печати"],
-  ["☰", "Открыть очередь", "очередь"],
-  ["☾", "Ночная печать", "ночная печать"],
-  ["◉", "Камеры", "камеры"],
-  ["◈", "Материалы", "материалы"],
-  ["⚙", "Настройки", "настройки"],
+  ["＋", "Добавить принтер", { act: "add-printer" }],
+  ["▦", "Добавить задание", { act: "add-job" }],
+  ["⇪", "Загрузить файл", { act: "upload-file" }],
+  ["☰", "Открыть очередь", { goto: "queue" }],
+  ["☾", "Ночная печать", { goto: "night" }],
+  ["◉", "Камеры", { goto: "cameras" }],
+  ["◈", "Материалы", { goto: "materials" }],
+  ["⚙", "Настройки", { act: "settings" }],
 ];
 
 export function renderQuick() {
   $("#actions-body").innerHTML = QUICK
-    .map(([i, l, page]) => `<button class="quick" data-act="goto-page" data-page="${esc(page)}"><span class="q-icon">${i}</span>${l}</button>`)
+    .map(([i, l, target]) => {
+      const attr = target.goto
+        ? `data-goto="${esc(target.goto)}"`
+        : `data-act="${esc(target.act)}"`;
+      return `<button class="quick" ${attr}><span class="q-icon">${i}</span>${l}</button>`;
+    })
     .join("");
 }
 

@@ -18,6 +18,12 @@ export interface PersistedToday {
   failed: number;
 }
 
+/** Persisted automation rule state: on/off by rule id plus the last-run stamp. */
+export interface PersistedAutomations {
+  states: Record<string, boolean>;
+  lastRun: string | null;
+}
+
 /**
  * The whole persisted state in one document. Only the state that is genuinely
  * mutated at runtime and would otherwise be lost on restart lives here: the
@@ -30,6 +36,7 @@ export interface PersistedState {
   queue: PersistedQueue;
   feed: FeedEvent[];
   today: PersistedToday;
+  automations: PersistedAutomations;
 }
 
 const CURRENT_VERSION = 1 as const;
@@ -40,7 +47,8 @@ export function emptyState(): PersistedState {
     version: CURRENT_VERSION,
     queue: { seq: 0, jobs: [] },
     feed: [],
-    today: { key: "", done: 0, failed: 0 }
+    today: { key: "", done: 0, failed: 0 },
+    automations: { states: {}, lastRun: null }
   };
 }
 
@@ -95,6 +103,18 @@ function normalize(raw: unknown): PersistedState {
     failed: toNonNegInt(today.failed)
   };
 
+  const automations = isObject(raw.automations) ? raw.automations : {};
+  const states: Record<string, boolean> = {};
+  if (isObject(automations.states)) {
+    for (const [id, value] of Object.entries(automations.states)) {
+      if (typeof value === "boolean") states[id] = value;
+    }
+  }
+  base.automations = {
+    states,
+    lastRun: typeof automations.lastRun === "string" ? automations.lastRun : null
+  };
+
   return base;
 }
 
@@ -111,6 +131,7 @@ function normalizeJob(raw: Record<string, unknown>): QueueJob {
   if (typeof raw.at === "string") job.at = raw.at;
   if (raw.night === true) job.night = true;
   if (typeof raw.reason === "string") job.reason = raw.reason;
+  if (typeof raw.file === "string" && raw.file.trim()) job.file = raw.file.trim();
   return job;
 }
 

@@ -1,12 +1,14 @@
 import { JobError, NotFoundError } from "../../core/errors";
-import type { Automation, NightPrint } from "../../domain/dashboard/types";
+import type { Automation, NightCandidate, NightPrint, QueueJob } from "../../domain/dashboard/types";
 import { env } from "../../shared/env";
 import { loadPrintersConfig, type PrinterConfig, type PrinterConfigSource } from "../printers/config";
 import { shutdownPrinterConnections } from "../printers/status";
+import { AutomationStore } from "./automationStore";
 import { CameraService } from "./cameraService";
 import { PrinterCommandService } from "./commandService";
 import { DashboardReadModel } from "./dashboardReadModel";
 import { EventFeed } from "./eventFeed";
+import type { NightPlanEntry } from "./nightPlanner";
 import { PrinterPoller, type StoreLogger } from "./printerPoller";
 import { QueueStore, type NewQueueJobInput } from "./queueStore";
 import { StateStore } from "./stateStore";
@@ -38,9 +40,13 @@ export class FarmStore {
   private readonly events: EventFeed;
   private readonly cameras = new CameraService();
   private readonly queue: QueueStore;
+  private readonly automations: AutomationStore;
   private readonly poller: PrinterPoller;
   private readonly commands: PrinterCommandService;
   private readonly readModel: DashboardReadModel;
+
+  /** Current selection in the night-print candidate list (ephemeral UI state). */
+  private nightPick = 0;
 
   constructor(stateFilePath: string = env.stateFilePath) {
     this.state = new StateStore(stateFilePath);
@@ -49,12 +55,14 @@ export class FarmStore {
 
     this.events = new EventFeed(persisted.feed, persist);
     this.queue = new QueueStore(this.events, persisted.queue, persist);
+    this.automations = new AutomationStore(persisted.automations, this.events, persist);
     this.poller = new PrinterPoller(
       () => this.enabledConfigs(),
       this.cameras,
       this.events,
       persist,
-      persisted.today
+      persisted.today,
+      () => this.automations.isEnabled("night-lights")
     );
     this.commands = new PrinterCommandService(
       (id) => this.configById(id),
@@ -70,7 +78,9 @@ export class FarmStore {
       this.poller,
       this.cameras,
       this.queue,
-      this.events
+      this.events,
+      this.automations,
+      () => this.nightPick
     );
 
     // Snapshot the whole durable state on every save.
@@ -78,7 +88,8 @@ export class FarmStore {
       version: 1,
       queue: this.queue.serialize(),
       feed: this.events.list(),
-      today: this.poller.serializeToday()
+      today: this.poller.serializeToday(),
+      automations: this.automations.serialize()
     }));
   }
 
@@ -214,22 +225,75 @@ export class FarmStore {
   addQueueJob(input: NewQueueJobInput) {
     return this.queue.add(input);
   }
-  startNext() {
-    return this.queue.startNext();
+
+  /**
+   * Starts the next ready queue job on its target printer. Resolves the printer
+   * from the job's printer field, dispatches a real remote start (Moonraker),
+   * and drops the job from the queue once the device has accepted it. Fails
+   * honestly when the job has no file, the printer is unknown/offline/busy, or
+   * the protocol does not support remote start.
+   */
+  async startNext(): Promise<{ job: QueueJob; printer: string }> {
+    const job = this.queue.findNextReady();
+    if (!job) {
+      throw new JobError("В очереди нет заданий, готовых к запуску");
+    }
+    const printer = this.readModel.resolvePrinter(job.printer);
+    if (!printer) {
+      throw new JobError(`Принтер «${job.printer}» не найден в конфигурации фермы`);
+    }
+    if (!job.file) {
+      throw new JobError(
+        `У задания «${job.title}» не задан файл — укажите имя .gcode на принтере, чтобы запустить его удалённо`
+      );
+    }
+
+    await this.commands.startPrint(printer.id, job.file);
+    this.queue.remove(job.id);
+    return { job, printer: printer.name };
   }
 
-  // ── Not wired up yet (honest failures, not fabricated data) ──────────────
-
-  toggleAutomation(id: string, _on?: boolean): Automation {
-    throw new NotFoundError(`Automation "${id}"`);
+  toggleAutomation(id: string, on?: boolean): Automation {
+    return this.automations.toggle(id, on);
   }
 
   advanceNightPick(): NightPrint {
-    throw new JobError("Планировщик ночной печати пока не подключён — нет кандидатов");
+    const plan = this.readModel.getNightPlan();
+    if (plan.length === 0) {
+      throw new JobError(
+        "Нет кандидатов на ночь — добавьте в очередь готовые задания (или включите подсказки ночной печати)"
+      );
+    }
+    this.nightPick = (this.nightPick + 1) % plan.length;
+    return this.readModel.getNight();
   }
 
-  startNight(): { candidate: NightPrint["candidates"][number]; window: string } {
-    throw new JobError("Планировщик ночной печати пока не подключён — нет кандидатов");
+  async startNight(): Promise<{ candidate: NightCandidate; window: string }> {
+    const plan = this.readModel.getNightPlan();
+    if (plan.length === 0) {
+      throw new JobError(
+        "Нет кандидатов на ночь — добавьте в очередь готовые задания (или включите подсказки ночной печати)"
+      );
+    }
+
+    const entry: NightPlanEntry = plan[Math.min(this.nightPick, plan.length - 1)];
+    if (entry.blockers.length > 0) {
+      throw new JobError(
+        `Нельзя запустить «${entry.job.title}» на ночь: ${entry.blockers.join("; ")}`
+      );
+    }
+
+    // blockers === [] guarantees a resolved printer and a file (see nightPlanner),
+    // but re-narrow for the type checker before dispatch.
+    const printer = entry.printer;
+    const file = entry.job.file;
+    if (!printer || !file) {
+      throw new JobError(`Нельзя запустить «${entry.job.title}» на ночь — недостаточно данных`);
+    }
+
+    await this.commands.startPrint(printer.id, file);
+    this.queue.remove(entry.job.id);
+    return { candidate: entry.candidate, window: env.nightWindow };
   }
 
   // ── Config resolution (shared by the collaborators) ──────────────────────

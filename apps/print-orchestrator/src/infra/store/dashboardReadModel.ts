@@ -20,8 +20,10 @@ import { env } from "../../shared/env";
 import { hhmm } from "../../shared/time";
 import { hasCameraSource } from "../printers/camera";
 import type { PrinterConfig, PrinterConfigSource } from "../printers/config";
+import type { AutomationStore } from "./automationStore";
 import type { CameraService } from "./cameraService";
 import type { EventFeed } from "./eventFeed";
+import { buildNightPlan, type NightPlanEntry } from "./nightPlanner";
 import { buildPrinterView, isBusyStatus } from "./printerView";
 import type { PrinterPoller } from "./printerPoller";
 import type { QueueStore } from "./queueStore";
@@ -86,7 +88,9 @@ export class DashboardReadModel {
     private readonly poller: PrinterPoller,
     private readonly cameras: CameraService,
     private readonly queue: QueueStore,
-    private readonly events: EventFeed
+    private readonly events: EventFeed,
+    private readonly automations: AutomationStore,
+    private readonly getNightPick: () => number
   ) {}
 
   private view(printer: PrinterConfig): PrinterView {
@@ -187,10 +191,33 @@ export class DashboardReadModel {
     return this.queue.list();
   }
 
+  /**
+   * The night-print plan: ranked candidates drawn from the queue with their
+   * blockers, gated by the `night-queue` automation. When the rule is off the
+   * plan is empty — the toggle genuinely suppresses the suggestions.
+   */
+  getNightPlan(): NightPlanEntry[] {
+    if (!this.automations.isEnabled("night-queue")) return [];
+    return buildNightPlan(this.queue.list(), {
+      window: env.nightWindow,
+      resolvePrinter: (job) => this.resolvePrinter(job.printer),
+      getStatus: (id) => this.poller.getStatus(id)
+    });
+  }
+
+  /** Resolves a queue job's free-text printer field to a config by id or name. */
+  resolvePrinter(reference: string): PrinterConfig | undefined {
+    const wanted = reference.trim().toLowerCase();
+    if (!wanted || wanted === "—") return undefined;
+    return this.enabledConfigs().find(
+      (p) => p.id.toLowerCase() === wanted || p.name.toLowerCase() === wanted
+    );
+  }
+
   getNight(): NightPrint {
-    // The window is config; candidates would come from a risk model that does
-    // not exist yet, so the list stays honestly empty.
-    return { window: env.nightWindow, candidates: [], pick: 0 };
+    const candidates = this.getNightPlan().map((entry) => entry.candidate);
+    const pick = candidates.length === 0 ? 0 : Math.min(this.getNightPick(), candidates.length - 1);
+    return { window: env.nightWindow, candidates, pick };
   }
 
   getCritical(): CriticalEvent[] {
@@ -263,8 +290,7 @@ export class DashboardReadModel {
   }
 
   getAutomations(): AutomationsSection {
-    // No automation engine is wired up yet — an empty list, not demo rules.
-    return { automations: [], lastRun: null };
+    return { automations: this.automations.list(), lastRun: this.automations.getLastRun() };
   }
 
   getSystem(): SystemComponent[] {

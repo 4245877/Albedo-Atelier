@@ -81,7 +81,9 @@ export class PrinterPoller {
     private readonly cameras: CameraService,
     private readonly events: EventFeed,
     private readonly persist: () => void = () => {},
-    initialToday?: PersistedToday
+    initialToday?: PersistedToday,
+    /** Gate for the scheduled night-light policy (the `night-lights` automation). */
+    private readonly nightLightsEnabled: () => boolean = () => true
   ) {
     // Hydrate the counters from persisted state. rolloverToday() resets them on
     // the first read if the persisted day is no longer today.
@@ -245,6 +247,9 @@ export class PrinterPoller {
   }
 
   private async applyNightLightPolicy(printers: PrinterConfig[]): Promise<void> {
+    // When the automation is off, leave the lights entirely under manual/device
+    // control — the schedule must not touch them.
+    if (!this.nightLightsEnabled()) return;
     const targetOn = this.currentNightLightTarget();
     await Promise.all(
       printers.map((printer) => this.applyNightLightPolicyToPrinter(printer, targetOn))

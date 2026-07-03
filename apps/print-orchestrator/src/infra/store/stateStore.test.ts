@@ -55,7 +55,8 @@ function sampleState(): PersistedState {
       { icon: "＋", text: "Задание добавлено", time: "10:00", kind: "info" },
       { icon: "✔", text: "K2 завершил печать", time: "11:00", kind: "ok" }
     ],
-    today: { key: "2026-07-03", done: 3, failed: 1 }
+    today: { key: "2026-07-03", done: 3, failed: 1 },
+    automations: { states: { "night-lights": false, "night-queue": true }, lastRun: "12:30" }
   };
 }
 

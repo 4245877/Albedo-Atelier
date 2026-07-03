@@ -18,6 +18,7 @@ import { installActions } from "./actions.js";
 import { reconcileCameras } from "./cameraPlayers.js";
 import { ensureReveal, renderNav, setupNav, setupStickyOffsets } from "./nav.js";
 import { renderBoard } from "./render/board.js";
+import { syncModals } from "./render/modals.js";
 import { renderTopbar } from "./render/sections.js";
 import { setupTheme } from "./theme.js";
 import { $, esc, toast } from "./util.js";
@@ -59,6 +60,8 @@ function renderAll() {
   // трансляция не прерывалась при обновлении телеметрии.
   reconcileCameras();
   renderTopbar(state, backendReachable);
+  // Открытое окно деталей принтера держим в согласии со свежим состоянием.
+  syncModals();
   ensureReveal();
 }
 

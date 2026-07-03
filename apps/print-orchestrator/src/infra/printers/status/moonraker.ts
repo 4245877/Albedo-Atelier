@@ -142,6 +142,40 @@ export async function sendMoonrakerCommand(
   }
 }
 
+/**
+ * Starts a print of a file already present on the printer's virtual SD card via
+ * Moonraker's `/printer/print/start?filename=`. The file must exist on the
+ * device (no remote upload here); a wrong name surfaces as a Moonraker error.
+ */
+export async function sendMoonrakerStart(printer: PrinterConfig, filename: string): Promise<void> {
+  const name = filename.trim();
+  if (!name) {
+    throw new PrinterCommandError("Не задано имя файла для запуска печати");
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), MOONRAKER_TIMEOUT_MS);
+  try {
+    const res = await fetch(
+      `${moonrakerBaseUrl(printer)}/printer/print/start?filename=${encodeURIComponent(name)}`,
+      {
+        method: "POST",
+        signal: controller.signal,
+        headers: moonrakerHeaders(printer)
+      }
+    );
+    if (!res.ok) {
+      throw new PrinterCommandError(
+        res.status === 404
+          ? `Moonraker не нашёл файл «${name}» на принтере`
+          : `Moonraker HTTP ${res.status}`
+      );
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function sendMoonrakerLightCommand(
   printer: PrinterConfig,
   on: boolean
