@@ -754,6 +754,9 @@ body::before {
 /* ── 3 · Ночная печать: тронная чернота ─────────────────────── */
 
 .card-night {
+  /* В ряду с более высокой «Очередью» ночная карточка иначе растягивается по
+     соседу и тянется снизу пустым тёмным «хвостом» — прижимаем к верху. */
+  align-self: start;
   background:
     radial-gradient(420px 210px at 100% 0%, rgb(217 198 94 / 13%), transparent 70%),
     radial-gradient(360px 240px at 0% 100%, rgb(122 84 148 / 22%), transparent 70%),
@@ -1603,7 +1606,7 @@ body::before {
   /* Обсидиановый волос · индиговый отлив — иерархия текста */
   --ink: #201a2b;
   --ink-soft: #55506c;
-  --ink-faint: #8a8299;
+  --ink-faint: #736b82;          /* 5.05:1 на белом — микрометки проходят AA */
 
   /* Старинное золото рогов · топазовый ирис.
      Для ТЕКСТА на светлом фоне золото углубляем (иначе теряет контраст);
@@ -1711,7 +1714,20 @@ body::before {
   }
 }
 
-:root[data-theme="light"] .hero-crest { color: #b0862a; }
+/* Днём герб — старинное золото на фарфоре: углубляем цвет и поднимаем
+   непрозрачность (тёмная 0.17 подобрана под свечение из тьмы и на белом почти
+   исчезает). Анимацию «дыхания» тоже переопределяем — её кадры жёстко задают
+   тёмные значения opacity и иначе перекрыли бы статическое правило. */
+:root[data-theme="light"] .hero-crest {
+  color: #9a7420;
+  opacity: 0.36;
+  animation-name: crest-breathe-light;
+}
+
+@keyframes crest-breathe-light {
+  0%, 100% { opacity: 0.34; transform: translateY(-50%) scale(1); }
+  50% { opacity: 0.42; transform: translateY(-50%) scale(1.015); }
+}
 
 /* Днём над залом опадают чёрные перья крыльев (одно — сливовое). */
 :root[data-theme="light"] .feather { color: rgb(26 20 34 / 34%); }
@@ -1750,7 +1766,47 @@ body::before {
   border-bottom-color: #e8dfea;
 }
 
-:root[data-theme="light"] .swatch { border-color: rgb(33 26 43 / 18%); }
+/* Свотчи материалов: near-white (жемчужный PLA) на белой карточке держится
+   только на рамке — углубляем её, чтобы образец не сливался с фоном. */
+:root[data-theme="light"] .swatch {
+  border-color: rgb(33 26 43 / 30%);
+  box-shadow: 0 1px 2px rgb(74 58 104 / 12%);
+}
+
+/* Глифы-иконки заголовков секций: --gold (#c49a3a) = 2.62:1 на белом — почти
+   не видны. Углубляем до #96701c (4.53:1); статусные (danger/warn) и глиф на
+   тёмной ночной карточке (топаз) не трогаем. */
+:root[data-theme="light"] .card:not(.card-night) .glyph:not(.glyph-danger):not(.glyph-warn) {
+  color: #96701c;
+}
+
+/* «Следующий запуск» плана — было захардкоженное тёмное золото; приводим к
+   светлой палитре. */
+:root[data-theme="light"] .plan-next {
+  background: linear-gradient(135deg, rgb(196 154 58 / 16%), rgb(196 154 58 / 6%));
+}
+
+/* Панели камер в светлой теме: обсидиановый градиент .cam превращал каждую
+   карточку принтера в тяжёлый чёрный блок, а заглушки — в большие чёрные плашки
+   поверх фарфора. Даём фарфоровый фон и приглушённый глиф. Живое видео/.cam-img
+   держат свой тёмный фон (background:#0b0912, object-fit:cover) и перекрывают
+   эту подложку, поэтому реальные трансляции не светлеют. */
+:root[data-theme="light"] .cam {
+  background:
+    repeating-linear-gradient(0deg, rgb(31 27 40 / 3.5%) 0 1px, transparent 1px 22px),
+    repeating-linear-gradient(90deg, rgb(31 27 40 / 3.5%) 0 1px, transparent 1px 22px),
+    radial-gradient(320px 150px at 50% 115%, rgb(196 154 58 / 14%), transparent 70%),
+    linear-gradient(170deg, #f5eff7, #e9e0ec);
+  color: #9187a4;
+}
+
+:root[data-theme="light"] .cam-offline,
+:root[data-theme="light"] .cam-state {
+  color: #7a7288;
+  background:
+    repeating-linear-gradient(45deg, rgb(31 27 40 / 3%) 0 6px, transparent 6px 12px),
+    rgb(245 239 247 / 86%);
+}
 
 /* Приглушённые бейджи — углубляем текст для читаемости на светлом. */
 :root[data-theme="light"] .badge-offline { color: #6d687e; }
