@@ -40,6 +40,11 @@ services:
       # named volume below so it survives `docker compose down` / recreation.
       STATE_FILE_PATH: /app/data/state.json
       TZ: ${TZ:-Etc/UTC}
+      # Auto-deduct filament from the fulfillment warehouse when a print finishes.
+      # Empty = disabled (the farm runs standalone). Set FULFILLMENT_API_URL in .env
+      # to fulfillment's published API on the host LAN, e.g. http://192.168.0.139:3001
+      # (or http://fulfillment-api:8080 if both compose projects share a network).
+      FULFILLMENT_API_URL: ${FULFILLMENT_API_URL:-}
     env_file:
       - .env
     volumes:

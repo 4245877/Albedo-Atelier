@@ -70,6 +70,7 @@ export function makeOfflineStatus(printer: PrinterConfig, error: string): Printe
     currentFile: null,
     progressPct: null,
     remainingMinutes: null,
+    filamentUsedMm: null,
     nozzleTemp: null,
     nozzleTarget: null,
     bedTemp: null,

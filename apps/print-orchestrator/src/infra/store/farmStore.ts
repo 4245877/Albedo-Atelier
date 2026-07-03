@@ -1,6 +1,7 @@
 import { JobError, NotFoundError } from "../../core/errors";
 import type { Automation, NightCandidate, NightPrint, QueueJob } from "../../domain/dashboard/types";
 import { env } from "../../shared/env";
+import { FulfillmentInventoryClient } from "../fulfillment/inventoryClient";
 import { loadPrintersConfig, type PrinterConfig, type PrinterConfigSource } from "../printers/config";
 import { shutdownPrinterConnections } from "../printers/status";
 import { AutomationStore } from "./automationStore";
@@ -39,6 +40,7 @@ export class FarmStore {
   private readonly state: StateStore;
   private readonly events: EventFeed;
   private readonly cameras = new CameraService();
+  private readonly inventory = new FulfillmentInventoryClient();
   private readonly queue: QueueStore;
   private readonly automations: AutomationStore;
   private readonly poller: PrinterPoller;
@@ -62,7 +64,8 @@ export class FarmStore {
       this.events,
       persist,
       persisted.today,
-      () => this.automations.isEnabled("night-lights")
+      () => this.automations.isEnabled("night-lights"),
+      this.inventory
     );
     this.commands = new PrinterCommandService(
       (id) => this.configById(id),
@@ -112,6 +115,12 @@ export class FarmStore {
     logger.info?.(
       { printers: printers.length, source: source.kind },
       "farm store started with real printer config"
+    );
+    logger.info?.(
+      { enabled: this.inventory.enabled },
+      this.inventory.enabled
+        ? "fulfillment filament auto-consume enabled"
+        : "fulfillment filament auto-consume disabled (set FULFILLMENT_API_URL to enable)"
     );
 
     this.commands.useLogger(logger);

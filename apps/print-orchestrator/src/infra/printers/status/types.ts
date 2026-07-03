@@ -11,6 +11,11 @@ export interface PrinterLiveStatus {
   currentFile: string | null;
   progressPct: number | null;
   remainingMinutes: number | null;
+  /**
+   * Filament extruded so far this print, in mm (Klipper `print_stats.filament_used`).
+   * `null` when the device/adapter does not report it (Bambu, Creality, offline).
+   */
+  filamentUsedMm: number | null;
   nozzleTemp: number | null;
   nozzleTarget: number | null;
   bedTemp: number | null;

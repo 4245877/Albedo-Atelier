@@ -1,0 +1,111 @@
+import { env } from "../../shared/env";
+
+/**
+ * Server-side client for the fulfillment inventory API. When a print completes,
+ * the orchestrator posts the extruded length here and fulfillment deducts the
+ * matching filament stock (resolving material/color from the printer's loaded
+ * reel and converting mm→grams by material density on its side).
+ *
+ * Modeled on fulfillment's own outbound proxy (`modules/appeals/upstream.ts`):
+ * `fetch` + `AbortController` timeout, a typed error, and a safe JSON parse. The
+ * feature is disabled (a no-op) until `FULFILLMENT_API_URL` is configured, so the
+ * farm keeps running standalone.
+ */
+
+const TIMEOUT_MS = 8000;
+
+export type ConsumeFilamentInput = {
+  /** Orchestrator printer id; must match fulfillment's `printer_filament_state.printerId`. */
+  printerId: string;
+  /** Extruded filament length in mm (Moonraker `print_stats.filament_used`). */
+  lengthMm: number;
+  /** Stable identity of the print run, recorded on the movement. */
+  printJobId: string;
+  /** Dedup key so a re-observed/retried completion is not deducted twice. */
+  idempotencyKey: string;
+  note?: string;
+};
+
+export type ConsumeFilamentResult = {
+  duplicate: boolean;
+  stock: { material: string; color: string; stockG: number } | null;
+  movement: { id: string; quantityG: number } | null;
+};
+
+/** A reached-but-rejected or unreachable fulfillment call. Message is operator-facing. */
+export class FulfillmentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FulfillmentError";
+  }
+}
+
+function safeJson(text: string): any {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+export class FulfillmentInventoryClient {
+  private readonly baseUrl: string;
+
+  constructor(baseUrl: string = env.fulfillmentApiUrl) {
+    this.baseUrl = baseUrl.replace(/\/+$/, "");
+  }
+
+  /** Whether a fulfillment base URL is configured; when false, `consume` is a no-op. */
+  get enabled(): boolean {
+    return Boolean(this.baseUrl);
+  }
+
+  /**
+   * Deducts filament for a completed print. Returns `null` when the feature is
+   * disabled; resolves with the movement/stock on success; throws
+   * {@link FulfillmentError} when fulfillment rejects the call or is unreachable.
+   */
+  async consume(input: ConsumeFilamentInput): Promise<ConsumeFilamentResult | null> {
+    if (!this.enabled) return null;
+
+    const url = `${this.baseUrl}/api/inventory/filament/consume`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        signal: controller.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          printerId: input.printerId,
+          lengthMm: input.lengthMm,
+          source: "printer",
+          printJobId: input.printJobId,
+          idempotencyKey: input.idempotencyKey,
+          note: input.note,
+        }),
+      });
+
+      const text = await res.text();
+      const json = text ? safeJson(text) : null;
+
+      if (!res.ok) {
+        // A JSON `{ error }` body means fulfillment reached the consume handler and
+        // rejected the request (no loaded filament, not enough stock, …): surface
+        // its message. Anything else means we never reached it — report generically.
+        if (json && typeof json.error === "string") {
+          throw new FulfillmentError(json.error);
+        }
+        throw new FulfillmentError(`склад вернул ${res.status}`);
+      }
+
+      return json as ConsumeFilamentResult;
+    } catch (error) {
+      if (error instanceof FulfillmentError) throw error;
+      throw new FulfillmentError("склад филамента недоступен");
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}

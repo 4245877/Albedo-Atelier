@@ -141,6 +141,8 @@ function buildBambuStatus(printer: PrinterConfig, payload: unknown): PrinterLive
     currentFile: currentFile || null,
     progressPct: roundOrNull(progressPct),
     remainingMinutes: roundOrNull(remainingMinutes),
+    // Bambu MQTT does not expose grams/length consumed (it lives in slicer metadata).
+    filamentUsedMm: null,
     nozzleTemp: roundOrNull(nozzleTemp),
     nozzleTarget: roundOrNull(nozzleTarget),
     bedTemp: roundOrNull(bedTemp),

@@ -36,6 +36,12 @@ export const env = Object.freeze({
    * Empty disables the guard — reads stay open either way.
    */
   apiToken: process.env.ORCHESTRATOR_API_TOKEN ?? "",
+  /**
+   * Base URL of the fulfillment API used to auto-deduct filament stock when a
+   * print completes (e.g. `http://fulfillment-api:8080` or `http://<host>:3001`).
+   * Empty disables auto-consume — the farm keeps running standalone.
+   */
+  fulfillmentApiUrl: process.env.FULFILLMENT_API_URL ?? "",
   /** Cross-origin origins allowed to call the API; empty = same-origin only. */
   corsAllowOrigins: (process.env.CORS_ALLOW_ORIGINS ?? "")
     .split(",")

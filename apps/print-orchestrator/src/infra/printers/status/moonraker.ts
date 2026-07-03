@@ -86,6 +86,9 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
     const progressRatio = firstFiniteNumber(virtualSd.progress, displayStatus.progress);
     const progressPct = progressRatio === null ? null : Math.round(progressRatio * 100);
     const elapsedSec = toFiniteNumber(printStats.print_duration);
+    // Klipper reports cumulative filament extruded this print, in mm. Held until
+    // the next print starts, so it is still the final total at the completion poll.
+    const filamentUsedMm = toFiniteNumber(printStats.filament_used);
 
     const stateText = firstText(printStats.state) || null;
     const stateMessage = firstText(printStats.message) || null;
@@ -98,6 +101,7 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
       currentFile: firstText(printStats.filename) || null,
       progressPct,
       remainingMinutes: estimateRemainingMinutes(progressPct, elapsedSec),
+      filamentUsedMm,
       nozzleTemp: roundOrNull(toFiniteNumber(extruder.temperature)),
       nozzleTarget: roundOrNull(toFiniteNumber(extruder.target)),
       bedTemp: roundOrNull(toFiniteNumber(bed.temperature)),

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { env } from "../../shared/env";
 import { hhmm, isWithinLocalTimeWindow, parseLocalTimeWindow } from "../../shared/time";
 import type { PrinterConfig } from "../printers/config";
@@ -16,6 +18,21 @@ export type StoreLogger = {
   warn?: (obj: unknown, message?: string) => void;
   error?: (obj: unknown, message?: string) => void;
 };
+
+/**
+ * The slice of the fulfillment inventory client the poller needs: deduct filament
+ * for a completed print. Structural, so the poller stays decoupled and testable.
+ */
+export interface InventoryConsumer {
+  readonly enabled: boolean;
+  consume(input: {
+    printerId: string;
+    lengthMm: number;
+    printJobId: string;
+    idempotencyKey: string;
+    note?: string;
+  }): Promise<unknown>;
+}
 
 const COMPLETE_RE = /complete|finish|done/i;
 const CANCEL_RE = /cancel|abort|stop/i;
@@ -76,6 +93,9 @@ export class PrinterPoller {
   private todayDone = 0;
   private todayFailed = 0;
 
+  /** Per-printer identity of the in-flight print, for stable idempotent deduction. */
+  private printRuns = new Map<string, { printId: string; file: string | null }>();
+
   constructor(
     private readonly enabledConfigs: () => PrinterConfig[],
     private readonly cameras: CameraService,
@@ -83,7 +103,9 @@ export class PrinterPoller {
     private readonly persist: () => void = () => {},
     initialToday?: PersistedToday,
     /** Gate for the scheduled night-light policy (the `night-lights` automation). */
-    private readonly nightLightsEnabled: () => boolean = () => true
+    private readonly nightLightsEnabled: () => boolean = () => true,
+    /** Fulfillment stock client; when absent/disabled, completion deduction is skipped. */
+    private readonly inventory?: InventoryConsumer
   ) {
     // Hydrate the counters from persisted state. rolloverToday() resets them on
     // the first read if the persisted day is no longer today.
@@ -438,6 +460,8 @@ export class PrinterPoller {
       return;
     }
     if (next.status === "printing" && prev.status !== "printing" && prev.status !== "paused") {
+      // New print run: mint a stable identity used as the idempotency key on finish.
+      this.printRuns.set(printer.id, { printId: randomUUID(), file: job });
       this.events.push("▶", `${name} начал печать${job ? ` «${job}»` : ""}`, "ok");
       return;
     }
@@ -450,6 +474,10 @@ export class PrinterPoller {
       return;
     }
     if (next.status === "idle" && (prev.status === "printing" || prev.status === "paused")) {
+      // The run is over however it ended: take the identity, then clear it.
+      const run = this.printRuns.get(printer.id);
+      this.printRuns.delete(printer.id);
+
       if (looksCancelled(next)) {
         this.events.push("✕", `Печать${job ? ` «${job}»` : ""} на ${name} отменена`, "info");
         return;
@@ -457,11 +485,49 @@ export class PrinterPoller {
       if (looksComplete(next)) {
         this.todayDone += 1;
         this.persist();
+        // Deduct the actually extruded filament (mm). Only Moonraker reports it;
+        // Bambu/Creality leave it null, so their completions are skipped here.
+        const usedMm = next.filamentUsedMm ?? prev.filamentUsedMm;
+        if (usedMm && usedMm > 0) {
+          const printJobId = run?.printId ?? `${printer.id}:${dateKey()}:${job ?? "?"}`;
+          this.consumeFilamentForPrint(printer, usedMm, printJobId, job);
+        }
         this.events.push("✔", `${name} завершил печать${job ? ` «${job}»` : ""}`, "ok");
         return;
       }
       this.events.push("◌", `${name} перешёл в режим ожидания`, "info");
     }
+  }
+
+  /**
+   * Fire-and-forget filament deduction for a completed print. Never throws into
+   * the poll loop: a missing/disabled client is a no-op, and any failure
+   * (fulfillment down, no loaded filament, not enough stock) is logged and
+   * surfaced as a soft warning in the event feed. Idempotent on
+   * `printerId:printJobId`, so a re-observed completion or retry never
+   * double-deducts.
+   */
+  private consumeFilamentForPrint(
+    printer: PrinterConfig,
+    usedMm: number,
+    printJobId: string,
+    job: string | null
+  ): void {
+    if (!this.inventory?.enabled) return;
+
+    void this.inventory
+      .consume({
+        printerId: printer.id,
+        lengthMm: usedMm,
+        printJobId,
+        idempotencyKey: `${printer.id}:${printJobId}`,
+        note: job ? `Печать «${job}»` : undefined
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn?.({ err: error, printer: printer.id }, "filament consume failed");
+        this.events.push("⚠", `<b>${printer.name}</b>: склад — ${message}`, "err");
+      });
   }
 
   private rolloverToday(): void {
