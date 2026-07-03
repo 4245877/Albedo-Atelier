@@ -2,7 +2,9 @@
  * Real camera access for the farm, split by concern:
  *   urls          — snapshot/stream URL resolving + capability predicates
  *   go2rtc        — WebRTC (Creality K2) liveness probe
- *   bambuCamera   — Bambu local TLS liveview frame grab
+ *   bambuProtocol — shared low-level Bambu liveview framing helpers
+ *   bambuCamera   — one-shot Bambu local TLS liveview frame grab
+ *   bambuLiveview — shared per-printer MJPEG broadcaster (one upstream, N viewers)
  *   snapshot      — HTTP still-image capture (with the Bambu fallback)
  *   stream        — live stream proxy
  *

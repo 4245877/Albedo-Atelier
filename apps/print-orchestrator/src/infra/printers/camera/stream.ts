@@ -1,7 +1,7 @@
 import { Readable } from "node:stream";
 
 import type { PrinterConfig } from "../config";
-import { openBambuCameraStream } from "./bambuCamera";
+import { subscribeBambuLiveview } from "./bambuLiveview";
 import { DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT_MS } from "./constants";
 import type { CameraStream } from "./types";
 import { resolveStreamUrl } from "./urls";
@@ -12,7 +12,9 @@ export async function openCameraStream(
   options: { timeoutMs?: number } = {}
 ): Promise<CameraStream | null> {
   if (printer.protocol === "bambu" && printer.accessCode.trim()) {
-    return openBambuCameraStream(
+    // Attach to the shared per-printer broadcaster so every tile viewing this
+    // camera rides one upstream TLS connection instead of one connection each.
+    return subscribeBambuLiveview(
       printer,
       options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       DEFAULT_MAX_BYTES

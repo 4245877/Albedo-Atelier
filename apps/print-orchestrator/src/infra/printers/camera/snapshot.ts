@@ -1,5 +1,6 @@
 import type { PrinterConfig } from "../config";
 import { captureBambuCameraFrame } from "./bambuCamera";
+import { peekBambuLiveviewFrame } from "./bambuLiveview";
 import { DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT_MS } from "./constants";
 import type { CameraFrame } from "./types";
 import { resolveSnapshotUrl } from "./urls";
@@ -20,6 +21,11 @@ export async function captureCameraFrame(
   const url = resolveSnapshotUrl(printer);
   if (!url) {
     if (printer.protocol === "bambu") {
+      // If a viewer is already streaming this camera, grab the freshest frame
+      // from the shared broadcast instead of opening a competing connection to
+      // port 6000 (which would fight the live stream for the single slot).
+      const live = peekBambuLiveviewFrame(printer);
+      if (live) return live;
       return captureBambuCameraFrame(printer, timeoutMs, maxBytes);
     }
     return null;
