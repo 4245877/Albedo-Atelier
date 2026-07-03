@@ -188,6 +188,27 @@ function bambuRequestTopic(printer: PrinterConfig): string {
   return `device/${printer.serial}/request`;
 }
 
+/**
+ * Publishes one MQTT message and waits for the broker to accept it, so a failed
+ * publish surfaces as a real error instead of a silent no-op that still lets the
+ * API report success. Rejects with a {@link PrinterCommandError}.
+ */
+function publishRequest(
+  client: mqtt.MqttClient,
+  printer: PrinterConfig,
+  payload: Record<string, unknown>
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    client.publish(bambuRequestTopic(printer), JSON.stringify(payload), (error) => {
+      if (error) {
+        reject(new PrinterCommandError(`Не удалось отправить команду Bambu: ${error.message}`));
+      } else {
+        resolve();
+      }
+    });
+  });
+}
+
 function ensureBambuClient(printer: PrinterConfig): void {
   if (!printer.serial || !printer.accessCode) {
     bambuCache.set(
@@ -262,41 +283,39 @@ export function getBambuStatus(printer: PrinterConfig): PrinterLiveStatus {
   };
 }
 
-export function sendBambuCommand(printer: PrinterConfig, command: PrinterCommand): void {
+export async function sendBambuCommand(
+  printer: PrinterConfig,
+  command: PrinterCommand
+): Promise<void> {
   const client = bambuClients.get(printer.id);
   if (!client || !client.connected) {
     throw new PrinterCommandError("Нет активного MQTT-подключения к принтеру");
   }
   const bambuCommand = command === "cancel" ? "stop" : command;
-  client.publish(
-    bambuRequestTopic(printer),
-    JSON.stringify({
-      print: { sequence_id: String(Date.now()), command: bambuCommand, param: "" }
-    })
-  );
+  await publishRequest(client, printer, {
+    print: { sequence_id: String(Date.now()), command: bambuCommand, param: "" }
+  });
 }
 
-export function sendBambuLightCommand(printer: PrinterConfig, on: boolean): void {
+export async function sendBambuLightCommand(printer: PrinterConfig, on: boolean): Promise<void> {
   const client = bambuClients.get(printer.id);
   if (!client || !client.connected) {
     throw new PrinterCommandError("Нет активного MQTT-подключения к принтеру");
   }
 
-  client.publish(
-    bambuRequestTopic(printer),
-    JSON.stringify({
-      system: {
-        sequence_id: String(Date.now()),
-        command: "ledctrl",
-        led_node: printer.light.bambuNode,
-        led_mode: on ? "on" : "off"
-      }
-    })
-  );
-  client.publish(
-    bambuRequestTopic(printer),
-    JSON.stringify({ pushing: { sequence_id: String(Date.now()), command: "pushall" } })
-  );
+  await publishRequest(client, printer, {
+    system: {
+      sequence_id: String(Date.now()),
+      command: "ledctrl",
+      led_node: printer.light.bambuNode,
+      led_mode: on ? "on" : "off"
+    }
+  });
+  // Nudge a fresh full report so the new light state resurfaces promptly; this is
+  // best-effort and must not fail the command if the broker drops it.
+  await publishRequest(client, printer, {
+    pushing: { sequence_id: String(Date.now()), command: "pushall" }
+  }).catch(() => {});
 }
 
 /** Closes all persistent Bambu MQTT connections and clears cached state. */

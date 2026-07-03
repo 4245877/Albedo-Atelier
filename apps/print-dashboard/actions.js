@@ -83,7 +83,7 @@ export function installActions({ getState, refresh }) {
         void flash.offsetWidth;
         flash.classList.add("go");
       }
-      runAction(`/api/printers/${p.id}/snapshot`, null, `«${esc(p.name)}»: снимок сохранён ◉`, "toast-ok", `snapshot:${p.id}`, el);
+      runAction(`/api/printers/${p.id}/snapshot`, null, `«${esc(p.name)}»: кадр с камеры обновлён ◉`, "toast-ok", `snapshot:${p.id}`, el);
     },
   };
 

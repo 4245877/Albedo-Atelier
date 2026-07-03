@@ -103,7 +103,13 @@ export class FulfillmentInventoryClient {
       return json as ConsumeFilamentResult;
     } catch (error) {
       if (error instanceof FulfillmentError) throw error;
-      throw new FulfillmentError("склад филамента недоступен");
+      const reason =
+        error instanceof Error
+          ? error.name === "AbortError"
+            ? `таймаут ${TIMEOUT_MS} мс`
+            : error.message
+          : String(error);
+      throw new FulfillmentError(`склад филамента недоступен (${reason})`);
     } finally {
       clearTimeout(timer);
     }

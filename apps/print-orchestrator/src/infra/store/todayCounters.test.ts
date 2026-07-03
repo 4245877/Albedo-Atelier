@@ -73,12 +73,15 @@ test("resets hydrated counters when the persisted day has already passed", () =>
 
 let realFetch: typeof globalThis.fetch;
 let printState: string;
+let httpFail: boolean;
 
 beforeEach(() => {
   printState = "standby";
+  httpFail = false;
   realFetch = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL | Request) => {
     const url = String(input);
+    if (httpFail) return { ok: false, status: 502, json: async () => ({}) } as unknown as Response;
     if (url.includes("/printer/objects/query")) {
       return {
         ok: true,
@@ -111,4 +114,27 @@ test("a completion transition increments and persists the done counter", async (
   assert.equal(poller.getTodayDone(), 1, "the completion was counted");
   assert.ok(saves >= 1, "the counter change was persisted");
   assert.equal(poller.serializeToday().done, 1);
+});
+
+test("a reconnect mid-print does not announce a false start or double-count", async () => {
+  const printer = k2();
+  const feed = new EventFeed();
+  const poller = new PrinterPoller(() => [printer], cameras, feed);
+
+  printState = "printing";
+  await poller.pollOnce(); // baseline: printing, online (no event)
+
+  httpFail = true;
+  await poller.pollOnce(); // lost connection → offline
+
+  httpFail = false;
+  printState = "printing";
+  await poller.pollOnce(); // reconnect, still printing → only "снова на связи"
+
+  const starts = feed.list().filter((event) => event.text.includes("начал печать"));
+  assert.equal(starts.length, 0, "reconnect must not announce a brand-new print start");
+
+  printState = "complete";
+  await poller.pollOnce(); // printing → complete
+  assert.equal(poller.getTodayDone(), 1, "the single print is counted exactly once");
 });

@@ -141,7 +141,7 @@ export class PrinterCommandService {
   async snapshot(id: string): Promise<PrinterView> {
     const printer = this.configById(id);
     await this.cameras.getFrame(printer);
-    this.events.push("◉", `Сделан снимок с камеры <b>${printer.name}</b>`, "info");
+    this.events.push("◉", `Обновлён кадр с камеры <b>${printer.name}</b>`, "info");
     return buildPrinterView(printer, this.poller.getStatus(id), this.cameras.getEntry(id));
   }
 

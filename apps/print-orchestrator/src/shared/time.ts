@@ -9,6 +9,18 @@ export function hhmm(date: Date = new Date()): string {
   return `${h}:${m}`;
 }
 
+/**
+ * Local `YYYY-MM-DD`. Used to key the "today" counters so they roll over at the
+ * operator's local midnight (the same timezone `hhmm` and the night window use),
+ * not at UTC midnight — the two diverge whenever `TZ` is not UTC.
+ */
+export function localDateKey(date: Date = new Date()): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
 export interface LocalTimeWindow {
   startMinutes: number;
   endMinutes: number;

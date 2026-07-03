@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { env } from "../../shared/env";
-import { hhmm, isWithinLocalTimeWindow, parseLocalTimeWindow } from "../../shared/time";
+import { hhmm, isWithinLocalTimeWindow, localDateKey, parseLocalTimeWindow } from "../../shared/time";
 import type { PrinterConfig } from "../printers/config";
 import {
   getPrinterLiveStatus,
@@ -53,7 +53,7 @@ function looksCancelled(status: PrinterLiveStatus): boolean {
 }
 
 function dateKey(): string {
-  return new Date().toISOString().slice(0, 10);
+  return localDateKey();
 }
 
 /**
@@ -449,8 +449,14 @@ export class PrinterPoller {
       return;
     }
     if (!prev.online && next.online) {
+      // Reconnect is a fresh baseline: announce it, but never derive a print
+      // start/completion from the offline→online edge. While offline prev.status
+      // is "offline", so falling through would mis-read a still-running job as a
+      // brand-new print — a false "started printing" event and a needlessly
+      // re-minted run id mid-print. The next poll compares two online states and
+      // reports the real transitions.
       this.events.push("↺", `${name} снова на связи`, "ok");
-      if (prev.status === "offline" && next.status === prev.status) return;
+      return;
     }
 
     if (next.status === "error" && prev.status !== "error") {

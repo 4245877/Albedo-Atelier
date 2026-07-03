@@ -35,13 +35,19 @@ service README for details and `STATE_FILE_PATH`.
 ### Ports & security
 
 The **orchestrator control API is not published to the host** — it is reachable
-only over the compose network (via the dashboard proxy), so pause/resume/cancel
-cannot be driven directly from the LAN. Only the dashboard (`8090`) and the
-go2rtc WebRTC media port (`8555`, required for live K2 video) are exposed on
-`0.0.0.0`; the go2rtc API (`1985`) is bound to localhost.
+only over the compose network. Only the dashboard (`8090`) and the go2rtc WebRTC
+media port (`8555`, required for live K2 video) are exposed on `0.0.0.0`; the
+go2rtc API (`1985`) is bound to localhost.
 
-For defence in depth, set `ORCHESTRATOR_API_TOKEN` in `.env` to require a bearer
-token on state-changing requests. See `.env.example`.
+> ⚠️ **Trust assumption:** the dashboard on `8090` is served on the LAN and
+> proxies the control API same-origin (`/api/print-orchestrator/*`). Unless
+> `ORCHESTRATOR_API_TOKEN` is set, that means **anyone who can reach `8090` on
+> the LAN can drive the printers** (pause/resume/cancel/light) with no
+> authentication — the guard logs a warning on startup when it is unset. This is
+> acceptable only on a trusted home network. **Do not expose `8090` to an
+> untrusted network** (public IP, port-forward, shared VLAN). To gate it, set
+> `ORCHESTRATOR_API_TOKEN` (and inject it from the proxy) or put HTTP Basic Auth
+> in front of nginx.
 
 Package manager: **pnpm** (`corepack enable`). The dashboard is static assets;
 `apps/print-orchestrator` is the only Node project.

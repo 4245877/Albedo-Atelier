@@ -71,7 +71,7 @@ export function getCrealityStatus(printer: PrinterConfig): Promise<PrinterLiveSt
           online: true,
           status: mappedStatus,
           currentFile: firstText(parsed.printFileName) || null,
-          progressPct: progress,
+          progressPct: roundOrNull(progress),
           remainingMinutes: leftSec === null ? null : Math.round(leftSec / 60),
           // Creality WS status carries no filament grams/length.
           filamentUsedMm: null,
