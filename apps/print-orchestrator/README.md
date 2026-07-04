@@ -66,6 +66,39 @@ Moonraker**, not the Creality WebSocket adapter — its config uses
 `SET_PIN PIN=LED VALUE=1/0` read back from `output_pin LED`. Creality
 **WebSocket** light control is not implemented for any model.
 
+## Filament auto-consume
+
+When a print **completes** (never on cancel or error), the poller deducts the
+used filament from the fulfillment warehouse via
+`POST /api/inventory/filament/consume`. All stock logic stays in fulfillment —
+the orchestrator only reports what a printer consumed. Disabled (a no-op) until
+`FULFILLMENT_API_URL` is set, so the farm still runs standalone. Warehouse
+errors are **soft**: logged and shown as one feed warning, never fatal to the
+poll loop. Each deduction carries a stable `idempotencyKey` so a re-observed
+completion or a retry cannot double-deduct.
+
+The consumed amount comes from whatever the device actually knows:
+
+- **Moonraker / K2** reports extruded length (`print_stats.filament_used`), sent
+  as `lengthMm` for the single loaded reel.
+- **Bambu A1 Combo / AMS Lite** MQTT does **not** report grams or length (that
+  lives in slicer metadata). Instead each AMS tray reports `remain` — the
+  printer's own 0–100 % estimate of filament left — and a nominal spool weight.
+  The poller snapshots the trays at print start and, at completion, deducts the
+  drop in `remain` × nominal weight as **grams per tray**, sending one call per
+  used slot with `amsTray` + material/colour hints so fulfillment resolves the
+  right per-slot reel. This naturally covers multi-colour prints. See
+  `src/infra/printers/status/bambuUsage.ts`.
+
+  Caveats, handled honestly rather than papered over: `remain` is quantised to
+  1 % (≈10 g on a 1 kg spool, ≈2.5 g on a 250 g AMS-Lite spool), so very small
+  prints can round to zero; an **uncalibrated** tray (`remain = -1`) or a print
+  that was already running before the orchestrator started (no start snapshot,
+  it is in-memory only) yields no data — nothing is deducted and one soft
+  warning is fed. For exact per-filament grams the upgrade path is the sliced
+  3MF `Metadata/slice_info.config` (`used_g`/`used_m`) fetched over the
+  printer's FTPS, pluggable behind the same completion → consume-items seam.
+
 ## Local development
 
 Uses **pnpm** (via `corepack enable`).

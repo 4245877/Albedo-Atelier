@@ -9,6 +9,8 @@ import {
   supportsPrinterLight,
   type PrinterLiveStatus
 } from "../printers/status";
+import { bambuMeasurableTrayCount, bambuTrayUsage } from "../printers/status/bambuUsage";
+import type { AmsTraySnapshot } from "../printers/status/types";
 import type { CameraService } from "./cameraService";
 import type { EventFeed } from "./eventFeed";
 import type { PersistedToday } from "./stateStore";
@@ -27,12 +29,29 @@ export interface InventoryConsumer {
   readonly enabled: boolean;
   consume(input: {
     printerId: string;
-    lengthMm: number;
+    lengthMm?: number;
+    grams?: number;
+    amsTray?: number;
+    material?: string;
+    color?: string;
     printJobId: string;
     idempotencyKey: string;
     note?: string;
   }): Promise<unknown>;
 }
+
+/** One filament deduction derived from a completed print. */
+type ConsumeItem =
+  | { kind: "length"; lengthMm: number }
+  | { kind: "grams"; grams: number; amsTray: number; material: string | null; color: string | null };
+
+/** Per-printer identity of the in-flight print, for stable idempotent deduction. */
+type PrintRun = {
+  printId: string;
+  file: string | null;
+  /** AMS tray `remain` snapshot at print start (Bambu), diffed at completion. */
+  amsStart: AmsTraySnapshot[] | null;
+};
 
 const COMPLETE_RE = /complete|finish|done/i;
 const CANCEL_RE = /cancel|abort|stop/i;
@@ -94,7 +113,7 @@ export class PrinterPoller {
   private todayFailed = 0;
 
   /** Per-printer identity of the in-flight print, for stable idempotent deduction. */
-  private printRuns = new Map<string, { printId: string; file: string | null }>();
+  private printRuns = new Map<string, PrintRun>();
 
   constructor(
     private readonly enabledConfigs: () => PrinterConfig[],
@@ -105,7 +124,11 @@ export class PrinterPoller {
     /** Gate for the scheduled night-light policy (the `night-lights` automation). */
     private readonly nightLightsEnabled: () => boolean = () => true,
     /** Fulfillment stock client; when absent/disabled, completion deduction is skipped. */
-    private readonly inventory?: InventoryConsumer
+    private readonly inventory?: InventoryConsumer,
+    /** Live telemetry source; injectable so the poll loop can be tested without real devices. */
+    private readonly statusProvider: (
+      printer: PrinterConfig
+    ) => Promise<PrinterLiveStatus> = getPrinterLiveStatus
   ) {
     // Hydrate the counters from persisted state. rolloverToday() resets them on
     // the first read if the persisted day is no longer today.
@@ -148,7 +171,7 @@ export class PrinterPoller {
       this.pruneStaleEntries(enabled);
       await Promise.all(
         enabled.map(async (printer) => {
-          const status = await getPrinterLiveStatus(printer);
+          const status = await this.statusProvider(printer);
           this.recordTransition(printer, this.statuses.get(printer.id), status);
           this.statuses.set(printer.id, status);
         })
@@ -237,6 +260,7 @@ export class PrinterPoller {
     const maps: Map<string, unknown>[] = [
       this.statuses,
       this.changedAt,
+      this.printRuns,
       this.lightTargets,
       this.manualLightOverrides,
       this.lightFailureKeys,
@@ -466,8 +490,15 @@ export class PrinterPoller {
       return;
     }
     if (next.status === "printing" && prev.status !== "printing" && prev.status !== "paused") {
-      // New print run: mint a stable identity used as the idempotency key on finish.
-      this.printRuns.set(printer.id, { printId: randomUUID(), file: job });
+      // New print run: mint a stable identity used as the idempotency key on
+      // finish, and snapshot the AMS trays so Bambu can diff `remain` at
+      // completion. A print already running before the orchestrator started has
+      // no snapshot (in-memory only), so its Bambu consumption is skipped.
+      this.printRuns.set(printer.id, {
+        printId: randomUUID(),
+        file: job,
+        amsStart: next.amsTrays
+      });
       this.events.push("▶", `${name} начал печать${job ? ` «${job}»` : ""}`, "ok");
       return;
     }
@@ -491,13 +522,7 @@ export class PrinterPoller {
       if (looksComplete(next)) {
         this.todayDone += 1;
         this.persist();
-        // Deduct the actually extruded filament (mm). Only Moonraker reports it;
-        // Bambu/Creality leave it null, so their completions are skipped here.
-        const usedMm = next.filamentUsedMm ?? prev.filamentUsedMm;
-        if (usedMm && usedMm > 0) {
-          const printJobId = run?.printId ?? `${printer.id}:${dateKey()}:${job ?? "?"}`;
-          this.consumeFilamentForPrint(printer, usedMm, printJobId, job);
-        }
+        this.consumeFilamentForPrint(printer, prev, next, run, job);
         this.events.push("✔", `${name} завершил печать${job ? ` «${job}»` : ""}`, "ok");
         return;
       }
@@ -506,34 +531,110 @@ export class PrinterPoller {
   }
 
   /**
+   * Turns one completed print into zero or more filament deductions. Moonraker
+   * reports a single extruded length for the loaded reel; Bambu attributes grams
+   * per AMS tray from the drop in each tray's `remain` between the start snapshot
+   * and completion ({@link bambuTrayUsage}), so multi-slot prints deduct from
+   * every slot they used. An empty list means the device gave nothing to deduct.
+   */
+  private buildConsumeItems(
+    printer: PrinterConfig,
+    prev: PrinterLiveStatus,
+    next: PrinterLiveStatus,
+    run: PrintRun | undefined
+  ): ConsumeItem[] {
+    if (printer.protocol === "bambu") {
+      const endTrays = next.amsTrays ?? prev.amsTrays;
+      return bambuTrayUsage(run?.amsStart ?? null, endTrays).map((usage) => ({
+        kind: "grams",
+        grams: usage.grams,
+        amsTray: usage.tray,
+        material: usage.material,
+        color: usage.color
+      }));
+    }
+
+    const usedMm = next.filamentUsedMm ?? prev.filamentUsedMm;
+    return usedMm && usedMm > 0 ? [{ kind: "length", lengthMm: usedMm }] : [];
+  }
+
+  /**
    * Fire-and-forget filament deduction for a completed print. Never throws into
    * the poll loop: a missing/disabled client is a no-op, and any failure
    * (fulfillment down, no loaded filament, not enough stock) is logged and
-   * surfaced as a soft warning in the event feed. Idempotent on
-   * `printerId:printJobId`, so a re-observed completion or retry never
+   * surfaced as a soft warning. Idempotent per print — and per AMS tray — via a
+   * stable `idempotencyKey`, so a re-observed completion or a retry never
    * double-deducts.
+   *
+   * When the print completed but the device gave no usable consumption data —
+   * Bambu with uncalibrated AMS trays (`remain = -1`) or a missing start
+   * snapshot — nothing is deducted (we never invent grams). For Bambu that gap
+   * is surfaced as one soft warning so the operator knows stock was untouched;
+   * Moonraker without a reported length stays silent, exactly as before.
    */
   private consumeFilamentForPrint(
     printer: PrinterConfig,
-    usedMm: number,
-    printJobId: string,
+    prev: PrinterLiveStatus,
+    next: PrinterLiveStatus,
+    run: PrintRun | undefined,
     job: string | null
   ): void {
     if (!this.inventory?.enabled) return;
 
-    void this.inventory
-      .consume({
-        printerId: printer.id,
-        lengthMm: usedMm,
-        printJobId,
-        idempotencyKey: `${printer.id}:${printJobId}`,
-        note: job ? `Печать «${job}»` : undefined
-      })
-      .catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.warn?.({ err: error, printer: printer.id }, "filament consume failed");
-        this.events.push("⚠", `<b>${printer.name}</b>: склад — ${message}`, "err");
-      });
+    const items = this.buildConsumeItems(printer, prev, next, run);
+    if (items.length === 0) {
+      // Warn only when the device gave us nothing to measure (uncalibrated trays
+      // or a missing start snapshot) — not when it measured a print too small to
+      // move the 1 % `remain`, which is a legitimate ~0 g no-op.
+      const endTrays = next.amsTrays ?? prev.amsTrays;
+      if (printer.protocol === "bambu" && bambuMeasurableTrayCount(run?.amsStart ?? null, endTrays) === 0) {
+        this.events.push(
+          "⚠",
+          `<b>${printer.name}</b>: склад — нет данных о расходе филамента${job ? ` для «${job}»` : ""}, списание пропущено`,
+          "err"
+        );
+      }
+      return;
+    }
+
+    const printJobId = run?.printId ?? `${printer.id}:${dateKey()}:${job ?? "?"}`;
+    for (const item of items) {
+      this.dispatchConsumeItem(printer, item, printJobId, job);
+    }
+  }
+
+  private dispatchConsumeItem(
+    printer: PrinterConfig,
+    item: ConsumeItem,
+    printJobId: string,
+    job: string | null
+  ): void {
+    const note = job ? `Печать «${job}»` : undefined;
+    const input =
+      item.kind === "length"
+        ? {
+            printerId: printer.id,
+            lengthMm: item.lengthMm,
+            printJobId,
+            idempotencyKey: `${printer.id}:${printJobId}`,
+            note
+          }
+        : {
+            printerId: printer.id,
+            grams: item.grams,
+            amsTray: item.amsTray,
+            material: item.material ?? undefined,
+            color: item.color ?? undefined,
+            printJobId,
+            idempotencyKey: `${printer.id}:${printJobId}:t${item.amsTray}`,
+            note
+          };
+
+    void this.inventory!.consume(input).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn?.({ err: error, printer: printer.id }, "filament consume failed");
+      this.events.push("⚠", `<b>${printer.name}</b>: склад — ${message}`, "err");
+    });
   }
 
   private rolloverToday(): void {

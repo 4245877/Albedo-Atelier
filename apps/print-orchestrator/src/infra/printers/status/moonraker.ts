@@ -102,6 +102,8 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
       progressPct,
       remainingMinutes: estimateRemainingMinutes(progressPct, elapsedSec),
       filamentUsedMm,
+      // Moonraker/Klipper has no AMS concept here; filament is one loaded reel.
+      amsTrays: null,
       nozzleTemp: roundOrNull(toFiniteNumber(extruder.temperature)),
       nozzleTarget: roundOrNull(toFiniteNumber(extruder.target)),
       bedTemp: roundOrNull(toFiniteNumber(bed.temperature)),

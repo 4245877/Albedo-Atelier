@@ -2,9 +2,20 @@ import { env } from "../../shared/env";
 
 /**
  * Server-side client for the fulfillment inventory API. When a print completes,
- * the orchestrator posts the extruded length here and fulfillment deducts the
- * matching filament stock (resolving material/color from the printer's loaded
- * reel and converting mm→grams by material density on its side).
+ * the orchestrator posts the consumed filament here and fulfillment deducts the
+ * matching stock (resolving material/color from the printer's loaded reel and
+ * converting mm→grams by material density on its side).
+ *
+ * Two quantity shapes, one per source of truth:
+ *  - Moonraker/K2 reports extruded length, so we send `lengthMm` for the single
+ *    loaded reel.
+ *  - Bambu MQTT has no length; filament is measured per AMS tray in grams (see
+ *    bambuUsage.ts), so we send `grams` plus `amsTray` (which slot) and the
+ *    tray's `material`/`color` hints, one call per used slot. Fulfillment uses
+ *    `amsTray` to resolve that slot's reel and already tracks stock in grams.
+ *
+ * These extra fields are additive: a fulfillment that only understands the
+ * single-reel `lengthMm` case keeps working for Moonraker unchanged.
  *
  * Modeled on fulfillment's own outbound proxy (`modules/appeals/upstream.ts`):
  * `fetch` + `AbortController` timeout, a typed error, and a safe JSON parse. The
@@ -18,7 +29,15 @@ export type ConsumeFilamentInput = {
   /** Orchestrator printer id; must match fulfillment's `printer_filament_state.printerId`. */
   printerId: string;
   /** Extruded filament length in mm (Moonraker `print_stats.filament_used`). */
-  lengthMm: number;
+  lengthMm?: number;
+  /** Consumed grams (Bambu AMS remain-delta). Provide this or {@link lengthMm}. */
+  grams?: number;
+  /** AMS slot index for per-slot reel resolution (Bambu AMS); omit for single-reel printers. */
+  amsTray?: number;
+  /** Material hint from the AMS tray (`tray_type`), to resolve/validate the slot's reel. */
+  material?: string;
+  /** Colour hint from the AMS tray (`#RRGGBB`). */
+  color?: string;
   /** Stable identity of the print run, recorded on the movement. */
   printJobId: string;
   /** Dedup key so a re-observed/retried completion is not deducted twice. */
@@ -77,9 +96,15 @@ export class FulfillmentInventoryClient {
         method: "POST",
         signal: controller.signal,
         headers: { "Content-Type": "application/json" },
+        // Undefined fields are dropped by JSON.stringify, so each call carries
+        // only the quantity/hints its source actually has.
         body: JSON.stringify({
           printerId: input.printerId,
           lengthMm: input.lengthMm,
+          grams: input.grams,
+          amsTray: input.amsTray,
+          material: input.material,
+          color: input.color,
           source: "printer",
           printJobId: input.printJobId,
           idempotencyKey: input.idempotencyKey,

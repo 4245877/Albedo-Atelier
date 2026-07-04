@@ -1,6 +1,7 @@
 import mqtt from "mqtt";
 
 import type { PrinterConfig } from "../config";
+import { parseAmsTrays } from "./bambuUsage";
 import {
   firstFiniteNumber,
   firstText,
@@ -141,8 +142,11 @@ function buildBambuStatus(printer: PrinterConfig, payload: unknown): PrinterLive
     currentFile: currentFile || null,
     progressPct: roundOrNull(progressPct),
     remainingMinutes: roundOrNull(remainingMinutes),
-    // Bambu MQTT does not expose grams/length consumed (it lives in slicer metadata).
+    // Bambu MQTT does not expose grams/length consumed (it lives in slicer
+    // metadata). Filament is instead attributed per AMS tray at completion from
+    // the drop in each tray's `remain` estimate — see bambuUsage.ts.
     filamentUsedMm: null,
+    amsTrays: parseAmsTrays(print),
     nozzleTemp: roundOrNull(nozzleTemp),
     nozzleTarget: roundOrNull(nozzleTarget),
     bedTemp: roundOrNull(bedTemp),
@@ -173,6 +177,7 @@ function mergeBambuStatus(
     currentFile: next.currentFile ?? previous.currentFile,
     progressPct: next.progressPct ?? previous.progressPct,
     remainingMinutes: next.remainingMinutes ?? previous.remainingMinutes,
+    amsTrays: next.amsTrays ?? previous.amsTrays,
     nozzleTemp: next.nozzleTemp ?? previous.nozzleTemp,
     nozzleTarget: next.nozzleTarget ?? previous.nozzleTarget,
     bedTemp: next.bedTemp ?? previous.bedTemp,
