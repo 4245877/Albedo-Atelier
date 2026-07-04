@@ -38,12 +38,18 @@ export interface PrinterView {
   material: string | null;
   swatch: string | null;
   /**
-   * Configured nozzle diameter in mm, live from the printer (Bambu setting, not
-   * a physical sensor); null when the device/adapter does not report it.
+   * Nozzle diameter in mm. Live from the printer where it reports the setting
+   * (Bambu `nozzle_diameter`, or Klipper/Moonraker `configfile` on the K2), else
+   * the configured `nozzleDiameterMm` fallback; null when neither is known. It is
+   * a printer/slicer *setting*, not a physical sensor.
    */
   nozzleDiameter: number | null;
-  /** Nozzle hardware type live from the printer (e.g. "hardened_steel"); null when unreported. */
+  /** Where {@link nozzleDiameter} came from: `printer` (live), `config` (printers.json) or `unknown`. */
+  nozzleDiameterSource: "printer" | "config" | "unknown";
+  /** Nozzle hardware type (e.g. "hardened_steel"), live from the printer or the config fallback; null when unknown. */
   nozzleType: string | null;
+  /** Where {@link nozzleType} came from: `printer` (live), `config` (printers.json) or `unknown`. */
+  nozzleTypeSource: "printer" | "config" | "unknown";
   /** Active filament material live from the printer (AMS tray or external spool); null when unreported. */
   liveMaterial: string | null;
   /** `#RRGGBB` of the active filament live from the printer; null when unreported. */

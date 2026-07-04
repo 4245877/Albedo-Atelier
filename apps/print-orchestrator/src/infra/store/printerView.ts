@@ -40,6 +40,20 @@ export function buildPrinterView(
       ? "config"
       : "unknown";
 
+  // Same rule for the nozzle: prefer the live setting from the device (Bambu, or
+  // the K2's Klipper config), else the configured fallback, tagged honestly so
+  // the dashboard never shows a config value as live telemetry.
+  const liveNozzleDiameter = status?.nozzleDiameterMm ?? null;
+  const nozzleDiameter = liveNozzleDiameter ?? printer.nozzleDiameterMm ?? null;
+  const nozzleDiameterSource: PrinterView["nozzleDiameterSource"] =
+    liveNozzleDiameter !== null ? "printer" : printer.nozzleDiameterMm != null ? "config" : "unknown";
+
+  const liveNozzleType = status?.nozzleType ?? null;
+  const configNozzleType = printer.nozzleType || null;
+  const nozzleType = liveNozzleType ?? configNozzleType;
+  const nozzleTypeSource: PrinterView["nozzleTypeSource"] =
+    liveNozzleType ? "printer" : configNozzleType ? "config" : "unknown";
+
   return {
     id: printer.id,
     name: printer.name,
@@ -54,8 +68,10 @@ export function buildPrinterView(
     minutesLeft: status?.remainingMinutes ?? null,
     material: printer.material || null,
     swatch: printer.swatch || null,
-    nozzleDiameter: status?.nozzleDiameterMm ?? null,
-    nozzleType: status?.nozzleType ?? null,
+    nozzleDiameter,
+    nozzleDiameterSource,
+    nozzleType,
+    nozzleTypeSource,
     liveMaterial,
     liveMaterialColor: activeFilament?.color ?? null,
     liveMaterialSource,

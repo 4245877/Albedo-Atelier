@@ -38,6 +38,14 @@ export interface PrinterConfig {
 
   /** Declared loaded material (config metadata, not live telemetry). */
   material: string;
+  /**
+   * Optional configured nozzle diameter in mm. A config fallback the view shows
+   * as "из конфигурации" only when the device does not report a live diameter
+   * (e.g. a Creality WS printer, or any printer while it is offline).
+   */
+  nozzleDiameterMm?: number | null;
+  /** Optional configured nozzle hardware type; same "из конфигурации" fallback role. */
+  nozzleType?: string;
   /** Optional UI colour for the material chip. */
   swatch: string;
   /** Explicit camera snapshot URL; empty when the camera is not set up. */
@@ -126,6 +134,7 @@ export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
 
   const portValue = Number(value.port);
   const protocol = normalizeProtocol(value.protocol);
+  const nozzleDiameterValue = Number(value.nozzleDiameterMm);
 
   return {
     id,
@@ -138,6 +147,9 @@ export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
     port: Number.isFinite(portValue) && portValue > 0 ? portValue : undefined,
 
     material: asString(value.material),
+    nozzleDiameterMm:
+      Number.isFinite(nozzleDiameterValue) && nozzleDiameterValue > 0 ? nozzleDiameterValue : null,
+    nozzleType: asString(value.nozzleType),
     swatch: asString(value.swatch),
     snapshotUrl: asString(value.snapshotUrl),
     streamUrl: asString(value.streamUrl),

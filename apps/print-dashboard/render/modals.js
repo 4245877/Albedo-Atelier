@@ -86,7 +86,12 @@ function teleRows(p) {
   if (p.nozzle) rows.push(["Сопло", `${p.nozzle[0]}°${p.nozzle[1] != null ? ` / ${p.nozzle[1]}°` : ""}`]);
   if (p.bed) rows.push(["Стол", `${p.bed[0]}°${p.bed[1] != null ? ` / ${p.bed[1]}°` : ""}`]);
   if (p.chamber != null) rows.push(["Камера", `${p.chamber}°`]);
-  if (p.nozzleType) rows.push(["Тип сопла", p.nozzleType]);
+  if (p.nozzleType) {
+    rows.push([
+      "Тип сопла",
+      p.nozzleTypeSource === "config" ? `${p.nozzleType} (из конфигурации)` : p.nozzleType,
+    ]);
+  }
   if (p.liveMaterialSource === "printer" && p.activeTray != null) {
     rows.push(["Активный лоток", `AMS ${p.activeTray + 1}`]);
   }

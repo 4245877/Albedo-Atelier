@@ -1078,7 +1078,8 @@ body::before {
 .src-printer { color: var(--gold-bright); background: var(--gold-soft); }
 .src-config { color: var(--ink-faint); background: var(--card-inner); border: 1px solid var(--card-edge); }
 
-/* Чип диаметра сопла (Bambu `nozzle_diameter`). */
+/* Чип диаметра сопла: живое значение с принтера (Bambu `nozzle_diameter`,
+   Klipper `configfile` на K2) либо значение из конфигурации. */
 .nozzle-chip {
   padding: 1px 8px;
   border-radius: 999px;
@@ -1089,6 +1090,8 @@ body::before {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* Диаметр из конфигурации, а не с принтера: приглушённый, пунктирная рамка. */
+.nozzle-chip-config { color: var(--ink-faint); border-style: dashed; }
 
 .printer-actions {
   display: flex;

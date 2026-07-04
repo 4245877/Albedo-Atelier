@@ -34,9 +34,33 @@ function moonrakerStatusUrl(printer: PrinterConfig): string {
   if (printer.light.enabled && printer.light.statusObject) {
     objects.push(printer.light.statusObject);
   }
-  return `${moonrakerBaseUrl(printer)}/printer/objects/query?${objects
-    .map((object) => encodeURIComponent(object))
-    .join("&")}`;
+  const query = objects.map((object) => encodeURIComponent(object)).join("&");
+  // `configfile=settings` selects only the parsed-settings subtree (which holds
+  // `extruder.nozzle_diameter`) rather than the whole raw+parsed config blob.
+  // `settings` is a literal Moonraker sub-field spec, so it is not URL-encoded.
+  return `${moonrakerBaseUrl(printer)}/printer/objects/query?${query}&configfile=settings`;
+}
+
+/**
+ * Klipper's configured nozzle diameter, read live from the device's own config
+ * via the Moonraker `configfile` object (`settings.extruder.nozzle_diameter`,
+ * already type-converted to a number; the raw `config` string is a fallback).
+ * This is the printer/slicer *setting*, not a physical sensor — a manual nozzle
+ * swap without updating `printer.cfg` leaves it stale (same caveat as Bambu).
+ * `null` when the object is absent or malformed — never invented.
+ */
+export function parseMoonrakerNozzleDiameter(status: Record<string, unknown>): number | null {
+  const configfile = isObject(status.configfile) ? status.configfile : null;
+  if (!configfile) return null;
+
+  const settings = isObject(configfile.settings) ? configfile.settings : null;
+  const config = isObject(configfile.config) ? configfile.config : null;
+  const fromSettings = settings && isObject(settings.extruder) ? settings.extruder.nozzle_diameter : null;
+  const fromConfig = config && isObject(config.extruder) ? config.extruder.nozzle_diameter : null;
+
+  const diameter = firstFiniteNumber(fromSettings, fromConfig);
+  // Guard against a bogus 0/negative slipping through as a real value.
+  return diameter !== null && diameter > 0 ? diameter : null;
 }
 
 function readMoonrakerLightState(
@@ -94,6 +118,11 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
     const stateMessage = firstText(printStats.message) || null;
     const mappedStatus = toStatusState(printStats.state);
 
+    // Nozzle diameter comes from Klipper's parsed config (a setting, not a live
+    // sensor). The Creality K2 runs Klipper over Moonraker, so this populates for
+    // it too — see README "Nozzle & active filament".
+    const nozzleDiameterMm = parseMoonrakerNozzleDiameter(status);
+
     return {
       id: printer.id,
       online: true,
@@ -104,9 +133,11 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
       filamentUsedMm,
       // Moonraker/Klipper has no AMS concept here; filament is one loaded reel.
       amsTrays: null,
-      // Klipper does not report a nozzle diameter or an active filament type
-      // over these objects — left null (fall back to config material).
-      nozzleDiameterMm: null,
+      nozzleDiameterMm,
+      // Klipper has no standard "nozzle type" field, and the active filament
+      // material is not in these core objects (Creality's CFS `box` object /
+      // sliced-file metadata are the upgrade path — see README). Left null so the
+      // view falls back to the configured nozzle type / material.
       nozzleType: null,
       activeFilament: null,
       nozzleTemp: roundOrNull(toFiniteNumber(extruder.temperature)),
