@@ -94,6 +94,31 @@ test("an offline printer still shows the configured nozzle as a config fallback"
   assert.equal(view.nozzleDiameterSource, "config");
 });
 
+test("live filament from the job wins over config and is tagged as from the printer", () => {
+  const view = buildPrinterView(
+    k2(),
+    liveStatus({ activeFilament: { material: "PLA", color: "#1A2B3C", tray: null, remainPct: null } }),
+    undefined
+  );
+  assert.equal(view.liveMaterial, "PLA");
+  assert.equal(view.liveMaterialColor, "#1A2B3C");
+  assert.equal(view.liveMaterialSource, "printer");
+  assert.equal(view.activeTray, null);
+});
+
+test("with no live filament, the configured material is used and tagged as config", () => {
+  const view = buildPrinterView(k2({ material: "PETG" }), liveStatus({}), undefined);
+  assert.equal(view.liveMaterial, null);
+  assert.equal(view.material, "PETG");
+  assert.equal(view.liveMaterialSource, "config");
+});
+
+test("no live filament and no configured material is unknown, never invented", () => {
+  const view = buildPrinterView(k2({ material: "" }), liveStatus({}), undefined);
+  assert.equal(view.liveMaterial, null);
+  assert.equal(view.liveMaterialSource, "unknown");
+});
+
 test("normalizePrinterConfig rejects a bogus configured diameter", () => {
   assert.equal(k2({ nozzleDiameterMm: 0 }).nozzleDiameterMm, null);
   assert.equal(k2({ nozzleDiameterMm: "abc" }).nozzleDiameterMm, null);

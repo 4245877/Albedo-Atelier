@@ -111,17 +111,22 @@ the config's `material` field in sync by hand:
   reports it live too. Like Bambu's, it is a *setting* read from the printer's own
   config, not a sensor. `nozzleType` is **Bambu-only** — Klipper has no standard
   nozzle-type field.
-- `liveMaterial` / `liveMaterialColor` / `activeTray` — the active filament,
-  resolved in `resolveActiveFilament()` (`src/infra/printers/status/bambuUsage.ts`):
-  first the active AMS/AMS-Lite tray (`print.ams.tray_now` →
-  `print.ams.ams[].tray[].tray_type` / `tray_color`), then the external spool
-  (`print.vt_tray`) when no AMS tray is feeding. **Bambu only** so far — see the
-  K2 note below for why Moonraker/Klipper leaves this `null`.
+- `liveMaterial` / `liveMaterialColor` / `activeTray` — the active filament. On
+  **Bambu**, resolved in `resolveActiveFilament()`
+  (`src/infra/printers/status/bambuUsage.ts`): first the active AMS/AMS-Lite tray
+  (`print.ams.tray_now` → `print.ams.ams[].tray[].tray_type` / `tray_color`), then
+  the external spool (`print.vt_tray`) when no AMS tray is feeding. On the
+  **Creality K2** (Moonraker), resolved in `parseMoonrakerJobFilament()` from the
+  *current job's sliced metadata* (`/server/files/metadata` → `filament_type` /
+  `filament_colors`) while a print is loaded — see the K2 note below. `activeTray`
+  is `null` on the K2 (no slot concept in metadata).
 - `liveMaterialSource` / `nozzleDiameterSource` / `nozzleTypeSource` — `"printer"`
   when the value came from the device, `"config"` when it fell back to
   `printers.json`, or `"unknown"` when neither is set. The dashboard shows a small
   **с принтера** / **из конфигурации** tag on the material, and the `Сопло 0.4 мм`
   chip renders muted/dashed when the diameter is a config fallback rather than live.
+  On the K2, a `"printer"` material tag means "the sliced material of the running
+  job" (not an RFID/sensor read) — the honest live source Moonraker exposes there.
 
 **Config fallback.** Beyond the declared `material`, `printers.json` accepts
 optional `nozzleDiameterMm` and `nozzleType`. They are shown only as a labelled
@@ -135,20 +140,25 @@ Partial MQTT deltas that omit these fields keep the last known value (merge in
 ### Creality K2 filament type — what is and isn't available
 
 The K2 runs Klipper behind Moonraker, so its **nozzle diameter** is a real live
-read (above). Its **active filament type/colour is not** in the core Moonraker
-objects we poll, so it stays `null` and falls back to the configured `material`.
-Two device-side sources exist but need verification against the real hardware
-before being wired into the poll loop (the K2 is frequently powered fully off,
-and this unit runs a single-material spool — CFS is optional on the base K2):
+read (above). Its **active filament** comes from the **current job's sliced
+metadata** (`parseMoonrakerJobFilament()`); the CFS `box`/`filament_rack` objects
+are deliberately **not** a source. This was verified against the real unit
+(K2-7F14) with `scripts/probe-k2.mjs`:
 
-- **CFS (`box` object)** — Creality's multi-material system exposes a closed-source
-  `[box]` Klipper module over `printer/objects/query?box`: per-slot `material_type`
-  (coded `1XXXXX`, decoded via the cloud-fetched `material_database.json`),
-  `color_value` (`#RRGGBB`) and `remain_len`. There is no documented "active slot"
-  flag, so which slot is feeding is not yet reliably derivable.
-- **Sliced-file metadata** — `GET /server/files/metadata?filename=<print_stats.filename>`
-  returns the job's `filament_type` / `filament_name` (the sliced material). Works
-  without a CFS, but only while a print with known metadata is loaded.
+- **Sliced-file metadata (used)** — `GET /server/files/metadata?filename=<print_stats.filename>`
+  returns the job's `filament_type` / `filament_name` and (slicer-dependent)
+  `filament_colors`. `parseMoonrakerJobFilament` takes the primary material and
+  first valid `#RRGGBB`, tagged `liveMaterialSource: "printer"`. Fetched only
+  while a print is `printing`/`paused` with a known filename; otherwise the view
+  falls back to the configured `material`. It is the *sliced* material, not a
+  sensor read — same "setting, not measurement" caveat as the nozzle diameter.
+- **CFS (`box` object) — not used.** The probe showed `box.state: "disconnect"`
+  with every slot (`T1..T4`, positions A–D) reporting `material_type` /
+  `color_value` / `remain_len` as `"-1"`, and **no field naming the active slot**.
+  `filament_rack` likewise reported `material_type: "-1"`. Reading an "active
+  filament" from these would mean inventing the slot, so it is left alone until a
+  loaded CFS payload can be captured. (`material_type` is a coded `1XXXXX` value
+  decoded via Creality's cloud `material_database.json`, also not available here.)
 
 Use `scripts/probe-k2.mjs` to dump these raw payloads from real hardware:
 

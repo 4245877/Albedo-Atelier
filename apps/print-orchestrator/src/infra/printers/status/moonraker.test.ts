@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { parseMoonrakerNozzleDiameter } from "./moonraker";
+import { parseMoonrakerJobFilament, parseMoonrakerNozzleDiameter } from "./moonraker";
 
 /*
  * Nozzle diameter from Klipper's parsed config, as returned by Moonraker's
@@ -54,4 +54,39 @@ test("tolerates malformed shapes without throwing", () => {
     parseMoonrakerNozzleDiameter({ configfile: { settings: { extruder: "nope" } } }),
     null
   );
+});
+
+/*
+ * Active filament from the current job's sliced metadata — the honest live
+ * filament signal for the K2 (its CFS `box`/`filament_rack` carry no usable
+ * material and no active-slot field, so they are intentionally not a source).
+ */
+
+test("reads material and colour from sliced job metadata", () => {
+  const filament = parseMoonrakerJobFilament({
+    filament_type: "PLA",
+    filament_colors: ["#1A2B3C"],
+  });
+  assert.deepEqual(filament, { material: "PLA", color: "#1A2B3C", tray: null, remainPct: null });
+});
+
+test("takes the primary material from a multi-material list", () => {
+  assert.equal(parseMoonrakerJobFilament({ filament_type: "PETG;PLA" })?.material, "PETG");
+  assert.equal(parseMoonrakerJobFilament({ filament_type: "PETG,PLA" })?.material, "PETG");
+  assert.equal(parseMoonrakerJobFilament({ filament_type: ["ABS", "PLA"] })?.material, "ABS");
+});
+
+test("falls back to filament_name when filament_type is absent", () => {
+  assert.equal(parseMoonrakerJobFilament({ filament_name: "Generic TPU" })?.material, "Generic TPU");
+});
+
+test("normalises a bare hex colour and ignores an invalid one", () => {
+  assert.equal(parseMoonrakerJobFilament({ filament_type: "PLA", filament_colors: ["1a2b3c"] })?.color, "#1A2B3C");
+  assert.equal(parseMoonrakerJobFilament({ filament_type: "PLA", filament_colors: ["nope"] })?.color, null);
+});
+
+test("returns null when metadata carries no usable filament (never invents)", () => {
+  assert.equal(parseMoonrakerJobFilament({}), null);
+  assert.equal(parseMoonrakerJobFilament({ filament_type: "-1", filament_colors: [] }), null);
+  assert.equal(parseMoonrakerJobFilament({ filament_type: "unknown" }), null);
 });

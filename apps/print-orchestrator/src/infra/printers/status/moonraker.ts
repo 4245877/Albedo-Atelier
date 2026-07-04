@@ -9,7 +9,12 @@ import {
   toFiniteNumber,
   toStatusState
 } from "./mapper";
-import { PrinterCommandError, type PrinterCommand, type PrinterLiveStatus } from "./types";
+import {
+  PrinterCommandError,
+  type ActiveFilament,
+  type PrinterCommand,
+  type PrinterLiveStatus
+} from "./types";
 
 const MOONRAKER_TIMEOUT_MS = 3500;
 const MOONRAKER_STATUS_OBJECTS = [
@@ -61,6 +66,79 @@ export function parseMoonrakerNozzleDiameter(status: Record<string, unknown>): n
   const diameter = firstFiniteNumber(fromSettings, fromConfig);
   // Guard against a bogus 0/negative slipping through as a real value.
   return diameter !== null && diameter > 0 ? diameter : null;
+}
+
+/**
+ * The first concrete filament material from a slicer metadata field. Slicers
+ * emit `filament_type` either as a single string ("PLA"), a multi-material list
+ * ("PLA;PETG" / "PLA,PETG"), or an array. We surface the first non-empty token —
+ * a print's *primary* material — rather than guessing which slot is feeding.
+ * `-1`/`""`/`unknown` (what an empty Creality slot reports) yields null.
+ */
+function firstFilamentToken(value: unknown): string | null {
+  const values = Array.isArray(value) ? value : [value];
+  for (const entry of values) {
+    for (const token of firstText(entry).split(/[;,]/)) {
+      const material = token.trim();
+      if (material && material !== "-1" && material.toLowerCase() !== "unknown") return material;
+    }
+  }
+  return null;
+}
+
+/** First valid `#RRGGBB` from a slicer `filament_colors` array (or single value); null otherwise. */
+function firstHexColor(value: unknown): string | null {
+  const values = Array.isArray(value) ? value : [value];
+  for (const entry of values) {
+    const match = /^#?([0-9a-fA-F]{6})$/.exec(firstText(entry));
+    if (match) return `#${match[1].toUpperCase()}`;
+  }
+  return null;
+}
+
+/**
+ * The active filament for the K2 from the *current job's sliced metadata*
+ * (`/server/files/metadata` — `filament_type` / `filament_colors`). This is the
+ * material the slicer was told to use, not a physical sensor reading, and it
+ * only exists while a sliced file is loaded — but it is the one honest live
+ * filament signal Moonraker/Klipper exposes on this unit.
+ *
+ * Deliberately NOT sourced from Creality's `[box]` (CFS) or `filament_rack`:
+ * the real K2 payload reports every slot as `-1`/`None` with no field telling
+ * which slot is feeding, so an "active filament" read from them would be
+ * invented. `tray`/`remainPct` stay null — metadata has no slot concept.
+ */
+export function parseMoonrakerJobFilament(metadata: Record<string, unknown>): ActiveFilament | null {
+  const material = firstFilamentToken(metadata.filament_type) ?? firstFilamentToken(metadata.filament_name);
+  const color = firstHexColor(metadata.filament_colors);
+  if (!material && color === null) return null;
+  return { material, color, tray: null, remainPct: null };
+}
+
+/**
+ * Best-effort fetch of the current job's sliced filament from Moonraker's file
+ * metadata. Never throws — filament is a nice-to-have that must not break (or
+ * slow past its own timeout) the core status poll, so any failure returns null.
+ */
+async function fetchMoonrakerJobFilament(
+  printer: PrinterConfig,
+  filename: string
+): Promise<ActiveFilament | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), MOONRAKER_TIMEOUT_MS);
+  try {
+    const res = await fetch(
+      `${moonrakerBaseUrl(printer)}/server/files/metadata?filename=${encodeURIComponent(filename)}`,
+      { signal: controller.signal, headers: moonrakerHeaders(printer) }
+    );
+    if (!res.ok) return null;
+    const json = (await res.json()) as { result?: unknown };
+    return isObject(json?.result) ? parseMoonrakerJobFilament(json.result) : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function readMoonrakerLightState(
@@ -123,23 +201,32 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
     // it too — see README "Nozzle & active filament".
     const nozzleDiameterMm = parseMoonrakerNozzleDiameter(status);
 
+    // Active filament from the current job's sliced metadata — the only honest
+    // live filament signal the K2 exposes (CFS `box`/`filament_rack` report no
+    // usable material and no active slot). Only meaningful while a print is
+    // loaded, so skip the extra request otherwise.
+    const currentFile = firstText(printStats.filename) || null;
+    const activeFilament =
+      currentFile && (mappedStatus === "printing" || mappedStatus === "paused")
+        ? await fetchMoonrakerJobFilament(printer, currentFile)
+        : null;
+
     return {
       id: printer.id,
       online: true,
       status: mappedStatus,
-      currentFile: firstText(printStats.filename) || null,
+      currentFile,
       progressPct,
       remainingMinutes: estimateRemainingMinutes(progressPct, elapsedSec),
       filamentUsedMm,
       // Moonraker/Klipper has no AMS concept here; filament is one loaded reel.
       amsTrays: null,
       nozzleDiameterMm,
-      // Klipper has no standard "nozzle type" field, and the active filament
-      // material is not in these core objects (Creality's CFS `box` object /
-      // sliced-file metadata are the upgrade path — see README). Left null so the
-      // view falls back to the configured nozzle type / material.
+      // Klipper has no standard "nozzle type" field, so this stays null and the
+      // view falls back to the configured nozzle type. (Active filament, by
+      // contrast, now comes from the current job's sliced metadata — below.)
       nozzleType: null,
-      activeFilament: null,
+      activeFilament,
       nozzleTemp: roundOrNull(toFiniteNumber(extruder.temperature)),
       nozzleTarget: roundOrNull(toFiniteNumber(extruder.target)),
       bedTemp: roundOrNull(toFiniteNumber(bed.temperature)),
