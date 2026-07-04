@@ -104,6 +104,11 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
       filamentUsedMm,
       // Moonraker/Klipper has no AMS concept here; filament is one loaded reel.
       amsTrays: null,
+      // Klipper does not report a nozzle diameter or an active filament type
+      // over these objects — left null (fall back to config material).
+      nozzleDiameterMm: null,
+      nozzleType: null,
+      activeFilament: null,
       nozzleTemp: roundOrNull(toFiniteNumber(extruder.temperature)),
       nozzleTarget: roundOrNull(toFiniteNumber(extruder.target)),
       bedTemp: roundOrNull(toFiniteNumber(bed.temperature)),

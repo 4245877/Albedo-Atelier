@@ -1,7 +1,7 @@
 import mqtt from "mqtt";
 
 import type { PrinterConfig } from "../config";
-import { parseAmsTrays } from "./bambuUsage";
+import { parseAmsTrays, resolveActiveFilament } from "./bambuUsage";
 import {
   firstFiniteNumber,
   firstText,
@@ -98,12 +98,18 @@ function mergeBambuRawPrint(
   return merged;
 }
 
-function buildBambuStatus(printer: PrinterConfig, payload: unknown): PrinterLiveStatus | null {
+export function buildBambuStatus(printer: PrinterConfig, payload: unknown): PrinterLiveStatus | null {
   const print = getBambuPrintPayload(payload);
   if (!print) return null;
 
   const progressPct = firstFiniteNumber(print.mc_percent, print.progress, print.print_progress);
   const remainingMinutes = firstFiniteNumber(print.mc_remaining_time, print.remaining_time);
+  // `nozzle_diameter` is a printer/slicer setting (not a physical sensor); a
+  // manual nozzle swap without a settings update leaves it stale — see README.
+  const nozzleDiameterMm = firstFiniteNumber(print.nozzle_diameter);
+  const nozzleType = firstText(print.nozzle_type) || null;
+  const amsTrays = parseAmsTrays(print);
+  const activeFilament = resolveActiveFilament(print, amsTrays);
   const nozzleTemp = firstFiniteNumber(print.nozzle_temper, print.nozzle_temperature);
   const nozzleTarget = firstFiniteNumber(print.nozzle_target_temper);
   const bedTemp = firstFiniteNumber(print.bed_temper, print.bed_temperature);
@@ -146,7 +152,10 @@ function buildBambuStatus(printer: PrinterConfig, payload: unknown): PrinterLive
     // metadata). Filament is instead attributed per AMS tray at completion from
     // the drop in each tray's `remain` estimate — see bambuUsage.ts.
     filamentUsedMm: null,
-    amsTrays: parseAmsTrays(print),
+    amsTrays,
+    nozzleDiameterMm,
+    nozzleType,
+    activeFilament,
     nozzleTemp: roundOrNull(nozzleTemp),
     nozzleTarget: roundOrNull(nozzleTarget),
     bedTemp: roundOrNull(bedTemp),
@@ -164,7 +173,7 @@ function buildBambuStatus(printer: PrinterConfig, payload: unknown): PrinterLive
   };
 }
 
-function mergeBambuStatus(
+export function mergeBambuStatus(
   previous: PrinterLiveStatus | undefined,
   next: PrinterLiveStatus
 ): PrinterLiveStatus {
@@ -178,6 +187,11 @@ function mergeBambuStatus(
     progressPct: next.progressPct ?? previous.progressPct,
     remainingMinutes: next.remainingMinutes ?? previous.remainingMinutes,
     amsTrays: next.amsTrays ?? previous.amsTrays,
+    // A partial delta may omit the nozzle setting or the active tray; keep the
+    // last known value so the view doesn't flicker to "unknown".
+    nozzleDiameterMm: next.nozzleDiameterMm ?? previous.nozzleDiameterMm,
+    nozzleType: next.nozzleType ?? previous.nozzleType,
+    activeFilament: next.activeFilament ?? previous.activeFilament,
     nozzleTemp: next.nozzleTemp ?? previous.nozzleTemp,
     nozzleTarget: next.nozzleTarget ?? previous.nozzleTarget,
     bedTemp: next.bedTemp ?? previous.bedTemp,

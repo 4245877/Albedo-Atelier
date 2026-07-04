@@ -76,6 +76,10 @@ export function getCrealityStatus(printer: PrinterConfig): Promise<PrinterLiveSt
           // Creality WS status carries no filament grams/length.
           filamentUsedMm: null,
           amsTrays: null,
+          // Creality WS status exposes no nozzle diameter or filament type.
+          nozzleDiameterMm: null,
+          nozzleType: null,
+          activeFilament: null,
           nozzleTemp: roundOrNull(toFiniteNumber(parsed.nozzleTemp)),
           nozzleTarget: roundOrNull(firstFiniteNumber(parsed.targetNozzleTemp, parsed.nozzleTempTarget)),
           bedTemp: roundOrNull(toFiniteNumber(parsed.bedTemp0)),

@@ -21,6 +21,20 @@ export interface AmsTraySnapshot {
 }
 
 /**
+ * The filament the printer is currently feeding from, resolved live from the
+ * device: the active AMS/AMS-Lite tray (`ams.tray_now`) or, with no AMS, the
+ * external spool (`vt_tray`). Every field is `null` when the device does not
+ * report it — never invented. `tray` is the global AMS tray index, or `null`
+ * for the external spool.
+ */
+export interface ActiveFilament {
+  material: string | null;
+  color: string | null;
+  tray: number | null;
+  remainPct: number | null;
+}
+
+/**
  * Live telemetry for one printer, straight from the device. Adapted from
  * apps/fulfillment (`modules/printers/routes.ts`), extended with temperature
  * targets and chamber readings where the device reports them. Every field that
@@ -44,6 +58,21 @@ export interface PrinterLiveStatus {
    * at completion to attribute filament per slot.
    */
   amsTrays: AmsTraySnapshot[] | null;
+  /**
+   * Configured nozzle diameter in mm (Bambu `nozzle_diameter`). Reflects the
+   * printer/slicer *setting*, not a physical sensor — if the nozzle was swapped
+   * without updating the setting, this can be stale. `null` when the device or
+   * adapter does not report it (Moonraker, Creality, offline).
+   */
+  nozzleDiameterMm: number | null;
+  /** Nozzle hardware type (Bambu `nozzle_type`, e.g. "hardened_steel"); null when unreported. */
+  nozzleType: string | null;
+  /**
+   * Filament currently loaded/feeding, straight from the device (active AMS
+   * tray or external `vt_tray`). `null` when the device reports neither — the
+   * view then falls back to the configured material.
+   */
+  activeFilament: ActiveFilament | null;
   nozzleTemp: number | null;
   nozzleTarget: number | null;
   bedTemp: number | null;

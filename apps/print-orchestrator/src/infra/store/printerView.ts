@@ -30,6 +30,16 @@ export function buildPrinterView(
   const cameraOnline = cameraState === "online";
   const webrtcSource = resolveWebrtcSource(printer);
 
+  // Prefer live filament telemetry from the device; fall back to the configured
+  // material. Only "printer" is authoritative — config is a declared default.
+  const activeFilament = status?.activeFilament ?? null;
+  const liveMaterial = activeFilament?.material ?? null;
+  const liveMaterialSource: PrinterView["liveMaterialSource"] = liveMaterial
+    ? "printer"
+    : printer.material
+      ? "config"
+      : "unknown";
+
   return {
     id: printer.id,
     name: printer.name,
@@ -44,6 +54,12 @@ export function buildPrinterView(
     minutesLeft: status?.remainingMinutes ?? null,
     material: printer.material || null,
     swatch: printer.swatch || null,
+    nozzleDiameter: status?.nozzleDiameterMm ?? null,
+    nozzleType: status?.nozzleType ?? null,
+    liveMaterial,
+    liveMaterialColor: activeFilament?.color ?? null,
+    liveMaterialSource,
+    activeTray: activeFilament?.tray ?? null,
     camera: cameraState,
     cameraStream: cameraOnline && hasCameraStream(printer),
     cameraSrc: cameraOnline ? webrtcSource : null,

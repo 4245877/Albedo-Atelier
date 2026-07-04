@@ -1062,9 +1062,33 @@ body::before {
   white-space: nowrap;
 }
 
-.printer-material { font-size: 12.5px; color: var(--ink-soft); display: flex; align-items: center; gap: 7px; }
+.printer-material { font-size: 12.5px; color: var(--ink-soft); display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
 
 .swatch { width: 12px; height: 12px; border-radius: 4px; border: 1px solid rgb(244 238 226 / 22%); flex: none; }
+
+/* Метка источника филамента: живые данные с принтера vs. значение из конфигурации. */
+.src-tag {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font: 800 9.5px var(--font-body);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.src-printer { color: var(--gold-bright); background: var(--gold-soft); }
+.src-config { color: var(--ink-faint); background: var(--card-inner); border: 1px solid var(--card-edge); }
+
+/* Чип диаметра сопла (Bambu `nozzle_diameter`). */
+.nozzle-chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font: 700 11px var(--font-body);
+  color: var(--ink-soft);
+  background: var(--card-inner);
+  border: 1px solid var(--card-edge);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 
 .printer-actions {
   display: flex;
@@ -1907,7 +1931,6 @@ html.modal-open { overflow: hidden; }
 .modal-side { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .modal-model { font-size: 13px; color: var(--ink-faint); }
 .modal-job { font-size: 14px; color: var(--ink-soft); }
-.modal-material { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--ink-soft); }
 .modal-tele { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 2px; }
 
 .modal-actions {

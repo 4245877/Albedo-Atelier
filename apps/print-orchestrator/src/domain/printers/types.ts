@@ -37,6 +37,24 @@ export interface PrinterView {
   /** Declared loaded material from config; null when not specified. */
   material: string | null;
   swatch: string | null;
+  /**
+   * Configured nozzle diameter in mm, live from the printer (Bambu setting, not
+   * a physical sensor); null when the device/adapter does not report it.
+   */
+  nozzleDiameter: number | null;
+  /** Nozzle hardware type live from the printer (e.g. "hardened_steel"); null when unreported. */
+  nozzleType: string | null;
+  /** Active filament material live from the printer (AMS tray or external spool); null when unreported. */
+  liveMaterial: string | null;
+  /** `#RRGGBB` of the active filament live from the printer; null when unreported. */
+  liveMaterialColor: string | null;
+  /**
+   * Where the shown filament came from: `printer` (live telemetry), `config`
+   * (fallback from printers.json) or `unknown` (neither available).
+   */
+  liveMaterialSource: "printer" | "config" | "unknown";
+  /** Global AMS tray index currently feeding; null for the external spool or when unknown. */
+  activeTray: number | null;
   camera: CameraState;
   /** True when an online live browser-safe camera stream is available now. */
   cameraStream: boolean;

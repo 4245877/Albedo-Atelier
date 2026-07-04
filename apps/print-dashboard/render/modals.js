@@ -6,7 +6,7 @@
 
 import { apiPost } from "../api.js";
 import { reconcileCameras } from "../cameraPlayers.js";
-import { $, badge, esc, fmtLeft, toast } from "../util.js";
+import { $, badge, esc, fmtLeft, materialBlock, toast } from "../util.js";
 import { camBlock } from "./printers.js";
 
 let deps = { getState: () => null, refresh: async () => {} };
@@ -86,6 +86,10 @@ function teleRows(p) {
   if (p.nozzle) rows.push(["Сопло", `${p.nozzle[0]}°${p.nozzle[1] != null ? ` / ${p.nozzle[1]}°` : ""}`]);
   if (p.bed) rows.push(["Стол", `${p.bed[0]}°${p.bed[1] != null ? ` / ${p.bed[1]}°` : ""}`]);
   if (p.chamber != null) rows.push(["Камера", `${p.chamber}°`]);
+  if (p.nozzleType) rows.push(["Тип сопла", p.nozzleType]);
+  if (p.liveMaterialSource === "printer" && p.activeTray != null) {
+    rows.push(["Активный лоток", `AMS ${p.activeTray + 1}`]);
+  }
   rows.push(["Осталось", fmtLeft(p.minutesLeft)]);
   rows.push(["Прогресс", p.progress != null ? `${Math.round(p.progress)}%` : "не сообщается"]);
   return rows
@@ -118,7 +122,7 @@ function printerModalHtml(p) {
         <div class="modal-model">${esc(p.model || "модель не указана")}</div>
         <div class="modal-job">${jobLine}</div>
         ${progress}
-        <div class="modal-material">${p.swatch ? `<span class="swatch" style="background:${esc(p.swatch)}"></span>` : ""}${esc(p.material || "материал не указан")}</div>
+        ${materialBlock(p)}
         <div class="modal-tele">${teleRows(p)}</div>
       </div>
     </div>

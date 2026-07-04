@@ -99,6 +99,35 @@ The consumed amount comes from whatever the device actually knows:
   3MF `Metadata/slice_info.config` (`used_g`/`used_m`) fetched over the
   printer's FTPS, pluggable behind the same completion → consume-items seam.
 
+## Nozzle & active filament (live)
+
+Each printer view carries the nozzle and the currently loaded filament **live
+from the device** where it reports them, so the operator does not have to keep
+the config's `material` field in sync by hand:
+
+- `nozzleDiameter` (mm) and `nozzleType` — Bambu `print.nozzle_diameter` /
+  `print.nozzle_type`. **Bambu only**; Moonraker and Creality report `null`.
+- `liveMaterial` / `liveMaterialColor` / `activeTray` — the active filament,
+  resolved in `resolveActiveFilament()` (`src/infra/printers/status/bambuUsage.ts`):
+  first the active AMS/AMS-Lite tray (`print.ams.tray_now` →
+  `print.ams.ams[].tray[].tray_type` / `tray_color`), then the external spool
+  (`print.vt_tray`) when no AMS tray is feeding.
+- `liveMaterialSource` — `"printer"` when the above came from the device,
+  `"config"` when it fell back to the static `material` from `printers.json`, or
+  `"unknown"` when neither is set. The dashboard shows a small **с принтера** /
+  **из конфигурации** tag accordingly, and the `Сопло 0.4 мм` chip only when the
+  device reports a diameter.
+
+Partial MQTT deltas that omit these fields keep the last known value (merge in
+`mergeBambuStatus`), so the chips do not flicker to "unknown" between reports.
+
+**Limitation.** The A1 Combo has no physical nozzle-diameter sensor:
+`nozzle_diameter` mirrors the **setting** in the printer/slicer. If the nozzle is
+swapped without updating that setting, the reported diameter is stale — treat it
+as "what the printer is configured for", not a measurement. Requires **LAN Mode**
+and the printer's **access code** (`serial` + `accessCode`); without them the
+Bambu adapter reports the printer as not configured and nothing is live.
+
 ## Local development
 
 Uses **pnpm** (via `corepack enable`).

@@ -1,5 +1,5 @@
 import { firstFiniteNumber, firstText, isObject } from "./mapper";
-import type { AmsTraySnapshot } from "./types";
+import type { ActiveFilament, AmsTraySnapshot } from "./types";
 
 /**
  * Bambu filament accounting from AMS/AMS-Lite telemetry.
@@ -93,6 +93,47 @@ export function parseAmsTrays(print: Record<string, unknown>): AmsTraySnapshot[]
   }
 
   return trays.length > 0 ? trays : null;
+}
+
+/**
+ * Reads the external spool (`vt_tray`) as an active-filament candidate: what the
+ * A1/P1 feeds from when printing without the AMS. Returns null when there is no
+ * `vt_tray` object or it carries no usable material/colour/remain.
+ */
+export function parseVtTray(print: Record<string, unknown>): ActiveFilament | null {
+  const vt = print.vt_tray;
+  if (!isObject(vt)) return null;
+
+  const material = firstText(vt.tray_type) || null;
+  const color = normalizeTrayColor(vt.tray_color);
+  const remainPct = clampPct(firstFiniteNumber(vt.remain));
+
+  if (!material && color === null && remainPct === null) return null;
+
+  return { material, color, tray: null, remainPct };
+}
+
+/**
+ * The filament the printer is currently feeding from. Prefers the active AMS
+ * tray (`ams.tray_now`); with no active tray it falls back to the external spool
+ * (`vt_tray`). Returns null when the device reports neither — the caller then
+ * falls back to the configured material rather than inventing one.
+ */
+export function resolveActiveFilament(
+  print: Record<string, unknown>,
+  trays: AmsTraySnapshot[] | null
+): ActiveFilament | null {
+  const active = trays?.find((tray) => tray.active) ?? null;
+  if (active) {
+    return {
+      material: active.material,
+      color: active.color,
+      tray: active.tray,
+      remainPct: active.remainPct
+    };
+  }
+
+  return parseVtTray(print);
 }
 
 /**

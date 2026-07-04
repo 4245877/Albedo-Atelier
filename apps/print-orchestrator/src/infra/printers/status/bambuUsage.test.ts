@@ -5,7 +5,9 @@ import {
   bambuMeasurableTrayCount,
   bambuTrayUsage,
   normalizeTrayColor,
-  parseAmsTrays
+  parseAmsTrays,
+  parseVtTray,
+  resolveActiveFilament
 } from "./bambuUsage";
 import type { AmsTraySnapshot } from "./types";
 
@@ -105,6 +107,66 @@ test("parseAmsTrays returns null when there is no AMS or no loaded trays", () =>
   assert.equal(parseAmsTrays({}), null);
   assert.equal(parseAmsTrays({ ams: { ams: [] } }), null);
   assert.equal(parseAmsTrays({ ams: { ams: [{ id: "0", tray: [{ id: "0" }] }] } }), null);
+});
+
+// ── parseVtTray / resolveActiveFilament ────────────────────────────────────
+
+test("resolveActiveFilament picks the active AMS tray (tray_now)", () => {
+  const print = {
+    ams: {
+      tray_now: "1",
+      ams: [
+        {
+          id: "0",
+          tray: [
+            { id: "0", tray_type: "PLA", tray_color: "FF0000FF", remain: 80, tray_weight: "1000" },
+            { id: "1", tray_type: "PETG", tray_color: "00FF00FF", remain: 50, tray_weight: "1000" }
+          ]
+        }
+      ]
+    }
+  };
+  const trays = parseAmsTrays(print);
+  assert.deepEqual(resolveActiveFilament(print, trays), {
+    material: "PETG",
+    color: "#00FF00",
+    tray: 1,
+    remainPct: 50
+  });
+});
+
+test("resolveActiveFilament falls back to vt_tray when no AMS tray is active", () => {
+  // tray_now 255 = external spool, no AMS tray feeding.
+  const print = {
+    ams: {
+      tray_now: "255",
+      ams: [{ id: "0", tray: [{ id: "0", tray_type: "PLA", remain: 90, tray_weight: "1000" }] }]
+    },
+    vt_tray: { tray_type: "TPU", tray_color: "0000FFFF", remain: 42 }
+  };
+  const trays = parseAmsTrays(print);
+  assert.deepEqual(resolveActiveFilament(print, trays), {
+    material: "TPU",
+    color: "#0000FF",
+    tray: null,
+    remainPct: 42
+  });
+});
+
+test("resolveActiveFilament returns null when neither AMS nor vt_tray has data", () => {
+  assert.equal(resolveActiveFilament({}, null), null);
+  assert.equal(resolveActiveFilament({ vt_tray: { tray_type: "", tray_color: "00000000" } }, null), null);
+});
+
+test("parseVtTray reads the external spool and ignores an empty one", () => {
+  assert.deepEqual(parseVtTray({ vt_tray: { tray_type: "PETG", tray_color: "112233FF", remain: 70 } }), {
+    material: "PETG",
+    color: "#112233",
+    tray: null,
+    remainPct: 70
+  });
+  assert.equal(parseVtTray({}), null);
+  assert.equal(parseVtTray({ vt_tray: {} }), null);
 });
 
 // ── bambuTrayUsage ─────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import { API_BASE } from "../api.js";
-import { $, badge, esc, emptyRow, fmtLeft } from "../util.js";
+import { $, badge, esc, emptyRow, fmtLeft, materialBlock } from "../util.js";
 
 /* ── Принтеры и камеры ─────────────────────────────────────── */
 
@@ -138,7 +138,7 @@ function printerCard(p) {
         <div class="printer-job">${jobLine}</div>
         ${progressBlock}
         ${teleBlock(p)}
-        <div class="printer-material">${p.swatch ? `<span class="swatch" style="background:${esc(p.swatch)}"></span>` : ""}${esc(p.material || "материал не указан")}</div>
+        ${materialBlock(p)}
         <div class="printer-actions">${actions}</div>
       </div>
     </article>`;
