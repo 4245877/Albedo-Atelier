@@ -146,6 +146,7 @@ body::before {
 }
 
 .brand-sigil {
+  position: relative;
   width: 44px;
   height: 44px;
   flex: none;
@@ -156,7 +157,20 @@ body::before {
   border: 1px solid var(--gold-line);
   border-radius: 50%;
   box-shadow: 0 0 0 1px rgb(8 7 15 / 80%), 0 6px 18px rgb(3 2 8 / 60%);
+}
+
+/* Золотое дыхание герба живёт на псевдоэлементе и пульсирует опаковостью:
+   opacity анимируется на композиторе, тогда как анимация самой box-shadow
+   заставляла бы главный поток перерисовывать герб каждый кадр — вечно. */
+.brand-sigil::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  box-shadow: 0 0 18px rgb(201 162 75 / 35%);
+  opacity: 0;
   animation: sigil-glow 6s ease-in-out infinite;
+  will-change: opacity;
 }
 
 .brand-sigil svg { width: 34px; height: 34px; }
@@ -431,6 +445,14 @@ body::before {
   .hero { grid-template-columns: 1fr; }
 }
 
+/* В две колонки справа резервируется полоса под скетч надзирательницы:
+   плитки сдвигаются влево и перекрывают только замаскированный край портрета,
+   лицо остаётся открытым. Ширина полосы растёт с экраном, но не превышает
+   ширину самого скетча. */
+@media (min-width: 901px) {
+  .hero { padding-right: clamp(150px, 19vw, 280px); }
+}
+
 /* Текст держится над декоративным скетчем и перьями (они позиционированы
    абсолютно и рисуются позже, иначе декор ложится поверх заголовка). */
 .hero-main { position: relative; z-index: 1; }
@@ -526,6 +548,15 @@ body::before {
 .stat-tile.tone-offline .num { color: var(--offline); }
 .stat-tile.tone-gold .num { color: var(--gold-bright); }
 
+/* Плитки в hero лежат поверх скетча: под привычный светлый глянец подложена
+   полупрозрачная обсидиановая вуаль — цифры читаются на любом фоне, а портрет
+   продолжает просвечивать сквозь плитку. */
+.hero-stats .stat-tile {
+  background:
+    linear-gradient(180deg, rgb(244 238 226 / 5%), rgb(244 238 226 / 2%)),
+    linear-gradient(180deg, rgb(19 15 30 / 62%), rgb(13 10 22 / 46%));
+}
+
 /* Скетч надзирательницы: портрет-медальон справа, медленно парит.
    Опаковость и transform живут на контейнере (их правят тема и медиа-запросы),
    маска и тёплый тон — на самой картинке: радиальная маска растворяет
@@ -536,9 +567,13 @@ body::before {
   top: 50%;
   width: min(360px, 46%);
   transform: translateY(-50%);
-  opacity: 0.5;
+  opacity: 0.62;
   pointer-events: none;
   animation: sketch-drift 11s ease-in-out infinite;
+  /* Свой слой на композиторе: маска и фильтр растрируются один раз, дрейф
+     дальше идёт на GPU. Без этого браузер перерисовывает фильтрованную
+     картинку каждый кадр, и медленный дрейф ползёт рывками по пикселю. */
+  will-change: transform;
 }
 
 .hero-sketch img {
@@ -547,12 +582,13 @@ body::before {
   height: auto;
   -webkit-mask-image: radial-gradient(closest-side, #000 52%, transparent 98%);
   mask-image: radial-gradient(closest-side, #000 52%, transparent 98%);
-  filter: sepia(0.38) saturate(0.9) brightness(0.85) contrast(1.05);
+  filter: sepia(0.38) saturate(0.9) brightness(0.9) contrast(1.05);
 }
 
-/* В одну колонку скетч уходит за спину текста — гасим до водяного знака. */
+/* В одну колонку скетч уходит за спину текста — приглушаем, но оставляем
+   различимым: вуаль на плитках держит читаемость поверх портрета. */
 @media (max-width: 900px) {
-  .hero-sketch { opacity: 0.14; width: 300px; right: -48px; }
+  .hero-sketch { opacity: 0.3; width: 300px; right: -48px; }
 }
 
 /* Опадающие перья: мягкое движение крыльев на краю зрения. */
@@ -570,6 +606,9 @@ body::before {
   opacity: 0;
   color: rgb(230 200 123 / 55%);
   animation: feather-fall linear infinite;
+  /* Падение — на композиторе, иначе каждое перо тянет за собой перерисовку
+     пересекаемой области зала. */
+  will-change: transform, opacity;
 }
 
 .feather.f1 { left: 14%; width: 16px; animation-duration: 17s; }
@@ -1502,8 +1541,8 @@ body::before {
 }
 
 @keyframes sigil-glow {
-  0%, 100% { box-shadow: 0 0 0 1px rgb(8 7 15 / 80%), 0 6px 18px rgb(3 2 8 / 60%); }
-  50% { box-shadow: 0 0 0 1px rgb(8 7 15 / 80%), 0 0 18px rgb(201 162 75 / 35%); }
+  0%, 100% { opacity: 0; }
+  50% { opacity: 1; }
 }
 
 /* Перо опадает: лёгкое покачивание и медленное вращение. */
@@ -1556,8 +1595,11 @@ body::before {
   .toggle::after { top: 4px; left: 4px; width: 20px; height: 20px; }
   .toggle.on::after { transform: translateX(18px); }
 
-  /* Постоянные фоновые анимации — лишняя нагрузка на батарею мобильных. */
-  .brand-sigil, .hero-sketch { animation: none; }
+  /* Постоянные фоновые анимации — лишняя нагрузка на батарею мобильных.
+     Дрейф скетча не глушим: он идёт целиком на композиторе (transform на
+     собственном слое) и батарею практически не трогает; при
+     prefers-reduced-motion его выключает общий блок выше. */
+  .brand-sigil::after { animation: none; }
   .dot-pulse, .cam-tag.live .dot, .sys-warn .dot, .sys-err .dot { animation: none; }
   .progress > i::after { animation: none; }
   .feather { display: none; }
@@ -1762,6 +1804,13 @@ body::before {
 :root[data-theme="light"] .hero-sketch { opacity: 0.6; }
 :root[data-theme="light"] .hero-sketch img { filter: sepia(0.18) contrast(1.03); }
 
+/* В одну колонку портрет оказывается за текстом — днём приглушаем сильнее:
+   тёмный графит волос под обсидиановым текстом съедает контраст быстрее,
+   чем тот же портрет под слоновой костью ночи. */
+@media (max-width: 900px) {
+  :root[data-theme="light"] .hero-sketch { opacity: 0.32; }
+}
+
 /* Днём над залом опадают чёрные перья крыльев (одно — сливовое). */
 :root[data-theme="light"] .feather { color: rgb(26 20 34 / 34%); }
 :root[data-theme="light"] .feather.f2 { color: rgb(109 76 120 / 32%); }
@@ -1771,6 +1820,12 @@ body::before {
   background: linear-gradient(180deg, #ffffff, #f6f0f7);
   border-color: #e7dee9;
   box-shadow: 0 1px 2px rgb(80 60 110 / 5%);
+}
+
+/* В hero изразцы полупрозрачны: глухой белый прятал скетч целиком, а сквозь
+   матовый фарфор портрет просвечивает, оставляя обсидиановые цифры чёткими. */
+:root[data-theme="light"] .hero-stats .stat-tile {
+  background: linear-gradient(180deg, rgb(255 255 255 / 82%), rgb(246 240 247 / 66%));
 }
 
 :root[data-theme="light"] .stat-tile:hover {
