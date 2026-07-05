@@ -71,6 +71,10 @@
   --shadow: 0 14px 34px rgb(3 2 8 / 55%);
   --shadow-hover: 0 20px 46px rgb(3 2 8 / 70%);
 
+  /* Кружево-парча фона зала (тёмный облик): аметистовое огива-плетение,
+     топазовые перья, аметистовые узлы-звёзды. Светлый облик переопределяет ниже. */
+  --damask: url("data:image/svg+xml,%3Csvg xmlns='http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg' width='168' height='235' viewBox='0 0 150 210'%3E%3Cpath d='M75 0 C40 20 0 55 0 105 C0 155 40 190 75 210M75 0 C110 20 150 55 150 105 C150 155 110 190 75 210' fill='none' stroke='%239a76ac' stroke-opacity='0.14' stroke-width='1.1'%2F%3E%3Cg fill='%239a76ac' fill-opacity='0.2'%3E%3Cpath d='M0 105 l6 -6 -6 -6 -6 6 z'%2F%3E%3Cpath d='M150 105 l6 -6 -6 -6 -6 6 z'%2F%3E%3Cpath d='M75 0 l6 6 -6 6 -6 -6 z'%2F%3E%3Cpath d='M75 210 l6 -6 -6 -6 -6 6 z'%2F%3E%3C%2Fg%3E%3Cg transform='translate(59.5 87) scale(1.55)' fill='%23e6c87b' fill-opacity='0.16' stroke='%23e6c87b' stroke-opacity='0.16' stroke-width='0.5'%3E%3Cpath d='M16 3.5C10.6 6.2 6.6 11.4 4.6 20.4c5.2-1.5 9.1-5.6 11-12.3z'%2F%3E%3Cpath d='M4.6 20.4C8.4 13.6 12.2 8.2 16 3.5' fill='none'%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E");
+
   --font-body: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-display: "Cormorant", "Georgia", serif;
 
@@ -102,12 +106,15 @@ body {
      уходит на канвас, и виньетка body::before с z-index:-1 без изоляции
      рисовалась бы ПОД непрозрачным фоном body — то есть не видна вовсе. */
   isolation: isolate;
+  /* Кружево дворцовой парчи Назарика: готическая огива-плетение (лиф платья
+     Альбедо) с топазовым пером в каждой второй ячейке (чёрные крылья) и
+     аметистовым ромбом-звездой в узлах (герб ❖). Мотив бесшовно повторяется,
+     заменил прежнюю инженерную сетку — фон стал тканью зала, а не чертежом. */
   background:
+    var(--damask) 0 0 / 168px 235px,
     radial-gradient(1200px 600px at 78% -10%, rgb(201 162 75 / 7%), transparent 60%),
     radial-gradient(900px 520px at -10% 24%, rgb(122 84 148 / 9%), transparent 62%),
     radial-gradient(1000px 700px at 50% 118%, rgb(80 58 110 / 12%), transparent 65%),
-    repeating-linear-gradient(135deg, rgb(230 200 123 / 1.5%) 0 1px, transparent 1px 26px),
-    repeating-linear-gradient(45deg, rgb(154 118 172 / 1.2%) 0 1px, transparent 1px 26px),
     linear-gradient(180deg, #0f0c17 0%, var(--bg) 40%, #0a0812 100%);
   -webkit-font-smoothing: antialiased;
 }
@@ -518,6 +525,8 @@ body::before {
 }
 
 .stat-tile {
+  position: relative;
+  overflow: hidden;
   background: linear-gradient(180deg, rgb(244 238 226 / 5%), rgb(244 238 226 / 2%));
   border: 1px solid var(--card-edge);
   border-radius: var(--radius-sm);
@@ -525,11 +534,26 @@ body::before {
   transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
 }
 
+/* Золотая фаска-грань по верху плитки: показатель читается как гравированная
+   табличка Назарика, а не плоский прямоугольник. Скруглённые углы обрезают
+   концы линии (overflow), при наведении грань разгорается. */
+.stat-tile::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  background: linear-gradient(90deg, transparent 12%, rgb(230 200 123 / 42%) 50%, transparent 88%);
+  opacity: 0.5;
+  transition: opacity 0.25s ease;
+}
+
 .stat-tile:hover {
   transform: translateY(-2px);
   box-shadow: 0 10px 24px -10px rgb(3 2 8 / 80%), 0 0 0 1px rgb(201 162 75 / 12%);
   border-color: var(--gold-line);
 }
+
+.stat-tile:hover::before { opacity: 1; }
 
 .stat-tile .num {
   font-family: var(--font-display);
@@ -1764,17 +1788,21 @@ body::before {
   /* Тени — прохладные и лёгкие, свет словно из витражей, не из бездны. */
   --shadow: 0 16px 34px -14px rgb(74 58 104 / 26%);
   --shadow-hover: 0 26px 50px -16px rgb(66 50 96 / 34%);
+
+  /* Кружево-парча (светлый облик): сливовое плетение и узлы, старинно-золотые
+     перья — тот же мотив, что и ночью, но для фарфора зала. */
+  --damask: url("data:image/svg+xml,%3Csvg xmlns='http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg' width='168' height='235' viewBox='0 0 150 210'%3E%3Cpath d='M75 0 C40 20 0 55 0 105 C0 155 40 190 75 210M75 0 C110 20 150 55 150 105 C150 155 110 190 75 210' fill='none' stroke='%236d4c78' stroke-opacity='0.17' stroke-width='1.1'%2F%3E%3Cg fill='%236d4c78' fill-opacity='0.22'%3E%3Cpath d='M0 105 l6 -6 -6 -6 -6 6 z'%2F%3E%3Cpath d='M150 105 l6 -6 -6 -6 -6 6 z'%2F%3E%3Cpath d='M75 0 l6 6 -6 6 -6 -6 z'%2F%3E%3Cpath d='M75 210 l6 -6 -6 -6 -6 6 z'%2F%3E%3C%2Fg%3E%3Cg transform='translate(59.5 87) scale(1.55)' fill='%23b58a2a' fill-opacity='0.17' stroke='%236d4c78' stroke-opacity='0.17' stroke-width='0.5'%3E%3Cpath d='M16 3.5C10.6 6.2 6.6 11.4 4.6 20.4c5.2-1.5 9.1-5.6 11-12.3z'%2F%3E%3Cpath d='M4.6 20.4C8.4 13.6 12.2 8.2 16 3.5' fill='none'%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E");
 }
 
-/* Соборный свет: фарфор, тёплые нити золота и сливы, кружевное плетение
-   (серо-голубой BFC6D6) — фактура платья Альбедо. */
+/* Соборный свет: фарфор, тёплые нити золота и сливы; то же кружево-парча, что
+   и ночью, но сливовым по фарфору — фактура белого платья Альбедо при свете
+   витражей. Значение самого узора переопределено в :root[data-theme="light"]. */
 :root[data-theme="light"] body {
   background:
+    var(--damask) 0 0 / 168px 235px,
     radial-gradient(1200px 600px at 78% -10%, rgb(196 154 58 / 10%), transparent 60%),
     radial-gradient(900px 520px at -10% 24%, rgb(109 76 120 / 8%), transparent 62%),
     radial-gradient(1000px 700px at 50% 118%, rgb(191 198 214 / 35%), transparent 66%),
-    repeating-linear-gradient(135deg, rgb(109 76 120 / 3.5%) 0 1px, transparent 1px 26px),
-    repeating-linear-gradient(45deg, rgb(196 154 58 / 3%) 0 1px, transparent 1px 26px),
     linear-gradient(180deg, #faf7fb 0%, #f2ecf4 42%, #ece4ef 100%);
 }
 
@@ -1849,6 +1877,11 @@ body::before {
   background: linear-gradient(180deg, #ffffff, #f6f0f7);
   border-color: #e7dee9;
   box-shadow: 0 1px 2px rgb(80 60 110 / 5%);
+}
+
+/* На фарфоре светлое золото фаски пропадает — углубляем до старинного. */
+:root[data-theme="light"] .stat-tile::before {
+  background: linear-gradient(90deg, transparent 12%, rgb(196 154 58 / 55%) 50%, transparent 88%);
 }
 
 /* В hero изразцы полупрозрачны: глухой белый прятал скетч целиком, а сквозь
