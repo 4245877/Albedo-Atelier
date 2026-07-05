@@ -75,15 +75,21 @@ export class CameraService {
     });
   }
 
-  /** A real camera frame for `GET /api/printers/:id/camera.jpg`. */
-  async getFrame(printer: PrinterConfig): Promise<CameraFrame> {
+  /**
+   * A real camera frame for `GET /api/printers/:id/camera.jpg`.
+   *
+   * `fresh` skips the short-lived frame cache and always pulls a new frame from
+   * the device — used right after the light was switched on for a snapshot, so a
+   * still-cached dark frame is never returned in place of the freshly lit one.
+   */
+  async getFrame(printer: PrinterConfig, options: { fresh?: boolean } = {}): Promise<CameraFrame> {
     const id = printer.id;
     if (!hasCameraSource(printer)) {
       throw new CameraError(id, "камера не настроена");
     }
 
     const entry = this.cameras.get(id);
-    if (entry?.frame && Date.now() - entry.fetchedAt < CAMERA_FRAME_FRESH_MS) {
+    if (!options.fresh && entry?.frame && Date.now() - entry.fetchedAt < CAMERA_FRAME_FRESH_MS) {
       return entry.frame;
     }
 

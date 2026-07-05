@@ -231,6 +231,59 @@ export class PrinterPoller {
     });
   }
 
+  /**
+   * Ensures the chamber light is on for an out-of-band snapshot (e.g. the night
+   * Telegram photo captured by fulfillment) at the exact moment a frame is
+   * grabbed — closing the gap the periodic policy leaves when a printer auto-off
+   * its light on FINISH and the next poll has not re-enabled it yet. Returns
+   * true only when it actually switched the light on, so the caller can let it
+   * settle before capturing.
+   *
+   * Only acts when the night-light schedule itself would want the light on (the
+   * automation is enabled and we are inside the night window): a daytime frame
+   * is meant to be unlit, and a disabled automation means "hands off the lights".
+   *
+   * Deliberately does NOT install a manual override and never turns the light
+   * back off: the steady state stays owned by the night-light policy, so the two
+   * systems can't flap against each other.
+   */
+  async ensureLightForSnapshot(printer: PrinterConfig): Promise<boolean> {
+    if (!supportsPrinterLight(printer)) return false;
+    if (!this.nightLightsEnabled()) return false;
+    if (!this.currentNightLightTarget()) return false;
+    if (this.isManualLightOverrideActive(printer.id)) return false;
+
+    const status = this.statuses.get(printer.id);
+    if (!status?.online || status.light === true) return false;
+
+    return this.runLightExclusive(printer.id, async () => {
+      // Re-check under the lock: a manual command or a fresh poll may have just
+      // taken over / already turned the light on.
+      if (this.isManualLightOverrideActive(printer.id)) return false;
+      const fresh = this.statuses.get(printer.id);
+      if (!fresh?.online || fresh.light === true) return false;
+
+      try {
+        await sendPrinterLight(printer, true);
+        this.lightTargets.set(printer.id, true);
+        if (fresh.light !== null) {
+          this.statuses.set(printer.id, {
+            ...fresh,
+            light: true,
+            updatedAt: new Date().toISOString()
+          });
+        }
+        return true;
+      } catch (error) {
+        this.logger.warn?.(
+          { err: error, printer: printer.id },
+          "ensure light for snapshot failed"
+        );
+        return false;
+      }
+    });
+  }
+
   getChangedAt(id: string): string | undefined {
     return this.changedAt.get(id);
   }

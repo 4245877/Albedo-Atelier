@@ -207,8 +207,23 @@ export class FarmStore {
 
   // ── Cameras (→ CameraService; facade resolves the config) ────────────────
 
-  getCameraFrame(id: string) {
-    return this.cameras.getFrame(this.configById(id));
+  /**
+   * A real camera frame. With `ensureLight`, the chamber light is switched on
+   * first when the night-light schedule would want it on (see
+   * {@link PrinterPoller.ensureLightForSnapshot}) so a night snapshot is not
+   * captured in the dark; the frame is then re-pulled fresh once the light has
+   * had a moment to come up. The light is left on for the schedule to manage — it
+   * is never restored to off here.
+   */
+  async getCameraFrame(id: string, options: { ensureLight?: boolean } = {}) {
+    const printer = this.configById(id);
+    const turnedOn = options.ensureLight
+      ? await this.poller.ensureLightForSnapshot(printer)
+      : false;
+    if (turnedOn) {
+      await new Promise((resolve) => setTimeout(resolve, env.snapshotLightSettleMs));
+    }
+    return this.cameras.getFrame(printer, { fresh: turnedOn });
   }
   getCameraStream(id: string) {
     return this.cameras.getStream(this.configById(id));

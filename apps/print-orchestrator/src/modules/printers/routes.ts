@@ -11,6 +11,11 @@ interface LightBody {
   on?: unknown;
 }
 
+interface CameraQuery {
+  /** `1`/`true` → ensure the chamber light is on before capturing (night snapshots). */
+  ensureLight?: string;
+}
+
 /**
  * Printer endpoints under `/api/printers`.
  *
@@ -41,13 +46,18 @@ export async function registerPrinterRoutes(app: FastifyInstance): Promise<void>
     farmStore.getPrinter(request.params.id)
   );
 
-  app.get<{ Params: PrinterParams }>("/:id/camera.jpg", async (request, reply) => {
-    const frame = await farmStore.getCameraFrame(request.params.id);
-    reply
-      .header("Cache-Control", "no-store")
-      .type(frame.mime)
-      .send(frame.data);
-  });
+  app.get<{ Params: PrinterParams; Querystring: CameraQuery }>(
+    "/:id/camera.jpg",
+    async (request, reply) => {
+      const ensureLight =
+        request.query.ensureLight === "1" || request.query.ensureLight === "true";
+      const frame = await farmStore.getCameraFrame(request.params.id, { ensureLight });
+      reply
+        .header("Cache-Control", "no-store")
+        .type(frame.mime)
+        .send(frame.data);
+    }
+  );
 
   app.get<{ Params: PrinterParams }>("/:id/camera.mp4", async (request, reply) => {
     const stream = await farmStore.getCameraStream(request.params.id);

@@ -25,6 +25,13 @@ export const env = Object.freeze({
   /** Night-print window shown on the dashboard (config, not telemetry). */
   nightWindow: process.env.NIGHT_PRINT_WINDOW ?? "23:00 – 07:30",
   /**
+   * How long to wait after switching a chamber light on for a night snapshot
+   * before grabbing the frame, so the camera exposes a lit scene rather than a
+   * dark one. Only applies when a light-ensured capture actually flipped the
+   * light (see FarmStore.getCameraFrame / ensureLight).
+   */
+  snapshotLightSettleMs: readInteger(process.env.SNAPSHOT_LIGHT_SETTLE_MS, 1200),
+  /**
    * JSON file the operator queue, event feed and today counters are persisted
    * to, so they survive a restart. Defaults to `<cwd>/data/state.json`; in the
    * container `<cwd>` is `/app`, and compose mounts a volume at `/app/data`.
