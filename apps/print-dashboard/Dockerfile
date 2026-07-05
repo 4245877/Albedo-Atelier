@@ -6,6 +6,7 @@ COPY styles.css /usr/share/nginx/html/styles.css
 # Dashboard ES modules: entry (app.js) + shared modules + render/ folder.
 COPY app.js api.js util.js nav.js cameraPlayers.js actions.js theme.js /usr/share/nginx/html/
 COPY render /usr/share/nginx/html/render
+COPY assets /usr/share/nginx/html/assets
 COPY camera-webrtc.js /usr/share/nginx/html/camera-webrtc.js
 COPY video-rtc.js /usr/share/nginx/html/video-rtc.js
 

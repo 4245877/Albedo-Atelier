@@ -431,8 +431,8 @@ body::before {
   .hero { grid-template-columns: 1fr; }
 }
 
-/* Текст держится над декоративным гербом и перьями (они позиционированы
-   абсолютно и рисуются позже, иначе золотые линии ложатся поверх заголовка). */
+/* Текст держится над декоративным скетчем и перьями (они позиционированы
+   абсолютно и рисуются позже, иначе декор ложится поверх заголовка). */
 .hero-main { position: relative; z-index: 1; }
 
 .eyebrow {
@@ -526,18 +526,33 @@ body::before {
 .stat-tile.tone-offline .num { color: var(--offline); }
 .stat-tile.tone-gold .num { color: var(--gold-bright); }
 
-/* Герб надзора: недвижим и величествен, лишь медленно «дышит». */
-.hero-crest {
+/* Скетч надзирательницы: портрет-медальон справа, медленно парит.
+   Опаковость и transform живут на контейнере (их правят тема и медиа-запросы),
+   маска и тёплый тон — на самой картинке: радиальная маска растворяет
+   квадратные края скетча в фоне зала, сепия подгоняет графит под золото. */
+.hero-sketch {
   position: absolute;
-  right: -54px;
+  right: -30px;
   top: 50%;
-  width: 330px;
-  height: 330px;
+  width: min(360px, 46%);
   transform: translateY(-50%);
-  color: var(--gold);
-  opacity: 0.17;
+  opacity: 0.5;
   pointer-events: none;
-  animation: crest-breathe 12s ease-in-out infinite;
+  animation: sketch-drift 11s ease-in-out infinite;
+}
+
+.hero-sketch img {
+  display: block;
+  width: 100%;
+  height: auto;
+  -webkit-mask-image: radial-gradient(closest-side, #000 52%, transparent 98%);
+  mask-image: radial-gradient(closest-side, #000 52%, transparent 98%);
+  filter: sepia(0.38) saturate(0.9) brightness(0.85) contrast(1.05);
+}
+
+/* В одну колонку скетч уходит за спину текста — гасим до водяного знака. */
+@media (max-width: 900px) {
+  .hero-sketch { opacity: 0.14; width: 300px; right: -48px; }
 }
 
 /* Опадающие перья: мягкое движение крыльев на краю зрения. */
@@ -1479,10 +1494,11 @@ body::before {
   to { transform: translateX(100%); }
 }
 
-/* Герб «дышит»: медленное золотое мерцание вместо вращения. */
-@keyframes crest-breathe {
-  0%, 100% { opacity: 0.14; transform: translateY(-50%) scale(1); }
-  50% { opacity: 0.22; transform: translateY(-50%) scale(1.015); }
+/* Скетч парит: лёгкий подъём и едва заметное приближение. Опаковость кадры
+   не трогают — её задают тема и медиа-запросы статическими правилами. */
+@keyframes sketch-drift {
+  0%, 100% { transform: translateY(-50%) scale(1); }
+  50% { transform: translateY(calc(-50% - 8px)) scale(1.02); }
 }
 
 @keyframes sigil-glow {
@@ -1541,7 +1557,7 @@ body::before {
   .toggle.on::after { transform: translateX(18px); }
 
   /* Постоянные фоновые анимации — лишняя нагрузка на батарею мобильных. */
-  .brand-sigil, .hero-crest { animation: none; }
+  .brand-sigil, .hero-sketch { animation: none; }
   .dot-pulse, .cam-tag.live .dot, .sys-warn .dot, .sys-err .dot { animation: none; }
   .progress > i::after { animation: none; }
   .feather { display: none; }
@@ -1741,20 +1757,10 @@ body::before {
   }
 }
 
-/* Днём герб — старинное золото на фарфоре: углубляем цвет и поднимаем
-   непрозрачность (тёмная 0.17 подобрана под свечение из тьмы и на белом почти
-   исчезает). Анимацию «дыхания» тоже переопределяем — её кадры жёстко задают
-   тёмные значения opacity и иначе перекрыли бы статическое правило. */
-:root[data-theme="light"] .hero-crest {
-  color: #9a7420;
-  opacity: 0.36;
-  animation-name: crest-breathe-light;
-}
-
-@keyframes crest-breathe-light {
-  0%, 100% { opacity: 0.34; transform: translateY(-50%) scale(1); }
-  50% { opacity: 0.42; transform: translateY(-50%) scale(1.015); }
-}
+/* Днём скетч — графит на фарфоре: плотнее и почти без сепии, тёплый тон
+   подобран под свечение из тьмы и на белом отдаёт желтизной. */
+:root[data-theme="light"] .hero-sketch { opacity: 0.6; }
+:root[data-theme="light"] .hero-sketch img { filter: sepia(0.18) contrast(1.03); }
 
 /* Днём над залом опадают чёрные перья крыльев (одно — сливовое). */
 :root[data-theme="light"] .feather { color: rgb(26 20 34 / 34%); }
