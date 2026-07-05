@@ -79,7 +79,7 @@ export function renderQueue(state) {
               <div class="grow">
                 <div class="row-title">${esc(p.job || "задание не определено")}</div>
                 <div class="row-sub">${esc(p.name)} · осталось ${fmtLeft(p.minutesLeft)}</div>
-                ${p.progress != null ? `<div class="progress ${p.status === "paused" ? "is-paused" : ""}" style="margin-top:7px"><i style="width:${p.progress}%"></i></div>` : ""}
+                ${p.progress != null ? `<div class="progress ${p.status === "paused" ? "is-paused" : ""}" style="margin-top:7px"><i style="transform:scaleX(${(p.progress / 100).toFixed(4)})"></i></div>` : ""}
               </div>
               <span class="row-time">${p.progress != null ? `${Math.round(p.progress)}%` : "—"}</span>
             </li>`).join("") || emptyRow("Нет активных печатей")}
@@ -114,7 +114,7 @@ export function renderNight(state) {
       <div class="night-part">${esc(c.title)}</div>
       <div class="night-part-sub">${esc(c.printer)} · ${esc(c.eta)} · впишется в окно печати</div>
       <div class="risk-meter">
-        <div class="risk-track"><span class="risk-pin" style="left:${c.risk}%"></span></div>
+        <div class="risk-track"><span class="risk-pin" style="transform:translateX(-${(100 - c.risk).toFixed(1)}%)"></span></div>
         <div class="risk-caption">
           <span>Оценка риска: <span class="risk-value">${c.risk}% · ${esc(c.riskLabel)}</span></span>
           <span>цель &lt; 35%</span>
@@ -164,7 +164,7 @@ function matItem(m) {
     <div class="mat-item ${m.low ? "mat-low" : ""}">
       <div class="grow">
         <div class="mat-name"><span class="swatch" style="background:${esc(m.swatch)}"></span>${esc(m.name)}</div>
-        <div class="level mat-level ${lvl}"><i style="width:${(ratio * 100).toFixed(0)}%"></i></div>
+        <div class="level mat-level ${lvl}"><i style="transform:scaleX(${ratio.toFixed(2)})"></i></div>
       </div>
       <span class="mat-qty">${esc(m.have)} ${esc(m.unit)}${m.need ? ` / нужно ${esc(m.need)}` : ""}</span>
     </div>`;
@@ -356,12 +356,17 @@ export function renderSystem(state) {
 
 /* ── 14 · Лента событий ────────────────────────────────────── */
 
+/* Текст события: backend выделяет имена принтеров тегом <b> (см. events.push в
+   commandService). Экранируем всё, затем возвращаем ТОЛЬКО <b>/</b> — жирность
+   работает, а любая другая разметка в именах заданий остаётся текстом. */
+const feedText = (s) => esc(s).replace(/&lt;(\/?)b&gt;/g, "<$1b>");
+
 export function renderFeed(state) {
   $("#feed-body").innerHTML = `
     <ul class="feed-list">
       ${state.feed.slice(0, 8).map((e) => `
         <li class="feed-item f-${e.kind}">
-          <div class="feed-text">${esc(e.icon)} ${esc(e.text)}</div>
+          <div class="feed-text">${esc(e.icon)} ${feedText(e.text)}</div>
           <div class="feed-time">${esc(e.time)}</div>
         </li>`).join("") || `<li class="feed-item f-info"><div class="feed-text">Событий пока нет — лента заполняется реальными переходами статусов принтеров</div></li>`}
     </ul>`;

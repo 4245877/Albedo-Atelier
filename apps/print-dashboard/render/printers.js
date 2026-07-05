@@ -117,7 +117,7 @@ function printerCard(p) {
 
   const progressBlock = !busy ? "" : p.progress != null ? `
     <div class="printer-progress">
-      <div class="progress ${p.status === "paused" ? "is-paused" : ""}"><i style="width:${p.progress}%"></i></div>
+      <div class="progress ${p.status === "paused" ? "is-paused" : ""}"><i style="transform:scaleX(${(p.progress / 100).toFixed(4)})"></i></div>
       <div class="progress-caption"><b>${Math.round(p.progress)}%</b><span>осталось ${fmtLeft(p.minutesLeft)}</span></div>
     </div>` : `
     <div class="printer-progress">

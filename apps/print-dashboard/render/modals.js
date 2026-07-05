@@ -113,7 +113,7 @@ function printerModalHtml(p) {
     "Свободен — ожидает распоряжений";
 
   const progress = busy && p.progress != null
-    ? `<div class="progress ${p.status === "paused" ? "is-paused" : ""}" style="margin:10px 0"><i style="width:${p.progress}%"></i></div>`
+    ? `<div class="progress ${p.status === "paused" ? "is-paused" : ""}" style="margin:10px 0"><i style="transform:scaleX(${(p.progress / 100).toFixed(4)})"></i></div>`
     : "";
 
   return `

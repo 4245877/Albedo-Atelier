@@ -10,7 +10,6 @@
 
   /* Обсидиан · мрамор глубин */
   --bg: #0d0b14;
-  --bg-deep: #080711;
   --card: #16131f;
   --card-edge: #292236;
   --card-inner: rgb(244 238 226 / 4%);
@@ -82,6 +81,10 @@
   /* Смещение для якорной навигации под липкие шапку+навигацию.
      Реальную высоту проставляет JS (--stack-h); 130px — запасной вариант. */
   scroll-padding-top: var(--stack-h, 130px);
+
+  /* Место под полосу прокрутки резервируется всегда: modal-open прячет
+     overflow, и без запаса доска дёргалась бы на ширину скроллбара. */
+  scrollbar-gutter: stable;
 }
 
 * {
@@ -95,6 +98,10 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  /* Собственный стековый контекст: фон задан и на :root, поэтому фон body не
+     уходит на канвас, и виньетка body::before с z-index:-1 без изоляции
+     рисовалась бы ПОД непрозрачным фоном body — то есть не видна вовсе. */
+  isolation: isolate;
   background:
     radial-gradient(1200px 600px at 78% -10%, rgb(201 162 75 / 7%), transparent 60%),
     radial-gradient(900px 520px at -10% 24%, rgb(122 84 148 / 9%), transparent 62%),
@@ -708,13 +715,16 @@ body::before {
   transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s, border-color 0.18s, color 0.18s;
 }
 
-.btn:hover {
+/* :not([disabled]) — погашенная кнопка не отзывается на наведение вовсе:
+   правило [disabled] ниже гасит только transform/box-shadow, а золото текста
+   и рамки при равной специфичности просачивалось бы и на неживые кнопки. */
+.btn:not([disabled]):hover {
   transform: translateY(-1px);
   box-shadow: 0 8px 20px -8px rgb(3 2 8 / 80%);
   border-color: var(--gold-line);
   color: var(--gold-bright);
 }
-.btn:active { transform: translateY(0); box-shadow: none; }
+.btn:not([disabled]):active { transform: translateY(0); box-shadow: none; }
 
 .btn-primary {
   background: linear-gradient(135deg, #e0bd63, #b08834);
@@ -722,7 +732,7 @@ body::before {
   color: #221806;
 }
 
-.btn-primary:hover {
+.btn-primary:not([disabled]):hover {
   background: linear-gradient(135deg, #eaca74, #c2963c);
   border-color: #8a6a24;
   color: #221806;
@@ -732,7 +742,7 @@ body::before {
 .btn-ghost { background: transparent; }
 
 .btn-danger { color: var(--danger-ink); }
-.btn-danger:hover { border-color: rgb(207 98 115 / 40%); background: var(--danger-soft); color: var(--danger-ink); }
+.btn-danger:not([disabled]):hover { border-color: rgb(207 98 115 / 40%); background: var(--danger-soft); color: var(--danger-ink); }
 
 .btn-sm { padding: 6px 11px; font-size: 12.5px; border-radius: 8px; }
 
@@ -748,12 +758,16 @@ body::before {
   overflow: hidden;
 }
 
+/* Заполнение — слой во всю дорожку, сжатый scaleX(доля выполнения): transform
+   анимируется на композиторе, тогда как переход по width гонял бы layout. */
 .progress > i {
   position: absolute;
-  inset: 0 auto 0 0;
+  inset: 0;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--gold-deep), var(--gold) 55%, var(--topaz));
-  transition: width 0.8s ease;
+  transform-origin: left;
+  transform: scaleX(0);
+  transition: transform 0.8s ease;
 }
 
 .progress > i::after {
@@ -859,17 +873,29 @@ body::before {
   opacity: 0.9;
 }
 
+/* Пин — невидимый слой во всю дорожку; JS сдвигает его translateX(-(100−риск)%),
+   и точка на правом краю слоя встаёт на нужную долю шкалы. Сдвиг через
+   transform (композитор), а не через left (layout на каждом кадре перехода). */
 .risk-pin {
   position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  transition: transform 0.6s ease;
+  pointer-events: none;
+}
+
+.risk-pin::after {
+  content: "";
+  position: absolute;
   top: 50%;
+  right: 0;
   width: 16px;
   height: 16px;
   border-radius: 50%;
   background: #f4eee1;
   border: 3px solid var(--night-deep);
   box-shadow: 0 0 0 2px rgb(244 238 226 / 30%), 0 2px 8px rgb(0 0 0 / 50%);
-  transform: translate(-50%, -50%);
-  transition: left 0.6s ease;
+  transform: translate(50%, -50%);
 }
 
 .risk-caption { display: flex; flex-wrap: wrap; gap: 2px 12px; justify-content: space-between; font-size: 12px; color: #a29fb8; margin-top: 7px; }
@@ -883,7 +909,7 @@ body::before {
 .night-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 2px; }
 
 .card-night .btn-ghost { border-color: rgb(244 238 226 / 22%); color: var(--night-ink); background: transparent; }
-.card-night .btn-ghost:hover { border-color: var(--topaz); color: #ece387; box-shadow: none; }
+.card-night .btn-ghost:not([disabled]):hover { border-color: var(--topaz); color: #ece387; box-shadow: none; }
 
 /* ── 4 · Принтеры ───────────────────────────────────────────── */
 
@@ -965,8 +991,9 @@ body::before {
   background: #0b0912;
   display: block;
 }
-/* Значок LIVE — только когда картинка реально идёт. */
-.cam-live:not(.is-live) .cam-tag { display: none; }
+/* Значок LIVE — только когда картинка реально идёт. Прячем адресно .cam-tag.live:
+   другие метки (например, время снимка) должны переживать потерю сигнала. */
+.cam-live:not(.is-live) .cam-tag.live { display: none; }
 .cam-stream:not(.is-live) .cam-tag.live { display: none; }
 
 /* Плашка состояния поверх видео: видна, пока картинка не пошла (подключение или
@@ -1101,7 +1128,7 @@ body::before {
 
 .tele .t-lbl {
   display: block;
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1124,7 +1151,7 @@ body::before {
 .src-tag {
   padding: 1px 7px;
   border-radius: 999px;
-  font: 800 9.5px var(--font-body);
+  font: 800 10.5px var(--font-body);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   white-space: nowrap;
@@ -1179,7 +1206,8 @@ body::before {
   overflow: hidden;
 }
 
-.level > i { display: block; height: 100%; border-radius: inherit; background: var(--amethyst); transition: width 0.6s ease; }
+/* Как и .progress > i: слой во всю ширину, сжатый scaleX(доля остатка). */
+.level > i { display: block; height: 100%; border-radius: inherit; background: var(--amethyst); transform-origin: left; transform: scaleX(0); transition: transform 0.6s ease; }
 
 .level.low > i { background: var(--warn); }
 .level.crit > i { background: var(--danger); }
@@ -1508,18 +1536,17 @@ body::before {
 
 .card-night :focus-visible { outline-color: var(--topaz); }
 
-/* Отклик на нажатие для тач-устройств, где :hover не срабатывает. */
+/* Отклик на нажатие для тач-устройств, где :hover не срабатывает, — только у
+   реально кликабельного (кнопки, вкладки, превью камер): «нажимной» отклик на
+   пассивных строках и плитках обещал бы действие, которого нет. */
 .nav-chip:active {
   transform: translateY(0) scale(0.96);
   color: var(--gold-bright);
   border-color: var(--gold-line);
   background: var(--gold-soft);
 }
-.stat-tile:active { transform: scale(0.98); border-color: var(--gold-line); }
 .quick:active { transform: scale(0.98); border-color: var(--gold-line); background: var(--gold-soft); }
-.row:active { border-color: var(--gold-line); background: rgb(244 238 226 / 6%); }
 .cam-thumb:active { transform: scale(0.98); }
-.printer-card:active { box-shadow: var(--shadow-hover); }
 
 /* ── Анимации ───────────────────────────────────────────────── */
 
@@ -1545,13 +1572,16 @@ body::before {
   50% { opacity: 1; }
 }
 
-/* Перо опадает: лёгкое покачивание и медленное вращение. */
+/* Перо опадает: лёгкое покачивание и медленное вращение. Дистанции в px, а не
+   в vh: перья живут внутри hero (overflow hidden), и вьюпортные величины
+   уносили их за нижнюю грань уже к середине цикла — оставшуюся половину
+   17–23-секундной анимации зал стоял без перьев. */
 @keyframes feather-fall {
   0%   { opacity: 0; transform: translate(0, 0) rotate(-14deg); }
   8%   { opacity: 0.55; }
-  55%  { opacity: 0.4; transform: translate(-26px, 46vh) rotate(16deg); }
+  55%  { opacity: 0.4; transform: translate(-26px, 190px) rotate(16deg); }
   92%  { opacity: 0.12; }
-  100% { opacity: 0; transform: translate(10px, 88vh) rotate(-8deg); }
+  100% { opacity: 0; transform: translate(10px, 360px) rotate(-8deg); }
 }
 
 @keyframes flash {
@@ -1674,7 +1704,6 @@ body::before {
 
   /* Фарфор и жемчуг · светлый мрамор зала */
   --bg: #f3edf4;
-  --bg-deep: #e7deea;
   --card: #ffffff;
   --card-edge: #e6dde7;          /* Холодная тень кожи, смягчённая */
   --card-inner: rgb(31 27 40 / 4%);
@@ -1833,9 +1862,8 @@ body::before {
   border-color: var(--gold-line);
 }
 
-/* Строки-списки: наведение и нажатие — лёгкий обсидиановый иней. */
-:root[data-theme="light"] .row:hover,
-:root[data-theme="light"] .row:active { background: rgb(31 27 40 / 5%); }
+/* Строки-списки: наведение — лёгкий обсидиановый иней. */
+:root[data-theme="light"] .row:hover { background: rgb(31 27 40 / 5%); }
 :root[data-theme="light"] .row-danger:hover { background: rgb(192 72 92 / 14%); border-color: rgb(192 72 92 / 40%); }
 :root[data-theme="light"] .row-warn:hover { background: rgb(181 121 42 / 16%); border-color: rgb(181 121 42 / 40%); }
 
@@ -1931,6 +1959,9 @@ html.modal-open { overflow: hidden; }
   animation: modal-fade 0.18s ease;
 }
 .modal-backdrop[hidden] { display: none; }
+
+/* Днём тьма бездны неуместна: скрым — прохладная сливовая тень собора. */
+:root[data-theme="light"] .modal-backdrop { background: rgb(74 58 104 / 38%); }
 
 @keyframes modal-fade { from { opacity: 0; } to { opacity: 1; } }
 
