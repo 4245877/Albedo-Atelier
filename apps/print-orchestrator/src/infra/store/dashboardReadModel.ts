@@ -269,7 +269,9 @@ export class DashboardReadModel {
       done: this.poller.getTodayDone(),
       active: this.listActivePrinters().length,
       failed: this.poller.getTodayFailed(),
-      hoursUsed: null,
+      // Observed printer-hours in `printing` today (summed across printers); can
+      // exceed 24. hoursQueued has no real source yet, so it stays null (→ "—").
+      hoursUsed: this.poller.getTodayHoursUsed(),
       hoursQueued: null
     };
   }

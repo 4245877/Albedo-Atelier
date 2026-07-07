@@ -130,6 +130,9 @@ export class FarmStore {
   async stop(): Promise<void> {
     this.poller.stop();
     shutdownPrinterConnections();
+    // Persist the tail of accrued printing-hours (checkpointed only ~once a
+    // minute while running), then wait for every scheduled write to settle.
+    this.state.save();
     await this.state.flush();
   }
 

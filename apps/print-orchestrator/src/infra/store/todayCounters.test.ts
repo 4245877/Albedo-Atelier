@@ -53,21 +53,30 @@ test("hydrates today counters from persisted state (same day)", () => {
   const poller = new PrinterPoller(() => [], cameras, new EventFeed(), noop, {
     key: today(),
     done: 5,
-    failed: 2
+    failed: 2,
+    printingMs: 2 * 60 * 60 * 1000 // 2 observed printer-hours
   });
   assert.equal(poller.getTodayDone(), 5);
   assert.equal(poller.getTodayFailed(), 2);
-  assert.deepEqual(poller.serializeToday(), { key: today(), done: 5, failed: 2 });
+  assert.equal(poller.getTodayHoursUsed(), 2);
+  assert.deepEqual(poller.serializeToday(), {
+    key: today(),
+    done: 5,
+    failed: 2,
+    printingMs: 2 * 60 * 60 * 1000
+  });
 });
 
 test("resets hydrated counters when the persisted day has already passed", () => {
   const poller = new PrinterPoller(() => [], cameras, new EventFeed(), noop, {
     key: "2000-01-01",
     done: 5,
-    failed: 2
+    failed: 2,
+    printingMs: 2 * 60 * 60 * 1000
   });
   assert.equal(poller.getTodayDone(), 0);
   assert.equal(poller.getTodayFailed(), 0);
+  assert.equal(poller.getTodayHoursUsed(), 0);
 });
 
 // ── A real printing→complete transition persists the incremented counter ──

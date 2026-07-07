@@ -16,6 +16,11 @@ export interface PersistedToday {
   key: string;
   done: number;
   failed: number;
+  /**
+   * Sum of observed printer-time in `printing` today, in ms, across all
+   * printers. An observed metric (see PrinterPoller), so it can exceed one day.
+   */
+  printingMs: number;
 }
 
 /** Persisted automation rule state: on/off by rule id plus the last-run stamp. */
@@ -47,7 +52,7 @@ export function emptyState(): PersistedState {
     version: CURRENT_VERSION,
     queue: { seq: 0, jobs: [] },
     feed: [],
-    today: { key: "", done: 0, failed: 0 },
+    today: { key: "", done: 0, failed: 0, printingMs: 0 },
     automations: { states: {}, lastRun: null }
   };
 }
@@ -100,7 +105,9 @@ function normalize(raw: unknown): PersistedState {
   base.today = {
     key: toStr(today.key),
     done: toNonNegInt(today.done),
-    failed: toNonNegInt(today.failed)
+    failed: toNonNegInt(today.failed),
+    // Missing in files written before printing-hours tracking → 0 (start fresh).
+    printingMs: toNonNegInt(today.printingMs)
   };
 
   const automations = isObject(raw.automations) ? raw.automations : {};

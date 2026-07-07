@@ -55,6 +55,24 @@ type PrintRun = {
 
 const COMPLETE_RE = /complete|finish|done/i;
 const CANCEL_RE = /cancel|abort|stop/i;
+const MS_PER_HOUR = 60 * 60 * 1000;
+/**
+ * Largest gap between two polls we still trust as a single continuous printing
+ * interval. Normal polls are seconds apart (PRINTER_POLL_INTERVAL_MS, default
+ * 10 s), but a hung poll, a suspended process or a backend that was down can
+ * make the wall clock jump far beyond that; crediting the whole jump would
+ * invent printing-hours the farm never observed. A single interval therefore
+ * contributes at most this much. Tied to the poll interval (with a floor) so a
+ * deliberately slow poll cadence does not systematically cap itself.
+ */
+const MAX_PRINT_ACCRUAL_MS = Math.max(env.printerPollIntervalMs * 6, 5 * 60 * 1000);
+/**
+ * How often accrued printing-hours are checkpointed to disk mid-print. The
+ * `done`/`failed` counters persist on every transition, but a long print emits
+ * no transition for hours, so we persist the running total at most this often
+ * (instead of every poll) to bound both write churn and the loss on a crash.
+ */
+const HOURS_PERSIST_INTERVAL_MS = 60 * 1000;
 const MANUAL_LIGHT_OVERRIDE_MS = 5 * 60 * 1000;
 /** After this many consecutive ineffective/errored light commands, pause retries. */
 const MAX_LIGHT_ATTEMPTS = 3;
@@ -111,6 +129,12 @@ export class PrinterPoller {
   private todayKey = dateKey();
   private todayDone = 0;
   private todayFailed = 0;
+  /** Sum of observed printer-time in `printing` today, in ms (across all printers). */
+  private todayPrintingMs = 0;
+  /** Wall-clock of the last accrual per printer; the anchor for the next interval. */
+  private lastAccrualAt = new Map<string, number>();
+  /** Wall-clock of the last throttled hours persist (see HOURS_PERSIST_INTERVAL_MS). */
+  private lastHoursPersistAt = 0;
 
   /** Per-printer identity of the in-flight print, for stable idempotent deduction. */
   private printRuns = new Map<string, PrintRun>();
@@ -136,13 +160,21 @@ export class PrinterPoller {
       this.todayKey = initialToday.key;
       this.todayDone = initialToday.done;
       this.todayFailed = initialToday.failed;
+      // `?? 0` tolerates a state file written before printing-hours tracking (or
+      // a hand-built PersistedToday in tests) — same lenient stance as the store.
+      this.todayPrintingMs = initialToday.printingMs ?? 0;
     }
   }
 
   /** The durable projection of today's counters (rolled over to the current day first). */
   serializeToday(): PersistedToday {
     this.rolloverToday();
-    return { key: this.todayKey, done: this.todayDone, failed: this.todayFailed };
+    return {
+      key: this.todayKey,
+      done: this.todayDone,
+      failed: this.todayFailed,
+      printingMs: this.todayPrintingMs
+    };
   }
 
   /** Runs the first poll, then starts the interval loop. */
@@ -172,7 +204,11 @@ export class PrinterPoller {
       await Promise.all(
         enabled.map(async (printer) => {
           const status = await this.statusProvider(printer);
-          this.recordTransition(printer, this.statuses.get(printer.id), status);
+          const prev = this.statuses.get(printer.id);
+          this.recordTransition(printer, prev, status);
+          // recordTransition rolled today over first, so accrue against the day
+          // this interval ends in; credit the interval to the PREVIOUS status.
+          this.accruePrintingTime(printer.id, prev);
           this.statuses.set(printer.id, status);
         })
       );
@@ -303,6 +339,65 @@ export class PrinterPoller {
   }
 
   /**
+   * Today's accumulated printer-time in `printing`, exposed as hours rounded to
+   * one decimal. It is a sum across every printer, so a busy farm can report
+   * more than 24 — that is intended, it is not a queue ETA or a job count.
+   */
+  getTodayHoursUsed(): number {
+    this.rolloverToday();
+    const hours = this.todayPrintingMs / MS_PER_HOUR;
+    return Math.round(hours * 10) / 10;
+  }
+
+  /**
+   * Accrues observed printer-time toward today's "hours printing" total. Called
+   * once per printer per poll with that printer's PREVIOUS status: the interval
+   * since the last poll is attributed to the state we last observed (a left
+   * Riemann sum), so only intervals that began while the printer was actually
+   * printing and online are counted.
+   *
+   * `printing` already subsumes heating/preparing — the status mapper folds
+   * those device states into `printing` (see toStatusState) — so they need no
+   * special case here. `paused`, `offline`/`unknown` and every reconnect edge
+   * contribute nothing, so a long pause or a dropped connection cannot inflate
+   * the metric.
+   *
+   * Guards: the first interval after a (re)start has no recorded anchor and is
+   * skipped — we only count time we actually watched, never reconstructing the
+   * past from remainingMinutes. The credited slice is clipped to the current
+   * local day (a print straddling local midnight splits across days) and capped
+   * at MAX_PRINT_ACCRUAL_MS (a hung poll / suspended process cannot inject hours).
+   */
+  private accruePrintingTime(id: string, prev: PrinterLiveStatus | undefined): void {
+    const now = Date.now();
+    const prevAt = this.lastAccrualAt.get(id);
+    // Advance the anchor even when this interval is not credited, so the next
+    // interval measures from now — e.g. an offline stretch is dropped rather
+    // than folded into the reconnect interval.
+    this.lastAccrualAt.set(id, now);
+
+    if (prevAt === undefined) return;
+    if (!prev || !prev.online || prev.status !== "printing") return;
+
+    // Clip to the local day: rolloverToday() has already zeroed the counter on a
+    // new day, so credit only the part of the interval after local midnight (the
+    // same local-day boundary localDateKey() keys the counters on).
+    const midnight = new Date(now);
+    midnight.setHours(0, 0, 0, 0);
+    const from = Math.max(prevAt, midnight.getTime());
+    const credited = Math.min(now - from, MAX_PRINT_ACCRUAL_MS);
+    if (credited <= 0) return;
+
+    this.todayPrintingMs += credited;
+
+    // Checkpoint at most once per HOURS_PERSIST_INTERVAL_MS while printing.
+    if (now - this.lastHoursPersistAt >= HOURS_PERSIST_INTERVAL_MS) {
+      this.lastHoursPersistAt = now;
+      this.persist();
+    }
+  }
+
+  /**
    * Drops per-printer map entries for printers no longer in the enabled config
    * (removed or disabled via a config change), so the maps do not grow without
    * bound. There is no live config reload today, but this keeps the state honest
@@ -313,6 +408,7 @@ export class PrinterPoller {
     const maps: Map<string, unknown>[] = [
       this.statuses,
       this.changedAt,
+      this.lastAccrualAt,
       this.printRuns,
       this.lightTargets,
       this.manualLightOverrides,
@@ -696,6 +792,7 @@ export class PrinterPoller {
       this.todayKey = key;
       this.todayDone = 0;
       this.todayFailed = 0;
+      this.todayPrintingMs = 0;
     }
   }
 }
