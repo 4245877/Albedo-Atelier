@@ -591,21 +591,22 @@ body::before {
 /* Скетч надзирательницы: портрет-медальон справа, медленно парит.
    Опаковость и transform живут на контейнере (их правят тема и медиа-запросы),
    маска и тёплый тон — на самой картинке: радиальная маска растворяет
-   квадратные края скетча в фоне зала, сепия подгоняет графит под золото. */
+   квадратные края скетча в фоне зала, сепия подгоняет графит под золото.
+   Opacity хранится в переменных: Firefox fallback ниже дышит ей, не ломая
+   light/dark и приглушение в узкой раскладке. */
 .hero-sketch {
+  --hero-sketch-opacity: 0.62;
+  --hero-sketch-opacity-breathe: 0.66;
   position: absolute;
   right: -30px;
   top: 50%;
   width: min(360px, 46%);
   transform: translateY(-50%);
-  opacity: 0.62;
+  opacity: var(--hero-sketch-opacity);
   pointer-events: none;
   animation: sketch-drift 11s ease-in-out infinite;
-  /* Дрейф — это только transform контейнера. Дорогие эффекты (маска, фильтр)
-     вынесены на собственный слой картинки (см. .hero-sketch img ниже), поэтому
-     контейнеру достаётся готовая текстура: композитор её сдвигает и чуть
-     масштабирует, не перерисовывая каждый кадр. will-change держит слой тёплым,
-     но компоновку обеспечивает именно связка со слоем картинки, не подсказка. */
+  /* Chrome/Chromium плавно двигают этот слой. Firefox получает отдельный
+     fallback ниже: там сложный PNG с mask/filter остаётся неподвижным. */
   will-change: transform;
 }
 
@@ -616,14 +617,8 @@ body::before {
   -webkit-mask-image: radial-gradient(closest-side, #000 52%, transparent 98%);
   mask-image: radial-gradient(closest-side, #000 52%, transparent 98%);
   filter: sepia(0.38) saturate(0.9) brightness(0.9) contrast(1.05);
-  /* Firefox-фикс дёрганого дрейфа. Пока маска и фильтр лежат в анимируемом
-     поддереве без собственного слоя, Firefox не отдаёт transform контейнера
-     композитору: дрейф считается в главном потоке, а тот снапит смещение к
-     целым пикселям — портрет парит покадровыми рывками (в Chrome этого нет).
-     translateZ(0) выносит фильтрованно-маскированную картинку на отдельный
-     GPU-слой: маска и фильтр растрируются один раз, а дрейф контейнера дальше
-     лишь пересэмплирует готовую текстуру — плавно во всех движках. Слой даёт
-     именно translateZ; will-change — только подсказка и держит его тёплым. */
+  /* Оставлено для стабильного Chromium-пути; Firefox fallback ниже не опирается
+     на GPU-хинты и отключает их для картинки. */
   transform: translateZ(0);
   will-change: transform;
   backface-visibility: hidden;
@@ -632,7 +627,12 @@ body::before {
 /* В одну колонку скетч уходит за спину текста — приглушаем, но оставляем
    различимым: вуаль на плитках держит читаемость поверх портрета. */
 @media (max-width: 900px) {
-  .hero-sketch { opacity: 0.3; width: 300px; right: -48px; }
+  .hero-sketch {
+    --hero-sketch-opacity: 0.3;
+    --hero-sketch-opacity-breathe: 0.34;
+    width: 300px;
+    right: -48px;
+  }
 }
 
 /* Опадающие перья: мягкое движение крыльев на краю зрения. */
@@ -1598,10 +1598,33 @@ body::before {
 }
 
 /* Скетч парит: лёгкий подъём и едва заметное приближение. Опаковость кадры
-   не трогают — её задают тема и медиа-запросы статическими правилами. */
+   не трогают — её задают тема и медиа-запросы статическими правилами. Это
+   обычный путь для Chromium; Firefox ниже получает fallback без движения. */
 @keyframes sketch-drift {
   0%, 100% { transform: translateY(-50%) scale(1); }
   50% { transform: translateY(calc(-50% - 8px)) scale(1.02); }
+}
+
+/* Firefox тяжело переваривает медленный subpixel transform у palette PNG с
+   mask/filter. Вместо движения оставляем портрет на месте и слегка меняем
+   opacity через theme-aware переменные: края, размер и тон остаются прежними. */
+@supports (-moz-appearance: none) {
+  .hero-sketch {
+    transform: translateY(-50%);
+    animation: sketch-breathe-firefox 9s ease-in-out infinite;
+    will-change: opacity;
+  }
+
+  .hero-sketch img {
+    transform: none;
+    will-change: auto;
+    backface-visibility: visible;
+  }
+
+  @keyframes sketch-breathe-firefox {
+    0%, 100% { opacity: var(--hero-sketch-opacity); }
+    50% { opacity: var(--hero-sketch-opacity-breathe); }
+  }
 }
 
 @keyframes sigil-glow {
@@ -1663,10 +1686,9 @@ body::before {
   .toggle.on::after { transform: translateX(18px); }
 
   /* Постоянные фоновые анимации — лишняя нагрузка на батарею мобильных.
-     Дрейф скетча не глушим: он идёт целиком на композиторе (картинка с
-     эффектами вынесена на свой GPU-слой, дрейф лишь двигает готовую текстуру)
-     и батарею практически не трогает; при prefers-reduced-motion его выключает
-     общий блок выше. */
+     Дрейф скетча на touch не глушим отдельно: Chromium держит прежнее лёгкое
+     движение, Firefox уже получает неподвижный opacity fallback выше; при
+     prefers-reduced-motion всё выключает общий блок. */
   .brand-sigil::after { animation: none; }
   .dot-pulse, .cam-tag.live .dot, .sys-warn .dot, .sys-err .dot { animation: none; }
   .progress > i::after { animation: none; }
@@ -1872,14 +1894,20 @@ body::before {
 
 /* Днём скетч — графит на фарфоре: плотнее и почти без сепии, тёплый тон
    подобран под свечение из тьмы и на белом отдаёт желтизной. */
-:root[data-theme="light"] .hero-sketch { opacity: 0.6; }
+:root[data-theme="light"] .hero-sketch {
+  --hero-sketch-opacity: 0.6;
+  --hero-sketch-opacity-breathe: 0.64;
+}
 :root[data-theme="light"] .hero-sketch img { filter: sepia(0.18) contrast(1.03); }
 
 /* В одну колонку портрет оказывается за текстом — днём приглушаем сильнее:
    тёмный графит волос под обсидиановым текстом съедает контраст быстрее,
    чем тот же портрет под слоновой костью ночи. */
 @media (max-width: 900px) {
-  :root[data-theme="light"] .hero-sketch { opacity: 0.32; }
+  :root[data-theme="light"] .hero-sketch {
+    --hero-sketch-opacity: 0.32;
+    --hero-sketch-opacity-breathe: 0.35;
+  }
 }
 
 /* Днём над залом опадают чёрные перья крыльев (одно — сливовое). */
