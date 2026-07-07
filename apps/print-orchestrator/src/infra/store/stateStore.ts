@@ -21,6 +21,17 @@ export interface PersistedToday {
    * printers. An observed metric (see PrinterPoller), so it can exceed one day.
    */
   printingMs: number;
+  /**
+   * Daily aggregate for the "average print duration" metric: the summed
+   * duration and the count of successfully completed print runs whose start the
+   * poller actually observed. `avgDurationMsTotal / avgDurationCount` is the
+   * shown average; a count of 0 means "нет данных". Only runs with a known
+   * start-to-finish span land here (see PrinterPoller.recordTransition), so a
+   * print already running at startup, a restart mid-print, or a completion seen
+   * only after coming back online never bias the average downward.
+   */
+  avgDurationMsTotal: number;
+  avgDurationCount: number;
 }
 
 /** Persisted automation rule state: on/off by rule id plus the last-run stamp. */
@@ -52,7 +63,7 @@ export function emptyState(): PersistedState {
     version: CURRENT_VERSION,
     queue: { seq: 0, jobs: [] },
     feed: [],
-    today: { key: "", done: 0, failed: 0, printingMs: 0 },
+    today: { key: "", done: 0, failed: 0, printingMs: 0, avgDurationMsTotal: 0, avgDurationCount: 0 },
     automations: { states: {}, lastRun: null }
   };
 }
@@ -107,7 +118,10 @@ function normalize(raw: unknown): PersistedState {
     done: toNonNegInt(today.done),
     failed: toNonNegInt(today.failed),
     // Missing in files written before printing-hours tracking → 0 (start fresh).
-    printingMs: toNonNegInt(today.printingMs)
+    printingMs: toNonNegInt(today.printingMs),
+    // Missing in files written before average-duration tracking → 0 (start fresh).
+    avgDurationMsTotal: toNonNegInt(today.avgDurationMsTotal),
+    avgDurationCount: toNonNegInt(today.avgDurationCount)
   };
 
   const automations = isObject(raw.automations) ? raw.automations : {};

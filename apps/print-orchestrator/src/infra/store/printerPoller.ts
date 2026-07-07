@@ -49,6 +49,15 @@ type ConsumeItem =
 type PrintRun = {
   printId: string;
   file: string | null;
+  /**
+   * Wall-clock (Date.now()) when this print run was observed to start. The
+   * anchor for the "average print duration" metric — present only for runs the
+   * poller itself watched begin, so a print already running at startup or one
+   * revived across a restart has none and is excluded from the average. Held in
+   * memory only (like the rest of PrintRun): after a restart there is no known
+   * start, so the run cannot be timed and is intentionally not counted.
+   */
+  startedAtMs: number;
   /** AMS tray `remain` snapshot at print start (Bambu), diffed at completion. */
   amsStart: AmsTraySnapshot[] | null;
 };
@@ -131,6 +140,13 @@ export class PrinterPoller {
   private todayFailed = 0;
   /** Sum of observed printer-time in `printing` today, in ms (across all printers). */
   private todayPrintingMs = 0;
+  /**
+   * Daily aggregate for the "average print duration" metric: summed duration
+   * and count of successfully completed runs whose start the poller observed.
+   * The average is total/count; a count of 0 means the UI shows "нет данных".
+   */
+  private todayAvgDurationMsTotal = 0;
+  private todayAvgDurationCount = 0;
   /** Wall-clock of the last accrual per printer; the anchor for the next interval. */
   private lastAccrualAt = new Map<string, number>();
   /** Wall-clock of the last throttled hours persist (see HOURS_PERSIST_INTERVAL_MS). */
@@ -163,6 +179,9 @@ export class PrinterPoller {
       // `?? 0` tolerates a state file written before printing-hours tracking (or
       // a hand-built PersistedToday in tests) — same lenient stance as the store.
       this.todayPrintingMs = initialToday.printingMs ?? 0;
+      // Likewise tolerant of files written before average-duration tracking.
+      this.todayAvgDurationMsTotal = initialToday.avgDurationMsTotal ?? 0;
+      this.todayAvgDurationCount = initialToday.avgDurationCount ?? 0;
     }
   }
 
@@ -173,7 +192,9 @@ export class PrinterPoller {
       key: this.todayKey,
       done: this.todayDone,
       failed: this.todayFailed,
-      printingMs: this.todayPrintingMs
+      printingMs: this.todayPrintingMs,
+      avgDurationMsTotal: this.todayAvgDurationMsTotal,
+      avgDurationCount: this.todayAvgDurationCount
     };
   }
 
@@ -347,6 +368,19 @@ export class PrinterPoller {
     this.rolloverToday();
     const hours = this.todayPrintingMs / MS_PER_HOUR;
     return Math.round(hours * 10) / 10;
+  }
+
+  /**
+   * Mean duration in ms of the print runs that completed successfully today and
+   * whose start the poller observed, or `null` when there is none yet (→ the
+   * dashboard shows "нет данных"). Deliberately computed from summed real run
+   * durations, never from todayPrintingMs / todayDone — that sum mixes in
+   * still-running prints, is taken across printers, and is clipped at midnight.
+   */
+  getTodayAvgPrintMs(): number | null {
+    this.rolloverToday();
+    if (this.todayAvgDurationCount <= 0) return null;
+    return this.todayAvgDurationMsTotal / this.todayAvgDurationCount;
   }
 
   /**
@@ -646,6 +680,7 @@ export class PrinterPoller {
       this.printRuns.set(printer.id, {
         printId: randomUUID(),
         file: job,
+        startedAtMs: Date.now(),
         amsStart: next.amsTrays
       });
       this.events.push("▶", `${name} начал печать${job ? ` «${job}»` : ""}`, "ok");
@@ -670,6 +705,20 @@ export class PrinterPoller {
       }
       if (looksComplete(next)) {
         this.todayDone += 1;
+        // Fold this run into today's average duration — but only when we saw it
+        // start (run present with a startedAtMs) and the span is positive.
+        // Pauses are intentionally included: startedAtMs..now spans the whole
+        // job, matching "how long the printer was occupied". Runs without a
+        // known start (pre-existing at boot, revived across a restart, or whose
+        // completion was only seen after reconnecting) contribute nothing, so
+        // the mean is never dragged down by a partial or unknown duration.
+        if (run) {
+          const durationMs = Date.now() - run.startedAtMs;
+          if (durationMs > 0) {
+            this.todayAvgDurationMsTotal += durationMs;
+            this.todayAvgDurationCount += 1;
+          }
+        }
         this.persist();
         this.consumeFilamentForPrint(printer, prev, next, run, job);
         this.events.push("✔", `${name} завершил печать${job ? ` «${job}»` : ""}`, "ok");
@@ -793,6 +842,8 @@ export class PrinterPoller {
       this.todayDone = 0;
       this.todayFailed = 0;
       this.todayPrintingMs = 0;
+      this.todayAvgDurationMsTotal = 0;
+      this.todayAvgDurationCount = 0;
     }
   }
 }

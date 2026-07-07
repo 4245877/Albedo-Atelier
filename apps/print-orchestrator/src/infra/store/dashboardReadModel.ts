@@ -75,6 +75,21 @@ function humanizeSince(ms: number): string {
 }
 
 /**
+ * Human "45 м" / "1 ч 20 м" from a duration in ms, for the average-print-time
+ * tile. Minutes are zero-padded once hours are shown ("2 ч 05 м") so the values
+ * line up; under an hour it is just the minute count.
+ */
+function formatDuration(ms: number): string {
+  const totalMin = Math.max(0, Math.round(ms / MS_PER_MIN));
+  const hours = Math.floor(totalMin / 60);
+  const mins = totalMin - hours * 60;
+  if (hours > 0) {
+    return `${hours} ч ${String(mins).padStart(2, "0")} м`;
+  }
+  return `${mins} м`;
+}
+
+/**
  * Projects the live farm state into the exact JSON shapes the dashboard renders.
  * Reads only — everything the farm genuinely does not know (material stock,
  * maintenance history, schedule) is returned empty/null, never invented.
@@ -281,12 +296,15 @@ export class DashboardReadModel {
     const free = views.filter((p) => p.status === "idle").length;
     const busy = views.filter((p) => isBusyStatus(p.status)).length;
     const maintenance = views.filter((p) => p.status === "maintenance").length;
+    const avgPrintMs = this.poller.getTodayAvgPrintMs();
     return {
       load: views.length > 0 ? Math.round((busy / views.length) * 100) : null,
       free,
       busy,
       maintenance,
-      avgPrint: null,
+      // Mean duration of today's successfully completed, poller-timed runs; null
+      // (→ "нет данных") until at least one such print has finished.
+      avgPrint: avgPrintMs === null ? null : formatDuration(avgPrintMs),
       successRate: null
     };
   }

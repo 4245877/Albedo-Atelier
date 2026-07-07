@@ -54,16 +54,21 @@ test("hydrates today counters from persisted state (same day)", () => {
     key: today(),
     done: 5,
     failed: 2,
-    printingMs: 2 * 60 * 60 * 1000 // 2 observed printer-hours
+    printingMs: 2 * 60 * 60 * 1000, // 2 observed printer-hours
+    avgDurationMsTotal: 90 * 60 * 1000, // two runs, 45 min mean
+    avgDurationCount: 2
   });
   assert.equal(poller.getTodayDone(), 5);
   assert.equal(poller.getTodayFailed(), 2);
   assert.equal(poller.getTodayHoursUsed(), 2);
+  assert.equal(poller.getTodayAvgPrintMs(), 45 * 60 * 1000);
   assert.deepEqual(poller.serializeToday(), {
     key: today(),
     done: 5,
     failed: 2,
-    printingMs: 2 * 60 * 60 * 1000
+    printingMs: 2 * 60 * 60 * 1000,
+    avgDurationMsTotal: 90 * 60 * 1000,
+    avgDurationCount: 2
   });
 });
 
@@ -72,11 +77,14 @@ test("resets hydrated counters when the persisted day has already passed", () =>
     key: "2000-01-01",
     done: 5,
     failed: 2,
-    printingMs: 2 * 60 * 60 * 1000
+    printingMs: 2 * 60 * 60 * 1000,
+    avgDurationMsTotal: 90 * 60 * 1000,
+    avgDurationCount: 2
   });
   assert.equal(poller.getTodayDone(), 0);
   assert.equal(poller.getTodayFailed(), 0);
   assert.equal(poller.getTodayHoursUsed(), 0);
+  assert.equal(poller.getTodayAvgPrintMs(), null, "a passed day resets the average to нет данных");
 });
 
 // ── A real printing→complete transition persists the incremented counter ──

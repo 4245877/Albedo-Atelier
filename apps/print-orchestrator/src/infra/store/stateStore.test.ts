@@ -55,7 +55,14 @@ function sampleState(): PersistedState {
       { icon: "＋", text: "Задание добавлено", time: "10:00", kind: "info" },
       { icon: "✔", text: "K2 завершил печать", time: "11:00", kind: "ok" }
     ],
-    today: { key: "2026-07-03", done: 3, failed: 1, printingMs: 5_400_000 },
+    today: {
+      key: "2026-07-03",
+      done: 3,
+      failed: 1,
+      printingMs: 5_400_000,
+      avgDurationMsTotal: 3_600_000,
+      avgDurationCount: 2
+    },
     automations: { states: { "night-lights": false, "night-queue": true }, lastRun: "12:30" }
   };
 }
@@ -116,6 +123,8 @@ test("normalizes partial / malformed persisted data instead of trusting it", () 
   assert.equal(loaded.today.done, 5);
   assert.equal(loaded.today.failed, 0, "missing counter defaults to 0");
   assert.equal(loaded.today.printingMs, 0, "missing printingMs defaults to 0 (pre-tracking files)");
+  assert.equal(loaded.today.avgDurationMsTotal, 0, "missing avgDurationMsTotal defaults to 0");
+  assert.equal(loaded.today.avgDurationCount, 0, "missing avgDurationCount defaults to 0");
 });
 
 test("save is a no-op until a snapshot provider is bound", async () => {
