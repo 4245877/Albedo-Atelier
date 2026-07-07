@@ -141,7 +141,25 @@ async function fetchMoonrakerJobFilament(
   }
 }
 
-function readMoonrakerLightState(
+/** Interprets a raw Moonraker pin value as on/off, before any active-low inversion. */
+function interpretPinState(rawValue: unknown): boolean | null {
+  const numericValue = toFiniteNumber(rawValue);
+  if (numericValue !== null) return numericValue > 0;
+
+  const textValue = firstText(rawValue).toLowerCase();
+  if (["on", "true", "enabled", "1"].includes(textValue)) return true;
+  if (["off", "false", "disabled", "0"].includes(textValue)) return false;
+  return null;
+}
+
+/**
+ * The chamber light's live on/off state from its Moonraker status object. For an
+ * active-low pin (`light.invert`) the physical fixture is lit when the pin reads
+ * low, so the raw pin reading is flipped — the reported state always means "the
+ * light is physically on", matching what the on/off commands drive. Exported for
+ * unit testing.
+ */
+export function readMoonrakerLightState(
   printer: PrinterConfig,
   status: Record<string, unknown>
 ): boolean | null {
@@ -150,14 +168,9 @@ function readMoonrakerLightState(
   const object = status[printer.light.statusObject];
   if (!isObject(object)) return null;
 
-  const rawValue = object[printer.light.statusField];
-  const numericValue = toFiniteNumber(rawValue);
-  if (numericValue !== null) return numericValue > 0;
-
-  const textValue = firstText(rawValue).toLowerCase();
-  if (["on", "true", "enabled", "1"].includes(textValue)) return true;
-  if (["off", "false", "disabled", "0"].includes(textValue)) return false;
-  return null;
+  const state = interpretPinState(object[printer.light.statusField]);
+  if (state === null) return null;
+  return printer.light.invert ? !state : state;
 }
 
 export async function getMoonrakerStatus(printer: PrinterConfig): Promise<PrinterLiveStatus> {

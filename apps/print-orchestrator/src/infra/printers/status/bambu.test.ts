@@ -30,6 +30,7 @@ function printer(): PrinterConfig {
     light: {
       enabled: true,
       pin: "",
+      invert: false,
       onGcode: "",
       offGcode: "",
       statusObject: "",

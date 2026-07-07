@@ -39,7 +39,12 @@ services:
       # Durable state (operator queue, event feed, today counters). Lives on the
       # named volume below so it survives `docker compose down` / recreation.
       STATE_FILE_PATH: /app/data/state.json
-      TZ: ${TZ:-Etc/UTC}
+      # Local timezone for the night-light window (NIGHT_PRINT_WINDOW), the
+      # dashboard event timestamps and the "today" counter rollover. Must be the
+      # farm's real timezone, NOT UTC: with UTC the default 23:00–07:30 window
+      # lands at 02:00–10:30 Kyiv time, so lights switch hours off. Override via
+      # TZ in .env if the farm moves.
+      TZ: ${TZ:-Europe/Kyiv}
       # Auto-deduct filament from the fulfillment warehouse when a print finishes.
       # Empty = disabled (the farm runs standalone). Set FULFILLMENT_API_URL in .env
       # to fulfillment's published API on the host LAN, e.g. http://192.168.0.139:3001

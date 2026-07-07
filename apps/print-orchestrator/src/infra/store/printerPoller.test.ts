@@ -110,6 +110,7 @@ function k2Config(): PrinterConfig {
     light: {
       enabled: true,
       pin: "LED",
+      invert: false,
       onGcode: "SET_PIN PIN=LED VALUE=1",
       offGcode: "SET_PIN PIN=LED VALUE=0",
       statusObject: "output_pin LED",

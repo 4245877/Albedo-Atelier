@@ -87,6 +87,7 @@ function bambuConfig(): PrinterConfig {
     light: {
       enabled: true,
       pin: "",
+      invert: false,
       onGcode: "",
       offGcode: "",
       statusObject: "",

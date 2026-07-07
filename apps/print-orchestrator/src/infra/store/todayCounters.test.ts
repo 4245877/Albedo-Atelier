@@ -35,6 +35,7 @@ function k2(): PrinterConfig {
     light: {
       enabled: false,
       pin: "",
+      invert: false,
       onGcode: "",
       offGcode: "",
       statusObject: "",

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { parseMoonrakerJobFilament, parseMoonrakerNozzleDiameter } from "./moonraker";
+import { normalizePrinterConfig } from "../config";
+import {
+  parseMoonrakerJobFilament,
+  parseMoonrakerNozzleDiameter,
+  readMoonrakerLightState
+} from "./moonraker";
 
 /*
  * Nozzle diameter from Klipper's parsed config, as returned by Moonraker's
@@ -89,4 +94,52 @@ test("returns null when metadata carries no usable filament (never invents)", ()
   assert.equal(parseMoonrakerJobFilament({}), null);
   assert.equal(parseMoonrakerJobFilament({ filament_type: "-1", filament_colors: [] }), null);
   assert.equal(parseMoonrakerJobFilament({ filament_type: "unknown" }), null);
+});
+
+/*
+ * Live chamber-light state from the Moonraker `output_pin` status object. An
+ * active-low pin (`light.invert`) is lit when the pin reads low, so the raw pin
+ * value is flipped — the reported boolean always means "physically lit", matching
+ * what the on/off commands drive.
+ */
+
+function k2Light(lightConfig: unknown) {
+  const printer = normalizePrinterConfig({
+    id: "k2",
+    name: "Creality K2",
+    host: "127.0.0.1",
+    protocol: "moonraker",
+    port: 4408,
+    light: lightConfig
+  });
+  assert.ok(printer);
+  return printer!;
+}
+
+test("a normal pin reports on when the pin reads high and off when low", () => {
+  const printer = k2Light({ pin: "LED" });
+  assert.equal(readMoonrakerLightState(printer, { "output_pin LED": { value: 1 } }), true);
+  assert.equal(readMoonrakerLightState(printer, { "output_pin LED": { value: 0 } }), false);
+});
+
+test("an active-low pin (invert) reports on when the pin reads low", () => {
+  const printer = k2Light({ pin: "LED", invert: true });
+  assert.equal(readMoonrakerLightState(printer, { "output_pin LED": { value: 0 } }), true);
+  assert.equal(readMoonrakerLightState(printer, { "output_pin LED": { value: 1 } }), false);
+});
+
+test("invert also flips textual pin states", () => {
+  const printer = k2Light({ pin: "LED", invert: true });
+  assert.equal(readMoonrakerLightState(printer, { "output_pin LED": { value: "off" } }), true);
+  assert.equal(readMoonrakerLightState(printer, { "output_pin LED": { value: "on" } }), false);
+});
+
+test("an unreadable pin stays null regardless of invert (never invents a state)", () => {
+  assert.equal(readMoonrakerLightState(k2Light({ pin: "LED" }), {}), null);
+  assert.equal(
+    readMoonrakerLightState(k2Light({ pin: "LED", invert: true }), {
+      "output_pin LED": { value: "???" }
+    }),
+    null
+  );
 });

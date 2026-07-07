@@ -9,6 +9,15 @@ export interface PrinterLightConfig {
   enabled: boolean;
   /** Moonraker output pin name; produces SET_PIN commands when present. */
   pin: string;
+  /**
+   * The physical pin is active-low: it lights the fixture at VALUE=0 and darkens
+   * it at VALUE=1 (a `!`-inverted `output_pin` in Klipper, common on the K2). When
+   * true, the pin-derived on/off G-code swaps its VALUE and the reported pin state
+   * is flipped, so "on" always means the light is physically lit. Ignored when the
+   * caller supplies explicit onGcode/offGcode (those already encode the intent),
+   * but the status read is still inverted so the reported state stays truthful.
+   */
+  invert: boolean;
   /** Explicit Moonraker G-code command for switching the light on. */
   onGcode: string;
   /** Explicit Moonraker G-code command for switching the light off. */
@@ -109,8 +118,12 @@ function normalizeType(value: unknown): PrinterTechnology {
 function normalizeLightConfig(value: unknown, protocol: PrinterProtocol): PrinterLightConfig {
   const object = isObject(value) ? value : {};
   const pin = asString(object.pin);
-  const onGcode = asString(object.onGcode) || (pin ? `SET_PIN PIN=${pin} VALUE=1` : "");
-  const offGcode = asString(object.offGcode) || (pin ? `SET_PIN PIN=${pin} VALUE=0` : "");
+  const invert = object.invert === true;
+  // Active-low pins light the fixture at VALUE=0, so swap the pin-derived VALUEs.
+  const onValue = invert ? 0 : 1;
+  const offValue = invert ? 1 : 0;
+  const onGcode = asString(object.onGcode) || (pin ? `SET_PIN PIN=${pin} VALUE=${onValue}` : "");
+  const offGcode = asString(object.offGcode) || (pin ? `SET_PIN PIN=${pin} VALUE=${offValue}` : "");
   const statusObject = asString(object.statusObject) || (pin ? `output_pin ${pin}` : "");
   const statusField = asString(object.statusField) || "value";
   const bambuNode = asString(object.bambuNode) || "chamber_light";
@@ -121,7 +134,7 @@ function normalizeLightConfig(value: unknown, protocol: PrinterProtocol): Printe
       ? explicitEnabled
       : protocol === "bambu" || (protocol === "moonraker" && Boolean(onGcode && offGcode));
 
-  return { enabled, pin, onGcode, offGcode, statusObject, statusField, bambuNode };
+  return { enabled, pin, invert, onGcode, offGcode, statusObject, statusField, bambuNode };
 }
 
 export function normalizePrinterConfig(value: unknown): PrinterConfig | null {

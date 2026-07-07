@@ -35,6 +35,7 @@ function moonraker(id: string, name: string, material = "PLA"): PrinterConfig {
     light: {
       enabled: false,
       pin: "",
+      invert: false,
       onGcode: "",
       offGcode: "",
       statusObject: "",
