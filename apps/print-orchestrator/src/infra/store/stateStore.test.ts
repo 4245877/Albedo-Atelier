@@ -63,7 +63,19 @@ function sampleState(): PersistedState {
       avgDurationMsTotal: 3_600_000,
       avgDurationCount: 2
     },
-    automations: { states: { "night-lights": false, "night-queue": true }, lastRun: "12:30" }
+    automations: { states: { "night-lights": false, "night-queue": true }, lastRun: "12:30" },
+    snapshots: [
+      {
+        id: "1720000000000-abcd1234",
+        printerId: "creality-k2",
+        capturedAt: "2026-07-03T10:00:00.000Z",
+        mime: "image/jpeg",
+        bytes: 2048,
+        path: "creality-k2/2026-07-03/1720000000000-abcd1234.jpg",
+        status: "printing · chalice.gcode",
+        url: "/api/printers/creality-k2/snapshots/1720000000000-abcd1234"
+      }
+    ]
   };
 }
 

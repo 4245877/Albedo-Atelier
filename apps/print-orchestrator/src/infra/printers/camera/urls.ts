@@ -72,6 +72,20 @@ export function resolveWebrtcSource(printer: PrinterConfig): string | null {
   }
 }
 
+/**
+ * True when the backend can capture a still JPEG for a manual snapshot. A plain
+ * HTTP snapshot URL (explicit or the conventional per-protocol one) and Bambu's
+ * local liveview both qualify. go2rtc/WebRTC cameras (Creality K2) only qualify
+ * when an explicit `snapshotUrl` is configured — otherwise `frame.jpeg` hangs
+ * with no watching WebRTC client, so there is no usable still endpoint and the
+ * snapshot button must be reported as unavailable rather than silently failing.
+ */
+export function canCaptureSnapshot(printer: PrinterConfig): boolean {
+  if (isGo2RtcCamera(printer)) return Boolean(printer.snapshotUrl.trim());
+  if (resolveSnapshotUrl(printer)) return true;
+  return printer.protocol === "bambu" && Boolean(printer.accessCode.trim());
+}
+
 /** True when the printer has any camera source we can try. */
 export function hasCameraSource(printer: PrinterConfig): boolean {
   if (hasCameraStream(printer)) return true;

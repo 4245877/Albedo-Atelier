@@ -12,6 +12,7 @@
  */
 export type { CameraFrame, CameraStream } from "./types";
 export {
+  canCaptureSnapshot,
   hasCameraSource,
   hasCameraStream,
   hasHttpCameraStream,

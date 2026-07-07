@@ -27,6 +27,7 @@ import { buildNightPlan, type NightPlanEntry } from "./nightPlanner";
 import { buildPrinterView, isBusyStatus } from "./printerView";
 import type { PrinterPoller } from "./printerPoller";
 import type { QueueStore } from "./queueStore";
+import type { SnapshotStore } from "./snapshotStore";
 
 const MS_PER_MIN = 60 * 1000;
 
@@ -105,11 +106,17 @@ export class DashboardReadModel {
     private readonly queue: QueueStore,
     private readonly events: EventFeed,
     private readonly automations: AutomationStore,
-    private readonly getNightPick: () => number
+    private readonly getNightPick: () => number,
+    private readonly snapshots: SnapshotStore
   ) {}
 
   private view(printer: PrinterConfig): PrinterView {
-    return buildPrinterView(printer, this.poller.getStatus(printer.id), this.cameras.getEntry(printer.id));
+    return buildPrinterView(
+      printer,
+      this.poller.getStatus(printer.id),
+      this.cameras.getEntry(printer.id),
+      this.snapshots.latest(printer.id)?.url ?? null
+    );
   }
 
   listPrinters(): PrinterView[] {

@@ -12,6 +12,7 @@ import { EventFeed } from "./eventFeed";
 import type { NightPlanEntry } from "./nightPlanner";
 import { PrinterPoller, type StoreLogger } from "./printerPoller";
 import { QueueStore, type NewQueueJobInput } from "./queueStore";
+import { SnapshotStore } from "./snapshotStore";
 import { StateStore } from "./stateStore";
 
 export type { NewQueueJobInput } from "./queueStore";
@@ -40,6 +41,7 @@ export class FarmStore {
   private readonly state: StateStore;
   private readonly events: EventFeed;
   private readonly cameras = new CameraService();
+  private readonly snapshots: SnapshotStore;
   private readonly inventory = new FulfillmentInventoryClient();
   private readonly queue: QueueStore;
   private readonly automations: AutomationStore;
@@ -50,12 +52,18 @@ export class FarmStore {
   /** Current selection in the night-print candidate list (ephemeral UI state). */
   private nightPick = 0;
 
-  constructor(stateFilePath: string = env.stateFilePath) {
+  constructor(
+    stateFilePath: string = env.stateFilePath,
+    snapshotsDir: string = env.snapshotsDir
+  ) {
     this.state = new StateStore(stateFilePath);
     const persisted = this.state.load();
     const persist = (): void => this.state.save();
 
     this.events = new EventFeed(persisted.feed, persist);
+    this.snapshots = new SnapshotStore(snapshotsDir, persisted.snapshots, persist, {
+      retainPerPrinter: env.snapshotRetainPerPrinter
+    });
     this.queue = new QueueStore(this.events, persisted.queue, persist);
     this.automations = new AutomationStore(persisted.automations, this.events, persist);
     this.poller = new PrinterPoller(
@@ -71,7 +79,8 @@ export class FarmStore {
       (id) => this.configById(id),
       this.poller,
       this.cameras,
-      this.events
+      this.events,
+      this.snapshots
     );
     this.readModel = new DashboardReadModel(
       () => this.enabledConfigs(),
@@ -83,7 +92,8 @@ export class FarmStore {
       this.queue,
       this.events,
       this.automations,
-      () => this.nightPick
+      () => this.nightPick,
+      this.snapshots
     );
 
     // Snapshot the whole durable state on every save.
@@ -92,7 +102,8 @@ export class FarmStore {
       queue: this.queue.serialize(),
       feed: this.events.list(),
       today: this.poller.serializeToday(),
-      automations: this.automations.serialize()
+      automations: this.automations.serialize(),
+      snapshots: this.snapshots.serialize()
     }));
   }
 
@@ -230,6 +241,35 @@ export class FarmStore {
   }
   getCameraStream(id: string) {
     return this.cameras.getStream(this.configById(id));
+  }
+
+  // ── Saved snapshots (→ SnapshotStore; facade resolves the config) ────────
+
+  /** Metadata for every saved snapshot of a printer, newest first. */
+  listSnapshots(id: string) {
+    this.configById(id);
+    return this.snapshots.list(id);
+  }
+
+  /** Metadata for the most recent saved snapshot; throws when there is none. */
+  latestSnapshot(id: string) {
+    this.configById(id);
+    const meta = this.snapshots.latest(id);
+    if (!meta) {
+      throw new NotFoundError(`Snapshot for printer "${id}"`);
+    }
+    return meta;
+  }
+
+  /** One saved snapshot's metadata and image bytes; throws when missing. */
+  async readSnapshot(id: string, snapshotId: string) {
+    this.configById(id);
+    const meta = this.snapshots.get(id, snapshotId);
+    if (!meta) {
+      throw new NotFoundError(`Snapshot "${snapshotId}"`);
+    }
+    const data = await this.snapshots.read(meta);
+    return { meta, data };
   }
 
   // ── Actions (→ CommandService / QueueStore) ──────────────────────────────

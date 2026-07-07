@@ -13,6 +13,9 @@ function readInteger(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
+const stateFilePath =
+  process.env.STATE_FILE_PATH || path.resolve(process.cwd(), "data", "state.json");
+
 export const env = Object.freeze({
   nodeEnv: process.env.NODE_ENV ?? "development",
   serviceName: process.env.SERVICE_NAME ?? "print-orchestrator",
@@ -36,8 +39,24 @@ export const env = Object.freeze({
    * to, so they survive a restart. Defaults to `<cwd>/data/state.json`; in the
    * container `<cwd>` is `/app`, and compose mounts a volume at `/app/data`.
    */
-  stateFilePath:
-    process.env.STATE_FILE_PATH || path.resolve(process.cwd(), "data", "state.json"),
+  stateFilePath,
+  /**
+   * Directory the saved camera snapshots (JPEG/PNG files) are written to, kept
+   * next to {@link stateFilePath} so the same mounted volume holds both. The
+   * durable JSON state stores only the per-snapshot metadata; the image bytes
+   * live here as files. Defaults to `<state dir>/snapshots`.
+   */
+  snapshotsDir:
+    process.env.SNAPSHOTS_DIR || path.resolve(path.dirname(stateFilePath), "snapshots"),
+  /**
+   * How many saved snapshots to keep per printer. Older ones (metadata and the
+   * file on disk) are pruned after each new capture so the volume cannot grow
+   * without bound. Must be at least 1.
+   */
+  snapshotRetainPerPrinter: Math.max(
+    1,
+    readInteger(process.env.SNAPSHOT_RETAIN_PER_PRINTER, 30)
+  ),
   /**
    * Shared secret required on state-changing requests (pause/resume/cancel/…).
    * Empty disables the guard — reads stay open either way.

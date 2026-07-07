@@ -71,6 +71,14 @@ export interface PrinterView {
   /** Whether this printer has a configured light command. */
   lightSupported: boolean;
   snapshotAt: string | null;
+  /**
+   * Whether the backend can capture and save a still snapshot for this camera —
+   * the capability flag the dashboard uses to enable/disable the snapshot button,
+   * instead of guessing from `camera`/`cameraSrc`.
+   */
+  snapshotAvailable: boolean;
+  /** API path of the most recently saved snapshot, or null when none exist yet. */
+  latestSnapshotUrl: string | null;
   error?: string;
   note?: string;
 }

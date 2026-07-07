@@ -4,6 +4,7 @@ import path from "node:path";
 
 import type { FeedEvent, QueueJob } from "../../domain/dashboard/types";
 import type { StoreLogger } from "./printerPoller";
+import { normalizeSnapshotMeta, type SnapshotMeta } from "./snapshotStore";
 
 /** Persisted operator queue: the jobs plus the id sequence, so ids stay unique across restarts. */
 export interface PersistedQueue {
@@ -53,6 +54,8 @@ export interface PersistedState {
   feed: FeedEvent[];
   today: PersistedToday;
   automations: PersistedAutomations;
+  /** Metadata for saved camera snapshots; the image bytes are files, not JSON. */
+  snapshots: SnapshotMeta[];
 }
 
 const CURRENT_VERSION = 1 as const;
@@ -64,7 +67,8 @@ export function emptyState(): PersistedState {
     queue: { seq: 0, jobs: [] },
     feed: [],
     today: { key: "", done: 0, failed: 0, printingMs: 0, avgDurationMsTotal: 0, avgDurationCount: 0 },
-    automations: { states: {}, lastRun: null }
+    automations: { states: {}, lastRun: null },
+    snapshots: []
   };
 }
 
@@ -135,6 +139,12 @@ function normalize(raw: unknown): PersistedState {
     states,
     lastRun: typeof automations.lastRun === "string" ? automations.lastRun : null
   };
+
+  if (Array.isArray(raw.snapshots)) {
+    base.snapshots = raw.snapshots
+      .map(normalizeSnapshotMeta)
+      .filter((meta): meta is SnapshotMeta => meta !== null);
+  }
 
   return base;
 }

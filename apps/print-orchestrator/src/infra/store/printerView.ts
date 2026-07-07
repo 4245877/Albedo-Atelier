@@ -1,5 +1,10 @@
 import type { PrinterView } from "../../domain/printers/types";
-import { hasCameraSource, hasCameraStream, resolveWebrtcSource } from "../printers/camera";
+import {
+  canCaptureSnapshot,
+  hasCameraSource,
+  hasCameraStream,
+  resolveWebrtcSource
+} from "../printers/camera";
 import type { PrinterConfig } from "../printers/config";
 import { supportsPrinterLight, type PrinterLiveStatus } from "../printers/status";
 import type { CameraEntry } from "./cameraService";
@@ -16,7 +21,8 @@ export function isBusyStatus(status: PrinterView["status"]): boolean {
 export function buildPrinterView(
   printer: PrinterConfig,
   status: PrinterLiveStatus | undefined,
-  camera: CameraEntry | undefined
+  camera: CameraEntry | undefined,
+  latestSnapshotUrl: string | null = null
 ): PrinterView {
   const viewStatus: PrinterView["status"] = !status
     ? "unknown"
@@ -82,6 +88,8 @@ export function buildPrinterView(
     light: status?.light ?? null,
     lightSupported: supportsPrinterLight(printer),
     snapshotAt: camera?.snapshotAt ?? null,
+    snapshotAvailable: canCaptureSnapshot(printer),
+    latestSnapshotUrl,
     ...(status?.error ? { error: status.error } : {})
   };
 }

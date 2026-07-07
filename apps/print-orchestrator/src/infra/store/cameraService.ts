@@ -18,6 +18,11 @@ import type { PrinterConfig } from "../printers/config";
 const CAMERA_PROBE_INTERVAL_MS = 30 * 1000;
 const CAMERA_FRAME_FRESH_MS = 5 * 1000;
 
+// A manual snapshot against a go2rtc still URL (Creality K2 `frame.jpeg`) must
+// return quickly or be treated as unavailable — the endpoint can hang for a
+// minute waiting for a keyframe when no WebRTC client is watching.
+const SNAPSHOT_STILL_TIMEOUT_MS = 4 * 1000;
+
 export interface CameraEntry {
   state: CameraState;
   snapshotAt: string | null;
@@ -119,6 +124,48 @@ export class CameraService {
       frame,
       fetchedAt: Date.now()
     });
+    return frame;
+  }
+
+  /**
+   * A guaranteed-fresh frame for saving a manual snapshot. Never returns the
+   * short-lived cache — it always pulls a new frame from the device so the saved
+   * image reflects the moment the operator pressed the button. go2rtc/WebRTC
+   * cameras are attempted only via an explicitly configured `snapshotUrl` (with
+   * a short timeout); without one there is no usable still endpoint and a
+   * {@link CameraError} is raised so the button stays honestly unavailable.
+   */
+  async captureFresh(printer: PrinterConfig): Promise<CameraFrame> {
+    const id = printer.id;
+    if (!hasCameraSource(printer)) {
+      throw new CameraError(id, "камера не настроена");
+    }
+
+    if (isGo2RtcCamera(printer)) {
+      if (!printer.snapshotUrl.trim()) {
+        throw new CameraError(id, "снимок недоступен — камера транслируется по WebRTC");
+      }
+      const frame = await captureCameraFrame(printer, { timeoutMs: SNAPSHOT_STILL_TIMEOUT_MS });
+      if (!frame) {
+        throw new CameraError(id, "снимок недоступен — go2rtc не отдал кадр вовремя");
+      }
+      this.cameras.set(id, { state: "online", snapshotAt: hhmm(), frame, fetchedAt: Date.now() });
+      return frame;
+    }
+
+    const frame = await captureCameraFrame(printer);
+    if (!frame) {
+      const entry = this.cameras.get(id);
+      this.cameras.set(id, {
+        state: "offline",
+        snapshotAt: entry?.snapshotAt ?? null,
+        frame: entry?.frame ?? null,
+        fetchedAt: Date.now()
+      });
+      throw new CameraError(id, "нет сигнала");
+    }
+
+    this.cameras.set(id, { state: "online", snapshotAt: hhmm(), frame, fetchedAt: Date.now() });
     return frame;
   }
 

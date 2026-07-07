@@ -77,13 +77,18 @@ export function installActions({ getState, refresh }) {
     },
 
     snapshot(p, el) {
-      const flash = document.querySelector(`[data-flash="${p.id}"]`);
-      if (flash) {
-        flash.classList.remove("go");
-        void flash.offsetWidth;
-        flash.classList.add("go");
-      }
-      runAction(`/api/printers/${p.id}/snapshot`, null, `«${esc(p.name)}»: кадр с камеры обновлён ◉`, "toast-ok", `snapshot:${p.id}`, el);
+      // Вспышку и тост показываем только после успешного сохранения — при ошибке
+      // (камера недоступна, go2rtc не отдал кадр) UI не должен «мигать» успехом.
+      runAction(`/api/printers/${p.id}/snapshot`, null, null, "toast-ok", `snapshot:${p.id}`, el).then((res) => {
+        if (!res) return;
+        const flash = document.querySelector(`[data-flash="${p.id}"]`);
+        if (flash) {
+          flash.classList.remove("go");
+          void flash.offsetWidth;
+          flash.classList.add("go");
+        }
+        toast(`«${esc(p.name)}»: снимок сохранён ◉`, "toast-ok");
+      });
     },
   };
 

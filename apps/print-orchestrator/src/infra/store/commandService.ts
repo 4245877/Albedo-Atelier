@@ -14,6 +14,13 @@ import type { CameraService } from "./cameraService";
 import type { EventFeed } from "./eventFeed";
 import type { PrinterPoller, StoreLogger } from "./printerPoller";
 import { buildPrinterView, isBusyStatus } from "./printerView";
+import type { SnapshotMeta, SnapshotStore } from "./snapshotStore";
+
+/** Result of a manual snapshot: the refreshed view plus the saved image's metadata. */
+export interface SnapshotResult {
+  printer: PrinterView;
+  snapshot: SnapshotMeta;
+}
 
 /**
  * Operator actions dispatched to the real printer drivers. Each command checks
@@ -27,7 +34,8 @@ export class PrinterCommandService {
     private readonly configById: (id: string) => PrinterConfig,
     private readonly poller: PrinterPoller,
     private readonly cameras: CameraService,
-    private readonly events: EventFeed
+    private readonly events: EventFeed,
+    private readonly snapshots: SnapshotStore
   ) {}
 
   /** Wires the store logger in once it is available (after config load). */
@@ -138,11 +146,29 @@ export class PrinterCommandService {
     return this.refresh(printer);
   }
 
-  async snapshot(id: string): Promise<PrinterView> {
+  /**
+   * Captures a fresh camera frame and saves it as a durable snapshot (file on
+   * disk + metadata). The frame is grabbed anew (never the short-lived cache),
+   * the file is written atomically, and only after it lands do we record the
+   * event and return — so a capture failure produces an error, not a phantom
+   * "snapshot saved" entry in the feed.
+   */
+  async snapshot(id: string): Promise<SnapshotResult> {
     const printer = this.configById(id);
-    await this.cameras.getFrame(printer);
-    this.events.push("◉", `Обновлён кадр с камеры <b>${printer.name}</b>`, "info");
-    return buildPrinterView(printer, this.poller.getStatus(id), this.cameras.getEntry(id));
+    const frame = await this.cameras.captureFresh(printer);
+
+    const status = this.poller.getStatus(id);
+    const statusLabel = status
+      ? status.currentFile
+        ? `${status.status} · ${status.currentFile}`
+        : status.status
+      : null;
+
+    const snapshot = await this.snapshots.save(printer.id, frame, { status: statusLabel });
+    this.events.push("◉", `Снимок с камеры <b>${printer.name}</b> сохранён`, "info");
+
+    const view = buildPrinterView(printer, status, this.cameras.getEntry(id), snapshot.url);
+    return { printer: view, snapshot };
   }
 
   private getReachableConfig(id: string): PrinterConfig {

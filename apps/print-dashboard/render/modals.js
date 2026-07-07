@@ -4,7 +4,7 @@
    с доской: syncModals() перерисовывает его при обновлении состояния, не разрывая
    живой поток камеры (реконсиляция плееров как на доске). */
 
-import { apiPost } from "../api.js";
+import { API_BASE, apiPost } from "../api.js";
 import { reconcileCameras } from "../cameraPlayers.js";
 import { $, badge, esc, fmtLeft, materialBlock, toast } from "../util.js";
 import { camBlock } from "./printers.js";
@@ -69,7 +69,10 @@ function modalActions(p) {
   const lightSupported = Boolean(p.lightSupported);
   const lightOnDisabled = !lightSupported || p.light === true || dead;
   const lightOffDisabled = !lightSupported || p.light === false || dead;
-  const snapDisabled = p.camera !== "online" || dead || p.cameraSrc;
+  // Доступность снимка определяет backend-флаг snapshotAvailable, а не догадки по
+  // camera/cameraSrc — так обычные HTTP-камеры, Bambu и go2rtc с настроенным
+  // snapshotUrl трактуются одинаково и честно.
+  const snapDisabled = !p.snapshotAvailable || dead;
   return `
     <div class="modal-actions">
       <button class="btn btn-sm" data-act="pause" data-id="${esc(p.id)}" ${p.status !== "printing" ? "disabled" : ""}>⏸ Пауза</button>
@@ -78,6 +81,7 @@ function modalActions(p) {
       <button class="btn btn-sm" data-act="light-on" data-id="${esc(p.id)}" ${lightOnDisabled ? "disabled" : ""}>☀ Подсветка</button>
       <button class="btn btn-sm" data-act="light-off" data-id="${esc(p.id)}" ${lightOffDisabled ? "disabled" : ""}>☾ Погасить</button>
       <button class="btn btn-sm" data-act="snapshot" data-id="${esc(p.id)}" ${snapDisabled ? "disabled" : ""}>◉ Снимок</button>
+      ${p.latestSnapshotUrl ? `<a class="btn btn-sm" href="${API_BASE}${esc(p.latestSnapshotUrl)}" target="_blank" rel="noopener">🖼 Последний снимок</a>` : ""}
     </div>`;
 }
 

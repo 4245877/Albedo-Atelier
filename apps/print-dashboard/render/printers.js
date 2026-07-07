@@ -113,7 +113,8 @@ function printerCard(p) {
     <button class="btn btn-sm btn-danger" data-act="cancel" data-id="${p.id}" ${!busy ? "disabled" : ""}>✕ Отмена</button>
     <button class="btn btn-sm" data-act="light-on" data-id="${p.id}"${lightTitle} ${lightOnDisabled ? "disabled" : ""}>☀ Подсветка</button>
     <button class="btn btn-sm" data-act="light-off" data-id="${p.id}"${lightTitle} ${lightOffDisabled ? "disabled" : ""}>☾ Погасить</button>
-    <button class="btn btn-sm" data-act="snapshot" data-id="${p.id}" ${p.camera !== "online" || dead || p.cameraSrc ? "disabled" : ""}>◉ Снимок</button>`;
+    <button class="btn btn-sm" data-act="snapshot" data-id="${p.id}"${p.snapshotAvailable ? "" : ' title="Для этой камеры снимок недоступен"'} ${!p.snapshotAvailable || dead ? "disabled" : ""}>◉ Снимок</button>
+    ${p.latestSnapshotUrl ? `<a class="btn btn-sm" href="${API_BASE}${esc(p.latestSnapshotUrl)}" target="_blank" rel="noopener" title="Открыть последний сохранённый снимок">🖼 Снимок</a>` : ""}`;
 
   const progressBlock = !busy ? "" : p.progress != null ? `
     <div class="printer-progress">
