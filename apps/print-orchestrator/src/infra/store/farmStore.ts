@@ -1,9 +1,21 @@
-import { JobError, NotFoundError } from "../../core/errors";
+import {
+  JobError,
+  NotFoundError,
+  PrinterConnectionError,
+  PrinterOfflineError,
+  ValidationError
+} from "../../core/errors";
 import type { Automation, NightCandidate, NightPrint, QueueJob } from "../../domain/dashboard/types";
 import { env } from "../../shared/env";
 import { FulfillmentInventoryClient } from "../fulfillment/inventoryClient";
 import { loadPrintersConfig, type PrinterConfig, type PrinterConfigSource } from "../printers/config";
-import { shutdownPrinterConnections } from "../printers/status";
+import {
+  fetchPrinterFiles,
+  normalizeStartablePath,
+  supportsPrinterFiles,
+  type PrinterFilesListing
+} from "../printers/files";
+import { PrinterCommandError, shutdownPrinterConnections } from "../printers/status";
 import { AutomationStore } from "./automationStore";
 import { CameraService } from "./cameraService";
 import { PrinterCommandService } from "./commandService";
@@ -291,6 +303,45 @@ export class FarmStore {
   }
   addQueueJob(input: NewQueueJobInput) {
     return this.queue.add(input);
+  }
+
+  /**
+   * Lists one directory of the printer's on-device files (path relative to the
+   * G-code root; "" is the root). Unsupported protocols (Bambu, Creality WS)
+   * and offline printers fail honestly before any device call is attempted.
+   */
+  async listPrinterFiles(id: string, path = ""): Promise<PrinterFilesListing> {
+    const printer = this.configById(id);
+    if (!supportsPrinterFiles(printer)) {
+      throw new JobError(
+        `Просмотр файлов на «${printer.name}» пока поддерживается только для Moonraker-принтеров`
+      );
+    }
+    const status = this.poller.getStatus(id);
+    if (!status || !status.online) {
+      throw new PrinterOfflineError(id);
+    }
+    try {
+      return await fetchPrinterFiles(printer, path);
+    } catch (error) {
+      if (error instanceof ValidationError) throw error;
+      if (error instanceof PrinterCommandError) throw new JobError(error.message);
+      throw new PrinterConnectionError(
+        printer.id,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+
+  /**
+   * Starts an on-device file picked in the file browser. The path is
+   * re-normalized here (no `..`/absolute/non-G-code paths reach the device),
+   * then the existing {@link PrinterCommandService.startPrint} does the rest:
+   * it re-checks live offline/busy/unsupported state at start time, because
+   * the printer may have changed state since the file list was fetched.
+   */
+  startPrinterFile(id: string, file: string) {
+    return this.commands.startPrint(id, normalizeStartablePath(file));
   }
 
   /**

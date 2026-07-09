@@ -79,6 +79,12 @@ export interface PrinterView {
   snapshotAvailable: boolean;
   /** API path of the most recently saved snapshot, or null when none exist yet. */
   latestSnapshotUrl: string | null;
+  /** Whether the backend can browse this printer's on-device files (Moonraker only). */
+  filesSupported: boolean;
+  /** Whether the backend can remote-start an on-device file (Moonraker only). */
+  remoteStartSupported: boolean;
+  /** Configured URL of the printer's own web UI, or null when none is set. */
+  interfaceUrl: string | null;
   error?: string;
   note?: string;
 }

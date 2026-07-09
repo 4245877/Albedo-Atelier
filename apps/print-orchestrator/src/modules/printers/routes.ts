@@ -23,6 +23,15 @@ interface LightBody {
   on?: unknown;
 }
 
+interface PrintBody {
+  file?: unknown;
+}
+
+interface FilesQuery {
+  /** Directory to list, relative to the printer's G-code root; empty = root. */
+  path?: string;
+}
+
 interface CameraQuery {
   /** `1`/`true` → ensure the chamber light is on before capturing (night snapshots). */
   ensureLight?: string;
@@ -40,6 +49,7 @@ interface CameraQuery {
  *   GET  /:id/snapshots            metadata for every saved snapshot (newest first)
  *   GET  /:id/snapshots/latest     metadata for the most recent saved snapshot
  *   GET  /:id/snapshots/:snapshotId  the saved JPEG/PNG image
+ *   GET  /:id/files?path=…  on-device files/directories (Moonraker only)
  *
  * WebRTC cameras (Creality K2) are exposed in the printer view as `cameraSrc`
  * and streamed by the dashboard through `/go2rtc/`, not through this MP4 route.
@@ -50,6 +60,7 @@ interface CameraQuery {
  *   POST /:id/cancel
  *   POST /:id/snapshot    captures + durably saves a still frame
  *   POST /:id/light       body: { "on": boolean }
+ *   POST /:id/print       body: { "file": "folder/model.gcode" } — start an on-device file
  */
 export async function registerPrinterRoutes(
   app: FastifyInstance,
@@ -120,6 +131,19 @@ export async function registerPrinterRoutes(
       .header("Cache-Control", "public, max-age=31536000, immutable")
       .type(meta.mime)
       .send(data);
+  });
+
+  app.get<{ Params: PrinterParams; Querystring: FilesQuery }>("/:id/files", async (request) => {
+    const listing = await farmStore.listPrinterFiles(request.params.id, request.query.path ?? "");
+    return { ok: true, ...listing };
+  });
+
+  app.post<{ Params: PrinterParams; Body: PrintBody }>("/:id/print", async (request) => {
+    const { file } = request.body ?? {};
+    if (typeof file !== "string" || !file.trim()) {
+      throw new ValidationError('Поле «file» обязательно и должно быть непустой строкой');
+    }
+    return { ok: true, printer: await farmStore.startPrinterFile(request.params.id, file) };
   });
 
   app.post<{ Params: PrinterParams }>("/:id/pause", async (request) => ({

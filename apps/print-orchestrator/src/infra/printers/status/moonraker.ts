@@ -26,11 +26,11 @@ const MOONRAKER_STATUS_OBJECTS = [
   "heater_bed"
 ];
 
-function moonrakerBaseUrl(printer: PrinterConfig): string {
+export function moonrakerBaseUrl(printer: PrinterConfig): string {
   return `http://${printer.host}:${printer.port ?? 80}`;
 }
 
-function moonrakerHeaders(printer: PrinterConfig): Record<string, string> | undefined {
+export function moonrakerHeaders(printer: PrinterConfig): Record<string, string> | undefined {
   return printer.apiKey ? { "X-Api-Key": printer.apiKey } : undefined;
 }
 

@@ -1,6 +1,7 @@
 import { apiPost } from "./api.js";
 import {
   initModals,
+  openFilesModal,
   openInfoModal,
   openJobForm,
   openPrinterModal
@@ -54,6 +55,10 @@ export function installActions({ getState, refresh }) {
 
   const actions = {
     open(p) { openPrinterModal(p.id); },
+
+    // Файлы принтера: для Moonraker — настоящий браузер каталога G-code,
+    // для остальных протоколов openFilesModal честно объяснит, что не поддержано.
+    files(p) { openFilesModal(p.id); },
 
     pause(p, el) { runAction(`/api/printers/${p.id}/pause`, null, `«${esc(p.name)}»: печать поставлена на паузу`, "toast-ok", `pause:${p.id}`, el); },
 

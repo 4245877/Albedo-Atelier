@@ -6,7 +6,12 @@ import {
   resolveWebrtcSource
 } from "../printers/camera";
 import type { PrinterConfig } from "../printers/config";
-import { supportsPrinterLight, type PrinterLiveStatus } from "../printers/status";
+import { supportsPrinterFiles } from "../printers/files";
+import {
+  supportsPrinterLight,
+  supportsPrinterStart,
+  type PrinterLiveStatus
+} from "../printers/status";
 import type { CameraEntry } from "./cameraService";
 
 export function isBusyStatus(status: PrinterView["status"]): boolean {
@@ -90,6 +95,9 @@ export function buildPrinterView(
     snapshotAt: camera?.snapshotAt ?? null,
     snapshotAvailable: canCaptureSnapshot(printer),
     latestSnapshotUrl,
+    filesSupported: supportsPrinterFiles(printer),
+    remoteStartSupported: supportsPrinterStart(printer),
+    interfaceUrl: printer.interfaceUrl || null,
     ...(status?.error ? { error: status.error } : {})
   };
 }

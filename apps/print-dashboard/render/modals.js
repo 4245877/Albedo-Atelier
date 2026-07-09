@@ -4,7 +4,7 @@
    с доской: syncModals() перерисовывает его при обновлении состояния, не разрывая
    живой поток камеры (реконсиляция плееров как на доске). */
 
-import { API_BASE, apiPost } from "../api.js";
+import { API_BASE, apiGet, apiPost } from "../api.js";
 import { reconcileCameras } from "../cameraPlayers.js";
 import { $, badge, esc, fmtLeft, materialBlock, toast } from "../util.js";
 import { camBlock } from "./printers.js";
@@ -33,6 +33,17 @@ function ensureRoot() {
   // Клик по фону (но не по самому окну) закрывает.
   root.addEventListener("click", (e) => {
     if (e.target === root || e.target.closest("[data-modal-close]")) closeModal();
+  });
+
+  // Навигация файлового браузера — делегированно, разметка перерисовывается.
+  root.addEventListener("click", (e) => {
+    if (!current || current.kind !== "files") return;
+    const back = e.target.closest("[data-files-back]");
+    if (back) { openPrinterModal(current.printerId); return; }
+    const nav = e.target.closest("[data-files-nav]");
+    if (nav && !nav.disabled) { openFilesModal(current.printerId, nav.dataset.filesNav || ""); return; }
+    const printBtn = e.target.closest("[data-files-print]");
+    if (printBtn && !printBtn.disabled) startFileFromBrowser(current.printerId, printBtn.dataset.filesPrint, printBtn);
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !root.hidden) closeModal();
@@ -73,6 +84,13 @@ function modalActions(p) {
   // camera/cameraSrc — так обычные HTTP-камеры, Bambu и go2rtc с настроенным
   // snapshotUrl трактуются одинаково и честно.
   const snapDisabled = !p.snapshotAvailable || dead;
+  // Для unsupported-принтера кнопка «Файлы» остаётся кликабельной: по клику
+  // показывается честное объяснение, а не молчаливо-серая кнопка. Отключается
+  // она только там, где просмотр поддержан, но принтер не в сети.
+  const filesDisabled = p.filesSupported && dead;
+  const filesTitle = p.filesSupported
+    ? "Файлы на принтере"
+    : "Просмотр файлов пока поддерживается только для Moonraker-принтеров";
   return `
     <div class="modal-actions">
       <button class="btn btn-sm" data-act="pause" data-id="${esc(p.id)}" ${p.status !== "printing" ? "disabled" : ""}>⏸ Пауза</button>
@@ -81,6 +99,8 @@ function modalActions(p) {
       <button class="btn btn-sm" data-act="light-on" data-id="${esc(p.id)}" ${lightOnDisabled ? "disabled" : ""}>☀ Подсветка</button>
       <button class="btn btn-sm" data-act="light-off" data-id="${esc(p.id)}" ${lightOffDisabled ? "disabled" : ""}>☾ Погасить</button>
       <button class="btn btn-sm" data-act="snapshot" data-id="${esc(p.id)}" ${snapDisabled ? "disabled" : ""}>◉ Снимок</button>
+      <button class="btn btn-sm" data-act="files" data-id="${esc(p.id)}" ${filesDisabled ? "disabled" : ""} title="${esc(filesTitle)}">🗂 Файлы</button>
+      ${p.interfaceUrl ? `<a class="btn btn-sm" href="${esc(p.interfaceUrl)}" target="_blank" rel="noopener">⧉ Интерфейс</a>` : ""}
       ${p.latestSnapshotUrl ? `<a class="btn btn-sm" href="${API_BASE}${esc(p.latestSnapshotUrl)}" target="_blank" rel="noopener">🖼 Последний снимок</a>` : ""}
     </div>`;
 }
@@ -164,6 +184,168 @@ export function syncModals() {
   current.lastJson = json;
   $("#modal-content").innerHTML = printerModalHtml(p);
   reconcileCameras();
+}
+
+/* ── Файлы принтера (реальный GET /api/printers/:id/files) ────
+   Живёт в том же модальном слое: кнопка «Файлы» в окне принтера открывает
+   браузер каталога G-code, папки навигируются, printable-файл запускается
+   через POST /api/printers/:id/print после подтверждения. */
+
+function fmtBytes(size) {
+  if (size == null || !Number.isFinite(size)) return "";
+  if (size < 1024) return `${size} Б`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} КБ`;
+  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} МБ`;
+  return `${(size / 1024 / 1024 / 1024).toFixed(2)} ГБ`;
+}
+
+function fmtFileMeta(e) {
+  const parts = [];
+  const bytes = fmtBytes(e.size);
+  if (bytes) parts.push(bytes);
+  const estSec = Number(e.metadata?.estimated_time);
+  if (Number.isFinite(estSec) && estSec > 0) parts.push(`≈ ${fmtLeft(estSec / 60)}`);
+  const material = e.metadata?.filament_type;
+  if (material) parts.push(esc(String(material)));
+  if (e.modifiedAt) {
+    const d = new Date(e.modifiedAt);
+    if (!Number.isNaN(d.getTime())) parts.push(d.toLocaleDateString("ru-RU", { day: "numeric", month: "short" }));
+  }
+  return parts.join(" · ");
+}
+
+function filesCrumbsHtml(path) {
+  const crumbs = [
+    path
+      ? `<button type="button" class="crumb" data-files-nav="">Корень</button>`
+      : `<span class="crumb is-here">Корень</span>`
+  ];
+  let acc = "";
+  const parts = path ? path.split("/") : [];
+  parts.forEach((part, i) => {
+    acc = acc ? `${acc}/${part}` : part;
+    crumbs.push(`<span class="crumb-sep">/</span>`);
+    crumbs.push(
+      i === parts.length - 1
+        ? `<span class="crumb is-here">${esc(part)}</span>`
+        : `<button type="button" class="crumb" data-files-nav="${esc(acc)}">${esc(part)}</button>`
+    );
+  });
+  return `<div class="files-crumbs">${crumbs.join("")}</div>`;
+}
+
+function filesShellHtml(p, path, bodyHtml) {
+  return `
+    <div class="modal-head">
+      <h2 id="modal-title">Файлы — ${esc(p.name)}</h2>
+      ${badge(p.status)}
+    </div>
+    ${filesCrumbsHtml(path)}
+    ${bodyHtml}
+    <div class="modal-actions">
+      <button type="button" class="btn btn-sm" data-files-back>← К принтеру</button>
+      <button type="button" class="btn btn-sm" data-modal-close>Закрыть</button>
+    </div>`;
+}
+
+function filesListHtml(p, entries) {
+  const busy = p.status === "printing" || p.status === "paused";
+  const dead = p.status === "offline";
+  const startBlocked = !p.remoteStartSupported || busy || dead;
+  const blockedNote = !p.remoteStartSupported
+    ? "Удалённый запуск для этого принтера не поддерживается — запустите файл на самом принтере."
+    : dead
+      ? "Принтер не в сети — запуск недоступен."
+      : busy
+        ? "Принтер занят печатью — запуск станет доступен после завершения."
+        : "";
+
+  if (entries.length === 0) {
+    return `<div class="files-note">Папка пуста</div>${blockedNote ? `<div class="files-note">${esc(blockedNote)}</div>` : ""}`;
+  }
+
+  const rows = entries.map((e) => {
+    if (e.type === "directory") {
+      return `
+        <button type="button" class="file-row is-dir" data-files-nav="${esc(e.path)}">
+          <span class="file-ico">📁</span>
+          <span class="file-name">${esc(e.name)}</span>
+          <span class="file-meta">папка</span>
+        </button>`;
+    }
+    const disabled = startBlocked || !e.printable;
+    const title = !e.printable
+      ? "Не файл G-code — запустить нельзя"
+      : blockedNote || `Запустить «${e.name}» на печать`;
+    return `
+      <div class="file-row">
+        <span class="file-ico">${e.printable ? "⬢" : "📄"}</span>
+        <span class="file-name">${esc(e.name)}</span>
+        <span class="file-meta">${fmtFileMeta(e)}</span>
+        <button type="button" class="btn btn-sm btn-primary file-start" data-files-print="${esc(e.path)}"
+          ${disabled ? "disabled" : ""} title="${esc(title)}">▶ Печать</button>
+      </div>`;
+  });
+
+  return `
+    ${blockedNote ? `<div class="files-note">${esc(blockedNote)}</div>` : ""}
+    <div class="files-list">${rows.join("")}</div>`;
+}
+
+/** Актуально ли ещё это окно браузера файлов (пользователь мог уйти). */
+function isCurrentFiles(printerId, path) {
+  return Boolean(current && current.kind === "files" && current.printerId === printerId && current.path === path);
+}
+
+export async function openFilesModal(printerId, path = "") {
+  const p = findPrinter(printerId);
+  if (!p) {
+    toast("Принтер не найден в текущем состоянии фермы", "toast-danger");
+    return;
+  }
+  if (!p.filesSupported) {
+    openInfoModal("files-unsupported");
+    return;
+  }
+
+  current = { kind: "files", printerId, path };
+  openShell();
+  $("#modal-content").innerHTML = filesShellHtml(p, path, `<div class="files-note">Загружаю список файлов…</div>`);
+  // Файловое окно без камеры: снять живой плеер, если он был в окне принтера.
+  reconcileCameras();
+
+  try {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    const res = await apiGet(`/api/printers/${encodeURIComponent(printerId)}/files${query}`);
+    if (!isCurrentFiles(printerId, path)) return; // окно уже сменилось
+    $("#modal-content").innerHTML = filesShellHtml(p, res.path ?? path, filesListHtml(p, res.entries || []));
+  } catch (err) {
+    if (!isCurrentFiles(printerId, path)) return;
+    $("#modal-content").innerHTML = filesShellHtml(
+      p,
+      path,
+      `<div class="files-note files-error">${esc(err.message || "Не удалось получить список файлов")}</div>`
+    );
+  }
+}
+
+async function startFileFromBrowser(printerId, filePath, btn) {
+  const p = findPrinter(printerId);
+  if (!p || !filePath) return;
+  // Подтверждение обязательно: запуск занимает принтер и греет столы-сопла.
+  if (!window.confirm(`Запустить печать «${filePath}» на «${p.name}»?`)) return;
+
+  btn.disabled = true;
+  try {
+    await apiPost(`/api/printers/${encodeURIComponent(printerId)}/print`, { file: filePath });
+    await deps.refresh();
+    toast(`«${esc(p.name)}»: печать «${esc(filePath)}» запущена ▶`, "toast-ok");
+    // Возвращаемся к деталям принтера — там прогресс и камера.
+    openPrinterModal(printerId);
+  } catch (err) {
+    toast(esc(err.message || "Не удалось запустить печать"), "toast-danger");
+    if (btn.isConnected) btn.disabled = false;
+  }
 }
 
 /* ── Форма нового задания (реальный POST /api/queue) ────────── */
@@ -279,7 +461,17 @@ const INFO = {
       <p>Положите нарезанный файл на принтер привычным путём (веб-интерфейс Moonraker/
       Bambu, SD-карта или USB), затем создайте задание кнопкой
       <b>«Добавить задание»</b> и укажите имя этого файла в поле
-      <b>«Файл на принтере»</b> — тогда его можно будет запустить удалённо из очереди.</p>`
+      <b>«Файл на принтере»</b> — тогда его можно будет запустить удалённо из очереди.</p>
+      <p>Файлы, уже лежащие на Moonraker-принтере (Creality K2), можно посмотреть и
+      запустить напрямую: откройте принтер и нажмите <b>«🗂 Файлы»</b>.</p>`
+  },
+  "files-unsupported": {
+    title: "Файлы принтера",
+    body: `
+      <p>Просмотр файлов и удалённый запуск пока поддерживаются только для
+      Moonraker-принтеров.</p>
+      <p>Для Bambu Lab и Creality (WebSocket) запускайте печать с самого принтера
+      или из фирменного приложения; задание при этом можно вести в очереди панели.</p>`
   },
   settings: {
     title: "Настройки",

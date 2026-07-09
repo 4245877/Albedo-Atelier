@@ -61,6 +61,13 @@ export interface PrinterConfig {
   snapshotUrl: string;
   /** Explicit live camera stream URL; empty when no browser-safe stream exists. */
   streamUrl: string;
+  /**
+   * Explicit URL of the printer's own web UI (Fluidd/Mainsail…), opened by the
+   * dashboard in a new tab. Configured, never guessed — Moonraker, Bambu MQTT
+   * and Creality WS expose their interfaces (if any) in incompatible ways.
+   * Empty when the printer has no browser UI.
+   */
+  interfaceUrl: string;
 
   enabled: boolean;
   apiKey: string;
@@ -109,6 +116,16 @@ function normalizeProtocol(value: unknown): PrinterProtocol {
   if (protocol === "bambu") return "bambu";
   if (protocol === "creality") return "creality";
   return "moonraker";
+}
+
+/**
+ * The printer's web-UI link is rendered as a clickable href on the dashboard,
+ * so only http(s) URLs are accepted; anything else is dropped (treated as
+ * "no interface configured") rather than passed through to the browser.
+ */
+function normalizeInterfaceUrl(value: unknown): string {
+  const url = asString(value);
+  return /^https?:\/\//i.test(url) ? url : "";
 }
 
 function normalizeType(value: unknown): PrinterTechnology {
@@ -166,6 +183,7 @@ export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
     swatch: asString(value.swatch),
     snapshotUrl: asString(value.snapshotUrl),
     streamUrl: asString(value.streamUrl),
+    interfaceUrl: normalizeInterfaceUrl(value.interfaceUrl),
 
     enabled: value.enabled !== false,
     apiKey: asString(value.apiKey),
