@@ -14,7 +14,7 @@ import { PrinterPoller } from "./printerPoller";
  */
 
 const RealDate = Date;
-let fakeNow = RealDate.UTC(2026, 6, 2, 2, 0, 0); // 02:00 UTC → inside 23:00–07:30
+let fakeNow = RealDate.UTC(2026, 6, 2, 2, 0, 0); // 02:00 UTC → inside 21:30–07:30
 
 class FakeDate extends RealDate {
   constructor(...args: ConstructorParameters<typeof Date>) {

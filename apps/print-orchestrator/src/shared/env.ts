@@ -26,7 +26,7 @@ export const env = Object.freeze({
   /** How often the farm polls real printers for live status. */
   printerPollIntervalMs: readInteger(process.env.PRINTER_POLL_INTERVAL_MS, 10000),
   /** Night-print window shown on the dashboard (config, not telemetry). */
-  nightWindow: process.env.NIGHT_PRINT_WINDOW ?? "23:00 – 07:30",
+  nightWindow: process.env.NIGHT_PRINT_WINDOW ?? "21:30 – 07:30",
   /**
    * How long to wait after switching a chamber light on for a night snapshot
    * before grabbing the frame, so the camera exposes a lit scene rather than a

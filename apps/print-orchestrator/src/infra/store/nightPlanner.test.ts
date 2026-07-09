@@ -88,14 +88,14 @@ test("parseEtaMinutes reads hours, minutes and combinations", () => {
 });
 
 test("windowLengthMinutes handles a wrap-around night window", () => {
-  assert.equal(windowLengthMinutes("23:00 – 07:30"), 8 * 60 + 30);
+  assert.equal(windowLengthMinutes("21:30 – 07:30"), 10 * 60);
   assert.equal(windowLengthMinutes("09:00 – 18:00"), 9 * 60);
   assert.equal(windowLengthMinutes("garbage"), null);
 });
 
 test("only ready jobs are candidates; night-flagged jobs win when present", () => {
   const ctx: NightPlanContext = {
-    window: "23:00 – 07:30",
+    window: "21:30 – 07:30",
     resolvePrinter: () => moonraker("k2", "K2"),
     getStatus: (id) => idleStatus(id)
   };
@@ -114,7 +114,7 @@ test("only ready jobs are candidates; night-flagged jobs win when present", () =
 
 test("candidates are ranked safest first", () => {
   const ctx: NightPlanContext = {
-    window: "23:00 – 07:30",
+    window: "21:30 – 07:30",
     resolvePrinter: (j) => (j.printer === "OFF" ? undefined : moonraker("k2", "K2")),
     getStatus: (id) => idleStatus(id)
   };
@@ -131,7 +131,7 @@ test("candidates are ranked safest first", () => {
 
 test("blockers list concrete reasons a job cannot launch tonight", () => {
   const ctx: NightPlanContext = {
-    window: "23:00 – 07:30",
+    window: "21:30 – 07:30",
     resolvePrinter: () => moonraker("k2", "K2"),
     getStatus: (id) => ({ ...idleStatus(id), online: false, status: "offline" })
   };

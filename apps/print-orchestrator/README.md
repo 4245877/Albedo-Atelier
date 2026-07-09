@@ -29,7 +29,7 @@ maintenance history and automations are still honest stubs with no runtime state
 yet; the persistence layer is structured to hold them once they are implemented.
 
 Printer lights are governed by `NIGHT_PRINT_WINDOW` (default
-`23:00 – 07:30`) using the process local timezone (`TZ` in Docker). On each
+`21:30 – 07:30`) using the process local timezone (`TZ` in Docker). On each
 poll, supported lights are switched on inside that window and switched off
 outside it.
 

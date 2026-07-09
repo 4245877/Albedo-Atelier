@@ -41,8 +41,8 @@ services:
       STATE_FILE_PATH: /app/data/state.json
       # Local timezone for the night-light window (NIGHT_PRINT_WINDOW), the
       # dashboard event timestamps and the "today" counter rollover. Must be the
-      # farm's real timezone, NOT UTC: with UTC the default 23:00–07:30 window
-      # lands at 02:00–10:30 Kyiv time, so lights switch hours off. Override via
+      # farm's real timezone, NOT UTC: with UTC the default 21:30–07:30 window
+      # is interpreted as UTC, so lights switch at the wrong local time. Override via
       # TZ in .env if the farm moves.
       TZ: ${TZ:-Europe/Kyiv}
       # Auto-deduct filament from the fulfillment warehouse when a print finishes.

@@ -9,8 +9,8 @@ function at(hour: number, minute = 0): Date {
 }
 
 test("parseLocalTimeWindow reads a well-formed window", () => {
-  assert.deepEqual(parseLocalTimeWindow("23:00 – 07:30"), {
-    startMinutes: 23 * 60,
+  assert.deepEqual(parseLocalTimeWindow("21:30 – 07:30"), {
+    startMinutes: 21 * 60 + 30,
     endMinutes: 7 * 60 + 30
   });
 });
@@ -21,18 +21,18 @@ test("parseLocalTimeWindow rejects garbage without throwing", () => {
   assert.equal(parseLocalTimeWindow("25:99"), null);
 });
 
-test("isWithinLocalTimeWindow handles a wrap-around night window 23:00–07:30", () => {
-  const window = "23:00 – 07:30";
+test("isWithinLocalTimeWindow handles a wrap-around night window 21:30–07:30", () => {
+  const window = "21:30 – 07:30";
   // Inside: late night and early morning.
   assert.equal(isWithinLocalTimeWindow(window, at(23, 30)), true);
   assert.equal(isWithinLocalTimeWindow(window, at(2)), true);
   assert.equal(isWithinLocalTimeWindow(window, at(7, 0)), true);
   // Boundaries: start inclusive, end exclusive.
-  assert.equal(isWithinLocalTimeWindow(window, at(23, 0)), true);
+  assert.equal(isWithinLocalTimeWindow(window, at(21, 30)), true);
   assert.equal(isWithinLocalTimeWindow(window, at(7, 30)), false);
   // Outside: daytime.
   assert.equal(isWithinLocalTimeWindow(window, at(12)), false);
-  assert.equal(isWithinLocalTimeWindow(window, at(22, 59)), false);
+  assert.equal(isWithinLocalTimeWindow(window, at(21, 29)), false);
 });
 
 test("isWithinLocalTimeWindow handles a same-day window 09:00–18:00", () => {
