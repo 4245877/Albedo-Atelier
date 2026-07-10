@@ -52,9 +52,25 @@ export type ConsumeFilamentResult = {
   movement: { id: string; quantityG: number } | null;
 };
 
+/**
+ * How a failed consume call should be treated by the caller:
+ *  - `rejected` — fulfillment's consume handler received the request and said
+ *    no (no loaded reel, not enough stock, material mismatch). Retrying the
+ *    same payload gives the same answer until an operator fixes the stock, so
+ *    the caller must NOT auto-retry — worse, the operator may correct the
+ *    stock by hand in the meantime, and a late auto-retry would double-deduct.
+ *  - `unreachable` — the request may never have been processed (network error,
+ *    timeout, 5xx). The consume endpoint is idempotent per `idempotencyKey`,
+ *    so retrying later is safe and expected.
+ */
+export type FulfillmentFailureKind = "rejected" | "unreachable";
+
 /** A reached-but-rejected or unreachable fulfillment call. Message is operator-facing. */
 export class FulfillmentError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly kind: FulfillmentFailureKind = "unreachable"
+  ) {
     super(message);
     this.name = "FulfillmentError";
   }
@@ -115,13 +131,16 @@ export class FulfillmentInventoryClient {
       const json = text ? safeJson(text) : null;
 
       if (!res.ok) {
-        // A JSON `{ error }` body means fulfillment reached the consume handler and
-        // rejected the request (no loaded filament, not enough stock, …): surface
-        // its message. Anything else means we never reached it — report generically.
-        if (json && typeof json.error === "string") {
-          throw new FulfillmentError(json.error);
+        // A 4xx with a JSON `{ error }` body means fulfillment reached the
+        // consume handler and rejected the request (no loaded filament, not
+        // enough stock, …): surface its message and mark it permanent. A 5xx —
+        // even with an error body (Fastify serializes crashes as JSON too) —
+        // or a bodyless status means the deduction may not have been recorded,
+        // so it stays retryable.
+        if (res.status < 500 && json && typeof json.error === "string") {
+          throw new FulfillmentError(json.error, "rejected");
         }
-        throw new FulfillmentError(`склад вернул ${res.status}`);
+        throw new FulfillmentError(`склад вернул ${res.status}`, "unreachable");
       }
 
       return json as ConsumeFilamentResult;

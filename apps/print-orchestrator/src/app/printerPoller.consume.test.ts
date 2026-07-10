@@ -5,7 +5,7 @@ import type { PrinterConfig } from "../infra/printers/config";
 import type { AmsTraySnapshot, PrinterLiveStatus } from "../infra/printers/status/types";
 import type { CameraService } from "./cameraService";
 import { EventFeed } from "./eventFeed";
-import { type InventoryConsumer } from "./filamentConsumption";
+import { FilamentConsumption, type InventoryConsumer } from "./filamentConsumption";
 import { PrinterPoller } from "./printerPoller";
 
 /*
@@ -121,7 +121,7 @@ function makePoller(
     () => {}, // persist
     undefined, // initialToday
     () => false, // night-lights off: never touch the (fake) device light
-    inventory,
+    new FilamentConsumption(inventory, events),
     scriptedProvider(sequence)
   );
   return { poller, events };

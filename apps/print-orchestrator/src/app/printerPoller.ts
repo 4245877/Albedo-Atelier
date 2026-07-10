@@ -9,7 +9,7 @@ import type { StoreLogger } from "../shared/logger";
 import { hhmm } from "../shared/time";
 import type { CameraService } from "./cameraService";
 import type { EventFeed } from "./eventFeed";
-import { FilamentConsumption, type InventoryConsumer } from "./filamentConsumption";
+import { FilamentConsumption } from "./filamentConsumption";
 import { LightScheduler } from "./lightScheduler";
 import { TodayCounters } from "./todayCounters";
 
@@ -72,7 +72,8 @@ export class PrinterPoller {
   readonly today: TodayCounters;
   /** Night policy + manual override for the chamber lights. */
   readonly lights: LightScheduler;
-  private readonly filament: FilamentConsumption;
+  /** Completion stock deduction + its retry queue (see FilamentConsumption). */
+  readonly filament: FilamentConsumption;
 
   /** Wall-clock of the last accrual per printer; the anchor for the next interval. */
   private lastAccrualAt = new Map<string, number>();
@@ -90,15 +91,15 @@ export class PrinterPoller {
     initialToday?: PersistedToday,
     /** Gate for the scheduled night-light policy (the `night-lights` automation). */
     nightLightsEnabled: () => boolean = () => true,
-    /** Fulfillment stock client; when absent/disabled, completion deduction is skipped. */
-    inventory?: InventoryConsumer,
+    /** Completion deduction; when absent a disabled no-op instance is used. */
+    filament?: FilamentConsumption,
     /** Live telemetry source; injectable so the poll loop can be tested without real devices. */
     private readonly statusProvider: (
       printer: PrinterConfig
     ) => Promise<PrinterLiveStatus> = getPrinterLiveStatus
   ) {
     this.today = new TodayCounters(initialToday);
-    this.filament = new FilamentConsumption(inventory, events);
+    this.filament = filament ?? new FilamentConsumption(undefined, events);
     this.lights = new LightScheduler({
       events,
       nightLightsEnabled,
@@ -146,6 +147,9 @@ export class PrinterPoller {
       );
       await this.lights.applyPolicy(enabled);
       await Promise.all(enabled.map((printer) => this.cameras.probe(printer)));
+      // Redeliver queued stock deductions in the poll cadence. Fire-and-forget:
+      // it is self-guarded and must never delay or fail the poll loop.
+      void this.filament.retryPending();
       this.lastPollAt = Date.now();
     } catch (error) {
       this.logger.error?.({ err: error }, "printer poll failed");

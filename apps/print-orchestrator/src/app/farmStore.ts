@@ -16,6 +16,7 @@ import { PrinterCommandService } from "./commandService";
 import { DashboardReadModel } from "./dashboardReadModel";
 import { runDriverOperation } from "./driverErrors";
 import { EventFeed } from "./eventFeed";
+import { FilamentConsumption } from "./filamentConsumption";
 import type { NightPlanEntry } from "./nightPlanner";
 import { PrinterPoller } from "./printerPoller";
 import type { StoreLogger } from "../shared/logger";
@@ -51,6 +52,7 @@ export class FarmStore {
   private readonly cameras = new CameraService();
   private readonly snapshots: SnapshotStore;
   private readonly inventory = new FulfillmentInventoryClient();
+  private readonly filament: FilamentConsumption;
   private readonly queue: QueueStore;
   private readonly automations: AutomationStore;
   private readonly poller: PrinterPoller;
@@ -80,6 +82,14 @@ export class FarmStore {
     });
     this.queue = new QueueStore(this.events, persisted.queue, persist);
     this.automations = new AutomationStore(persisted.automations, this.events, persist);
+    // Deductions fulfillment never confirmed are reloaded into the retry queue,
+    // so a restart cannot lose them (delivery stays deduped by idempotencyKey).
+    this.filament = new FilamentConsumption(
+      this.inventory,
+      this.events,
+      persist,
+      persisted.pendingConsumes
+    );
     this.poller = new PrinterPoller(
       () => this.enabledConfigs(),
       this.cameras,
@@ -87,7 +97,7 @@ export class FarmStore {
       persist,
       persisted.today,
       () => this.automations.isEnabled("night-lights"),
-      this.inventory
+      this.filament
     );
     this.commands = new PrinterCommandService(
       (id) => this.configById(id),
@@ -118,7 +128,8 @@ export class FarmStore {
       feed: this.events.list(),
       today: this.poller.today.serialize(),
       automations: this.automations.serialize(),
-      snapshots: this.snapshots.serialize()
+      snapshots: this.snapshots.serialize(),
+      pendingConsumes: this.filament.serialize()
     }));
   }
 

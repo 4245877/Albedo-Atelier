@@ -89,9 +89,21 @@ used filament from the fulfillment warehouse via
 `POST /api/inventory/filament/consume`. All stock logic stays in fulfillment —
 the orchestrator only reports what a printer consumed. Disabled (a no-op) until
 `FULFILLMENT_API_URL` is set, so the farm still runs standalone. Warehouse
-errors are **soft**: logged and shown as one feed warning, never fatal to the
-poll loop. Each deduction carries a stable `idempotencyKey` so a re-observed
-completion or a retry cannot double-deduct.
+errors are **soft** — never fatal to the poll loop — and split by whether
+delivery is worth repeating:
+
+- **Rejected** (fulfillment processed the call and refused: no loaded reel, not
+  enough stock, material mismatch): one feed warning, no auto-retry. Retrying
+  would re-fail identically — and once the operator corrects the stock by hand,
+  a late auto-retry could double-deduct.
+- **Unreachable** (network error, timeout, 5xx — delivery unknown): the
+  deduction is queued and redelivered with exponential backoff (1 min doubling
+  up to 30 min, given up loudly after 7 days). The queue is persisted in
+  `state.json` (`pendingConsumes`), so a restart cannot lose an owed deduction.
+
+Each deduction carries a stable `idempotencyKey` (minted per print run, and per
+AMS tray), so a re-observed completion or any redelivery cannot double-deduct —
+fulfillment answers `duplicate: true` instead of writing a second movement.
 
 The consumed amount comes from whatever the device actually knows:
 

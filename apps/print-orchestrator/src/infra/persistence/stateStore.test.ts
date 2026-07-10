@@ -75,6 +75,24 @@ function sampleState(): PersistedState {
         status: "printing · chalice.gcode",
         url: "/api/printers/creality-k2/snapshots/1720000000000-abcd1234"
       }
+    ],
+    pendingConsumes: [
+      {
+        input: {
+          printerId: "bambu-a1-combo",
+          grams: 120,
+          amsTray: 0,
+          material: "PLA",
+          color: "#FF0000",
+          printJobId: "run-9",
+          idempotencyKey: "bambu-a1-combo:run-9:t0",
+          note: "Печать «model.3mf»"
+        },
+        printerName: "Bambu Lab A1 Combo",
+        attempts: 2,
+        nextAttemptAtMs: 1_720_000_120_000,
+        firstFailedAtMs: 1_720_000_000_000
+      }
     ]
   };
 }
@@ -137,6 +155,66 @@ test("normalizes partial / malformed persisted data instead of trusting it", () 
   assert.equal(loaded.today.printingMs, 0, "missing printingMs defaults to 0 (pre-tracking files)");
   assert.equal(loaded.today.avgDurationMsTotal, 0, "missing avgDurationMsTotal defaults to 0");
   assert.equal(loaded.today.avgDurationCount, 0, "missing avgDurationCount defaults to 0");
+  assert.deepEqual(loaded.pendingConsumes, [], "missing pendingConsumes defaults to empty (pre-retry files)");
+});
+
+test("normalizes pending consume entries and drops undeliverable ones", () => {
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      pendingConsumes: [
+        // Deliverable: keeps its key, quantity and schedule.
+        {
+          input: { printerId: "k2", lengthMm: 500, printJobId: "run-1", idempotencyKey: "k2:run-1" },
+          printerName: "Creality K2",
+          attempts: 3,
+          nextAttemptAtMs: 123,
+          firstFailedAtMs: 456
+        },
+        // Missing quantity → could never be delivered → dropped.
+        { input: { printerId: "k2", printJobId: "run-2", idempotencyKey: "k2:run-2" } },
+        // Missing idempotency key → redelivery would not be dedupable → dropped.
+        { input: { printerId: "k2", lengthMm: 10, printJobId: "run-3" } },
+        // Junk shapes → dropped.
+        "junk",
+        { printerName: "no input" }
+      ]
+    }),
+    "utf8"
+  );
+
+  const loaded = new StateStore(file).load();
+  assert.equal(loaded.pendingConsumes.length, 1, "only the deliverable entry survives");
+  const entry = loaded.pendingConsumes[0];
+  assert.equal(entry.input.idempotencyKey, "k2:run-1");
+  assert.equal(entry.input.lengthMm, 500);
+  assert.equal(entry.attempts, 3);
+  assert.equal(entry.nextAttemptAtMs, 123);
+  assert.equal(entry.firstFailedAtMs, 456);
+});
+
+test("a pending consume without a first-failure stamp restarts its age clock", () => {
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      pendingConsumes: [
+        {
+          input: { printerId: "k2", grams: 10, printJobId: "r", idempotencyKey: "k" }
+        }
+      ]
+    }),
+    "utf8"
+  );
+
+  const before = Date.now();
+  const loaded = new StateStore(file).load();
+  const entry = loaded.pendingConsumes[0];
+  assert.equal(entry.attempts, 1, "attempts floor is 1");
+  assert.equal(entry.nextAttemptAtMs, 0, "missing schedule means due immediately");
+  assert.ok(
+    entry.firstFailedAtMs >= before,
+    "missing age anchor restarts now — never 0, which would expire it instantly"
+  );
 });
 
 test("a legacy queue status \"error\" is normalized to review and survives a re-save", async () => {

@@ -2,6 +2,7 @@ import type { PrinterConfig } from "../infra/printers/config";
 import type { PrinterLiveStatus } from "../infra/printers/status";
 import { bambuMeasurableTrayCount, bambuTrayUsage } from "../infra/printers/status/bambuUsage";
 import type { AmsTraySnapshot } from "../infra/printers/status/types";
+import { FulfillmentError } from "../infra/fulfillment/inventoryClient";
 import type { StoreLogger } from "../shared/logger";
 import { localDateKey } from "../shared/time";
 import type { EventFeed } from "./eventFeed";
@@ -12,17 +13,51 @@ import type { EventFeed } from "./eventFeed";
  */
 export interface InventoryConsumer {
   readonly enabled: boolean;
-  consume(input: {
-    printerId: string;
-    lengthMm?: number;
-    grams?: number;
-    amsTray?: number;
-    material?: string;
-    color?: string;
-    printJobId: string;
-    idempotencyKey: string;
-    note?: string;
-  }): Promise<unknown>;
+  consume(input: ConsumePayload): Promise<unknown>;
+}
+
+/** The consume request payload as posted to fulfillment (see inventoryClient). */
+export type ConsumePayload = {
+  printerId: string;
+  lengthMm?: number;
+  grams?: number;
+  amsTray?: number;
+  material?: string;
+  color?: string;
+  printJobId: string;
+  idempotencyKey: string;
+  note?: string;
+};
+
+/**
+ * One deduction that could not be delivered to fulfillment (unreachable/5xx)
+ * and is awaiting redelivery. The payload is retried verbatim: its
+ * `idempotencyKey` makes redelivery safe even if the original request did land.
+ * Persisted with the farm state so a restart cannot lose an owed deduction.
+ */
+export type PendingConsume = {
+  input: ConsumePayload;
+  /** Printer display name for operator-facing feed messages. */
+  printerName: string;
+  /** Failed delivery attempts so far (>= 1 once queued). */
+  attempts: number;
+  /** Wall-clock (ms) before which no redelivery is attempted. */
+  nextAttemptAtMs: number;
+  /** Wall-clock (ms) of the first failed attempt; anchors the give-up age. */
+  firstFailedAtMs: number;
+};
+
+/** First retry delay; doubles per failed attempt up to {@link RETRY_MAX_DELAY_MS}. */
+const RETRY_BASE_DELAY_MS = 60 * 1000;
+const RETRY_MAX_DELAY_MS = 30 * 60 * 1000;
+/** After this long without a successful delivery the deduction is dropped (loudly). */
+const RETRY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/** Hard cap on the queue; beyond it the oldest entry is dropped (logged). */
+const MAX_PENDING = 200;
+
+function retryDelayMs(attempts: number): number {
+  const exponent = Math.min(attempts - 1, 30); // avoid 2^huge overflow
+  return Math.min(RETRY_BASE_DELAY_MS * 2 ** exponent, RETRY_MAX_DELAY_MS);
 }
 
 /** One filament deduction derived from a completed print. */
@@ -70,20 +105,49 @@ export function buildConsumeItems(
 /**
  * Posts a completed print's filament consumption to fulfillment. Separated from
  * the pure {@link buildConsumeItems}: this class owns only the side effects —
- * the network dispatch, the soft-warning feed entries and the logging.
+ * the network dispatch, the retry queue for deliveries fulfillment never
+ * received, the soft-warning feed entries and the logging.
+ *
+ * Failure handling follows the {@link FulfillmentError} taxonomy:
+ *  - `rejected` (fulfillment processed and refused — no loaded reel, not enough
+ *    stock): warned and dropped. Auto-retrying would re-fail identically, and
+ *    once an operator corrects the stock by hand a late auto-retry could
+ *    double-deduct.
+ *  - `unreachable` (network/timeout/5xx — delivery unknown): queued in
+ *    {@link PendingConsume} and redelivered with exponential backoff. The
+ *    payload's `idempotencyKey` makes redelivery safe if the original did land.
+ *    The queue is persisted via the injected `persist` callback, so restarts
+ *    cannot lose an owed deduction.
  */
 export class FilamentConsumption {
   private logger: StoreLogger = {};
+  private pending: PendingConsume[];
+  private retrying = false;
 
   constructor(
     /** Fulfillment stock client; when absent/disabled, completion deduction is skipped. */
     private readonly inventory: InventoryConsumer | undefined,
-    private readonly events: EventFeed
-  ) {}
+    private readonly events: EventFeed,
+    /** Schedules a state save; wired to the farm's StateStore. */
+    private readonly persist: () => void = () => {},
+    initialPending: PendingConsume[] = []
+  ) {
+    this.pending = [...initialPending];
+  }
 
   /** Wires the store logger in once it is available (after config load). */
   useLogger(logger: StoreLogger): void {
     this.logger = logger;
+  }
+
+  /** The retry queue for persistence (a fresh array; entries are not copied). */
+  serialize(): PendingConsume[] {
+    return [...this.pending];
+  }
+
+  /** Deductions still awaiting delivery (for tests/observability). */
+  get pendingCount(): number {
+    return this.pending.length;
   }
 
   /**
@@ -126,42 +190,132 @@ export class FilamentConsumption {
     }
 
     const printJobId = run?.printId ?? `${printer.id}:${localDateKey()}:${job ?? "?"}`;
+    const note = job ? `Печать «${job}»` : undefined;
     for (const item of items) {
-      this.dispatchConsumeItem(printer, item, printJobId, job);
+      const input: ConsumePayload =
+        item.kind === "length"
+          ? {
+              printerId: printer.id,
+              lengthMm: item.lengthMm,
+              printJobId,
+              idempotencyKey: `${printer.id}:${printJobId}`,
+              note
+            }
+          : {
+              printerId: printer.id,
+              grams: item.grams,
+              amsTray: item.amsTray,
+              material: item.material ?? undefined,
+              color: item.color ?? undefined,
+              printJobId,
+              idempotencyKey: `${printer.id}:${printJobId}:t${item.amsTray}`,
+              note
+            };
+      void this.deliver(input, printer.name);
     }
   }
 
-  private dispatchConsumeItem(
-    printer: PrinterConfig,
-    item: ConsumeItem,
-    printJobId: string,
-    job: string | null
-  ): void {
-    const note = job ? `Печать «${job}»` : undefined;
-    const input =
-      item.kind === "length"
-        ? {
-            printerId: printer.id,
-            lengthMm: item.lengthMm,
-            printJobId,
-            idempotencyKey: `${printer.id}:${printJobId}`,
-            note
-          }
-        : {
-            printerId: printer.id,
-            grams: item.grams,
-            amsTray: item.amsTray,
-            material: item.material ?? undefined,
-            color: item.color ?? undefined,
-            printJobId,
-            idempotencyKey: `${printer.id}:${printJobId}:t${item.amsTray}`,
-            note
-          };
+  /**
+   * Redelivers due queue entries (nextAttemptAtMs in the past). Invoked from
+   * the poll loop every cycle; self-guarded so overlapping invocations and slow
+   * deliveries (each bounded by the client timeout) never stack. Sequential on
+   * purpose: when fulfillment is down every attempt fails the same way, so
+   * parallel calls would only multiply timeouts.
+   */
+  async retryPending(): Promise<void> {
+    if (this.retrying || this.pending.length === 0 || !this.inventory?.enabled) return;
+    this.retrying = true;
+    try {
+      const now = Date.now();
+      const due = this.pending.filter((entry) => entry.nextAttemptAtMs <= now);
+      for (const entry of due) {
+        await this.retryOne(entry);
+      }
+    } finally {
+      this.retrying = false;
+    }
+  }
 
-    void this.inventory!.consume(input).catch((error: unknown) => {
+  private async retryOne(entry: PendingConsume): Promise<void> {
+    const label = entry.input.note ?? entry.input.printJobId;
+    try {
+      await this.inventory!.consume(entry.input);
+      this.remove(entry);
+      this.events.push(
+        "✔",
+        `<b>${entry.printerName}</b>: склад — отложенное списание выполнено (${label})`,
+        "ok"
+      );
+    } catch (error) {
+      if (error instanceof FulfillmentError && error.kind === "rejected") {
+        // Fulfillment finally processed it and said no — same terminal outcome
+        // as an immediate rejection: tell the operator, stop retrying.
+        this.remove(entry);
+        this.events.push("⚠", `<b>${entry.printerName}</b>: склад — ${error.message}`, "err");
+        return;
+      }
+
+      entry.attempts += 1;
+      entry.nextAttemptAtMs = Date.now() + retryDelayMs(entry.attempts);
+      if (Date.now() - entry.firstFailedAtMs > RETRY_MAX_AGE_MS) {
+        this.remove(entry);
+        this.events.push(
+          "⚠",
+          `<b>${entry.printerName}</b>: склад — не удалось списать за 7 дней, отложенное списание отброшено (${label})`,
+          "err"
+        );
+        return;
+      }
+      this.persist();
+      this.logger.warn?.(
+        { printer: entry.input.printerId, attempts: entry.attempts },
+        "filament consume retry failed"
+      );
+    }
+  }
+
+  private remove(entry: PendingConsume): void {
+    this.pending = this.pending.filter((item) => item !== entry);
+    this.persist();
+  }
+
+  /** First delivery of one deduction; failures route to the queue or the feed. */
+  private async deliver(input: ConsumePayload, printerName: string): Promise<void> {
+    try {
+      await this.inventory!.consume(input);
+    } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn?.({ err: error, printer: printer.id }, "filament consume failed");
-      this.events.push("⚠", `<b>${printer.name}</b>: склад — ${message}`, "err");
+      this.logger.warn?.({ err: error, printer: input.printerId }, "filament consume failed");
+
+      if (error instanceof FulfillmentError && error.kind === "unreachable") {
+        this.enqueue(input, printerName, message);
+        return;
+      }
+      this.events.push("⚠", `<b>${printerName}</b>: склад — ${message}`, "err");
+    }
+  }
+
+  private enqueue(input: ConsumePayload, printerName: string, reason: string): void {
+    if (this.pending.length >= MAX_PENDING) {
+      const dropped = this.pending.shift();
+      this.logger.warn?.(
+        { droppedKey: dropped?.input.idempotencyKey },
+        "pending consume queue full — dropped the oldest entry"
+      );
+    }
+    const now = Date.now();
+    this.pending.push({
+      input,
+      printerName,
+      attempts: 1,
+      nextAttemptAtMs: now + retryDelayMs(1),
+      firstFailedAtMs: now
     });
+    this.persist();
+    this.events.push(
+      "⚠",
+      `<b>${printerName}</b>: склад — ${reason}; списание будет повторено автоматически`,
+      "err"
+    );
   }
 }

@@ -3,6 +3,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 
 import type { FeedEvent, QueueJob } from "../../domain/dashboard/types";
+import type { ConsumePayload, PendingConsume } from "../../app/filamentConsumption";
 import { isObject } from "../../shared/isObject";
 import { MAX_FEED } from "../../app/eventFeed";
 import type { StoreLogger } from "../../shared/logger";
@@ -58,6 +59,11 @@ export interface PersistedState {
   automations: PersistedAutomations;
   /** Metadata for saved camera snapshots; the image bytes are files, not JSON. */
   snapshots: SnapshotMeta[];
+  /**
+   * Filament deductions fulfillment has not confirmed yet (unreachable at
+   * completion time), owed across restarts. See FilamentConsumption.
+   */
+  pendingConsumes: PendingConsume[];
 }
 
 const CURRENT_VERSION = 1 as const;
@@ -69,7 +75,8 @@ export function emptyState(): PersistedState {
     feed: [],
     today: { key: "", done: 0, failed: 0, printingMs: 0, avgDurationMsTotal: 0, avgDurationCount: 0 },
     automations: { states: {}, lastRun: null },
-    snapshots: []
+    snapshots: [],
+    pendingConsumes: []
   };
 }
 
@@ -143,7 +150,74 @@ function normalize(raw: unknown): PersistedState {
       .filter((meta): meta is SnapshotMeta => meta !== null);
   }
 
+  if (Array.isArray(raw.pendingConsumes)) {
+    base.pendingConsumes = raw.pendingConsumes
+      .map(normalizePendingConsume)
+      .filter((entry): entry is PendingConsume => entry !== null);
+  }
+
   return base;
+}
+
+function toPositiveFinite(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function toOptionalStr(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
+}
+
+/**
+ * Coerces one persisted retry-queue entry. An entry without the fields a
+ * redelivery needs (printer, idempotency key, a positive quantity) is dropped —
+ * redelivering it could never succeed or, worse, could deduct unpredictably.
+ */
+function normalizePendingConsume(raw: unknown): PendingConsume | null {
+  if (!isObject(raw) || !isObject(raw.input)) return null;
+  const source = raw.input;
+
+  const printerId = toStr(source.printerId);
+  const idempotencyKey = toStr(source.idempotencyKey);
+  const lengthMm = toPositiveFinite(source.lengthMm);
+  const grams = toPositiveFinite(source.grams);
+  if (!printerId || !idempotencyKey || (lengthMm === undefined && grams === undefined)) {
+    return null;
+  }
+
+  const amsTray =
+    typeof source.amsTray === "number" && Number.isInteger(source.amsTray) && source.amsTray >= 0
+      ? source.amsTray
+      : undefined;
+
+  // Optional fields are set only when present: a JSON round-trip drops
+  // undefined-valued keys, so re-adding them here would make load(save(x)) ≠ x.
+  const input: ConsumePayload = {
+    printerId,
+    printJobId: toStr(source.printJobId) || idempotencyKey,
+    idempotencyKey
+  };
+  if (lengthMm !== undefined) input.lengthMm = lengthMm;
+  if (grams !== undefined) input.grams = grams;
+  if (amsTray !== undefined) input.amsTray = amsTray;
+  const material = toOptionalStr(source.material);
+  if (material !== undefined) input.material = material;
+  const color = toOptionalStr(source.color);
+  if (color !== undefined) input.color = color;
+  const note = toOptionalStr(source.note);
+  if (note !== undefined) input.note = note;
+
+  return {
+    input,
+    printerName: toStr(raw.printerName) || printerId,
+    attempts: Math.max(1, toNonNegInt(raw.attempts)),
+    nextAttemptAtMs: toNonNegInt(raw.nextAttemptAtMs),
+    // A missing first-failure stamp must not look ancient (that would drop the
+    // entry as expired on the first retry) — restart the age clock instead.
+    firstFailedAtMs:
+      typeof raw.firstFailedAtMs === "number" && Number.isFinite(raw.firstFailedAtMs) && raw.firstFailedAtMs > 0
+        ? raw.firstFailedAtMs
+        : Date.now()
+  };
 }
 
 function normalizeJob(raw: Record<string, unknown>): QueueJob {

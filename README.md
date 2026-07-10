@@ -26,10 +26,11 @@ printer/queue/automation actions) and the `/health`, `/ready`, `/metrics` probes
 
 ### Persistence
 
-The orchestrator's mutable state — the operator queue, the event feed and
-today's counters — is written to a JSON file on the `orchestrator-data` Docker
-volume (`/app/data/state.json`), so it survives `docker compose down` and
-container recreation. Live telemetry is not persisted (it is re-polled). See the
+The orchestrator's mutable state — the operator queue, the event feed,
+today's counters and filament deductions still awaiting delivery to the
+fulfillment warehouse — is written to a JSON file on the `orchestrator-data`
+Docker volume (`/app/data/state.json`), so it survives `docker compose down`
+and container recreation. Live telemetry is not persisted (it is re-polled). See the
 service README for details and `STATE_FILE_PATH`.
 
 ### Ports & security
