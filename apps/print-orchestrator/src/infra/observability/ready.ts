@@ -1,4 +1,5 @@
-import { farmStore, type FarmReadiness } from "../store/farmStore";
+import type { FarmReadiness } from "../../domain/farm/types";
+import { farmStore } from "../../app/farmStore";
 
 export type ReadyResponse = FarmReadiness;
 
@@ -8,5 +9,5 @@ export type ReadyResponse = FarmReadiness;
  * completed a poll, or the poll loop has gone stale.
  */
 export function getReadiness(): ReadyResponse {
-  return farmStore.getReadiness();
+  return farmStore.reads.getReadiness();
 }

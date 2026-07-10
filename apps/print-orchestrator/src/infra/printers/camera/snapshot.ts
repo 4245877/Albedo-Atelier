@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from "../../../shared/fetchWithTimeout";
 import type { PrinterConfig } from "../config";
 import { captureBambuCameraFrame } from "./bambuCamera";
 import { peekBambuLiveviewFrame } from "./bambuLiveview";
@@ -31,11 +32,10 @@ export async function captureCameraFrame(
     return null;
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    // The deadline covers the body read too — a camera that dribbles a frame
+    // slower than the timeout is treated as unavailable, exactly as before.
+    const response = await fetchWithTimeout(url, { timeoutMs });
     if (!response.ok) return null;
 
     const contentType = (response.headers.get("content-type") || "")
@@ -50,7 +50,5 @@ export async function captureCameraFrame(
     return { data: buffer, mime: contentType || "image/jpeg" };
   } catch {
     return null;
-  } finally {
-    clearTimeout(timeout);
   }
 }

@@ -1,4 +1,5 @@
 import { env } from "../../shared/env";
+import { fetchWithTimeout, isTimeoutError } from "../../shared/fetchWithTimeout";
 
 /**
  * Server-side client for the fulfillment inventory API. When a print completes,
@@ -18,7 +19,7 @@ import { env } from "../../shared/env";
  * single-reel `lengthMm` case keeps working for Moonraker unchanged.
  *
  * Modeled on fulfillment's own outbound proxy (`modules/appeals/upstream.ts`):
- * `fetch` + `AbortController` timeout, a typed error, and a safe JSON parse. The
+ * a hard request timeout, a typed error, and a safe JSON parse. The
  * feature is disabled (a no-op) until `FULFILLMENT_API_URL` is configured, so the
  * farm keeps running standalone.
  */
@@ -88,13 +89,11 @@ export class FulfillmentInventoryClient {
     if (!this.enabled) return null;
 
     const url = `${this.baseUrl}/api/inventory/filament/consume`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
     try {
-      const res = await fetch(url, {
+      const res = await fetchWithTimeout(url, {
         method: "POST",
-        signal: controller.signal,
+        timeoutMs: TIMEOUT_MS,
         headers: { "Content-Type": "application/json" },
         // Undefined fields are dropped by JSON.stringify, so each call carries
         // only the quantity/hints its source actually has.
@@ -128,15 +127,12 @@ export class FulfillmentInventoryClient {
       return json as ConsumeFilamentResult;
     } catch (error) {
       if (error instanceof FulfillmentError) throw error;
-      const reason =
-        error instanceof Error
-          ? error.name === "AbortError"
-            ? `таймаут ${TIMEOUT_MS} мс`
-            : error.message
+      const reason = isTimeoutError(error)
+        ? `таймаут ${TIMEOUT_MS} мс`
+        : error instanceof Error
+          ? error.message
           : String(error);
       throw new FulfillmentError(`склад филамента недоступен (${reason})`);
-    } finally {
-      clearTimeout(timer);
     }
   }
 }

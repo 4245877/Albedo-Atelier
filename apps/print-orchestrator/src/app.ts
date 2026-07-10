@@ -5,11 +5,11 @@ import Fastify, {
 } from "fastify";
 
 import { AppError } from "./core/errors";
-import { registerSecurity } from "./core/security";
+import { registerSecurity } from "./http/security";
 import { getHealth } from "./infra/observability/health";
 import { collectMetrics, METRICS_CONTENT_TYPE } from "./infra/observability/metrics";
 import { getReadiness } from "./infra/observability/ready";
-import { farmStore } from "./infra/store/farmStore";
+import { farmStore } from "./app/farmStore";
 import { registerAutomationRoutes } from "./modules/automation/routes";
 import { registerDashboardRoutes } from "./modules/dashboard/routes";
 import { registerPrinterRoutes } from "./modules/printers/routes";
@@ -23,7 +23,7 @@ export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
   });
 
   // CORS (allowlisted, not wildcard) + shared-secret guard on state-changing
-  // requests. See ./core/security.
+  // requests. See ./http/security.
   registerSecurity(app);
 
   // Map the domain error taxonomy to structured JSON: { error: { code, message, details } }.

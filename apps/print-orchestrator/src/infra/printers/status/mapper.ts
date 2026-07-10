@@ -4,11 +4,9 @@ import type { PrinterLiveStatus } from "./types";
 /**
  * Protocol-agnostic helpers for turning raw device payloads into a
  * {@link PrinterLiveStatus}. Shared by the Moonraker/Bambu/Creality adapters.
+ * (`isObject` lives in `shared/isObject` — the same guard the config and
+ * persisted-state loaders use.)
  */
-
-export function isObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 export function toFiniteNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;

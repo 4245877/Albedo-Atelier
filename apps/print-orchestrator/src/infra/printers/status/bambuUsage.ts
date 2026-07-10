@@ -1,4 +1,5 @@
-import { firstFiniteNumber, firstText, isObject } from "./mapper";
+import { isObject } from "../../../shared/isObject";
+import { firstFiniteNumber, firstText } from "./mapper";
 import type { ActiveFilament, AmsTraySnapshot } from "./types";
 
 /**

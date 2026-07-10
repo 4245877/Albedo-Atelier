@@ -7,7 +7,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { AppError, NotFoundError } from "../../core/errors";
-import { SnapshotStore } from "../../infra/store/snapshotStore";
+import { SnapshotStore } from "../../infra/persistence/snapshotStore";
 import { registerPrinterRoutes, type PrinterRoutesStore } from "./routes";
 
 let dir: string;

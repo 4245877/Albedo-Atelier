@@ -1,11 +1,11 @@
 import mqtt from "mqtt";
 
+import { isObject } from "../../../shared/isObject";
 import type { PrinterConfig } from "../config";
 import { parseAmsTrays, resolveActiveFilament } from "./bambuUsage";
 import {
   firstFiniteNumber,
   firstText,
-  isObject,
   makeOfflineStatus,
   roundOrNull,
   toStatusState

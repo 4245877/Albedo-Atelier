@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from "../../../shared/fetchWithTimeout";
 import type { PrinterConfig } from "../config";
 import { resolveGo2RtcApiBase, resolveWebrtcSource } from "./urls";
 
@@ -33,11 +34,9 @@ export async function probeGo2RtcStream(
   const src = resolveWebrtcSource(printer);
   if (!base || !src) return false;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? GO2RTC_PROBE_TIMEOUT_MS);
   try {
-    const response = await fetch(`${base}/api/streams`, {
-      signal: controller.signal,
+    const response = await fetchWithTimeout(`${base}/api/streams`, {
+      timeoutMs: options.timeoutMs ?? GO2RTC_PROBE_TIMEOUT_MS,
       headers: { Accept: "application/json" }
     });
     if (!response.ok) return false;
@@ -48,7 +47,5 @@ export async function probeGo2RtcStream(
     return isGo2RtcStreamLive(body[src]);
   } catch {
     return false;
-  } finally {
-    clearTimeout(timeout);
   }
 }

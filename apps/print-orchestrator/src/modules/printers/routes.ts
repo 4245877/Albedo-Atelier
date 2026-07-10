@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 
 import { ValidationError } from "../../core/errors";
-import { farmStore as defaultFarmStore } from "../../infra/store/farmStore";
+import { farmStore as defaultFarmStore } from "../../app/farmStore";
 
 /** The farm facade the routes call; injectable so the HTTP layer is testable. */
 export type PrinterRoutesStore = typeof defaultFarmStore;
@@ -68,13 +68,13 @@ export async function registerPrinterRoutes(
 ): Promise<void> {
   const farmStore = opts.store ?? defaultFarmStore;
 
-  app.get("/", async () => farmStore.listPrinters());
+  app.get("/", async () => farmStore.reads.listPrinters());
 
   // Declared before "/:id" so the literal path wins unambiguously.
-  app.get("/active", async () => farmStore.listActivePrinters());
+  app.get("/active", async () => farmStore.reads.listActivePrinters());
 
   app.get<{ Params: PrinterParams }>("/:id", async (request) =>
-    farmStore.getPrinter(request.params.id)
+    farmStore.reads.getPrinter(request.params.id)
   );
 
   app.get<{ Params: PrinterParams; Querystring: CameraQuery }>(

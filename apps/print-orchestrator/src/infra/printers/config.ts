@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import type { PrinterTechnology } from "../../domain/printers/types";
+import { isObject } from "../../shared/isObject";
 
 export type PrinterProtocol = "moonraker" | "bambu" | "creality";
 
@@ -92,10 +93,6 @@ export interface PrintersConfigResult {
 }
 
 const DEFAULT_CONFIG_PATH = path.resolve(process.cwd(), "config", "printers.json");
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 /**
  * Expands `${ENV_VAR}` references in config strings so secrets (e.g. the Bambu

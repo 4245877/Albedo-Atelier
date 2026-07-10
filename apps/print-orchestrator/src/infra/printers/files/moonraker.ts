@@ -1,5 +1,7 @@
+import { fetchWithTimeout } from "../../../shared/fetchWithTimeout";
+import { isObject } from "../../../shared/isObject";
 import type { PrinterConfig } from "../config";
-import { isObject, toFiniteNumber } from "../status/mapper";
+import { toFiniteNumber } from "../status/mapper";
 import { moonrakerBaseUrl, moonrakerHeaders } from "../status/moonraker";
 import { PrinterCommandError } from "../status/types";
 import { isPrintableFile, normalizePrinterPath } from "./path";
@@ -103,24 +105,18 @@ export async function listMoonrakerFiles(
   const relative = normalizePrinterPath(path, { allowEmpty: true });
   const target = relative ? `gcodes/${relative}` : "gcodes";
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MOONRAKER_FILES_TIMEOUT_MS);
-  try {
-    const res = await fetch(
-      `${moonrakerBaseUrl(printer)}/server/files/directory?path=${encodeURIComponent(target)}&extended=true`,
-      { signal: controller.signal, headers: moonrakerHeaders(printer) }
+  const res = await fetchWithTimeout(
+    `${moonrakerBaseUrl(printer)}/server/files/directory?path=${encodeURIComponent(target)}&extended=true`,
+    { timeoutMs: MOONRAKER_FILES_TIMEOUT_MS, headers: moonrakerHeaders(printer) }
+  );
+  if (!res.ok) {
+    // Moonraker answers 400/404 for a directory that does not exist.
+    throw new PrinterCommandError(
+      res.status === 404 || res.status === 400
+        ? `Папка «${relative || "/"}» не найдена на принтере`
+        : `Moonraker HTTP ${res.status}`
     );
-    if (!res.ok) {
-      // Moonraker answers 400/404 for a directory that does not exist.
-      throw new PrinterCommandError(
-        res.status === 404 || res.status === 400
-          ? `Папка «${relative || "/"}» не найдена на принтере`
-          : `Moonraker HTTP ${res.status}`
-      );
-    }
-    const json = (await res.json()) as { result?: unknown };
-    return { path: relative, entries: parseMoonrakerDirectory(relative, json?.result) };
-  } finally {
-    clearTimeout(timeout);
   }
+  const json = (await res.json()) as { result?: unknown };
+  return { path: relative, entries: parseMoonrakerDirectory(relative, json?.result) };
 }

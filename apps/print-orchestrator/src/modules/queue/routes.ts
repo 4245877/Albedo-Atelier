@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 
-import { farmStore, type NewQueueJobInput } from "../../infra/store/farmStore";
+import { farmStore } from "../../app/farmStore";
+import type { NewQueueJobInput } from "../../app/queueStore";
 
 /**
  * Print queue endpoints under `/api/queue`.
@@ -16,9 +17,9 @@ import { farmStore, type NewQueueJobInput } from "../../infra/store/farmStore";
  *   POST /night/pick     advance to the next night candidate
  */
 export async function registerQueueRoutes(app: FastifyInstance): Promise<void> {
-  app.get("/", async () => farmStore.getQueue());
+  app.get("/", async () => farmStore.reads.getQueue());
 
-  app.get("/night", async () => farmStore.getNight());
+  app.get("/night", async () => farmStore.reads.getNight());
 
   app.post<{ Body: NewQueueJobInput }>("/", async (request) => ({
     ok: true,

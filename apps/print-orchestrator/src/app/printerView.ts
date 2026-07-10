@@ -1,0 +1,103 @@
+import type { PrinterView } from "../domain/printers/types";
+import {
+  canCaptureSnapshot,
+  hasCameraSource,
+  hasCameraStream,
+  resolveWebrtcSource
+} from "../infra/printers/camera";
+import type { PrinterConfig } from "../infra/printers/config";
+import { supportsPrinterFiles } from "../infra/printers/files";
+import {
+  supportsPrinterLight,
+  supportsPrinterStart,
+  type PrinterLiveStatus
+} from "../infra/printers/status";
+import type { CameraEntry } from "./cameraService";
+
+export function isBusyStatus(status: PrinterView["status"]): boolean {
+  return status === "printing" || status === "paused";
+}
+
+/**
+ * The dashboard-facing view for a printer, from its static config plus the live
+ * status and camera entry. Keys match the frontend 1:1; every telemetry field
+ * is null when the device did not report it.
+ */
+export function buildPrinterView(
+  printer: PrinterConfig,
+  status: PrinterLiveStatus | undefined,
+  camera: CameraEntry | undefined,
+  latestSnapshotUrl: string | null = null
+): PrinterView {
+  const viewStatus: PrinterView["status"] = !status
+    ? "unknown"
+    : !status.online
+      ? status.status === "unknown"
+        ? "unknown"
+        : "offline"
+      : status.status;
+
+  const cameraState = hasCameraSource(printer) ? camera?.state ?? "offline" : "none";
+  const cameraOnline = cameraState === "online";
+  const webrtcSource = resolveWebrtcSource(printer);
+
+  // Prefer live filament telemetry from the device; fall back to the configured
+  // material. Only "printer" is authoritative — config is a declared default.
+  const activeFilament = status?.activeFilament ?? null;
+  const liveMaterial = activeFilament?.material ?? null;
+  const liveMaterialSource: PrinterView["liveMaterialSource"] = liveMaterial
+    ? "printer"
+    : printer.material
+      ? "config"
+      : "unknown";
+
+  // Same rule for the nozzle: prefer the live setting from the device (Bambu, or
+  // the K2's Klipper config), else the configured fallback, tagged honestly so
+  // the dashboard never shows a config value as live telemetry.
+  const liveNozzleDiameter = status?.nozzleDiameterMm ?? null;
+  const nozzleDiameter = liveNozzleDiameter ?? printer.nozzleDiameterMm ?? null;
+  const nozzleDiameterSource: PrinterView["nozzleDiameterSource"] =
+    liveNozzleDiameter !== null ? "printer" : printer.nozzleDiameterMm != null ? "config" : "unknown";
+
+  const liveNozzleType = status?.nozzleType ?? null;
+  const configNozzleType = printer.nozzleType || null;
+  const nozzleType = liveNozzleType ?? configNozzleType;
+  const nozzleTypeSource: PrinterView["nozzleTypeSource"] =
+    liveNozzleType ? "printer" : configNozzleType ? "config" : "unknown";
+
+  return {
+    id: printer.id,
+    name: printer.name,
+    model: printer.model || null,
+    type: printer.type,
+    status: viewStatus,
+    job: status?.currentFile ?? null,
+    progress: status?.progressPct ?? null,
+    nozzle: status && status.nozzleTemp !== null ? [status.nozzleTemp, status.nozzleTarget] : null,
+    bed: status && status.bedTemp !== null ? [status.bedTemp, status.bedTarget] : null,
+    chamber: status?.chamberTemp ?? null,
+    minutesLeft: status?.remainingMinutes ?? null,
+    material: printer.material || null,
+    swatch: printer.swatch || null,
+    nozzleDiameter,
+    nozzleDiameterSource,
+    nozzleType,
+    nozzleTypeSource,
+    liveMaterial,
+    liveMaterialColor: activeFilament?.color ?? null,
+    liveMaterialSource,
+    activeTray: activeFilament?.tray ?? null,
+    camera: cameraState,
+    cameraStream: cameraOnline && hasCameraStream(printer),
+    cameraSrc: cameraOnline ? webrtcSource : null,
+    light: status?.light ?? null,
+    lightSupported: supportsPrinterLight(printer),
+    snapshotAt: camera?.snapshotAt ?? null,
+    snapshotAvailable: canCaptureSnapshot(printer),
+    latestSnapshotUrl,
+    filesSupported: supportsPrinterFiles(printer),
+    remoteStartSupported: supportsPrinterStart(printer),
+    interfaceUrl: printer.interfaceUrl || null,
+    ...(status?.error ? { error: status.error } : {})
+  };
+}

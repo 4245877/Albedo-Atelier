@@ -1,4 +1,4 @@
-import { farmStore } from "../store/farmStore";
+import { farmStore } from "../../app/farmStore";
 
 interface Metric {
   name: string;
@@ -16,7 +16,7 @@ const PREFIX = "print_orchestrator_";
  * a misleading zero.
  */
 export function collectMetrics(): string {
-  const m = farmStore.getMetricsSnapshot();
+  const m = farmStore.reads.getMetricsSnapshot();
 
   const metrics: Metric[] = [
     { name: "up", help: "1 when the service is running", type: "gauge", value: m.up },

@@ -1,9 +1,10 @@
+import { fetchWithTimeout } from "../../../shared/fetchWithTimeout";
+import { isObject } from "../../../shared/isObject";
 import type { PrinterConfig } from "../config";
 import {
   estimateRemainingMinutes,
   firstText,
   firstFiniteNumber,
-  isObject,
   makeOfflineStatus,
   roundOrNull,
   toFiniteNumber,
@@ -124,20 +125,16 @@ async function fetchMoonrakerJobFilament(
   printer: PrinterConfig,
   filename: string
 ): Promise<ActiveFilament | null> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MOONRAKER_TIMEOUT_MS);
   try {
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `${moonrakerBaseUrl(printer)}/server/files/metadata?filename=${encodeURIComponent(filename)}`,
-      { signal: controller.signal, headers: moonrakerHeaders(printer) }
+      { timeoutMs: MOONRAKER_TIMEOUT_MS, headers: moonrakerHeaders(printer) }
     );
     if (!res.ok) return null;
     const json = (await res.json()) as { result?: unknown };
     return isObject(json?.result) ? parseMoonrakerJobFilament(json.result) : null;
   } catch {
     return null;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -176,12 +173,9 @@ export function readMoonrakerLightState(
 export async function getMoonrakerStatus(printer: PrinterConfig): Promise<PrinterLiveStatus> {
   const url = moonrakerStatusUrl(printer);
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MOONRAKER_TIMEOUT_MS);
-
   try {
-    const res = await fetch(url, {
-      signal: controller.signal,
+    const res = await fetchWithTimeout(url, {
+      timeoutMs: MOONRAKER_TIMEOUT_MS,
       headers: moonrakerHeaders(printer)
     });
     if (!res.ok) {
@@ -259,8 +253,6 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
       printer,
       error instanceof Error ? error.message : "Неизвестная ошибка Moonraker"
     );
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -268,19 +260,13 @@ export async function sendMoonrakerCommand(
   printer: PrinterConfig,
   command: PrinterCommand
 ): Promise<void> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MOONRAKER_TIMEOUT_MS);
-  try {
-    const res = await fetch(`${moonrakerBaseUrl(printer)}/printer/print/${command}`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: moonrakerHeaders(printer)
-    });
-    if (!res.ok) {
-      throw new PrinterCommandError(`Moonraker HTTP ${res.status}`);
-    }
-  } finally {
-    clearTimeout(timeout);
+  const res = await fetchWithTimeout(`${moonrakerBaseUrl(printer)}/printer/print/${command}`, {
+    method: "POST",
+    timeoutMs: MOONRAKER_TIMEOUT_MS,
+    headers: moonrakerHeaders(printer)
+  });
+  if (!res.ok) {
+    throw new PrinterCommandError(`Moonraker HTTP ${res.status}`);
   }
 }
 
@@ -295,26 +281,20 @@ export async function sendMoonrakerStart(printer: PrinterConfig, filename: strin
     throw new PrinterCommandError("Не задано имя файла для запуска печати");
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MOONRAKER_TIMEOUT_MS);
-  try {
-    const res = await fetch(
-      `${moonrakerBaseUrl(printer)}/printer/print/start?filename=${encodeURIComponent(name)}`,
-      {
-        method: "POST",
-        signal: controller.signal,
-        headers: moonrakerHeaders(printer)
-      }
-    );
-    if (!res.ok) {
-      throw new PrinterCommandError(
-        res.status === 404
-          ? `Moonraker не нашёл файл «${name}» на принтере`
-          : `Moonraker HTTP ${res.status}`
-      );
+  const res = await fetchWithTimeout(
+    `${moonrakerBaseUrl(printer)}/printer/print/start?filename=${encodeURIComponent(name)}`,
+    {
+      method: "POST",
+      timeoutMs: MOONRAKER_TIMEOUT_MS,
+      headers: moonrakerHeaders(printer)
     }
-  } finally {
-    clearTimeout(timeout);
+  );
+  if (!res.ok) {
+    throw new PrinterCommandError(
+      res.status === 404
+        ? `Moonraker не нашёл файл «${name}» на принтере`
+        : `Moonraker HTTP ${res.status}`
+    );
   }
 }
 
@@ -327,21 +307,15 @@ export async function sendMoonrakerLightCommand(
     throw new PrinterCommandError(`Moonraker light command is not configured for ${printer.name}`);
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MOONRAKER_TIMEOUT_MS);
-  try {
-    const res = await fetch(
-      `${moonrakerBaseUrl(printer)}/printer/gcode/script?script=${encodeURIComponent(script)}`,
-      {
-        method: "POST",
-        signal: controller.signal,
-        headers: moonrakerHeaders(printer)
-      }
-    );
-    if (!res.ok) {
-      throw new PrinterCommandError(`Moonraker HTTP ${res.status}`);
+  const res = await fetchWithTimeout(
+    `${moonrakerBaseUrl(printer)}/printer/gcode/script?script=${encodeURIComponent(script)}`,
+    {
+      method: "POST",
+      timeoutMs: MOONRAKER_TIMEOUT_MS,
+      headers: moonrakerHeaders(printer)
     }
-  } finally {
-    clearTimeout(timeout);
+  );
+  if (!res.ok) {
+    throw new PrinterCommandError(`Moonraker HTTP ${res.status}`);
   }
 }

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 
-import { farmStore } from "../../infra/store/farmStore";
+import { farmStore } from "../../app/farmStore";
 
 interface AutomationParams {
   id: string;
@@ -18,7 +18,7 @@ interface ToggleBody {
  *                       (omit `on` to toggle the current value)
  */
 export async function registerAutomationRoutes(app: FastifyInstance): Promise<void> {
-  app.get("/", async () => farmStore.getAutomations());
+  app.get("/", async () => farmStore.reads.getAutomations());
 
   app.post<{ Params: AutomationParams; Body: ToggleBody }>("/:id/toggle", async (request) => {
     const on = typeof request.body?.on === "boolean" ? request.body.on : undefined;

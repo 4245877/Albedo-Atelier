@@ -18,9 +18,13 @@ is `STATE_FILE_PATH` (default `<cwd>/data/state.json`; `/app/data/state.json` on
 the `orchestrator-data` volume in Docker). Writes are atomic (temp file +
 rename) and loading is tolerant: a missing file starts empty (first run) and a
 corrupt/hand-edited one degrades to empty defaults with a logged warning instead
-of crashing startup. The store is composed of focused collaborators behind a
-facade (`src/infra/store/`): `PrinterPoller`, `CameraService`, `QueueStore`,
-`EventFeed`, `StateStore` and the read-only `DashboardReadModel`.
+of crashing startup. The farm is composed of focused collaborators behind the
+`FarmStore` facade (`src/app/`): the `PrinterPoller` poll loop with its
+extracted `LightScheduler`, `TodayCounters` and `FilamentConsumption`,
+plus `CameraService`, `QueueStore`, `EventFeed` and the read-only
+`DashboardReadModel` (exposed as `farmStore.reads`). Persistence lives in
+`src/infra/persistence/` (`StateStore`, `SnapshotStore`); HTTP routes in
+`src/modules/`, the CORS/token hook in `src/http/security.ts`.
 
 Live telemetry is deliberately **not** persisted — printer statuses and the
 manual light override are re-derived on the next poll, and persisting statuses
