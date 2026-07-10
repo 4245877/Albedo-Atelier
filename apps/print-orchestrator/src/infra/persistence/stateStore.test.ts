@@ -139,6 +139,55 @@ test("normalizes partial / malformed persisted data instead of trusting it", () 
   assert.equal(loaded.today.avgDurationCount, 0, "missing avgDurationCount defaults to 0");
 });
 
+test("a legacy queue status \"error\" is normalized to review and survives a re-save", async () => {
+  // Files written by older builds could carry status "error"; the current
+  // contract has only ready/review. Loading must not crash, the job must land
+  // in "review" (operator attention) with an explanatory reason, and a re-save
+  // must produce a clean version-1 file.
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      version: 1,
+      queue: {
+        seq: 3,
+        jobs: [
+          { id: "q1", title: "Broken", printer: "K2", material: "PLA", eta: "2ч", status: "error" },
+          {
+            id: "q2",
+            title: "Also broken",
+            printer: "A1",
+            material: "PLA",
+            eta: "1ч",
+            status: "error",
+            reason: "старое пояснение"
+          },
+          { id: "q3", title: "Fine", printer: "K2", material: "PLA", eta: "1ч", status: "ready" }
+        ]
+      }
+    }),
+    "utf8"
+  );
+
+  const store = new StateStore(file);
+  const loaded = store.load();
+  assert.equal(store.loadWarning, null, "a legacy status is not a load failure");
+  assert.equal(loaded.queue.jobs[0].status, "review");
+  assert.equal(loaded.queue.jobs[0].reason, "задание было помечено ошибкой — проверьте его");
+  assert.equal(loaded.queue.jobs[1].status, "review");
+  assert.equal(loaded.queue.jobs[1].reason, "старое пояснение", "an existing reason is kept");
+  assert.equal(loaded.queue.jobs[2].status, "ready", "untouched statuses stay as-is");
+
+  store.bind(() => loaded);
+  store.save();
+  await store.flush();
+  const reloaded = new StateStore(file).load();
+  assert.equal(reloaded.version, 1);
+  assert.deepEqual(
+    reloaded.queue.jobs.map((job) => job.status),
+    ["review", "review", "ready"]
+  );
+});
+
 test("save is a no-op until a snapshot provider is bound", async () => {
   const store = new StateStore(file);
   store.save();

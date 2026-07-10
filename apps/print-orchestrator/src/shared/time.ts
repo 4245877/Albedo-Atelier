@@ -45,6 +45,13 @@ export function parseLocalTimeWindow(value: string): LocalTimeWindow | null {
   return { startMinutes, endMinutes };
 }
 
+/** Canonical zero-padded `"HH:MM"` from minutes since midnight (e.g. 450 → `"07:30"`). */
+export function minutesToHhmm(minutes: number): string {
+  const h = String(Math.floor(minutes / 60)).padStart(2, "0");
+  const m = String(minutes % 60).padStart(2, "0");
+  return `${h}:${m}`;
+}
+
 export function minutesSinceLocalMidnight(date: Date = new Date()): number {
   return date.getHours() * 60 + date.getMinutes();
 }

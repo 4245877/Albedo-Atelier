@@ -2,17 +2,31 @@ import { $ } from "./util.js";
 
 /* ── Навигация по секциям ──────────────────────────────────── */
 
+/* Секции, для которых у backend пока нет реальных данных — read model честно
+   возвращает пустые getMaintenance()/getPlan(). Пока так, секции убраны из
+   навигации, scroll-spy и с доски, чтобы не вести в вечные заглушки.
+   Вернуть секцию, когда появятся данные, = убрать её id из этого набора. */
+const HIDDEN_SECTIONS = new Set(["maintenance", "plan"]);
+
+export const isSectionVisible = (id) => !HIDDEN_SECTIONS.has(id);
+
 const NAV = [
   ["summary", "Статус"], ["queue", "Очередь"], ["night", "Ночь"], ["printers", "Принтеры"],
   ["critical", "События"], ["materials", "Материалы"], ["today", "Сегодня"], ["performance", "Показатели"],
   ["automations", "Автоматизации"], ["cameras", "Камеры"], ["maintenance", "Обслуживание"],
   ["actions", "Действия"], ["system", "Система"], ["feed", "Лента"], ["warnings", "Внимание"], ["plan", "План"],
-];
+].filter(([id]) => isSectionVisible(id));
 
 export function renderNav() {
   $("#section-nav").innerHTML = NAV
     .map(([id, label]) => `<button type="button" class="nav-chip" data-goto="${id}">${label}</button>`)
     .join("");
+  // Сама разметка секций статична (index.html) — скрытые прячем целиком,
+  // вместе с их якорями; .card не задаёт display, поэтому hidden работает.
+  for (const id of HIDDEN_SECTIONS) {
+    const section = document.getElementById(id);
+    if (section) section.hidden = true;
+  }
 }
 
 /* ── Текущий раздел: подсветка активной вкладки (scroll-spy) ── */

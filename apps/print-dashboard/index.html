@@ -4,19 +4,18 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0d0b14" />
-    <!-- Облик зала до первой отрисовки: тьма/свет по сохранённому режиму и
-         часам (окно тьмы 21:30–7:30). Ставит data-theme синхронно, чтобы не
-         было вспышки чужой темы. Полную логику ведёт theme.js. -->
+    <!-- Облик зала до первой отрисовки: ручной режим применяется как есть, а
+         для auto берётся последний фактический облик из кэша theme.js — само
+         ночное окно знает только backend (NIGHT_PRINT_WINDOW, приходит в
+         /api/dashboard), собственной копии расписания здесь нет. Ставит
+         data-theme синхронно, чтобы не было вспышки чужой темы; после загрузки
+         данных theme.js пересчитает облик по реальному окну. -->
     <script>
       (function () {
         try {
           var m = localStorage.getItem("albedo-theme");
-          if (m !== "light" && m !== "dark" && m !== "auto") m = "auto";
-          var theme = m;
-          if (m === "auto") {
-            var d = new Date(), mins = d.getHours() * 60 + d.getMinutes();
-            theme = mins >= 1290 || mins < 450 ? "dark" : "light"; // 21:30–07:30 → тьма
-          }
+          var theme = m === "light" || m === "dark" ? m : localStorage.getItem("albedo-theme-effective");
+          if (theme !== "light" && theme !== "dark") theme = "dark"; // тьма — базовый облик зала
           document.documentElement.dataset.theme = theme;
           var meta = document.querySelector('meta[name="theme-color"]');
           if (meta) meta.setAttribute("content", theme === "light" ? "#f4eef4" : "#0d0b14");

@@ -20,7 +20,7 @@ import { ensureReveal, renderNav, setupNav, setupStickyOffsets } from "./nav.js"
 import { renderBoard } from "./render/board.js";
 import { syncModals } from "./render/modals.js";
 import { renderTopbar } from "./render/sections.js";
-import { setupTheme } from "./theme.js";
+import { setNightWindow, setupTheme } from "./theme.js";
 import { $, esc, toast } from "./util.js";
 
 /* Состояние фермы — заполняется из GET /api/dashboard. До первой удачной
@@ -69,6 +69,10 @@ async function loadDashboard() {
   const data = await apiGet("/api/dashboard");
   state = data;
   backendReachable = true;
+  // Эффективное ночное окно фермы определяет backend (NIGHT_PRINT_WINDOW);
+  // auto-тема следует ему, а не собственной копии расписания. Старый payload
+  // без этих полей оставляет fallback внутри theme.js.
+  setNightWindow(data.night?.windowStart, data.night?.windowEnd);
   return data;
 }
 

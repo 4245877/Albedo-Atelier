@@ -1,3 +1,4 @@
+import { isSectionVisible } from "../nav.js";
 import { renderCameras, renderPrinters } from "./printers.js";
 import {
   renderAutomations,
@@ -28,10 +29,12 @@ export function renderBoard(state) {
   renderPerf(state);
   renderAutomations(state);
   renderCameras(state);
-  renderMaintenance(state);
+  // «Обслуживание» и «План» скрыты, пока backend отдаёт только пустые
+  // заглушки (см. HIDDEN_SECTIONS в nav.js) — их рендер тогда пропускается.
+  if (isSectionVisible("maintenance")) renderMaintenance(state);
   renderQuick();
   renderSystem(state);
   renderFeed(state);
   renderWarnings(state);
-  renderPlan(state);
+  if (isSectionVisible("plan")) renderPlan(state);
 }

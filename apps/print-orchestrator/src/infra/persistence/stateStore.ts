@@ -147,7 +147,12 @@ function normalize(raw: unknown): PersistedState {
 }
 
 function normalizeJob(raw: Record<string, unknown>): QueueJob {
-  const status = raw.status === "review" || raw.status === "error" ? raw.status : "ready";
+  // Nothing in the current code ever sets a job to "error", but files written
+  // by older builds may still carry it. Such a job needs the operator's
+  // attention, which is exactly what "review" means — map it there instead of
+  // failing the load or resurrecting the dead status.
+  const legacyError = raw.status === "error";
+  const status = raw.status === "review" || legacyError ? "review" : "ready";
   const job: QueueJob = {
     id: toStr(raw.id),
     title: toStr(raw.title),
@@ -159,6 +164,7 @@ function normalizeJob(raw: Record<string, unknown>): QueueJob {
   if (typeof raw.at === "string") job.at = raw.at;
   if (raw.night === true) job.night = true;
   if (typeof raw.reason === "string") job.reason = raw.reason;
+  else if (legacyError) job.reason = "задание было помечено ошибкой — проверьте его";
   if (typeof raw.file === "string" && raw.file.trim()) job.file = raw.file.trim();
   return job;
 }

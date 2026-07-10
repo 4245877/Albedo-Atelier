@@ -18,7 +18,6 @@ export const STATUS = {
   paused: { label: "пауза", badge: "badge-paused" },
   error: { label: "ошибка", badge: "badge-error", pulse: true },
   offline: { label: "offline", badge: "badge-offline" },
-  maintenance: { label: "обслуживание", badge: "badge-maint" },
   unknown: { label: "неизвестно", badge: "badge-offline" },
 };
 

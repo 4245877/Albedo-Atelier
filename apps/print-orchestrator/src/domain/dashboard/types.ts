@@ -9,12 +9,15 @@ import type { CameraState, PrinterState, PrinterView } from "../printers/types";
 
 export interface ServiceStatus {
   status: "ok" | "degraded" | "down";
-  backend: "ok" | "down";
   version: string;
-  startedHoursAgo: number;
 }
 
-export type QueueJobStatus = "ready" | "review" | "error";
+/**
+ * `ready` — has a printer, can be started; `review` — needs operator attention
+ * (no printer assigned). Older persisted files may still carry a legacy
+ * `"error"` status; the state loader normalizes it to `review` on load.
+ */
+export type QueueJobStatus = "ready" | "review";
 
 export interface QueueJob {
   id: string;
@@ -44,7 +47,16 @@ export interface NightCandidate {
 }
 
 export interface NightPrint {
+  /** Human label of the configured window, e.g. `"21:30 – 07:30"`. */
   window: string;
+  /**
+   * Machine-readable bounds of the same window (`"HH:MM"`), parsed from
+   * `NIGHT_PRINT_WINDOW`. The dashboard uses them for the automatic
+   * night theme, so the frontend never keeps its own copy of the schedule.
+   * `null` when the configured window cannot be parsed.
+   */
+  windowStart: string | null;
+  windowEnd: string | null;
   candidates: NightCandidate[];
   pick: number;
 }
@@ -105,7 +117,6 @@ export interface PerformanceSection {
   load: number | null;
   free: number;
   busy: number;
-  maintenance: number;
   avgPrint: string | null;
   successRate: number | null;
 }

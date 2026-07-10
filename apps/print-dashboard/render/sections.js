@@ -1,4 +1,5 @@
 import { $, badge, esc, emptyRow, fmtLeft } from "../util.js";
+import { isBusy, progressBarHtml, progressPercentText } from "./printerView.js";
 
 /* ── Верхняя панель (статус сервиса / backend) ─────────────── */
 
@@ -38,22 +39,25 @@ export function renderHero(state) {
     .map((t) => `<div class="stat-tile ${t.tone}"><span class="num">${t.n}</span><span class="lbl">${t.l}</span></div>`)
     .join("");
 
+  // Пилюли «Backend» здесь нет: сам факт полученного payload уже означает, что
+  // backend доступен (реальную недоступность показывают renderTopbar и
+  // renderBackendError по результату запроса, а не по полю из ответа).
   const svcOk = state.service.status === "ok";
-  const beOk = state.service.backend === "ok";
   $("#hero-pills").innerHTML = `
     <span class="pill ${svcOk ? "pill-ok" : "pill-danger"}"><i class="dot dot-pulse"></i>${svcOk ? "Порядок безупречен" : "Обнаружены отклонения"}</span>
-    <span class="pill ${beOk ? "pill-ok" : "pill-danger"}"><i class="dot"></i>Backend: ${beOk ? "подключён" : "недоступен"}</span>
     <span class="pill pill-gold"><i class="dot"></i>${esc(state.service.version)}</span>`;
 }
 
 /* ── 2 · Очередь ───────────────────────────────────────────── */
 
 function queueRow(job) {
-  const cls = job.status === "error" ? "row-danger" : job.status === "review" ? "row-warn" : "";
-  const st =
-    job.status === "ready" ? `<span class="badge badge-idle">готово к запуску</span>` :
-    job.status === "review" ? `<span class="badge badge-paused">требует проверки</span>` :
-    `<span class="badge badge-error">ошибка</span>`;
+  // Статусы очереди: ready / review (legacy "error" нормализуется в review при
+  // загрузке state-файла на backend и до фронта не доходит).
+  const review = job.status === "review";
+  const cls = review ? "row-warn" : "";
+  const st = review
+    ? `<span class="badge badge-paused">требует проверки</span>`
+    : `<span class="badge badge-idle">готово к запуску</span>`;
   return `
     <li class="row ${cls}">
       <div class="grow">
@@ -65,7 +69,7 @@ function queueRow(job) {
 }
 
 export function renderQueue(state) {
-  const active = state.printers.filter((p) => p.status === "printing" || p.status === "paused");
+  const active = state.printers.filter(isBusy);
   const next = state.queue.find((j) => j.status === "ready");
   $("#queue-meta").textContent = `${active.length} активных · ${state.queue.length} в очереди`;
 
@@ -79,9 +83,9 @@ export function renderQueue(state) {
               <div class="grow">
                 <div class="row-title">${esc(p.job || "задание не определено")}</div>
                 <div class="row-sub">${esc(p.name)} · осталось ${fmtLeft(p.minutesLeft)}</div>
-                ${p.progress != null ? `<div class="progress ${p.status === "paused" ? "is-paused" : ""}" style="margin-top:7px"><i style="transform:scaleX(${(p.progress / 100).toFixed(4)})"></i></div>` : ""}
+                ${progressBarHtml(p.progress, { paused: p.status === "paused", style: "margin-top:7px" })}
               </div>
-              <span class="row-time">${p.progress != null ? `${Math.round(p.progress)}%` : "—"}</span>
+              <span class="row-time">${progressPercentText(p.progress)}</span>
             </li>`).join("") || emptyRow("Нет активных печатей")}
         </ul>
       </div>
@@ -250,7 +254,6 @@ export function renderPerf(state) {
       <div class="perf-side">
         <div class="kv"><span class="k">Свободны</span><span class="v">${p.free}</span></div>
         <div class="kv"><span class="k">Заняты</span><span class="v">${p.busy}</span></div>
-        <div class="kv"><span class="k">Обслуживание</span><span class="v">${p.maintenance}</span></div>
         <div class="kv"><span class="k">Среднее время печати</span><span class="v">${p.avgPrint != null ? esc(p.avgPrint) : "нет данных"}</span></div>
         <div class="kv"><span class="k">Успешных печатей</span><span class="v" ${p.successRate != null ? 'style="color:var(--ok)"' : ""}>${p.successRate != null ? `${p.successRate}%` : "нет данных"}</span></div>
       </div>

@@ -1,6 +1,13 @@
 import type { FastifyInstance } from "fastify";
 
-import { farmStore } from "../../app/farmStore";
+import { farmStore as defaultFarmStore } from "../../app/farmStore";
+
+/** The farm facade the routes read from; injectable so the HTTP layer is testable. */
+export type DashboardRoutesStore = typeof defaultFarmStore;
+
+export interface DashboardRoutesOptions {
+  store?: DashboardRoutesStore;
+}
 
 /**
  * Read-only dashboard endpoints, registered under `/api`. Each returns the
@@ -9,9 +16,17 @@ import { farmStore } from "../../app/farmStore";
  * the rest are per-section slices for finer-grained polling or other clients.
  *
  * Resources that also accept actions (printers, queue, automations) live in
- * their own modules.
+ * their own modules. The canonical event/night/active-printer routes are
+ * `/api/events`, `/api/queue/night` and `/api/printers/active`; the historical
+ * spec aliases (`/events/recent`, `/night-print`, `/jobs/active`) duplicated
+ * them 1:1, were called by nothing, and have been removed.
  */
-export async function registerDashboardRoutes(app: FastifyInstance): Promise<void> {
+export async function registerDashboardRoutes(
+  app: FastifyInstance,
+  opts: DashboardRoutesOptions = {}
+): Promise<void> {
+  const farmStore = opts.store ?? defaultFarmStore;
+
   // Whole board in one call — mirrors the frontend `state` object.
   app.get("/dashboard", async () => farmStore.reads.snapshot());
 
@@ -27,16 +42,8 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
   // Maintenance schedule per printer.
   app.get("/maintenance", async () => farmStore.reads.getMaintenance());
 
-  // Recent events (live feed). `/events/recent` is a spec alias of `/events`.
+  // Recent events (live feed).
   app.get("/events", async () => farmStore.reads.getFeed());
-  app.get("/events/recent", async () => farmStore.reads.getFeed());
-
-  // Active print jobs — the printers currently printing or paused.
-  app.get("/jobs/active", async () => farmStore.reads.listActivePrinters());
-
-  // Night-print window, candidates and current pick.
-  // Spec alias of `/api/queue/night`.
-  app.get("/night-print", async () => farmStore.reads.getNight());
 
   // Critical events for today.
   app.get("/critical", async () => farmStore.reads.getCritical());

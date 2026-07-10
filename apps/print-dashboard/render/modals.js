@@ -8,6 +8,14 @@ import { API_BASE, apiGet, apiPost } from "../api.js";
 import { reconcileCameras } from "../cameraPlayers.js";
 import { $, badge, esc, fmtLeft, materialBlock, toast } from "../util.js";
 import { camBlock } from "./printers.js";
+import {
+  actionAvailability,
+  isBusy,
+  jobLine,
+  normalizeProgress,
+  progressBarHtml,
+  progressPercentText
+} from "./printerView.js";
 
 let deps = { getState: () => null, refresh: async () => {} };
 let root = null; // .modal-backdrop
@@ -75,31 +83,22 @@ function findPrinter(id) {
 }
 
 function modalActions(p) {
-  const busy = p.status === "printing" || p.status === "paused";
-  const dead = p.status === "offline";
-  const lightSupported = Boolean(p.lightSupported);
-  const lightOnDisabled = !lightSupported || p.light === true || dead;
-  const lightOffDisabled = !lightSupported || p.light === false || dead;
-  // Доступность снимка определяет backend-флаг snapshotAvailable, а не догадки по
-  // camera/cameraSrc — так обычные HTTP-камеры, Bambu и go2rtc с настроенным
-  // snapshotUrl трактуются одинаково и честно.
-  const snapDisabled = !p.snapshotAvailable || dead;
-  // Для unsupported-принтера кнопка «Файлы» остаётся кликабельной: по клику
-  // показывается честное объяснение, а не молчаливо-серая кнопка. Отключается
-  // она только там, где просмотр поддержан, но принтер не в сети.
-  const filesDisabled = p.filesSupported && dead;
+  const can = actionAvailability(p);
+  const lightTitle = can.lightUnknown && can.lightSupported
+    ? ' title="Состояние подсветки неизвестно — команда будет отправлена вручную"'
+    : "";
   const filesTitle = p.filesSupported
     ? "Файлы на принтере"
     : "Просмотр файлов пока поддерживается только для Moonraker-принтеров";
   return `
     <div class="modal-actions">
-      <button class="btn btn-sm" data-act="pause" data-id="${esc(p.id)}" ${p.status !== "printing" ? "disabled" : ""}>⏸ Пауза</button>
-      <button class="btn btn-sm" data-act="resume" data-id="${esc(p.id)}" ${p.status !== "paused" ? "disabled" : ""}>▶ Продолжить</button>
-      <button class="btn btn-sm btn-danger" data-act="cancel" data-id="${esc(p.id)}" ${!busy ? "disabled" : ""}>✕ Отмена</button>
-      <button class="btn btn-sm" data-act="light-on" data-id="${esc(p.id)}" ${lightOnDisabled ? "disabled" : ""}>☀ Подсветка</button>
-      <button class="btn btn-sm" data-act="light-off" data-id="${esc(p.id)}" ${lightOffDisabled ? "disabled" : ""}>☾ Погасить</button>
-      <button class="btn btn-sm" data-act="snapshot" data-id="${esc(p.id)}" ${snapDisabled ? "disabled" : ""}>◉ Снимок</button>
-      <button class="btn btn-sm" data-act="files" data-id="${esc(p.id)}" ${filesDisabled ? "disabled" : ""} title="${esc(filesTitle)}">🗂 Файлы</button>
+      <button class="btn btn-sm" data-act="pause" data-id="${esc(p.id)}" ${can.canPause ? "" : "disabled"}>⏸ Пауза</button>
+      <button class="btn btn-sm" data-act="resume" data-id="${esc(p.id)}" ${can.canResume ? "" : "disabled"}>▶ Продолжить</button>
+      <button class="btn btn-sm btn-danger" data-act="cancel" data-id="${esc(p.id)}" ${can.canCancel ? "" : "disabled"}>✕ Отмена</button>
+      <button class="btn btn-sm" data-act="light-on" data-id="${esc(p.id)}"${lightTitle} ${can.canLightOn ? "" : "disabled"}>☀ Подсветка</button>
+      <button class="btn btn-sm" data-act="light-off" data-id="${esc(p.id)}"${lightTitle} ${can.canLightOff ? "" : "disabled"}>☾ Погасить</button>
+      <button class="btn btn-sm" data-act="snapshot" data-id="${esc(p.id)}" ${can.canSnapshot ? "" : "disabled"}>◉ Снимок</button>
+      <button class="btn btn-sm" data-act="files" data-id="${esc(p.id)}" ${can.canFiles ? "" : "disabled"} title="${esc(filesTitle)}">🗂 Файлы</button>
       ${p.interfaceUrl ? `<a class="btn btn-sm" href="${esc(p.interfaceUrl)}" target="_blank" rel="noopener">⧉ Интерфейс</a>` : ""}
       ${p.latestSnapshotUrl ? `<a class="btn btn-sm" href="${API_BASE}${esc(p.latestSnapshotUrl)}" target="_blank" rel="noopener">🖼 Последний снимок</a>` : ""}
     </div>`;
@@ -120,24 +119,15 @@ function teleRows(p) {
     rows.push(["Активный лоток", `AMS ${p.activeTray + 1}`]);
   }
   rows.push(["Осталось", fmtLeft(p.minutesLeft)]);
-  rows.push(["Прогресс", p.progress != null ? `${Math.round(p.progress)}%` : "не сообщается"]);
+  rows.push(["Прогресс", normalizeProgress(p.progress) != null ? progressPercentText(p.progress) : "не сообщается"]);
   return rows
     .map(([k, v]) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`)
     .join("");
 }
 
 function printerModalHtml(p) {
-  const busy = p.status === "printing" || p.status === "paused";
-  const jobLine =
-    busy && p.job ? `Печатает: <b>${esc(p.job)}</b>` :
-    busy ? "Печатает — название задания не определено" :
-    p.status === "error" ? `<b style="color:var(--danger-ink)">${esc(p.error || "Ошибка")}</b>` :
-    p.status === "offline" ? esc(p.error ? `Нет связи: ${p.error}` : "Нет связи с принтером") :
-    p.status === "unknown" ? esc(p.error || "Состояние неизвестно") :
-    "Свободен — ожидает распоряжений";
-
-  const progress = busy && p.progress != null
-    ? `<div class="progress ${p.status === "paused" ? "is-paused" : ""}" style="margin:10px 0"><i style="transform:scaleX(${(p.progress / 100).toFixed(4)})"></i></div>`
+  const progress = isBusy(p)
+    ? progressBarHtml(p.progress, { paused: p.status === "paused", style: "margin:10px 0" })
     : "";
 
   return `
@@ -149,7 +139,7 @@ function printerModalHtml(p) {
       <div class="modal-cam">${camBlock(p, "modal")}</div>
       <div class="modal-side">
         <div class="modal-model">${esc(p.model || "модель не указана")}</div>
-        <div class="modal-job">${jobLine}</div>
+        <div class="modal-job">${jobLine(p)}</div>
         ${progress}
         ${materialBlock(p)}
         <div class="modal-tele">${teleRows(p)}</div>
@@ -249,7 +239,7 @@ function filesShellHtml(p, path, bodyHtml) {
 }
 
 function filesListHtml(p, entries) {
-  const busy = p.status === "printing" || p.status === "paused";
+  const busy = isBusy(p);
   const dead = p.status === "offline";
   const startBlocked = !p.remoteStartSupported || busy || dead;
   const blockedNote = !p.remoteStartSupported

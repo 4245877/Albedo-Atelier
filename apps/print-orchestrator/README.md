@@ -18,7 +18,10 @@ is `STATE_FILE_PATH` (default `<cwd>/data/state.json`; `/app/data/state.json` on
 the `orchestrator-data` volume in Docker). Writes are atomic (temp file +
 rename) and loading is tolerant: a missing file starts empty (first run) and a
 corrupt/hand-edited one degrades to empty defaults with a logged warning instead
-of crashing startup. The farm is composed of focused collaborators behind the
+of crashing startup. Queue jobs have two statuses, `ready` and `review`;
+a legacy `"error"` status from files written by older builds is normalized to
+`review` (with an explanatory `reason`) on load — nothing in the current code
+can produce it. The farm is composed of focused collaborators behind the
 `FarmStore` facade (`src/app/`): the `PrinterPoller` poll loop with its
 extracted `LightScheduler`, `TodayCounters` and `FilamentConsumption`,
 plus `CameraService`, `QueueStore`, `EventFeed` and the read-only
@@ -36,6 +39,15 @@ Printer lights are governed by `NIGHT_PRINT_WINDOW` (default
 `21:30 – 07:30`) using the process local timezone (`TZ` in Docker). On each
 poll, supported lights are switched on inside that window and switched off
 outside it.
+
+The same window is the single source for the dashboard: `GET /api/dashboard`
+(and `GET /api/queue/night`) exports it both as the human label
+(`night.window`) and machine-readable bounds (`night.windowStart` /
+`night.windowEnd`, `"HH:MM"`, `null` when the configured window cannot be
+parsed). The dashboard's automatic dark/light theme follows these fields
+instead of keeping its own copy of the schedule — the frontend only has one
+built-in fallback mirroring the default, used until the first successful
+payload.
 
 **Manual override.** A manual light command is allowed at any time. It is
 serialized with the scheduler through a per-printer light queue, so a manual
@@ -234,6 +246,12 @@ the guard is disabled and a startup warning is logged. CORS is closed by default
 - `GET /api/events` · `GET /api/critical` · `GET /api/warnings`
 - `GET /api/system` · `GET /api/today` · `GET /api/performance` · `GET /api/plan`
 - `GET /api/automations`
+
+These are the canonical routes. The historical spec aliases
+`GET /api/events/recent`, `GET /api/night-print` and `GET /api/jobs/active`
+duplicated `/api/events`, `/api/queue/night` and `/api/printers/active` 1:1,
+were called by nothing (dashboard, tests, nginx, compose, scripts) and have
+been **removed** — they now return 404.
 
 ### Actions
 

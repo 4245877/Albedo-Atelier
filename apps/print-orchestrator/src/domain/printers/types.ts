@@ -6,7 +6,6 @@ export type PrinterState =
   | "printing"
   | "paused"
   | "error"
-  | "maintenance"
   /** The device is configured but has not reported a definite state yet. */
   | "unknown";
 
@@ -86,5 +85,4 @@ export interface PrinterView {
   /** Configured URL of the printer's own web UI, or null when none is set. */
   interfaceUrl: string | null;
   error?: string;
-  note?: string;
 }

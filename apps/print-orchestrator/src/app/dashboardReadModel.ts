@@ -18,7 +18,7 @@ import type {
 import type { PrinterView } from "../domain/printers/types";
 import type { FarmMetrics, FarmReadiness } from "../domain/farm/types";
 import { env } from "../shared/env";
-import { hhmm } from "../shared/time";
+import { hhmm, minutesToHhmm, parseLocalTimeWindow } from "../shared/time";
 import { hasCameraSource } from "../infra/printers/camera";
 import type { PrinterConfig, PrinterConfigSource } from "../infra/printers/config";
 import type { AutomationStore } from "./automationStore";
@@ -110,9 +110,7 @@ export class DashboardReadModel {
       Boolean(this.getConfigSource().warning);
     return {
       status: troubled ? "degraded" : "ok",
-      backend: "ok",
-      version: env.serviceVersion,
-      startedHoursAgo: Math.round((Date.now() - this.startedAt) / (60 * MS_PER_MIN))
+      version: env.serviceVersion
     };
   }
 
@@ -211,7 +209,17 @@ export class DashboardReadModel {
   getNight(): NightPrint {
     const candidates = this.getNightPlan().map((entry) => entry.candidate);
     const pick = candidates.length === 0 ? 0 : Math.min(this.getNightPick(), candidates.length - 1);
-    return { window: env.nightWindow, candidates, pick };
+    // Machine-readable window bounds for the frontend (auto night theme): the
+    // backend stays the single source of the schedule, the dashboard only
+    // falls back to its built-in default when these are absent.
+    const parsed = parseLocalTimeWindow(env.nightWindow);
+    return {
+      window: env.nightWindow,
+      windowStart: parsed ? minutesToHhmm(parsed.startMinutes) : null,
+      windowEnd: parsed ? minutesToHhmm(parsed.endMinutes) : null,
+      candidates,
+      pick
+    };
   }
 
   getCritical(): CriticalEvent[] {
@@ -274,13 +282,11 @@ export class DashboardReadModel {
     const views = this.listPrinters();
     const free = views.filter((p) => p.status === "idle").length;
     const busy = views.filter((p) => isBusyStatus(p.status)).length;
-    const maintenance = views.filter((p) => p.status === "maintenance").length;
     const avgPrintMs = this.poller.today.getAvgPrintMs();
     return {
       load: views.length > 0 ? Math.round((busy / views.length) * 100) : null,
       free,
       busy,
-      maintenance,
       // Mean duration of today's successfully completed, poller-timed runs; null
       // (→ "нет данных") until at least one such print has finished.
       avgPrint: avgPrintMs === null ? null : formatDuration(avgPrintMs),

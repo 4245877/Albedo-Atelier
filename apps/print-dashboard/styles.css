@@ -731,7 +731,6 @@ body::before {
 .badge-paused   { color: var(--warn-ink); background: var(--warn-soft); }
 .badge-error    { color: var(--danger-ink); background: var(--danger-soft); }
 .badge-offline  { color: #a9a4bb; background: var(--offline-soft); }
-.badge-maint    { color: #b3aed8; background: var(--slate-soft); }
 .badge-amethyst { color: var(--amethyst-ink); background: var(--amethyst-soft); }
 .badge-plain    { color: var(--ink-soft); background: var(--card-inner); border: 1px solid var(--card-edge); }
 
@@ -1135,6 +1134,10 @@ body::before {
 
 .printer-job { font-size: 13px; color: var(--ink-soft); }
 .printer-job b { color: var(--ink); font-weight: 700; }
+/* Текст ошибки в строке состояния (общий для карточки и модального окна) —
+   один класс вместо двух разных inline-стилей (см. render/printerView.js).
+   b-селектор — чтобы перевесить «.printer-job b» выше. */
+b.job-error { color: var(--danger-ink); font-weight: 700; }
 
 .printer-progress { display: flex; flex-direction: column; gap: 6px; }
 
@@ -2001,7 +2004,6 @@ body::before {
 
 /* Приглушённые бейджи — углубляем текст для читаемости на светлом. */
 :root[data-theme="light"] .badge-offline { color: #6d687e; }
-:root[data-theme="light"] .badge-maint { color: #63608a; }
 
 :root[data-theme="light"] .footer-sig { color: var(--gold-bright); }
 

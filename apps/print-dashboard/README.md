@@ -7,9 +7,49 @@
 - Front-end на нативных ES-модулях (без сборки), точка входа — `app.js` (`<script type="module">`):
   - `app.js` — состояние + оркестрация: загрузка `GET /api/print-orchestrator/api/dashboard`, дедупликация рендера, опрос каждые 6 с, повторные попытки при недоступности backend.
   - `api.js` — REST-клиент. `util.js` — DOM/формат/тосты. `nav.js` — навигация, scroll-spy, липкие смещения, появление секций.
-  - `render/` — отрисовка секций доски (`printers.js`, `sections.js`, `board.js`).
+  - `render/` — отрисовка секций доски (`printers.js`, `sections.js`, `modals.js`, `board.js`).
+  - `render/printerView.js` — чистые view-helpers принтера, одна точка правды для карточки, модального окна и очереди: `isBusy`, строка состояния `jobLine`, модель доступности действий `actionAvailability`, нормализация и разметка progress bar. Без DOM — модуль покрыт тестами в `tests/`.
   - `actions.js` — действия оператора (пауза/продолжить/отмена/снимок/ручная подсветка, очередь, ночная печать, автоматизации) через POST + делегированные клики. Подсветку можно включать/выключать вручную в любое время; выбранное состояние удерживается 5 минут, затем управление возвращается к расписанию (`NIGHT_PRINT_WINDOW`). Кнопки подсветки активны только когда backend сообщает `lightSupported: true`, и блокируются на время запроса, чтобы быстрые повторные клики не слали лишние команды.
+  - `theme.js` — тьма/свет/авто. Ночное окно auto-режима определяет backend: `NIGHT_PRINT_WINDOW` приходит в payload `/api/dashboard` (`night.windowStart` / `night.windowEnd`) и применяется через `setNightWindow()`; в `theme.js` остаётся единственный fallback (зеркало backend-дефолта `21:30 – 07:30`) для старого или мокового payload. Встроенный скрипт в `<head>` собственной копии расписания не имеет — до первой загрузки данных он применяет последний фактический облик из localStorage (`albedo-theme-effective`), по умолчанию тьму.
   - `cameraPlayers.js` — реестр живых WebRTC-плееров камер; `camera-webrtc.js`/`video-rtc.js` — go2rtc-компонент `<camera-stream>`.
+
+Секции «Обслуживание» и «План» скрыты из навигации, scroll-spy и с доски,
+пока backend отдаёт для них только честные пустые заглушки
+(`getMaintenance()`/`getPlan()` в read model возвращают пусто). Их разметка и
+рендеры сохранены; вернуть секции = убрать их id из `HIDDEN_SECTIONS`
+в `nav.js`.
+
+## Тесты
+
+Чистые helpers (`render/printerView.js`) покрыты тестами без браузера и без
+тестового фреймворка — обычным `node --test`:
+
+```bash
+cd apps/print-dashboard
+pnpm test        # node --test "tests/**/*.test.mjs"
+```
+
+`package.json` здесь нужен только ради `"type": "module"` (чтобы Node читал
+файлы дашборда как ES-модули) и скрипта тестов; в Docker-образ он и `tests/`
+не копируются.
+
+## Vendored: video-rtc.js
+
+`video-rtc.js` — это **VideoRTC v1.6.0** из upstream-проекта
+[go2rtc](https://github.com/AlexxIT/go2rtc) (`www/video-rtc.js`).
+
+- Файл локально **не редактируется** — любые правки поведения живут в
+  `camera-webrtc.js`, который наследуется от `VideoRTC`.
+- Обновление — отдельная процедура: скачать новую версию из upstream, заменить
+  файл целиком, зафиксировать новую версию (она указана в заголовке файла и в
+  этом README).
+- После обновления проверить совместимость с `camera-webrtc.js`: наш компонент
+  опирается на `mode`/`media`/`visibilityThreshold`, жизненный цикл
+  подключения (`DISCONNECT_TIMEOUT` ≈ 5 с при переносе элемента в DOM) и
+  события состояния соединения — а затем убедиться, что live-поток камеры K2
+  (WebRTC через go2rtc) по-прежнему играет и переживает перерисовку доски.
+
+## nginx
 
 The nginx container serves the page on port `8080` and proxies:
 

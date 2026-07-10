@@ -1,5 +1,12 @@
 import { API_BASE } from "../api.js";
 import { $, badge, esc, emptyRow, fmtLeft, materialBlock } from "../util.js";
+import {
+  actionAvailability,
+  jobLine,
+  normalizeProgress,
+  progressBarHtml,
+  progressPercentText
+} from "./printerView.js";
 
 /* ── Принтеры и камеры ─────────────────────────────────────── */
 
@@ -87,46 +94,31 @@ function teleBlock(p) {
 }
 
 function printerCard(p) {
-  const busy = p.status === "printing" || p.status === "paused";
-  const dead = p.status === "offline";
-  const jobLine =
-    busy && p.job ? `Печатает: <b>${esc(p.job)}</b>` :
-    busy ? "Печатает — название задания не определено" :
-    p.status === "error" ? `<span style="color:var(--danger);font-weight:700">${esc(p.error || "Ошибка")}</span>` :
-    p.status === "maintenance" ? esc(p.note || "На обслуживании") :
-    p.status === "unknown" ? esc(p.error || "Состояние неизвестно — принтер ещё не ответил") :
-    dead ? esc(p.error ? `Нет связи: ${p.error}` : "Нет связи с принтером") :
-    "Свободен — ожидает распоряжений";
-
-  // light === null: состояние подсветки неизвестно. Управляемость определяет
-  // ТОЛЬКО backend-флаг lightSupported — читаемость состояния не означает, что
-  // подсветкой можно управлять (иначе кнопка «включится», а backend вернёт ошибку).
-  const lightUnknown = p.light == null;
-  const lightSupported = Boolean(p.lightSupported);
-  const lightTitle = lightUnknown && lightSupported ? ' title="Состояние подсветки неизвестно — команда будет отправлена вручную"' : "";
-  const lightOnDisabled = !lightSupported || p.light === true || dead;
-  const lightOffDisabled = !lightSupported || p.light === false || dead;
+  const can = actionAvailability(p);
+  const lightTitle = can.lightUnknown && can.lightSupported
+    ? ' title="Состояние подсветки неизвестно — команда будет отправлена вручную"'
+    : "";
   const actions = `
     <button class="btn btn-sm" data-act="open" data-id="${p.id}">Открыть</button>
-    <button class="btn btn-sm" data-act="pause" data-id="${p.id}" ${p.status !== "printing" ? "disabled" : ""}>⏸ Пауза</button>
-    <button class="btn btn-sm" data-act="resume" data-id="${p.id}" ${p.status !== "paused" ? "disabled" : ""}>▶ Продолжить</button>
-    <button class="btn btn-sm btn-danger" data-act="cancel" data-id="${p.id}" ${!busy ? "disabled" : ""}>✕ Отмена</button>
-    <button class="btn btn-sm" data-act="light-on" data-id="${p.id}"${lightTitle} ${lightOnDisabled ? "disabled" : ""}>☀ Подсветка</button>
-    <button class="btn btn-sm" data-act="light-off" data-id="${p.id}"${lightTitle} ${lightOffDisabled ? "disabled" : ""}>☾ Погасить</button>
-    <button class="btn btn-sm" data-act="snapshot" data-id="${p.id}"${p.snapshotAvailable ? "" : ' title="Для этой камеры снимок недоступен"'} ${!p.snapshotAvailable || dead ? "disabled" : ""}>◉ Снимок</button>
+    <button class="btn btn-sm" data-act="pause" data-id="${p.id}" ${can.canPause ? "" : "disabled"}>⏸ Пауза</button>
+    <button class="btn btn-sm" data-act="resume" data-id="${p.id}" ${can.canResume ? "" : "disabled"}>▶ Продолжить</button>
+    <button class="btn btn-sm btn-danger" data-act="cancel" data-id="${p.id}" ${can.canCancel ? "" : "disabled"}>✕ Отмена</button>
+    <button class="btn btn-sm" data-act="light-on" data-id="${p.id}"${lightTitle} ${can.canLightOn ? "" : "disabled"}>☀ Подсветка</button>
+    <button class="btn btn-sm" data-act="light-off" data-id="${p.id}"${lightTitle} ${can.canLightOff ? "" : "disabled"}>☾ Погасить</button>
+    <button class="btn btn-sm" data-act="snapshot" data-id="${p.id}"${p.snapshotAvailable ? "" : ' title="Для этой камеры снимок недоступен"'} ${can.canSnapshot ? "" : "disabled"}>◉ Снимок</button>
     ${p.latestSnapshotUrl ? `<a class="btn btn-sm" href="${API_BASE}${esc(p.latestSnapshotUrl)}" target="_blank" rel="noopener" title="Открыть последний сохранённый снимок">🖼 Снимок</a>` : ""}`;
 
-  const progressBlock = !busy ? "" : p.progress != null ? `
+  const progressBlock = !can.busy ? "" : normalizeProgress(p.progress) != null ? `
     <div class="printer-progress">
-      <div class="progress ${p.status === "paused" ? "is-paused" : ""}"><i style="transform:scaleX(${(p.progress / 100).toFixed(4)})"></i></div>
-      <div class="progress-caption"><b>${Math.round(p.progress)}%</b><span>осталось ${fmtLeft(p.minutesLeft)}</span></div>
+      ${progressBarHtml(p.progress, { paused: p.status === "paused" })}
+      <div class="progress-caption"><b>${progressPercentText(p.progress)}</b><span>осталось ${fmtLeft(p.minutesLeft)}</span></div>
     </div>` : `
     <div class="printer-progress">
       <div class="progress-caption"><b>—%</b><span>прогресс не сообщается принтером</span></div>
     </div>`;
 
   return `
-    <article class="printer-card ${p.status === "error" ? "is-error" : ""} ${dead ? "is-offline" : ""}">
+    <article class="printer-card ${p.status === "error" ? "is-error" : ""} ${can.offline ? "is-offline" : ""}">
       ${camBlock(p, "card")}
       <div class="printer-body">
         <div class="printer-top">
@@ -136,7 +128,7 @@ function printerCard(p) {
           </div>
           ${badge(p.status)}
         </div>
-        <div class="printer-job">${jobLine}</div>
+        <div class="printer-job">${jobLine(p)}</div>
         ${progressBlock}
         ${teleBlock(p)}
         ${materialBlock(p)}
