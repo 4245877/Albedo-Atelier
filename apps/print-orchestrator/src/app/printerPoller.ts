@@ -10,6 +10,7 @@ import { hhmm } from "../shared/time";
 import type { CameraService } from "./cameraService";
 import type { EventFeed } from "./eventFeed";
 import { FilamentConsumption } from "./filamentConsumption";
+import { FilamentSync } from "./filamentSync";
 import { LightScheduler } from "./lightScheduler";
 import { TodayCounters } from "./todayCounters";
 
@@ -74,6 +75,8 @@ export class PrinterPoller {
   readonly lights: LightScheduler;
   /** Completion stock deduction + its retry queue (see FilamentConsumption). */
   readonly filament: FilamentConsumption;
+  /** Keeps fulfillment's loaded-reel bindings in step with live telemetry. */
+  readonly filamentSync: FilamentSync;
 
   /** Wall-clock of the last accrual per printer; the anchor for the next interval. */
   private lastAccrualAt = new Map<string, number>();
@@ -96,10 +99,13 @@ export class PrinterPoller {
     /** Live telemetry source; injectable so the poll loop can be tested without real devices. */
     private readonly statusProvider: (
       printer: PrinterConfig
-    ) => Promise<PrinterLiveStatus> = getPrinterLiveStatus
+    ) => Promise<PrinterLiveStatus> = getPrinterLiveStatus,
+    /** Loaded-reel sync; when absent a disabled no-op instance is used. */
+    filamentSync?: FilamentSync
   ) {
     this.today = new TodayCounters(initialToday);
     this.filament = filament ?? new FilamentConsumption(undefined, events);
+    this.filamentSync = filamentSync ?? new FilamentSync(undefined);
     this.lights = new LightScheduler({
       events,
       nightLightsEnabled,
@@ -113,6 +119,7 @@ export class PrinterPoller {
     this.logger = logger;
     this.lights.useLogger(logger);
     this.filament.useLogger(logger);
+    this.filamentSync.useLogger(logger);
     await this.pollOnce();
     this.pollTimer = setInterval(() => {
       void this.pollOnce();
@@ -143,6 +150,11 @@ export class PrinterPoller {
           // only time we watched the printer actually printing counts.
           this.accruePrintingTime(printer.id, prev);
           this.statuses.set(printer.id, status);
+          // Keep fulfillment's loaded-reel binding current from live telemetry,
+          // so the completion deduction always has a target with no manual entry.
+          // Runs every poll (deduped internally), so the binding exists well
+          // before the print finishes.
+          this.filamentSync.syncPrinter(printer, status);
         })
       );
       await this.lights.applyPolicy(enabled);

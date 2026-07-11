@@ -6,6 +6,7 @@ import type { AmsTraySnapshot, PrinterLiveStatus } from "../infra/printers/statu
 import type { CameraService } from "./cameraService";
 import { EventFeed } from "./eventFeed";
 import { FilamentConsumption, type InventoryConsumer } from "./filamentConsumption";
+import { FilamentSync, type InventorySyncClient, type SyncPayload } from "./filamentSync";
 import { PrinterPoller } from "./printerPoller";
 
 /*
@@ -111,7 +112,8 @@ function scriptedProvider(sequence: PrinterLiveStatus[]): (p: PrinterConfig) => 
 function makePoller(
   printer: PrinterConfig,
   sequence: PrinterLiveStatus[],
-  inventory: InventoryConsumer
+  inventory: InventoryConsumer,
+  filamentSync?: FilamentSync
 ): { poller: PrinterPoller; events: EventFeed } {
   const events = new EventFeed();
   const poller = new PrinterPoller(
@@ -122,7 +124,8 @@ function makePoller(
     undefined, // initialToday
     () => false, // night-lights off: never touch the (fake) device light
     new FilamentConsumption(inventory, events),
-    scriptedProvider(sequence)
+    scriptedProvider(sequence),
+    filamentSync
   );
   return { poller, events };
 }
@@ -324,4 +327,45 @@ test("Moonraker: the extruded-length path is unchanged (single reel, no tray)", 
   assert.equal(call.grams, undefined);
   assert.equal(call.amsTray, undefined);
   assert.match(String(call.idempotencyKey), /^k2:[0-9a-f-]{36}$/, "no per-tray suffix for a single reel");
+});
+
+test("the poller syncs the loaded reel to fulfillment while a print runs", async () => {
+  const inventory = recordingInventory();
+  const syncCalls: SyncPayload[] = [];
+  const syncClient: InventorySyncClient = {
+    enabled: true,
+    syncLoadedFilament: async (input) => {
+      syncCalls.push(input);
+      return { resolved: true };
+    }
+  };
+  const printer: PrinterConfig = { ...bambuConfig(), id: "k2", protocol: "moonraker" };
+  // Moonraker reports the active reel from sliced metadata only while printing.
+  const active = { material: "PETG", color: "#080808", tray: null, remainPct: null };
+  const sequence = [
+    baseStatus({ id: "k2", status: "idle" }),
+    baseStatus({ id: "k2", status: "printing", stateText: "printing", activeFilament: active }),
+    baseStatus({
+      id: "k2",
+      status: "idle",
+      stateText: "complete",
+      progressPct: 100,
+      filamentUsedMm: 1234
+    })
+  ];
+  const { poller } = makePoller(printer, sequence, inventory.client, new FilamentSync(syncClient));
+
+  await pollTimes(poller, 3);
+  await new Promise((resolve) => setImmediate(resolve)); // let fire-and-forget deliveries settle
+
+  assert.equal(syncCalls.length, 1, "the loaded reel is synced once while printing");
+  assert.deepEqual(syncCalls[0], {
+    printerId: "k2",
+    amsTray: undefined,
+    material: "PETG",
+    color: "#080808"
+  });
+  // And the completion deduction still fires as before.
+  assert.equal(inventory.calls.length, 1);
+  assert.equal(inventory.calls[0].lengthMm, 1234);
 });

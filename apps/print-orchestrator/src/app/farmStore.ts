@@ -17,6 +17,7 @@ import { DashboardReadModel } from "./dashboardReadModel";
 import { runDriverOperation } from "./driverErrors";
 import { EventFeed } from "./eventFeed";
 import { FilamentConsumption } from "./filamentConsumption";
+import { FilamentSync } from "./filamentSync";
 import type { NightPlanEntry } from "./nightPlanner";
 import { PrinterPoller } from "./printerPoller";
 import type { StoreLogger } from "../shared/logger";
@@ -53,6 +54,7 @@ export class FarmStore {
   private readonly snapshots: SnapshotStore;
   private readonly inventory = new FulfillmentInventoryClient();
   private readonly filament: FilamentConsumption;
+  private readonly filamentSync: FilamentSync;
   private readonly queue: QueueStore;
   private readonly automations: AutomationStore;
   private readonly poller: PrinterPoller;
@@ -90,6 +92,9 @@ export class FarmStore {
       persist,
       persisted.pendingConsumes
     );
+    // Same client as the deduction path: it pushes the live loaded reel so
+    // fulfillment binds it to a stock position automatically (no manual entry).
+    this.filamentSync = new FilamentSync(this.inventory);
     this.poller = new PrinterPoller(
       () => this.enabledConfigs(),
       this.cameras,
@@ -97,7 +102,9 @@ export class FarmStore {
       persist,
       persisted.today,
       () => this.automations.isEnabled("night-lights"),
-      this.filament
+      this.filament,
+      undefined,
+      this.filamentSync
     );
     this.commands = new PrinterCommandService(
       (id) => this.configById(id),

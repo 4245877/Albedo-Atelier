@@ -53,6 +53,33 @@ export type ConsumeFilamentResult = {
 };
 
 /**
+ * The loaded-filament hint the orchestrator pushes so fulfillment can bind the
+ * printer's reel to a stock position automatically — no manual dashboard entry
+ * (see FilamentSync). Material/colour are raw device values; fulfillment resolves
+ * them to an existing reel (per slot for AMS) and records the binding used by
+ * {@link consume} at completion.
+ */
+export type SyncLoadedFilamentInput = {
+  /** Orchestrator printer id; must match fulfillment's `printer_filament_state.printerId`. */
+  printerId: string;
+  /** AMS slot for per-slot binding (Bambu AMS); omit for single-reel printers. */
+  amsTray?: number;
+  /** Loaded material as the device reports it (may carry a brand suffix). */
+  material: string;
+  /** Loaded colour hint (`#RRGGBB` or a named colour); omit when the device has none. */
+  color?: string;
+};
+
+/**
+ * Fulfillment's answer to a sync: `resolved` false means the hint matched no
+ * stock (nothing bound — not an error), true means the reel is now bound.
+ */
+export type SyncLoadedFilamentResult = {
+  resolved: boolean;
+  reason?: string;
+};
+
+/**
  * How a failed consume call should be treated by the caller:
  *  - `rejected` — fulfillment's consume handler received the request and said
  *    no (no loaded reel, not enough stock, material mismatch). Retrying the
@@ -144,6 +171,57 @@ export class FulfillmentInventoryClient {
       }
 
       return json as ConsumeFilamentResult;
+    } catch (error) {
+      if (error instanceof FulfillmentError) throw error;
+      const reason = isTimeoutError(error)
+        ? `таймаут ${TIMEOUT_MS} мс`
+        : error instanceof Error
+          ? error.message
+          : String(error);
+      throw new FulfillmentError(`склад филамента недоступен (${reason})`);
+    }
+  }
+
+  /**
+   * Reports the reel a printer currently has loaded so fulfillment binds it to a
+   * stock position for auto-deduction. Returns `null` when the feature is
+   * disabled; resolves with `{ resolved }` on success (`resolved: false` means
+   * the hint matched no stock — a benign no-op, not an error); throws
+   * {@link FulfillmentError} only when fulfillment rejects the call or is
+   * unreachable, so the caller can retry the sync on the next poll.
+   */
+  async syncLoadedFilament(
+    input: SyncLoadedFilamentInput
+  ): Promise<SyncLoadedFilamentResult | null> {
+    if (!this.enabled) return null;
+
+    const url = `${this.baseUrl}/api/inventory/printer-filament/sync`;
+
+    try {
+      const res = await fetchWithTimeout(url, {
+        method: "POST",
+        timeoutMs: TIMEOUT_MS,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          printerId: input.printerId,
+          amsTray: input.amsTray,
+          material: input.material,
+          color: input.color,
+          source: "printer",
+        }),
+      });
+
+      const text = await res.text();
+      const json = text ? safeJson(text) : null;
+
+      if (!res.ok) {
+        if (res.status < 500 && json && typeof json.error === "string") {
+          throw new FulfillmentError(json.error, "rejected");
+        }
+        throw new FulfillmentError(`склад вернул ${res.status}`, "unreachable");
+      }
+
+      return (json as SyncLoadedFilamentResult) ?? { resolved: false };
     } catch (error) {
       if (error instanceof FulfillmentError) throw error;
       const reason = isTimeoutError(error)

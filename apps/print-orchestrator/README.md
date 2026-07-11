@@ -105,6 +105,33 @@ Each deduction carries a stable `idempotencyKey` (minted per print run, and per
 AMS tray), so a re-observed completion or any redelivery cannot double-deduct —
 fulfillment answers `duplicate: true` instead of writing a second movement.
 
+### Automatic loaded-reel binding (no manual entry)
+
+The deduction above resolves *which* stock to draw down from fulfillment's
+per-printer loaded-reel binding (`printer_filament_state`). That binding is kept
+current automatically — the operator never has to load filament in the
+fulfillment dashboard. On every poll the orchestrator reports each printer's
+**live loaded reel** — the same telemetry the dashboard shows (active AMS trays
+on Bambu, the current job's sliced material on the K2) — to
+`POST /api/inventory/printer-filament/sync`, and fulfillment resolves it against
+what is actually on the shelf and saves the binding:
+
+- **Resolution is fulfillment's job.** The orchestrator sends raw device hints
+  (a material that may carry a brand suffix like `PLA Basic`, and a `#RRGGBB`
+  colour); fulfillment matches them to an existing stock position by material
+  family and nearest named colour. It **never invents stock** — a material that
+  is not stocked answers `{ resolved: false }` and binds nothing, so the
+  completion deduction honestly reports "no loaded reel" until the operator adds
+  it (rather than deducting a phantom spool).
+- **Per slot.** One binding per AMS slot (`amsTray`), so a multi-colour Bambu
+  print binds and later deducts each slot's own reel. Single-reel printers
+  (Moonraker/K2) bind the printer-level reel (`amsTray` null).
+- **Cheap and soft.** A slot is posted only when its loaded filament *changes*
+  (deduped in memory), gated by the same `FULFILLMENT_API_URL` switch, and never
+  fatal to the poll loop — a failed sync is simply retried on the next poll. The
+  binding is created well before a print finishes, so the completion deduction
+  always has a target. See `src/app/filamentSync.ts`.
+
 The consumed amount comes from whatever the device actually knows:
 
 - **Moonraker / K2** reports extruded length (`print_stats.filament_used`), sent
