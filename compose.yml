@@ -63,6 +63,13 @@ services:
     # add a temporary `ports: ["127.0.0.1:3100:3100"]`.
     expose:
       - "3100"
+    networks:
+      - default
+      # Shared bridge with the fulfillment stack: fulfillment-api reads
+      # statuses and camera snapshots at http://print-orchestrator:3100 over
+      # this network (read-only integration; the port stays off the LAN).
+      # Create it once before the first `up`: ./ops/ensure-print-farm-network.sh
+      - print-farm
     healthcheck:
       test:
         [
@@ -97,3 +104,14 @@ services:
 volumes:
   # Durable orchestrator state (queue, events, today counters) as a JSON file.
   orchestrator-data:
+
+networks:
+  # Shared cross-project bridge with the fulfillment stack. External on
+  # purpose: it must not carry a directory-derived compose name and must let
+  # either stack start first. Create it once (idempotent):
+  #   ./ops/ensure-print-farm-network.sh
+  # A missing network fails fast with "network print-farm declared as
+  # external, but could not be found" — run the script and `up` again.
+  print-farm:
+    external: true
+    name: print-farm

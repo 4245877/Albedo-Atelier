@@ -50,6 +50,59 @@ go2rtc API (`1985`) is bound to localhost.
 > `ORCHESTRATOR_API_TOKEN` (and inject it from the proxy) or put HTTP Basic Auth
 > in front of nginx.
 
+### Fulfillment integration
+
+This orchestrator is the **only** service that talks to the printer hardware
+(Moonraker HTTP, Bambu MQTT, Creality WebSocket, cameras/go2rtc) — exactly one
+Bambu MQTT client and one go2rtc instance exist on the host, both in this
+stack. The fulfillment API (`~/apps/fulfillment`) consumes it read-only over
+HTTP:
+
+- `GET /api/printers` — statuses for fulfillment's monitoring, health checks
+  and its read-only «3D-принтери» page;
+- `GET /api/printers/:id/camera.jpg?ensureLight=1` — snapshots for Telegram
+  print notifications (the orchestrator switches the chamber light on first at
+  night).
+
+Both stacks meet on the shared external docker network **`print-farm`**
+(stable name, independent of either project's directory). Create it once —
+idempotent, and required before the first `docker compose up` of either
+project:
+
+```bash
+./ops/ensure-print-farm-network.sh
+```
+
+The fulfillment `api` container dials `http://print-orchestrator:3100` (its
+`PRINTER_ORCHESTRATOR_URL`) over that network, so the control API still is
+not published to the LAN, no LAN IPs are pinned, and either stack may start
+first (fulfillment degrades gracefully until this one is up). If
+`ORCHESTRATOR_API_TOKEN` is set here, mirror it in fulfillment's
+`PRINTER_ORCHESTRATOR_API_TOKEN`.
+
+**Wire contract.** The `GET /api/printers` payload (PrinterView) is pinned by
+`src/app/printerView.contract.test.ts` against
+`apps/print-orchestrator/contracts/printer-view.contract.json`; the same
+fixture is committed verbatim in fulfillment and replayed through its runtime
+validator. After a deliberate DTO change run `UPDATE_CONTRACT=1 pnpm test`,
+copy the regenerated fixture into
+`~/apps/fulfillment/apps/api/src/infra/integrations/orchestrator/` and make
+both test suites pass. The contract (and a test) also guarantees the payload
+carries no connection parameters or credentials (`host`, `serial`,
+`accessCode`, `apiKey`, `snapshotUrl`, …).
+
+**Printer config & secrets.** `apps/print-orchestrator/config/printers.json`
+holds LAN hosts and the Bambu serial + access code, so it is **untracked**
+(`.gitignore`) and lives only on this host; start from
+`config/printers.example.json`. It used to be committed — treat the Bambu
+LAN access code from any old history as burned and rotate it on the printer.
+
+**Restart cost.** Recreating the orchestrator container keeps the queue,
+event feed and today's counters (`orchestrator-data` volume), but in-memory
+print-run identity is lost: prints already running are still tracked, yet
+their completion skips filament auto-deduction and the average-duration
+metric. Prefer deploying while no print is mid-run when that matters.
+
 Package manager: **pnpm** (`corepack enable`). The dashboard is static assets;
 `apps/print-orchestrator` is the only Node project.
 

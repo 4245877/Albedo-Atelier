@@ -7,3 +7,8 @@ npm-debug.log*
 # Local persisted state written by `pnpm dev` / `pnpm start` (STATE_FILE_PATH).
 # In Docker this lives on the named `orchestrator-data` volume instead.
 apps/print-orchestrator/data/
+
+# Real printer inventory: hosts, Bambu serial + LAN access code. Lives only on
+# this host (mounted read-only into the orchestrator container); commit the
+# scrubbed printers.example.json instead.
+apps/print-orchestrator/config/printers.json

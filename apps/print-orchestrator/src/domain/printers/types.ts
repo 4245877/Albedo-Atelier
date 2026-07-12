@@ -25,6 +25,18 @@ export interface PrinterView {
   model: string | null;
   type: PrinterTechnology;
   status: PrinterState;
+  /** Whether the device answered the last poll (false while offline/unreported). */
+  online: boolean;
+  /**
+   * Raw device state string (e.g. Moonraker "complete"/"cancelled", Bambu
+   * "FINISH"). Consumers such as the fulfillment monitor use it to tell a
+   * cancelled print from a completed one; null until the device reports one.
+   */
+  stateText: string | null;
+  /** Human-readable reason (pause reason, error text) when the device gives one. */
+  stateMessage: string | null;
+  /** When the underlying live status was produced; null before the first report. */
+  updatedAt: string | null;
   job: string | null;
   progress: number | null;
   /** `[current, target]` °C; target is null when the device does not report it. */
