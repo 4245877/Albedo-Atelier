@@ -131,6 +131,15 @@ what is actually on the shelf and saves the binding:
   fatal to the poll loop — a failed sync is simply retried on the next poll. The
   binding is created well before a print finishes, so the completion deduction
   always has a target. See `src/app/filamentSync.ts`.
+- **Observable, and never blanks a binding.** A missing hint is *not* synced — a
+  printer that reports no loaded reel simply skips the call, so a good binding is
+  never overwritten with a blank when a device goes idle or an AMS empties. Each
+  case is logged so an operator can tell them apart: one `info`
+  (`printer reported no loaded filament — nothing to sync`) per online *dry
+  spell*, deduped so an idle K2 between prints does not log every tick and
+  re-armed once it names a reel again; one `warn`
+  (`loaded filament matched no fulfillment stock`) when a hint resolves to no
+  shelf stock; and one `warn` (`filament sync failed`) on a failed delivery.
 
 The consumed amount comes from whatever the device actually knows:
 

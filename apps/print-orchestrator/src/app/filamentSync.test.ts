@@ -95,6 +95,20 @@ async function settle() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
+/** Captures the structural log records the sync emits, for the no-data notices. */
+function recordingLogger() {
+  const info: Array<{ obj: unknown; message?: string }> = [];
+  const warn: Array<{ obj: unknown; message?: string }> = [];
+  return {
+    info,
+    warn,
+    logger: {
+      info: (obj: unknown, message?: string) => void info.push({ obj, message }),
+      warn: (obj: unknown, message?: string) => void warn.push({ obj, message }),
+    },
+  };
+}
+
 // ── buildSyncItems (pure) ───────────────────────────────────────────────────
 
 test("buildSyncItems: Bambu yields one item per loaded AMS tray, empties skipped", () => {
@@ -229,4 +243,55 @@ test("an unresolved reel (resolved:false) is not retried every poll", async () =
   }
 
   assert.equal(calls.length, 1, "a stable no-match state is posted once, not on every tick");
+});
+
+// ── No-data logging ─────────────────────────────────────────────────────────
+
+test("an online printer that reports no loaded filament is logged once per dry spell", async () => {
+  const { calls, client } = recordingSync();
+  const { info, logger } = recordingLogger();
+  const sync = new FilamentSync(client);
+  sync.useLogger(logger);
+  // Online, idle, no active reel (a K2 between prints).
+  const dry = baseStatus({ status: "idle", activeFilament: null });
+
+  for (let i = 0; i < 3; i += 1) {
+    sync.syncPrinter(config(), dry);
+    await settle();
+  }
+
+  assert.equal(calls.length, 0, "nothing is synced when the device names no reel");
+  assert.equal(info.length, 1, "the dry spell is flagged once, not on every tick");
+  assert.match(String(info[0].message), /no loaded filament/i);
+  assert.deepEqual(info[0].obj, { printer: "p", protocol: "moonraker", status: "idle" });
+});
+
+test("an offline printer reporting no filament is not flagged (offline is its own signal)", async () => {
+  const { client } = recordingSync();
+  const { info, logger } = recordingLogger();
+  const sync = new FilamentSync(client);
+  sync.useLogger(logger);
+
+  sync.syncPrinter(config(), baseStatus({ online: false, status: "offline", activeFilament: null }));
+  await settle();
+
+  assert.equal(info.length, 0, "an offline device is not a 'no data' warning");
+});
+
+test("a printer that resumes reporting, then goes dry again, is flagged afresh", async () => {
+  const { client } = recordingSync();
+  const { info, logger } = recordingLogger();
+  const sync = new FilamentSync(client);
+  sync.useLogger(logger);
+  const dry = baseStatus({ status: "idle", activeFilament: null });
+  const loaded = baseStatus({ activeFilament: { material: "PLA", color: "#010203", tray: null, remainPct: null } });
+
+  sync.syncPrinter(config(), dry); // first dry spell → logged
+  await settle();
+  sync.syncPrinter(config(), loaded); // names a reel → clears the flag
+  await settle();
+  sync.syncPrinter(config(), dry); // new dry spell → logged again
+  await settle();
+
+  assert.equal(info.length, 2, "each distinct dry spell is flagged, the middle report clears it");
 });

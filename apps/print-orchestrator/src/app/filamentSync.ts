@@ -83,6 +83,13 @@ export class FilamentSync {
   private synced = new Map<string, string>();
   /** Slot keys with an in-flight call, so overlapping polls don't double-send. */
   private inFlight = new Set<string>();
+  /**
+   * Printer ids currently in a logged "reports no loaded filament" dry spell.
+   * The de-dup anchor for the no-data notice so an idle device (a K2 with no
+   * active reel, an empty AMS) is flagged once, not on every poll; cleared the
+   * moment the device names a reel again, so a later dry spell is flagged afresh.
+   */
+  private noData = new Set<string>();
 
   constructor(
     /** Fulfillment stock client; when absent/disabled, sync is a no-op. */
@@ -103,12 +110,40 @@ export class FilamentSync {
   syncPrinter(printer: PrinterConfig, status: PrinterLiveStatus): void {
     if (!this.inventory?.enabled) return;
 
-    for (const item of buildSyncItems(printer, status)) {
+    const items = buildSyncItems(printer, status);
+
+    if (items.length === 0) {
+      this.noteNoData(printer, status);
+      return;
+    }
+
+    // The device is naming reels again — end any dry spell so the next one is
+    // logged afresh rather than silently swallowed.
+    this.noData.delete(printer.id);
+
+    for (const item of items) {
       const key = slotKey(printer.id, item.amsTray);
       const sig = signature(item);
       if (this.synced.get(key) === sig || this.inFlight.has(key)) continue;
       void this.deliver(printer.id, key, sig, item);
     }
+  }
+
+  /**
+   * Records that a printer named no loaded filament this poll. Offline is its
+   * own signal (surfaced as a connection loss by the poller), so only an ONLINE
+   * printer that simply isn't transmitting a reel is worth flagging — and only
+   * once per dry spell (see {@link noData}), so a legitimately idle K2 with no
+   * active reel does not log on every tick. Nothing is synced either way: a
+   * missing hint must never overwrite a good binding with a blank.
+   */
+  private noteNoData(printer: PrinterConfig, status: PrinterLiveStatus): void {
+    if (!status.online || this.noData.has(printer.id)) return;
+    this.noData.add(printer.id);
+    this.logger.info?.(
+      { printer: printer.id, protocol: printer.protocol, status: status.status },
+      "printer reported no loaded filament — nothing to sync"
+    );
   }
 
   private async deliver(
