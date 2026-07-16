@@ -5,6 +5,7 @@ import {
   actionAvailability,
   isBusy,
   jobLine,
+  lightPolicyLine,
   normalizeProgress,
   progressBarHtml,
   progressPercentText
@@ -176,4 +177,84 @@ test("progressPercentText: округление и «—» для неизвес
   assert.equal(progressPercentText(0), "0%");
   assert.equal(progressPercentText(null), "—");
   assert.equal(progressPercentText(""), "—");
+});
+
+test("lightPolicyLine: желаемое состояние, причина, время смены и признак резерва", () => {
+  assert.equal(lightPolicyLine(null), "", "нет записи (старый payload) — нет строки");
+  assert.equal(
+    lightPolicyLine({ supported: false, reason: "unsupported" }),
+    "Подсветка: не поддерживается"
+  );
+  assert.equal(
+    lightPolicyLine({ supported: true, reason: "unsupported" }),
+    "Подсветка: не поддерживается"
+  );
+
+  // Время следующего переключения показывается в локальных часах браузера —
+  // ожидание строится той же арифметикой, чтобы тест не зависел от TZ.
+  const next = new Date(2026, 6, 2, 21, 5, 0);
+  const hhmm = `${String(next.getHours()).padStart(2, "0")}:${String(next.getMinutes()).padStart(2, "0")}`;
+  assert.equal(
+    lightPolicyLine({
+      supported: true,
+      desired: true,
+      reason: "solar_dark_active_print",
+      nextTransitionAt: next.toISOString(),
+      usingFallback: false,
+    }),
+    `Подсветка: включить · темно, принтер печатает · смена в ${hhmm}`
+  );
+
+  assert.equal(
+    lightPolicyLine({
+      supported: true,
+      desired: false,
+      reason: "printer_inactive",
+      nextTransitionAt: null,
+      usingFallback: true,
+    }),
+    "Подсветка: выключить · принтер неактивен · резервное расписание"
+  );
+
+  // Причина fallback_window сама говорит о резерве — суффикс не дублируется.
+  assert.equal(
+    lightPolicyLine({
+      supported: true,
+      desired: true,
+      reason: "fallback_window",
+      nextTransitionAt: null,
+      usingFallback: true,
+    }),
+    "Подсветка: включить · используется резервное расписание"
+  );
+
+  // desired == null (автоматика выключена) — без «включить/выключить».
+  assert.equal(
+    lightPolicyLine({
+      supported: true,
+      desired: null,
+      reason: "automation_disabled",
+      nextTransitionAt: null,
+      usingFallback: false,
+    }),
+    "Подсветка: автоматика выключена"
+  );
+
+  // Неизвестная причина от нового backend показывается как есть, не ломаясь.
+  assert.equal(
+    lightPolicyLine({ supported: true, desired: true, reason: "brand_new_reason" }),
+    "Подсветка: включить · brand_new_reason"
+  );
+
+  // Непарсибельное время просто опускается.
+  assert.equal(
+    lightPolicyLine({
+      supported: true,
+      desired: true,
+      reason: "monitoring_lease",
+      nextTransitionAt: "not-a-date",
+      usingFallback: false,
+    }),
+    "Подсветка: включить · открыта панель мониторинга"
+  );
 });

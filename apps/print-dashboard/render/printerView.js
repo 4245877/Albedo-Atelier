@@ -97,3 +97,49 @@ export function progressPercentText(value) {
   const pct = normalizeProgress(value);
   return pct === null ? "—" : `${Math.round(pct)}%`;
 }
+
+/* ── Политика подсветки (payload state.lights) ─────────────────
+   Причины решения приходят машинно-читаемыми (reason); здесь — единственная
+   таблица их отображения. Причина описывает РЕШЕНИЕ автоматики, а не факт:
+   фактическое состояние лампы видно по кнопкам и полю actual. */
+
+export const LIGHT_REASON_TEXT = {
+  manual_override: "ручное управление",
+  monitoring_lease: "открыта панель мониторинга",
+  solar_dark_active_print: "темно, принтер печатает",
+  solar_dark: "тёмное время суток",
+  solar_daylight: "дневное время",
+  printer_inactive: "принтер неактивен",
+  automation_disabled: "автоматика выключена",
+  fallback_window: "используется резервное расписание",
+  fixed_window: "фиксированное расписание",
+  dark_unknown_safe_on: "нет расчёта темноты — включено для печати",
+  unsupported: "не поддерживается",
+};
+
+/** "HH:MM" локального времени из ISO-строки; null, если она не парсится. */
+function hhmmFromIso(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * Однострочное описание решения подсветки для карточки и модального окна.
+ * Возвращает ПЛОСКИЙ текст (вызывающий экранирует сам): желаемое состояние,
+ * человекочитаемая причина, время следующего переключения и признак резерва.
+ * Пустая строка — когда записи о подсветке нет (старый payload).
+ */
+export function lightPolicyLine(entry) {
+  if (!entry) return "";
+  if (!entry.supported || entry.reason === "unsupported") {
+    return "Подсветка: не поддерживается";
+  }
+  const parts = [];
+  if (entry.desired != null) parts.push(entry.desired ? "включить" : "выключить");
+  parts.push(LIGHT_REASON_TEXT[entry.reason] || entry.reason);
+  const at = entry.nextTransitionAt ? hhmmFromIso(entry.nextTransitionAt) : null;
+  if (at) parts.push(`смена в ${at}`);
+  if (entry.usingFallback && entry.reason !== "fallback_window") parts.push("резервное расписание");
+  return `Подсветка: ${parts.join(" · ")}`;
+}

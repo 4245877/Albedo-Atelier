@@ -4,6 +4,7 @@ import type {
   CriticalEvent,
   DashboardSnapshot,
   FeedEvent,
+  LightControlView,
   MaintenanceRow,
   MaterialMismatch,
   MaterialsSection,
@@ -182,6 +183,19 @@ export class DashboardReadModel {
 
   getQueue(): QueueJob[] {
     return this.queue.list();
+  }
+
+  /**
+   * Per-printer chamber-light policy state: the desired state, the rule that
+   * produced it (machine-readable reason), the known physical state and the
+   * next automatic switch. Computed by the same scheduler that sends the
+   * commands, so the panel shows exactly the decision the farm acts on.
+   */
+  getLights(): LightControlView[] {
+    return this.enabledConfigs().map((printer) => ({
+      id: printer.id,
+      ...this.poller.lights.lightState(printer)
+    }));
   }
 
   /**
@@ -391,6 +405,15 @@ export class DashboardReadModel {
       });
     }
 
+    if (this.automations.isEnabled("night-lights") && this.poller.lights.isUsingFallback()) {
+      warnings.push({
+        icon: "☾",
+        text: "Подсветка работает по резервному расписанию",
+        hint: "солнечный расчёт недоступен — проверьте LIGHT_* настройки",
+        level: "warn"
+      });
+    }
+
     for (const printer of enabled) {
       const status = this.poller.getStatus(printer.id);
       if (!status || status.status === "unknown") {
@@ -481,6 +504,7 @@ export class DashboardReadModel {
     return {
       service: this.getService(),
       printers: this.listPrinters(),
+      lights: this.getLights(),
       queue: this.getQueue(),
       night: this.getNight(),
       critical: this.getCritical(),

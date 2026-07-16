@@ -184,6 +184,40 @@ export interface MaintenanceRow {
   due: boolean;
 }
 
+/**
+ * Machine-readable rule that produced the current light decision for one
+ * printer. Deliberately about the *decision*, never about whether the physical
+ * command succeeded — the command outcome lives in `LightControlView.actual`.
+ */
+export type LightPolicyReason =
+  | "manual_override"
+  | "monitoring_lease"
+  | "solar_dark_active_print"
+  | "solar_dark"
+  | "solar_daylight"
+  | "printer_inactive"
+  | "automation_disabled"
+  | "fallback_window"
+  | "fixed_window"
+  | "dark_unknown_safe_on"
+  | "unsupported";
+
+/** Per-printer chamber-light policy state for the dashboard (`snapshot.lights`). */
+export interface LightControlView {
+  id: string;
+  /** Whether this printer has a controllable light at all. */
+  supported: boolean;
+  /** What the automation currently wants; null when it deliberately does not act. */
+  desired: boolean | null;
+  /** Last reported physical light state; null when the device does not say. */
+  actual: boolean | null;
+  reason: LightPolicyReason;
+  /** ISO timestamp of the next automatic switch, when one is known. */
+  nextTransitionAt: string | null;
+  /** True while the solar schedule is degraded to the fallback window. */
+  usingFallback: boolean;
+}
+
 /** Compact camera projection, derived from printers, for `GET /api/cameras`. */
 export interface CameraView {
   id: string;
@@ -205,6 +239,7 @@ export interface AutomationsSection {
 export interface DashboardSnapshot {
   service: ServiceStatus;
   printers: PrinterView[];
+  lights: LightControlView[];
   queue: QueueJob[];
   night: NightPrint;
   critical: CriticalEvent[];

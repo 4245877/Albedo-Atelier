@@ -5,13 +5,31 @@ import type { PrinterConfig } from "../infra/printers/config";
 import { EventFeed } from "./eventFeed";
 import type { CameraService } from "./cameraService";
 import { PrinterPoller } from "./printerPoller";
+import { SolarLightPolicy } from "./solarLightPolicy";
 
 /*
  * Integration-style tests: a fake global `fetch` simulates one Moonraker K2 so
  * the real driver code (getMoonrakerStatus / sendMoonrakerLightCommand) runs
  * end to end, and a fake `Date` gives us deterministic control over the
- * 5-minute manual override and the night window. Runs under TZ=UTC.
+ * 5-minute manual override and the schedule window. The poller is built with
+ * the legacy fixed-window policy (21:30–07:30, idle printers included) so the
+ * override/backoff mechanics are tested apart from the solar decision logic
+ * (which has its own suite in lightScheduler.solar.test.ts). Runs under TZ=UTC.
  */
+
+/** The pre-solar behaviour: fixed 21:30–07:30 window, idle printers included. */
+function legacyNightPolicy(): SolarLightPolicy {
+  return new SolarLightPolicy({
+    mode: "fixed",
+    latitude: null,
+    longitude: null,
+    onOffsetMinutes: -30,
+    offOffsetMinutes: 30,
+    onlyWhenActive: false,
+    fallbackWindow: "21:30 – 07:30",
+    issues: []
+  });
+}
 
 const RealDate = Date;
 let fakeNow = RealDate.UTC(2026, 6, 2, 2, 0, 0); // 02:00 UTC → inside 21:30–07:30
@@ -122,7 +140,18 @@ function k2Config(): PrinterConfig {
 
 function makePoller(printer: PrinterConfig): PrinterPoller {
   const cameras = { probe: async () => {} } as unknown as CameraService;
-  return new PrinterPoller(() => [printer], cameras, new EventFeed());
+  return new PrinterPoller(
+    () => [printer],
+    cameras,
+    new EventFeed(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { solarPolicy: legacyNightPolicy() }
+  );
 }
 
 test("manual override holds the operator's state, then the schedule reasserts", async () => {
@@ -241,7 +270,18 @@ test("stale map entries are pruned when a printer leaves the enabled set", async
   const printer = k2Config();
   let enabled: PrinterConfig[] = [printer];
   const cameras = { probe: async () => {} } as unknown as CameraService;
-  const poller = new PrinterPoller(() => enabled, cameras, new EventFeed());
+  const poller = new PrinterPoller(
+    () => enabled,
+    cameras,
+    new EventFeed(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { solarPolicy: legacyNightPolicy() }
+  );
 
   await poller.pollOnce();
   assert.ok(poller.getStatus("k2"), "status recorded while enabled");

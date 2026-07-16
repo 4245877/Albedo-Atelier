@@ -1139,6 +1139,10 @@ body::before {
    b-селектор — чтобы перевесить «.printer-job b» выше. */
 b.job-error { color: var(--danger-ink); font-weight: 700; }
 
+/* Решение автоматики подсветки (state.lights) — приглушённая строка на
+   карточке и в модальном окне; факт лампы показывают кнопки ☀/☾. */
+.printer-light { font-size: 12px; color: var(--ink-faint); }
+
 .printer-progress { display: flex; flex-direction: column; gap: 6px; }
 
 .progress-caption {

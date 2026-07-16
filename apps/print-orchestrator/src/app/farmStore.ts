@@ -18,6 +18,7 @@ import { EventFeed } from "./eventFeed";
 import { FilamentConsumption } from "./filamentConsumption";
 import { FilamentSync } from "./filamentSync";
 import { materialsIncompatible, type NightPlanEntry } from "./nightPlanner";
+import { MonitoringLease } from "./monitoringLease";
 import { PrinterPoller } from "./printerPoller";
 import type { StoreLogger } from "../shared/logger";
 import { QueueStore, type NewQueueJobInput } from "./queueStore";
@@ -56,6 +57,8 @@ export class FarmStore {
   private readonly filamentSync: FilamentSync;
   private readonly queue: QueueStore;
   private readonly automations: AutomationStore;
+  /** "Operator is watching" lease renewed by the dashboard; in-memory only. */
+  private readonly monitoring = new MonitoringLease();
   private readonly poller: PrinterPoller;
   private readonly commands: PrinterCommandService;
   /**
@@ -118,7 +121,8 @@ export class FarmStore {
       () => this.automations.isEnabled("night-lights"),
       this.filament,
       undefined,
-      this.filamentSync
+      this.filamentSync,
+      { monitoringLease: this.monitoring }
     );
     this.commands = new PrinterCommandService(
       (id) => this.configById(id),
@@ -271,6 +275,21 @@ export class FarmStore {
   }
   setLight(id: string, on: boolean) {
     return this.commands.setLight(id, on);
+  }
+
+  /**
+   * Creates or extends the farm-wide monitoring lease (the dashboard renews it
+   * while its tab is visible). Idempotent: repeated calls only move the expiry
+   * forward. While the lease is live the light policy keeps supported printers
+   * lit; there is no explicit release — the lease expires on its own.
+   */
+  renewMonitoringLease(): { ok: true; ttlSeconds: number; expiresAt: string } {
+    const lease = this.monitoring.renew();
+    return {
+      ok: true,
+      ttlSeconds: Math.round(lease.ttlMs / 1000),
+      expiresAt: lease.expiresAt.toISOString()
+    };
   }
   snapshotPrinter(id: string) {
     return this.commands.snapshot(id);

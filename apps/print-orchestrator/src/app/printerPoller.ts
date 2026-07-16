@@ -11,7 +11,7 @@ import type { CameraService } from "./cameraService";
 import type { EventFeed } from "./eventFeed";
 import { FilamentConsumption } from "./filamentConsumption";
 import { FilamentSync } from "./filamentSync";
-import { LightScheduler } from "./lightScheduler";
+import { LightScheduler, type LightSchedulerDeps } from "./lightScheduler";
 import { TodayCounters } from "./todayCounters";
 
 /** Per-printer identity of the in-flight print, for stable idempotent deduction. */
@@ -103,7 +103,9 @@ export class PrinterPoller {
       printer: PrinterConfig
     ) => Promise<PrinterLiveStatus> = getPrinterLiveStatus,
     /** Loaded-reel sync; when absent a disabled no-op instance is used. */
-    filamentSync?: FilamentSync
+    filamentSync?: FilamentSync,
+    /** Light-policy collaborators (solar schedule, monitoring lease); injectable. */
+    lightPolicy?: Pick<LightSchedulerDeps, "solarPolicy" | "monitoringLease">
   ) {
     this.today = new TodayCounters(initialToday);
     this.filament = filament ?? new FilamentConsumption(undefined, events);
@@ -112,7 +114,9 @@ export class PrinterPoller {
       events,
       nightLightsEnabled,
       getStatus: (id) => this.statuses.get(id),
-      setStatus: (id, status) => this.statuses.set(id, status)
+      setStatus: (id, status) => this.statuses.set(id, status),
+      solarPolicy: lightPolicy?.solarPolicy,
+      monitoringLease: lightPolicy?.monitoringLease
     });
   }
 

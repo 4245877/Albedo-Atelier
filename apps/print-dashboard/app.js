@@ -13,7 +13,7 @@
      actions.js      — действия оператора и делегированные клики
    ═══════════════════════════════════════════════════════════════ */
 
-import { apiGet } from "./api.js";
+import { apiGet, apiPost } from "./api.js";
 import { installActions } from "./actions.js";
 import { reconcileCameras } from "./cameraPlayers.js";
 import { ensureReveal, renderNav, setupNav, setupStickyOffsets } from "./nav.js";
@@ -31,6 +31,39 @@ let everLoaded = false;
 /* Снимок последних отрисованных данных: если новый ответ идентичен,
    DOM не пересобираем (камеры не мигают, нет лишних перекачек кадров). */
 let lastRenderedJson = null;
+
+/* ── Аренда мониторинга ────────────────────────────────────── */
+
+/* Пока вкладка видима, панель продлевает короткую аренду «оператор смотрит»:
+   backend на это время включает подсветку поддерживаемых принтеров, чтобы в
+   камерах было видно происходящее. Явной команды выключения нет — аренда
+   истекает на backend сама (~90 с), поэтому скрытая или закрытая вкладка
+   просто перестаёт её продлевать. Ошибки продления не трогают обновление
+   доски: это отдельный тихий запрос. */
+
+const LEASE_RENEW_INTERVAL_MS = 30000;
+let leaseTimer = null;
+
+function renewMonitoringLease() {
+  apiPost("/api/monitoring/lease").catch(() => {});
+}
+
+function startLeaseRenewal() {
+  if (leaseTimer !== null) return; // повторные visibilitychange не плодят таймеры
+  renewMonitoringLease();
+  leaseTimer = setInterval(renewMonitoringLease, LEASE_RENEW_INTERVAL_MS);
+}
+
+function stopLeaseRenewal() {
+  if (leaseTimer === null) return;
+  clearInterval(leaseTimer);
+  leaseTimer = null;
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopLeaseRenewal();
+  else startLeaseRenewal();
+});
 
 /* ── Часы ──────────────────────────────────────────────────── */
 
@@ -120,3 +153,6 @@ setupNav();
 
 refresh({ silent: false });
 setInterval(() => { void refresh(); }, 6000);
+
+// Первая аренда мониторинга — сразу после открытия видимой панели.
+if (!document.hidden) startLeaseRenewal();

@@ -12,6 +12,7 @@ import {
   actionAvailability,
   isBusy,
   jobLine,
+  lightPolicyLine,
   normalizeProgress,
   progressBarHtml,
   progressPercentText
@@ -82,6 +83,12 @@ function findPrinter(id) {
   return state?.printers?.find((p) => p.id === id) || null;
 }
 
+/** Запись политики подсветки (state.lights) для принтера; null у старого payload. */
+function findLight(id) {
+  const state = deps.getState();
+  return state?.lights?.find((l) => l.id === id) || null;
+}
+
 function modalActions(p) {
   const can = actionAvailability(p);
   const lightTitle = can.lightUnknown && can.lightSupported
@@ -125,10 +132,11 @@ function teleRows(p) {
     .join("");
 }
 
-function printerModalHtml(p) {
+function printerModalHtml(p, light) {
   const progress = isBusy(p)
     ? progressBarHtml(p.progress, { paused: p.status === "paused", style: "margin:10px 0" })
     : "";
+  const lightLine = light ? `<div class="printer-light">${esc(lightPolicyLine(light))}</div>` : "";
 
   return `
     <div class="modal-head">
@@ -143,6 +151,7 @@ function printerModalHtml(p) {
         ${progress}
         ${materialBlock(p)}
         <div class="modal-tele">${teleRows(p)}</div>
+        ${lightLine}
       </div>
     </div>
     ${modalActions(p)}`;
@@ -154,9 +163,10 @@ export function openPrinterModal(id) {
     toast("Принтер не найден в текущем состоянии фермы", "toast-danger");
     return;
   }
-  current = { kind: "printer", printerId: id, lastJson: JSON.stringify(p) };
+  const light = findLight(id);
+  current = { kind: "printer", printerId: id, lastJson: JSON.stringify([p, light]) };
   openShell();
-  $("#modal-content").innerHTML = printerModalHtml(p);
+  $("#modal-content").innerHTML = printerModalHtml(p, light);
   reconcileCameras();
 }
 
@@ -169,10 +179,11 @@ export function syncModals() {
     closeModal();
     return;
   }
-  const json = JSON.stringify(p);
+  const light = findLight(current.printerId);
+  const json = JSON.stringify([p, light]);
   if (json === current.lastJson) return; // ничего не изменилось — не трогаем камеру
   current.lastJson = json;
-  $("#modal-content").innerHTML = printerModalHtml(p);
+  $("#modal-content").innerHTML = printerModalHtml(p, light);
   reconcileCameras();
 }
 

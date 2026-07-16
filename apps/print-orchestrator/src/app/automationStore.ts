@@ -25,8 +25,8 @@ export interface AutomationRule {
 export const AUTOMATION_RULES: readonly AutomationRule[] = [
   {
     id: "night-lights",
-    name: "Ночная подсветка по расписанию",
-    desc: "Гасит свет днём и включает его в ночном окне на управляемых принтерах",
+    name: "Подсветка по солнечному расписанию",
+    desc: "Включает свет активным принтерам от заката до рассвета и на время открытой панели",
     defaultOn: true
   },
   {

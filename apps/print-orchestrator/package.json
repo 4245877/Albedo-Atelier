@@ -14,10 +14,12 @@
   "dependencies": {
     "fastify": "^5.4.0",
     "mqtt": "^5.10.1",
+    "suncalc": "1.9.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
+    "@types/suncalc": "1.9.2",
     "@types/ws": "^8.5.13",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"

@@ -5,14 +5,30 @@ import type { PrinterConfig } from "../infra/printers/config";
 import type { PrinterLiveStatus } from "../infra/printers/status";
 import { EventFeed } from "./eventFeed";
 import { LightScheduler } from "./lightScheduler";
+import { SolarLightPolicy } from "./solarLightPolicy";
 
 /*
- * Direct unit tests for the LightScheduler: the night policy, the manual
- * override, backoff and per-printer command serialization — with an injected
- * `sendLight` and plain in-memory statuses, so no driver, no fake fetch. The
- * poller-level integration of the same behaviour stays in printerPoller.test.ts.
- * Runs under TZ=UTC; the default night window is 21:30–07:30.
+ * Direct unit tests for the LightScheduler mechanics: manual override, backoff
+ * and per-printer command serialization — with an injected `sendLight`, plain
+ * in-memory statuses and the legacy fixed-window policy (21:30–07:30,
+ * unconditional), so the pre-solar behaviour stays pinned. The solar decision
+ * logic has its own suite in lightScheduler.solar.test.ts; the poller-level
+ * integration stays in printerPoller.test.ts. Runs under TZ=UTC.
  */
+
+/** The pre-solar behaviour: fixed 21:30–07:30 window, idle printers included. */
+function legacyNightPolicy(): SolarLightPolicy {
+  return new SolarLightPolicy({
+    mode: "fixed",
+    latitude: null,
+    longitude: null,
+    onOffsetMinutes: -30,
+    offOffsetMinutes: 30,
+    onlyWhenActive: false,
+    fallbackWindow: "21:30 – 07:30",
+    issues: []
+  });
+}
 
 const RealDate = Date;
 let fakeNow = RealDate.UTC(2026, 6, 2, 2, 0, 0); // 02:00 UTC → inside the night window
@@ -116,6 +132,7 @@ function makeScheduler(options: {
     nightLightsEnabled: options.nightLightsEnabled ?? (() => true),
     getStatus: (id) => statuses.get(id),
     setStatus: (id, s) => statuses.set(id, s),
+    solarPolicy: legacyNightPolicy(),
     sendLight: async (_printer, on) => {
       if (device.fail) throw new Error("device unreachable");
       commands.push(on);
@@ -203,6 +220,7 @@ test("light operations for one printer never interleave (strict serialization)",
     nightLightsEnabled: () => true,
     getStatus: (id) => statuses.get(id),
     setStatus: (id, s) => statuses.set(id, s),
+    solarPolicy: legacyNightPolicy(),
     sendLight: async (_printer, on) => {
       inFlight += 1;
       maxInFlight = Math.max(maxInFlight, inFlight);

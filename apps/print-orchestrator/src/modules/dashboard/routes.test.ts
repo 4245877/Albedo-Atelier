@@ -49,10 +49,13 @@ test("GET /api/dashboard returns the whole board with the current contract", asy
   assert.equal(body.service.status, "ok");
 
   // The night window is exported in machine-readable form for the frontend
-  // theme; with the default NIGHT_PRINT_WINDOW that is 21:30 → 07:30.
+  // theme; with the default NIGHT_PRINT_WINDOW that is 21:30 → 07:30. It stays
+  // an independent setting: the chamber lights follow the separate LIGHT_*
+  // solar policy, whose per-printer verdicts ship in `lights`.
   assert.equal(body.night.window, "21:30 – 07:30");
   assert.equal(body.night.windowStart, "21:30");
   assert.equal(body.night.windowEnd, "07:30");
+  assert.deepEqual(body.lights, [], "light policy section present (empty farm → empty)");
 
   // The printer status "maintenance" is unreachable and was removed — the
   // performance section no longer reports its always-zero counter.

@@ -3,6 +3,7 @@ import { $, badge, esc, emptyRow, fmtLeft, materialBlock } from "../util.js";
 import {
   actionAvailability,
   jobLine,
+  lightPolicyLine,
   normalizeProgress,
   progressBarHtml,
   progressPercentText
@@ -93,8 +94,11 @@ function teleBlock(p) {
     .join("")}</div>`;
 }
 
-function printerCard(p) {
+function printerCard(p, lightEntry) {
   const can = actionAvailability(p);
+  // Решение автоматики подсветки (state.lights) — отдельно от фактического
+  // состояния лампы, которое показывают кнопки ☀/☾ и подсветка камеры.
+  const lightLine = lightEntry ? `<div class="printer-light">${esc(lightPolicyLine(lightEntry))}</div>` : "";
   const lightTitle = can.lightUnknown && can.lightSupported
     ? ' title="Состояние подсветки неизвестно — команда будет отправлена вручную"'
     : "";
@@ -132,6 +136,7 @@ function printerCard(p) {
         ${progressBlock}
         ${teleBlock(p)}
         ${materialBlock(p)}
+        ${lightLine}
         <div class="printer-actions">${actions}</div>
       </div>
     </article>`;
@@ -139,9 +144,10 @@ function printerCard(p) {
 
 export function renderPrinters(state) {
   const p = state.printers;
+  const lightsById = new Map((state.lights || []).map((l) => [l.id, l]));
   $("#printers-meta").textContent =
     `${p.filter((x) => x.status === "printing").length} печатают · ${p.filter((x) => x.status === "idle").length} свободны · ${p.length} всего`;
-  $("#printer-grid").innerHTML = p.map(printerCard).join("") ||
+  $("#printer-grid").innerHTML = p.map((x) => printerCard(x, lightsById.get(x.id))).join("") ||
     `<div class="row"><div class="grow row-sub">Принтеры не настроены — добавьте их в config/printers.json на backend</div></div>`;
 }
 

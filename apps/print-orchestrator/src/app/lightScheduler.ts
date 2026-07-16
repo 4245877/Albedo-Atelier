@@ -1,19 +1,41 @@
+import type { LightControlView, LightPolicyReason } from "../domain/dashboard/types";
 import type { PrinterConfig } from "../infra/printers/config";
 import {
   sendPrinterLight,
   supportsPrinterLight,
   type PrinterLiveStatus
 } from "../infra/printers/status";
-import { env } from "../shared/env";
 import type { StoreLogger } from "../shared/logger";
-import { isWithinLocalTimeWindow, parseLocalTimeWindow } from "../shared/time";
 import type { EventFeed } from "./eventFeed";
+import { isBusyStatus } from "./printerView";
+import { SolarLightPolicy } from "./solarLightPolicy";
 
 const MANUAL_LIGHT_OVERRIDE_MS = 5 * 60 * 1000;
 /** After this many consecutive ineffective/errored light commands, pause retries. */
 const MAX_LIGHT_ATTEMPTS = 3;
 /** How long the schedule stops retrying a light that will not converge. */
 const LIGHT_BACKOFF_MS = 5 * 60 * 1000;
+
+/** The scheduled decision for one printer on one evaluation. */
+export interface LightDecision {
+  /** What the automation wants; null — it deliberately does not act. */
+  desired: boolean | null;
+  reason: LightPolicyReason;
+  nextTransitionAt: Date | null;
+  usingFallback: boolean;
+}
+
+/** Feed wording per decision reason (the decision, not the command outcome). */
+const REASON_FEED_TEXT: Partial<Record<LightPolicyReason, string>> = {
+  monitoring_lease: "открыта панель мониторинга",
+  solar_dark_active_print: "темно, принтер печатает",
+  solar_dark: "тёмное время суток",
+  solar_daylight: "дневное время",
+  printer_inactive: "принтер неактивен",
+  fallback_window: "резервное расписание",
+  fixed_window: "окно расписания",
+  dark_unknown_safe_on: "нет расчёта темноты, идёт печать"
+};
 
 /**
  * What the scheduler needs from the rest of the farm. Live statuses are read
@@ -28,17 +50,27 @@ export interface LightSchedulerDeps {
   setStatus: (id: string, status: PrinterLiveStatus) => void;
   /** Driver dispatch; injectable so unit tests need no device or fake fetch. */
   sendLight?: (printer: PrinterConfig, on: boolean) => Promise<void>;
+  /** Darkness schedule; injectable for tests, defaults to the env-configured one. */
+  solarPolicy?: SolarLightPolicy;
+  /** The farm-wide "operator is watching" lease; absent → never active. */
+  monitoringLease?: { isActive(): boolean; expiresAt(): Date | null };
 }
 
 /**
- * Printer chamber-light control: the scheduled night policy (on inside
- * `NIGHT_PRINT_WINDOW`, off outside), operator overrides, and the plumbing that
- * keeps the two honest — per-printer command serialization, convergence
- * tracking with backoff, and failure de-duplication in the feed.
+ * Printer chamber-light control: the scheduled policy (dark per
+ * {@link SolarLightPolicy} + activity + the monitoring lease), operator
+ * overrides, and the plumbing that keeps the two honest — per-printer command
+ * serialization, convergence tracking with backoff, and failure de-duplication
+ * in the feed.
+ *
+ * Decision priority per printer, top wins:
+ *   manual override → automation disabled → monitoring lease →
+ *   dark & printing/paused → otherwise off.
  */
 export class LightScheduler {
   private logger: StoreLogger = {};
-  private warnedInvalidNightWindow = false;
+  /** Darkness schedule (solar or fixed window); owns its own warnings dedupe. */
+  private readonly policy: SolarLightPolicy;
   /** Last light target successfully requested per printer. */
   private lightTargets = new Map<string, boolean>();
   /** Until this timestamp, scheduled light policy must not override manual changes. */
@@ -60,6 +92,17 @@ export class LightScheduler {
 
   constructor(private readonly deps: LightSchedulerDeps) {
     this.sendLight = deps.sendLight ?? sendPrinterLight;
+    this.policy =
+      deps.solarPolicy ??
+      new SolarLightPolicy(undefined, {
+        onWarning: (message) => this.notePolicyDegraded(message)
+      });
+  }
+
+  /** A degraded/invalid light schedule: once per distinct problem, feed + log. */
+  private notePolicyDegraded(message: string): void {
+    this.deps.events.push("☾", `Подсветка: ${message}`, "err");
+    this.logger.warn?.({ message }, "light schedule degraded");
   }
 
   useLogger(logger: StoreLogger): void {
@@ -138,7 +181,9 @@ export class LightScheduler {
   async ensureForSnapshot(printer: PrinterConfig): Promise<boolean> {
     if (!supportsPrinterLight(printer)) return false;
     if (!this.deps.nightLightsEnabled()) return false;
-    if (!this.currentNightTarget()) return false;
+    // Only a *provably* dark scene needs a lit snapshot; unknown darkness stays
+    // conservative here (the periodic policy handles the safe-on for prints).
+    if (this.policy.assess().dark !== true) return false;
     if (this.isManualOverrideActive(printer.id)) return false;
 
     const status = this.deps.getStatus(printer.id);
@@ -173,34 +218,142 @@ export class LightScheduler {
   }
 
   /**
-   * Applies the scheduled night policy to every supported printer: on inside
-   * the night window, off outside it. When the automation is off, leaves the
-   * lights entirely under manual/device control — the schedule must not touch
-   * them. Called once per poll with the current enabled set.
+   * The scheduled decision for one printer, in strict priority order (see the
+   * class doc). Pure — no commands are sent; `applyPolicy` acts on it and the
+   * dashboard read model shows the very same verdict via {@link lightState}.
+   */
+  evaluate(printer: PrinterConfig, now: Date = new Date()): LightDecision {
+    if (!supportsPrinterLight(printer)) {
+      return { desired: null, reason: "unsupported", nextTransitionAt: null, usingFallback: false };
+    }
+    if (!this.deps.nightLightsEnabled()) {
+      return {
+        desired: null,
+        reason: "automation_disabled",
+        nextTransitionAt: null,
+        usingFallback: false
+      };
+    }
+    if (this.isManualOverrideActive(printer.id)) {
+      const until = this.manualOverrides.get(printer.id);
+      return {
+        // Under an override the operator's choice is the desired state; the
+        // last requested target is what they asked for.
+        desired: this.lightTargets.get(printer.id) ?? this.deps.getStatus(printer.id)?.light ?? null,
+        reason: "manual_override",
+        nextTransitionAt: until ? new Date(until) : null,
+        usingFallback: false
+      };
+    }
+
+    const lease = this.deps.monitoringLease;
+    if (lease?.isActive()) {
+      return {
+        desired: true,
+        reason: "monitoring_lease",
+        nextTransitionAt: lease.expiresAt(),
+        usingFallback: false
+      };
+    }
+
+    const status = this.deps.getStatus(printer.id);
+    const active = status ? isBusyStatus(status.status) : false;
+    const darkness = this.policy.assess(now);
+
+    if (darkness.dark === null) {
+      // Darkness cannot be determined at all (bad solar config AND bad fallback
+      // window). Safe default: keep an actively printing printer lit, leave
+      // idle ones dark.
+      if (active) {
+        return {
+          desired: true,
+          reason: "dark_unknown_safe_on",
+          nextTransitionAt: null,
+          usingFallback: true
+        };
+      }
+      return {
+        desired: false,
+        reason: "printer_inactive",
+        nextTransitionAt: null,
+        usingFallback: true
+      };
+    }
+
+    const windowReason: LightPolicyReason =
+      darkness.source === "fixed" ? "fixed_window" : "fallback_window";
+
+    if (!darkness.dark) {
+      return {
+        desired: false,
+        reason: darkness.source === "solar" ? "solar_daylight" : windowReason,
+        nextTransitionAt: darkness.nextTransitionAt,
+        usingFallback: darkness.usingFallback
+      };
+    }
+
+    if (this.policy.onlyWhenActive && !active) {
+      return {
+        desired: false,
+        reason: "printer_inactive",
+        nextTransitionAt: darkness.nextTransitionAt,
+        usingFallback: darkness.usingFallback
+      };
+    }
+
+    return {
+      desired: true,
+      reason:
+        darkness.source === "solar"
+          ? active
+            ? "solar_dark_active_print"
+            : "solar_dark"
+          : windowReason,
+      nextTransitionAt: darkness.nextTransitionAt,
+      usingFallback: darkness.usingFallback
+    };
+  }
+
+  /** The dashboard projection of the decision plus the known physical state. */
+  lightState(printer: PrinterConfig): Omit<LightControlView, "id"> {
+    const decision = this.evaluate(printer);
+    return {
+      supported: supportsPrinterLight(printer),
+      desired: decision.desired,
+      actual: this.deps.getStatus(printer.id)?.light ?? null,
+      reason: decision.reason,
+      nextTransitionAt: decision.nextTransitionAt?.toISOString() ?? null,
+      usingFallback: decision.usingFallback
+    };
+  }
+
+  /** Whether the darkness schedule is currently degraded to the fallback window. */
+  isUsingFallback(): boolean {
+    return this.policy.assess().usingFallback;
+  }
+
+  /**
+   * Applies the scheduled policy to every supported printer, one decision per
+   * printer per poll. When the automation is off, leaves the lights entirely
+   * under manual/device control — the schedule must not touch them.
    */
   async applyPolicy(printers: PrinterConfig[]): Promise<void> {
     if (!this.deps.nightLightsEnabled()) return;
-    const targetOn = this.currentNightTarget();
-    await Promise.all(printers.map((printer) => this.applyPolicyToPrinter(printer, targetOn)));
+    await Promise.all(
+      printers.map((printer) => {
+        const decision = this.evaluate(printer);
+        // desired === null → hands off (unsupported printer or manual override).
+        if (decision.desired === null) return undefined;
+        return this.applyPolicyToPrinter(printer, decision.desired, decision.reason);
+      })
+    );
   }
 
-  private currentNightTarget(): boolean {
-    const window = parseLocalTimeWindow(env.nightWindow);
-    if (!window) {
-      if (!this.warnedInvalidNightWindow) {
-        this.warnedInvalidNightWindow = true;
-        this.logger.warn?.(
-          { window: env.nightWindow },
-          "invalid NIGHT_PRINT_WINDOW; printer lights will stay off"
-        );
-      }
-      return false;
-    }
-    return isWithinLocalTimeWindow(window);
-  }
-
-  private async applyPolicyToPrinter(printer: PrinterConfig, targetOn: boolean): Promise<void> {
-    if (!supportsPrinterLight(printer)) return;
+  private async applyPolicyToPrinter(
+    printer: PrinterConfig,
+    targetOn: boolean,
+    reason: LightPolicyReason
+  ): Promise<void> {
     if (this.isManualOverrideActive(printer.id)) return;
 
     const status = this.deps.getStatus(printer.id);
@@ -247,9 +400,10 @@ export class LightScheduler {
         }
 
         if (announce) {
+          const detail = REASON_FEED_TEXT[reason];
           this.deps.events.push(
             targetOn ? "☾" : "☀",
-            `<b>${printer.name}</b>: подсветка ${targetOn ? "включена на ночь" : "выключена на день"}`,
+            `<b>${printer.name}</b>: подсветка ${targetOn ? "включена" : "выключена"}${detail ? ` — ${detail}` : ""}`,
             "info"
           );
         }

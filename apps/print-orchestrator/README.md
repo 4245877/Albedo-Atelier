@@ -35,26 +35,58 @@ would make a restart re-announce pre-existing conditions. Material stock,
 maintenance history and automations are still honest stubs with no runtime state
 yet; the persistence layer is structured to hold them once they are implemented.
 
-Printer lights are governed by `NIGHT_PRINT_WINDOW` (default
-`21:30 – 07:30`) using the process local timezone (`TZ` in Docker). On each
-poll, supported lights are switched on inside that window and switched off
-outside it.
+Printer lights are governed by the **solar light policy** (`LIGHT_*`
+variables; `src/app/solarLightPolicy.ts`), applied on each poll to every
+supported printer with this priority (top wins):
 
-The same window is the single source for the dashboard: `GET /api/dashboard`
-(and `GET /api/queue/night`) exports it both as the human label
-(`night.window`) and machine-readable bounds (`night.windowStart` /
-`night.windowEnd`, `"HH:MM"`, `null` when the configured window cannot be
-parsed). The dashboard's automatic dark/light theme follows these fields
-instead of keeping its own copy of the schedule — the frontend only has one
-built-in fallback mirroring the default, used until the first successful
-payload.
+1. **manual override** — an operator command holds its state for 5 minutes;
+2. **automation disabled** — the `night-lights` rule off means hands off;
+3. **monitoring lease** — while a dashboard tab is visible it renews
+   `POST /api/monitoring/lease` (~90 s TTL), and the lights stay on so the
+   cameras show something;
+4. **dark & active** — from `sunset + LIGHT_ON_OFFSET_MINUTES` (default −30)
+   until `sunrise + LIGHT_OFF_OFFSET_MINUTES` (default +30) the light is on
+   for printers that are printing/paused (`LIGHT_ONLY_WHEN_ACTIVE=true`; set
+   it to `false` to light idle printers at night too);
+5. otherwise — off.
+
+Sunrise/sunset are computed **locally** (suncalc; no external APIs) for
+`LIGHT_LATITUDE`/`LIGHT_LONGITUDE` (default Kyiv 50.45/30.52), once per
+farm-local calendar day (`TZ` in Docker) with a recompute on the date
+rollover. If the solar calculation is impossible (broken coordinates, polar
+day/night) or the config is invalid, the service does **not** crash: it
+degrades to the fixed `LIGHT_FALLBACK_WINDOW` (default `16:00-08:00`, may
+cross midnight) and reports a warning to the event feed plus the dashboard
+warnings block. If even the window is unusable, the safe default keeps an
+actively printing printer lit. `LIGHT_SCHEDULE_MODE=fixed` skips the solar
+calculation entirely and switches on the fixed window — without an explicit
+`LIGHT_FALLBACK_WINDOW` it takes the legacy `NIGHT_PRINT_WINDOW`, which
+reproduces the pre-solar behaviour.
+
+Per printer, `GET /api/dashboard` exports the policy verdict as
+`lights[]`: `desired` (what the automation wants), `actual` (last reported
+physical state), a machine-readable `reason` (`manual_override`,
+`monitoring_lease`, `solar_dark_active_print`, `solar_daylight`,
+`printer_inactive`, `automation_disabled`, `fallback_window`, `unsupported`,
+…), `nextTransitionAt` and `usingFallback`. The reason describes the
+*decision*, never whether the physical command worked.
+
+`NIGHT_PRINT_WINDOW` (default `21:30 – 07:30`) deliberately stays a separate
+setting: it governs night-print planning and the dashboard theme, **not** the
+lights. `GET /api/dashboard` (and `GET /api/queue/night`) exports it both as
+the human label (`night.window`) and machine-readable bounds
+(`night.windowStart` / `night.windowEnd`, `"HH:MM"`, `null` when the
+configured window cannot be parsed). The dashboard's automatic dark/light
+theme follows these fields instead of keeping its own copy of the schedule —
+the frontend only has one built-in fallback mirroring the default, used until
+the first successful payload.
 
 **Manual override.** A manual light command is allowed at any time. It is
 serialized with the scheduler through a per-printer light queue, so a manual
 command and a scheduled one can never interleave on the wire, and a stale
 scheduled command can never clobber a fresh manual one. After a manual command
 the chosen state is held for **5 minutes**; once that window passes the
-schedule takes over again — turning the light on if the night window says on,
+schedule takes over again — turning the light on if the light policy says on,
 off if it says off. Two caveats:
 
 - The return to the schedule happens on the **next poll tick**, not exactly at
@@ -313,7 +345,8 @@ Queue/night/automation features that have no engine yet return a clear error
 instead of fabricating a result.
 
 - `POST /api/printers/:id/pause` · `.../resume` · `.../cancel` · `.../snapshot`
-- `POST /api/printers/:id/light` — body `{ "on": boolean }`; manual state is kept for 5 minutes (in memory; ±one poll tick), then `NIGHT_PRINT_WINDOW` takes over again
+- `POST /api/printers/:id/light` — body `{ "on": boolean }`; manual state is kept for 5 minutes (in memory; ±one poll tick), then the solar light policy takes over again
+- `POST /api/monitoring/lease` — create/extend the farm-wide "operator is watching" lease (no body; idempotent, ~90 s TTL, expires on its own — there is no release endpoint). The dashboard renews it every ~30 s while its tab is visible; deliberately **not** a side effect of any camera read (`camera.jpg?ensureLight=1` stays blocked by the dashboard nginx)
 - `POST /api/queue` — add a job, body `{ title, printer?, material?, eta?, at?, night? }`
 - `POST /api/queue/start-next` · `POST /api/queue/night/start` · `POST /api/queue/night/pick`
 - `POST /api/queue/:id/review` — park a job in `review` (body `{ reason? }`) so a job that can never start (unknown printer, no/invalid file, material mismatch) stops blocking `start-next`
