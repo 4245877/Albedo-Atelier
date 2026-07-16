@@ -281,8 +281,28 @@ export class StateStore {
     try {
       return normalize(JSON.parse(raw));
     } catch {
-      this.loadWarning = `Файл состояния ${this.filePath} повреждён (не JSON) — начинаем с пустого`;
+      // Do not silently overwrite an unparseable file on the next save — move it
+      // aside first so its contents can be inspected/recovered by hand.
+      const backup = this.backupCorruptFile();
+      this.loadWarning =
+        `Файл состояния ${this.filePath} повреждён (не JSON) — начинаем с пустого` +
+        (backup ? ` (сохранён бэкап ${backup})` : "");
       return emptyState();
+    }
+  }
+
+  /**
+   * Renames a corrupt state file to a timestamped `.corrupt-*` sibling so the
+   * next {@link save} does not clobber it. Best-effort: a failure here must not
+   * break startup, so the caller still proceeds with empty defaults.
+   */
+  private backupCorruptFile(): string | null {
+    const backup = `${this.filePath}.corrupt-${Date.now()}`;
+    try {
+      fs.renameSync(this.filePath, backup);
+      return backup;
+    } catch {
+      return null;
     }
   }
 

@@ -3,3 +3,8 @@ dist
 npm-debug.log*
 .env
 .env.*
+# The real printer config carries the Bambu serial + LAN access code. It is
+# git-ignored and must not be baked into an image layer either — compose mounts
+# it as a read-only volume at runtime (PRINTERS_CONFIG_PATH=/app/config/printers.json).
+# The committed printers.example.json is still copied so the image is self-describing.
+config/printers.json

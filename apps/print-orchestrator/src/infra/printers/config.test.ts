@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 
-import { normalizePrinterConfig } from "./config";
+import { loadPrintersConfig, normalizePrinterConfig } from "./config";
 
 /*
  * Light config normalization, focused on the active-low (`invert`) pin support:
@@ -57,4 +57,41 @@ test("explicit on/off G-code wins over invert (the operator already encoded inte
   assert.equal(config.offGcode, "LIGHT_OFF");
   // The flag is still recorded so the status read can stay truthful.
   assert.equal(config.invert, true);
+});
+
+// ── id validation & uniqueness ────────────────────────────────────────────
+
+test("an unsafe printer id (path traversal / separators) is rejected", () => {
+  for (const id of ["../evil", "a/b", "a b", "..", "a.b", "a:b", ""]) {
+    assert.equal(
+      normalizePrinterConfig({ id, name: "X", host: "127.0.0.1" }),
+      null,
+      `id ${JSON.stringify(id)} must be rejected`
+    );
+  }
+  // A safe id passes.
+  assert.ok(normalizePrinterConfig({ id: "creality-k2", name: "X", host: "127.0.0.1" }));
+});
+
+afterEach(() => {
+  delete process.env.PRINTERS_CONFIG_PATH;
+  delete process.env.PRINTERS_CONFIG_JSON;
+});
+
+test("loadPrintersConfig drops duplicate ids (first wins) and warns", async () => {
+  process.env.PRINTERS_CONFIG_PATH = "/nonexistent/printers.json"; // force the env source
+  process.env.PRINTERS_CONFIG_JSON = JSON.stringify([
+    { id: "k2", name: "First", host: "10.0.0.1", protocol: "moonraker" },
+    { id: "k2", name: "Second (dup)", host: "10.0.0.2", protocol: "moonraker" },
+    { id: "a1", name: "Bambu", host: "10.0.0.3", protocol: "bambu" }
+  ]);
+
+  const { printers, source } = await loadPrintersConfig();
+  assert.deepEqual(
+    printers.map((p) => p.id),
+    ["k2", "a1"],
+    "the second k2 is dropped"
+  );
+  assert.equal(printers[0].name, "First", "the first entry for an id wins");
+  assert.match(String(source.warning), /Повторяющиеся id/);
 });

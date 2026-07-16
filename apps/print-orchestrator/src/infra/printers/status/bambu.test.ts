@@ -23,6 +23,7 @@ function printer(): PrinterConfig {
     swatch: "",
     snapshotUrl: "",
     streamUrl: "",
+    interfaceUrl: "",
     enabled: true,
     apiKey: "",
     serial: "SERIAL",

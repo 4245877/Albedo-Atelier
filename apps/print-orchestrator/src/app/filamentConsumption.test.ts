@@ -32,6 +32,7 @@ function printer(over: Partial<PrinterConfig> = {}): PrinterConfig {
     swatch: "",
     snapshotUrl: "",
     streamUrl: "",
+    interfaceUrl: "",
     enabled: true,
     apiKey: "",
     serial: "SN",
@@ -185,6 +186,28 @@ test("a dispatch failure surfaces as one soft feed warning, never a throw", asyn
 
   const feed = events.list().map((event) => event.text).join("\n");
   assert.match(feed, /склад — нет загруженного филамента/);
+});
+
+test("consumeForPrint skips an untracked print (no run) and warns to deduct by hand", async () => {
+  // A Moonraker print already running at startup / revived across a restart has
+  // no run identity: its reported length spans the whole job and a synthetic key
+  // could collide same-day, under-deducting. It must skip auto-deduction (README
+  // “Restart cost”), not deduct with a guessed key.
+  const inventory = recordingInventory();
+  const events = new EventFeed();
+  const consumption = new FilamentConsumption(inventory.client, events);
+
+  consumption.consumeForPrint(
+    printer({ id: "k2", protocol: "moonraker" }),
+    status(),
+    status({ filamentUsedMm: 500 }),
+    undefined,
+    "vase.gcode"
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(inventory.calls.length, 0, "an untracked print never auto-deducts");
+  assert.match(feed(events), /не отслеживалась/);
 });
 
 // ── Retry queue (unreachable fulfillment) ─────────────────────────────────

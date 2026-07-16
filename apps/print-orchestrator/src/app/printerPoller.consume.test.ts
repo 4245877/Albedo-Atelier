@@ -44,6 +44,9 @@ function baseStatus(over: Partial<PrinterLiveStatus>): PrinterLiveStatus {
     remainingMinutes: null,
     filamentUsedMm: null,
     amsTrays: null,
+    nozzleDiameterMm: null,
+    nozzleType: null,
+    activeFilament: null,
     nozzleTemp: null,
     nozzleTarget: null,
     bedTemp: null,
@@ -82,6 +85,7 @@ function bambuConfig(): PrinterConfig {
     swatch: "",
     snapshotUrl: "",
     streamUrl: "",
+    interfaceUrl: "",
     enabled: true,
     apiKey: "",
     serial: "SN",
@@ -307,6 +311,24 @@ test("Bambu: no start snapshot (started before boot) skips deduction", async () 
 
   assert.equal(inventory.calls.length, 0);
   assert.match(feedText(events), /нет данных о расходе филамента/);
+});
+
+test("Moonraker: a print started before boot skips deduction (no tracked run)", async () => {
+  const inventory = recordingInventory();
+  const printer: PrinterConfig = { ...bambuConfig(), id: "k2", protocol: "moonraker" };
+  // First observation is already 'printing' → baseline, so no run identity is
+  // captured. On completion there is no reliable idempotency anchor, so the
+  // reported length must not be auto-deducted with a guessed key.
+  const sequence = [
+    baseStatus({ id: "k2", status: "printing", stateText: "printing" }),
+    baseStatus({ id: "k2", status: "idle", stateText: "complete", progressPct: 100, filamentUsedMm: 1234 })
+  ];
+  const { poller, events } = makePoller(printer, sequence, inventory.client);
+
+  await pollTimes(poller, 2);
+
+  assert.equal(inventory.calls.length, 0, "no deduction without a tracked run");
+  assert.match(feedText(events), /не отслеживалась/);
 });
 
 test("Moonraker: the extruded-length path is unchanged (single reel, no tray)", async () => {

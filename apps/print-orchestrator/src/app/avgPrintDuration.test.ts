@@ -18,11 +18,10 @@ const RealDate = Date;
 let fakeNow = RealDate.UTC(2026, 6, 2, 8, 0, 0);
 
 class FakeDate extends RealDate {
-  constructor(...args: ConstructorParameters<typeof Date>) {
+  constructor(...args: ConstructorParameters<typeof Date> | []) {
     if (args.length === 0) {
       super(fakeNow);
     } else {
-      // @ts-expect-error forward tuple to the real Date constructor
       super(...args);
     }
   }
@@ -61,6 +60,7 @@ function config(id: string): PrinterConfig {
     swatch: "",
     snapshotUrl: "",
     streamUrl: "",
+    interfaceUrl: "",
     enabled: true,
     apiKey: "",
     serial: "",

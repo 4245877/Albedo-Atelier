@@ -4,7 +4,6 @@ import { bambuMeasurableTrayCount, bambuTrayUsage } from "../infra/printers/stat
 import type { AmsTraySnapshot } from "../infra/printers/status/types";
 import { FulfillmentError } from "../infra/fulfillment/inventoryClient";
 import type { StoreLogger } from "../shared/logger";
-import { localDateKey } from "../shared/time";
 import type { EventFeed } from "./eventFeed";
 
 /**
@@ -189,7 +188,25 @@ export class FilamentConsumption {
       return;
     }
 
-    const printJobId = run?.printId ?? `${printer.id}:${localDateKey()}:${job ?? "?"}`;
+    // A completed print with no tracked run — one that was already printing when
+    // this process started, or was revived across a restart — has no reliable
+    // idempotency anchor. Its device-reported total (Moonraker length) spans the
+    // whole job, and a synthetic `printer:date:file` key would collide for two
+    // untracked prints of the same file on the same day and under-deduct. Matching
+    // the documented restart behaviour (README “Restart cost”: such prints skip
+    // auto-deduction), skip it and tell the operator to deduct by hand rather
+    // than guess. A tracked run always carries a printId, so the deduction below
+    // stays idempotent.
+    if (!run) {
+      this.events.push(
+        "⚠",
+        `<b>${printer.name}</b>: склад — печать${job ? ` «${job}»` : ""} не отслеживалась (перезапуск во время печати), автосписание пропущено — спишите вручную`,
+        "err"
+      );
+      return;
+    }
+
+    const printJobId = run.printId;
     const note = job ? `Печать «${job}»` : undefined;
     for (const item of items) {
       const input: ConsumePayload =

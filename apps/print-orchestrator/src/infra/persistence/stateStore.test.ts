@@ -114,11 +114,18 @@ test("a missing file loads empty defaults without a warning", () => {
   assert.equal(store.loadWarning, null);
 });
 
-test("a corrupt file loads empty defaults and records a warning", () => {
+test("a corrupt file loads empty defaults, records a warning and is backed up", () => {
   fs.writeFileSync(file, "{ this is not json", "utf8");
   const store = new StateStore(file);
   assert.deepEqual(store.load(), emptyState());
   assert.ok(store.loadWarning, "a warning is recorded for a corrupt file");
+
+  // The unparseable file is moved aside (not left to be clobbered by save), and
+  // its bytes are preserved in the backup for manual recovery.
+  const backups = fs.readdirSync(dir).filter((name) => name.includes(".corrupt-"));
+  assert.equal(backups.length, 1, "the corrupt file is renamed to a .corrupt-* backup");
+  assert.equal(fs.readFileSync(path.join(dir, backups[0]), "utf8"), "{ this is not json");
+  assert.equal(fs.existsSync(file), false, "the corrupt file no longer occupies the state path");
 });
 
 test("atomic write leaves no temp file behind", async () => {

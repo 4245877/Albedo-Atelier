@@ -95,6 +95,16 @@ export interface PrintersConfigResult {
 const DEFAULT_CONFIG_PATH = path.resolve(process.cwd(), "config", "printers.json");
 
 /**
+ * Allowed printer id shape. The id is used verbatim as a filesystem path
+ * segment (camera snapshots: `<snapshotsDir>/<id>/<day>/…`) and as a URL path
+ * segment, so it is restricted to characters that cannot traverse a directory
+ * or need escaping — letters, digits, underscore and hyphen. An id with any
+ * other character (a slash, a dot, `..`, whitespace) is rejected, dropping the
+ * whole printer rather than trusting an unsafe key downstream.
+ */
+const PRINTER_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+/**
  * Expands `${ENV_VAR}` references in config strings so secrets (e.g. the Bambu
  * LAN access code) can live in the environment instead of the committed JSON.
  * An unset variable expands to "" — the driver then reports the printer as
@@ -158,6 +168,8 @@ export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
   const name = asString(value.name);
   const host = asString(value.host);
   if (!id || !name || !host) return null;
+  // An unsafe id would become a traversable snapshot path / URL segment.
+  if (!PRINTER_ID_RE.test(id)) return null;
 
   const portValue = Number(value.port);
   const protocol = normalizeProtocol(value.protocol);
@@ -190,11 +202,37 @@ export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
   };
 }
 
-function parsePrinters(raw: unknown): PrinterConfig[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
+/**
+ * Normalizes every entry and enforces id uniqueness: the first printer to claim
+ * an id wins and later duplicates are dropped. Duplicate ids are dangerous
+ * downstream — the poller keys live status by id, so a second device under the
+ * same id would overwrite the first's status, and a command resolved by id
+ * could hit the wrong printer. Returns the accepted printers plus a warning
+ * when any duplicate was dropped.
+ */
+function parsePrinters(raw: unknown): { printers: PrinterConfig[]; warning?: string } {
+  if (!Array.isArray(raw)) return { printers: [] };
+  const normalized = raw
     .map(normalizePrinterConfig)
     .filter((printer): printer is PrinterConfig => Boolean(printer));
+
+  const seen = new Set<string>();
+  const printers: PrinterConfig[] = [];
+  const duplicates = new Set<string>();
+  for (const printer of normalized) {
+    if (seen.has(printer.id)) {
+      duplicates.add(printer.id);
+      continue;
+    }
+    seen.add(printer.id);
+    printers.push(printer);
+  }
+
+  const warning =
+    duplicates.size > 0
+      ? `Повторяющиеся id принтеров пропущены (первый выигрывает): ${[...duplicates].join(", ")}`
+      : undefined;
+  return { printers, warning };
 }
 
 function readFromEnv(): PrintersConfigResult {
@@ -203,8 +241,8 @@ function readFromEnv(): PrintersConfigResult {
     return { printers: [], source: { kind: "none" } };
   }
   try {
-    const printers = parsePrinters(JSON.parse(raw));
-    return { printers, source: { kind: "env" } };
+    const { printers, warning } = parsePrinters(JSON.parse(raw));
+    return { printers, source: { kind: "env", warning } };
   } catch {
     return {
       printers: [],
@@ -244,17 +282,17 @@ export async function loadPrintersConfig(): Promise<PrintersConfigResult> {
     };
   }
 
-  const printers = parsePrinters(parsed);
+  const { printers, warning } = parsePrinters(parsed);
   if (printers.length === 0 && Array.isArray(parsed) && parsed.length > 0) {
     const fallback = readFromEnv();
     return {
       ...fallback,
       source: {
         ...fallback.source,
-        warning: `Файл ${configPath}: ни одна запись не валидна (нужны id, name, host)`
+        warning: `Файл ${configPath}: ни одна запись не валидна (нужны id, name, host; id — [A-Za-z0-9_-])`
       }
     };
   }
 
-  return { printers, source: { kind: "file", path: configPath } };
+  return { printers, source: { kind: "file", path: configPath, warning } };
 }

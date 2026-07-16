@@ -46,6 +46,6 @@ test("the view no longer exposes a lightAllowed field", () => {
     protocol: "moonraker",
     light: { pin: "LED" }
   });
-  const view = buildPrinterView(printer!, undefined, undefined) as Record<string, unknown>;
+  const view = buildPrinterView(printer!, undefined, undefined) as unknown as Record<string, unknown>;
   assert.equal("lightAllowed" in view, false);
 });

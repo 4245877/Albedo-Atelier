@@ -144,7 +144,11 @@ what is actually on the shelf and saves the binding:
 The consumed amount comes from whatever the device actually knows:
 
 - **Moonraker / K2** reports extruded length (`print_stats.filament_used`), sent
-  as `lengthMm` for the single loaded reel.
+  as `lengthMm` for the single loaded reel. A print with no tracked run — one
+  already printing when the orchestrator started, or revived across a restart —
+  has no reliable idempotency anchor (its reported length spans the whole job),
+  so its completion **skips** auto-deduction and feeds one soft warning to deduct
+  by hand, rather than guessing a key that two same-day prints could collide on.
 - **Bambu A1 Combo / AMS Lite** MQTT does **not** report grams or length (that
   lives in slicer metadata). Instead each AMS tray reports `remain` — the
   printer's own 0–100 % estimate of filament left — and a nominal spool weight.
@@ -312,4 +316,6 @@ instead of fabricating a result.
 - `POST /api/printers/:id/light` — body `{ "on": boolean }`; manual state is kept for 5 minutes (in memory; ±one poll tick), then `NIGHT_PRINT_WINDOW` takes over again
 - `POST /api/queue` — add a job, body `{ title, printer?, material?, eta?, at?, night? }`
 - `POST /api/queue/start-next` · `POST /api/queue/night/start` · `POST /api/queue/night/pick`
+- `POST /api/queue/:id/review` — park a job in `review` (body `{ reason? }`) so a job that can never start (unknown printer, no/invalid file, material mismatch) stops blocking `start-next`
+- `DELETE /api/queue/:id` — remove a job by id (the other escape hatch for a wedged queue); `404` when the id is unknown
 - `POST /api/automations/:id/toggle` — body `{ "on"?: boolean }` (omit to flip)

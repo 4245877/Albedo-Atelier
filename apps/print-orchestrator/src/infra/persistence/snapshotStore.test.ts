@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 
 import type { CameraFrame } from "../printers/camera";
+import type { SnapshotMeta } from "./snapshotStore";
 import { SnapshotStore } from "./snapshotStore";
 
 let dir: string;
@@ -99,6 +100,24 @@ test("retention keeps only the newest N per printer and deletes the pruned files
   assert.equal(fs.existsSync(path.join(dir, metas[1].path)), false);
   assert.equal(fs.existsSync(path.join(dir, metas[2].path)), true);
   assert.equal(fs.existsSync(path.join(dir, metas[3].path)), true);
+});
+
+test("a persisted meta.path that escapes the store dir is refused, not followed", async () => {
+  // A hand-edited / corrupt state file could carry a traversal path. resolveFile
+  // must not resolve it to an arbitrary file on disk.
+  const store = new SnapshotStore(dir);
+  const evil: SnapshotMeta = {
+    id: "x",
+    printerId: "k2",
+    capturedAt: "2026-07-01T10:00:00.000Z",
+    mime: "image/jpeg",
+    bytes: 0,
+    path: "../../../../etc/passwd",
+    status: null,
+    url: "/api/printers/k2/snapshots/x"
+  };
+  assert.throws(() => store.resolveFile(evil), /не найден|not found/i);
+  await assert.rejects(() => store.read(evil), /не найден|not found/i);
 });
 
 test("metadata survives a restart via serialize()/constructor rehydration", async () => {

@@ -67,6 +67,8 @@ export class PrinterPoller {
   private lastPollAt: number | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
+  /** The currently running poll, so shutdown can await an in-flight cycle. */
+  private inFlightPoll: Promise<void> | null = null;
   private logger: StoreLogger = {};
 
   /** Completions/failures/printing-hours the poller itself observed today. */
@@ -127,17 +129,33 @@ export class PrinterPoller {
     this.pollTimer.unref?.();
   }
 
-  stop(): void {
+  /**
+   * Stops the interval and awaits any in-flight poll, so no telemetry write,
+   * light command or filament deduction lands after the caller flushes state on
+   * shutdown. Async on purpose — the previous fire-and-forget stop could let a
+   * poll started just before shutdown run on past the final state flush.
+   */
+  async stop(): Promise<void> {
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    await this.inFlightPoll;
   }
 
   /** Polls every enabled printer once and records observed transitions. */
   async pollOnce(): Promise<void> {
     if (this.polling) return;
     this.polling = true;
+    const run = this.runPoll().finally(() => {
+      this.polling = false;
+      this.inFlightPoll = null;
+    });
+    this.inFlightPoll = run;
+    await run;
+  }
+
+  private async runPoll(): Promise<void> {
     try {
       const enabled = this.enabledConfigs();
       this.pruneStaleEntries(enabled);
@@ -165,8 +183,6 @@ export class PrinterPoller {
       this.lastPollAt = Date.now();
     } catch (error) {
       this.logger.error?.({ err: error }, "printer poll failed");
-    } finally {
-      this.polling = false;
     }
   }
 

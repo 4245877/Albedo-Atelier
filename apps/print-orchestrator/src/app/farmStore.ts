@@ -186,7 +186,9 @@ export class FarmStore {
   }
 
   async stop(): Promise<void> {
-    this.poller.stop();
+    // Await the in-flight poll before closing connections and flushing, so no
+    // late telemetry write races past the final save.
+    await this.poller.stop();
     shutdownPrinterConnections();
     // Persist the tail of accrued printing-hours (checkpointed only ~once a
     // minute while running), then wait for every scheduled write to settle.
@@ -275,6 +277,16 @@ export class FarmStore {
   }
   addQueueJob(input: NewQueueJobInput) {
     return this.queue.add(input);
+  }
+
+  /** Removes a queue job by id (operator action); 404s when the id is unknown. */
+  removeQueueJob(id: string): QueueJob {
+    return this.queue.removeById(id);
+  }
+
+  /** Parks a queue job in `review` so it stops blocking start-next; 404s when unknown. */
+  reviewQueueJob(id: string, reason?: string): QueueJob {
+    return this.queue.moveToReview(id, reason);
   }
 
   /**

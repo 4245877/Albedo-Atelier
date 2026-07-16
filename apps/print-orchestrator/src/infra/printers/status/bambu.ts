@@ -240,6 +240,10 @@ function ensureBambuClient(printer: PrinterConfig): void {
   if (bambuClients.has(printer.id)) return;
 
   const port = printer.port ?? 8883;
+  // Bambu's local MQTT uses a per-printer self-signed certificate with no CA to
+  // verify against, so `rejectUnauthorized: false` is required to connect at all
+  // — verification would need certificate pinning per device. This is a known
+  // Bambu LAN constraint; keep the orchestrator on a trusted network segment.
   const client = mqtt.connect(`mqtts://${printer.host}:${port}`, {
     username: "bblp",
     password: printer.accessCode,

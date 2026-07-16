@@ -38,6 +38,7 @@ function makePrinter(over: Partial<PrinterConfig> = {}): PrinterConfig {
     swatch: "#4c4f55",
     snapshotUrl: "http://go2rtc:1984/api/frame.jpeg?src=k2",
     streamUrl: "http://go2rtc:1984/api/stream.mp4?src=k2",
+    interfaceUrl: "",
     enabled: true,
     apiKey: "",
     serial: "",

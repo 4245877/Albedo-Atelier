@@ -42,7 +42,16 @@ function config(overrides: Partial<PrinterConfig> = {}): PrinterConfig {
     apiKey: "",
     serial: "",
     accessCode: "",
-    light: { pin: "LED" },
+    light: {
+      enabled: false,
+      pin: "LED",
+      invert: false,
+      onGcode: "",
+      offGcode: "",
+      statusObject: "",
+      statusField: "value",
+      bambuNode: ""
+    },
     ...overrides,
   };
 }

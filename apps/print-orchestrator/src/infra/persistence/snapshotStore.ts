@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
+import { NotFoundError } from "../../core/errors";
 import { isObject } from "../../shared/isObject";
 import type { CameraFrame } from "../printers/camera";
 
@@ -112,11 +113,29 @@ export class SnapshotStore {
 
   /** Absolute on-disk path for a snapshot's image file. */
   resolveFile(meta: SnapshotMeta): string {
-    return path.resolve(this.dir, meta.path);
+    return this.resolveWithin(meta.path);
+  }
+
+  /**
+   * Resolves a snapshot-relative path against {@link dir} and asserts it stays
+   * inside it. `meta.path` is loaded from the persisted JSON (or a hand-edited
+   * file), so a value like `../../etc/passwd` must not let a snapshot read or
+   * prune an arbitrary file. A path that escapes the storage root is treated as
+   * a missing snapshot (404) rather than followed.
+   */
+  private resolveWithin(relPath: string): string {
+    const root = path.resolve(this.dir);
+    const abs = path.resolve(root, relPath);
+    if (abs !== root && !abs.startsWith(root + path.sep)) {
+      throw new NotFoundError("Снимок камеры");
+    }
+    return abs;
   }
 
   /** Reads a snapshot's image bytes from disk. */
-  read(meta: SnapshotMeta): Promise<Buffer> {
+  async read(meta: SnapshotMeta): Promise<Buffer> {
+    // `async` so a containment rejection surfaces as a rejected promise rather
+    // than a synchronous throw from resolveFile.
     return fsp.readFile(this.resolveFile(meta));
   }
 
@@ -137,7 +156,7 @@ export class SnapshotStore {
     const id = `${now.getTime()}-${randomBytes(4).toString("hex")}`;
     const ext = mimeToExt(frame.mime);
     const relPath = path.posix.join(printerId, day, `${id}.${ext}`);
-    const abs = path.resolve(this.dir, relPath);
+    const abs = this.resolveWithin(relPath);
 
     await fsp.mkdir(path.dirname(abs), { recursive: true });
     const tmp = `${abs}.${process.pid}.tmp`;

@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The full quality gate for the only Node project in the workspace
+# (apps/print-orchestrator): typecheck (tests included), unit tests, then build.
+jobs:
+  print-orchestrator:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/print-orchestrator
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable corepack (pins pnpm from packageManager)
+        run: corepack enable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/print-orchestrator/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (source + tests)
+        run: pnpm run typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm run build

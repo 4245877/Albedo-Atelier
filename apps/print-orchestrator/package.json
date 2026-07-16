@@ -5,7 +5,7 @@
   "description": "Fastify service for orchestrating FDM and resin 3D printers.",
   "main": "dist/src/server.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "dev": "tsx watch src/server.ts",
     "start": "node dist/src/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",

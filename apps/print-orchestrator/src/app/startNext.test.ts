@@ -172,6 +172,53 @@ test("adding a queue job with an unsafe or non-G-code file is refused", async ()
   await store.stop();
 });
 
+test("a wedged first job can be removed so the rest of the queue runs", async () => {
+  // A first `ready` job that can never start (no file) fails every start-next
+  // and stays first — the operator must be able to drop it and move on.
+  const store = new FarmStore(file);
+  await store.start();
+  const wedged = store.addQueueJob({ title: "Base", printer: "k2" }); // no file → wedges
+  store.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
+
+  await assert.rejects(() => store.startNext(), /не задан файл/);
+
+  const removed = store.removeQueueJob(wedged.id);
+  assert.equal(removed.title, "Base");
+  assert.equal(store.reads.getQueue().length, 1, "only the runnable job remains");
+
+  const result = await store.startNext();
+  assert.equal(result.job.title, "Chalice");
+  assert.equal(startCalls.length, 1);
+
+  await store.stop();
+});
+
+test("a wedged first job can be parked in review instead of deleted", async () => {
+  const store = new FarmStore(file);
+  await store.start();
+  const wedged = store.addQueueJob({ title: "Orphan", printer: "ghost-printer", file: "x.gcode" });
+  store.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
+
+  await assert.rejects(() => store.startNext(), /не найден/);
+
+  const parked = store.reviewQueueJob(wedged.id, "принтер не найден");
+  assert.equal(parked.status, "review");
+  assert.equal(store.reads.getQueue().length, 2, "the parked job is kept, not dropped");
+
+  const result = await store.startNext();
+  assert.equal(result.job.title, "Chalice", "start-next skips the parked job");
+
+  await store.stop();
+});
+
+test("removing or reviewing an unknown job id is a NotFoundError", async () => {
+  const store = new FarmStore(file);
+  await store.start();
+  assert.throws(() => store.removeQueueJob("nope"), /not found|очереди/);
+  assert.throws(() => store.reviewQueueJob("nope"), /not found|очереди/);
+  await store.stop();
+});
+
 test("a legacy persisted job with an unsafe path is refused at dispatch, not sent", async () => {
   // A state file written before add-time validation existed: the job carries a
   // traversal path. startPrint re-validates at dispatch, so the driver never

@@ -17,11 +17,10 @@ const RealDate = Date;
 let fakeNow = RealDate.UTC(2026, 6, 2, 2, 0, 0); // 02:00 UTC → inside 21:30–07:30
 
 class FakeDate extends RealDate {
-  constructor(...args: ConstructorParameters<typeof Date>) {
+  constructor(...args: ConstructorParameters<typeof Date> | []) {
     if (args.length === 0) {
       super(fakeNow);
     } else {
-      // @ts-expect-error forward tuple to the real Date constructor
       super(...args);
     }
   }
@@ -103,6 +102,7 @@ function k2Config(): PrinterConfig {
     swatch: "",
     snapshotUrl: "",
     streamUrl: "",
+    interfaceUrl: "",
     enabled: true,
     apiKey: "",
     serial: "",

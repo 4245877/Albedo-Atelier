@@ -1,0 +1,7 @@
+{
+  // Production build: same settings as tsconfig.json, but test files are
+  // excluded so they are never emitted into dist. `pnpm run typecheck` uses the
+  // base config (which includes tests) so the tests are still type-checked.
+  "extends": "./tsconfig.json",
+  "exclude": ["dist", "node_modules", "src/**/*.test.ts"]
+}

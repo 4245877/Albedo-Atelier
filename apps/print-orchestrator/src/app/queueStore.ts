@@ -1,4 +1,4 @@
-import { ValidationError } from "../core/errors";
+import { NotFoundError, ValidationError } from "../core/errors";
 import type { QueueJob } from "../domain/dashboard/types";
 import { normalizeStartablePath } from "../infra/printers/files";
 import type { EventFeed } from "./eventFeed";
@@ -93,5 +93,40 @@ export class QueueStore {
     if (index === -1) return;
     this.queue.splice(index, 1);
     this.persist();
+  }
+
+  /**
+   * Operator-driven removal by id. Unlike {@link remove} (an internal
+   * post-dispatch cleanup that silently no-ops on a missing id), this reports a
+   * {@link NotFoundError} so the API can answer 404. This is the escape hatch
+   * for a queue wedged by a first `ready` job that can never start (unknown
+   * printer, no/invalid file, material mismatch): without it such a job stays
+   * first forever and every `start-next` fails on it.
+   */
+  removeById(id: string): QueueJob {
+    const index = this.queue.findIndex((job) => job.id === id);
+    if (index === -1) throw new NotFoundError(`Задание очереди «${id}»`);
+    const [removed] = this.queue.splice(index, 1);
+    this.events.push("✕", `Задание «${removed.title}» удалено из очереди`, "info");
+    this.persist();
+    return { ...removed };
+  }
+
+  /**
+   * Parks a job for the operator: sets it to `review` (so {@link findNextReady}
+   * skips it and it no longer blocks `start-next`) with an optional reason,
+   * without deleting it. The counterpart to {@link removeById} when the job is
+   * worth fixing rather than discarding.
+   */
+  moveToReview(id: string, reason?: string): QueueJob {
+    const job = this.queue.find((entry) => entry.id === id);
+    if (!job) throw new NotFoundError(`Задание очереди «${id}»`);
+    job.status = "review";
+    const trimmed = typeof reason === "string" ? reason.trim() : "";
+    if (trimmed) job.reason = trimmed;
+    else if (!job.reason) job.reason = "отложено оператором на проверку";
+    this.events.push("⚑", `Задание «${job.title}» отложено на проверку`, "info");
+    this.persist();
+    return { ...job };
   }
 }

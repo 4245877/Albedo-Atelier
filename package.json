@@ -6,6 +6,11 @@
   "scripts": {
     "build:print-orchestrator": "pnpm -C apps/print-orchestrator run build",
     "start:print-orchestrator": "pnpm -C apps/print-orchestrator run start",
-    "typecheck:print-orchestrator": "pnpm -C apps/print-orchestrator run typecheck"
+    "typecheck:print-orchestrator": "pnpm -C apps/print-orchestrator run typecheck",
+    "test:print-orchestrator": "pnpm -C apps/print-orchestrator run test",
+    "typecheck": "pnpm run typecheck:print-orchestrator",
+    "test": "pnpm run test:print-orchestrator",
+    "build": "pnpm run build:print-orchestrator",
+    "check": "pnpm run typecheck && pnpm run test && pnpm run build"
   }
 }
