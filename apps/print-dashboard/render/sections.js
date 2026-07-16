@@ -110,13 +110,25 @@ export function renderQueue(state) {
 export function renderNight(state) {
   const n = state.night;
   const c = n.candidates[n.pick];
+  // Кандидат запускаем только без блокеров: backend перечисляет конкретные
+  // причины (нет файла, неизвестная длительность, материал не совпадает, …) и
+  // сам откажет в night/start — UI не обещает «впишется в окно» и не
+  // подсовывает активную кнопку, когда запуск заведомо невозможен.
+  const blockers = c?.blockers || [];
+  const startable = Boolean(c) && blockers.length === 0;
   $("#night-window").textContent = `окно ${n.window}`;
+
+  const blockersBlock = c && !startable ? `
+      <div class="night-part-sub" style="margin-top:6px;color:var(--danger-ink)">
+        ⚠ Не запустится: ${blockers.map((b) => esc(b)).join("; ")}
+      </div>` : "";
 
   const reco = c ? `
     <div class="night-reco">
       <span class="night-lbl">Рекомендуемая деталь на ночь</span>
       <div class="night-part">${esc(c.title)}</div>
-      <div class="night-part-sub">${esc(c.printer)} · ${esc(c.eta)} · впишется в окно печати</div>
+      <div class="night-part-sub">${esc(c.printer)} · ${esc(c.eta)}${startable ? " · впишется в окно печати" : ""}</div>
+      ${blockersBlock}
       <div class="risk-meter">
         <div class="risk-track"><span class="risk-pin" style="transform:translateX(-${(100 - c.risk).toFixed(1)}%)"></span></div>
         <div class="risk-caption">
@@ -137,7 +149,7 @@ export function renderNight(state) {
     </div>
     <div class="night-actions">
       <button class="btn btn-ghost" data-act="night-pick" ${c ? "" : "disabled"}>Подобрать задание на ночь</button>
-      <button class="btn btn-primary" data-act="night-start" ${c ? "" : "disabled"}>☾ Запустить ночную печать</button>
+      <button class="btn btn-primary" data-act="night-start" ${startable ? "" : "disabled"}>☾ Запустить ночную печать</button>
     </div>`;
 }
 

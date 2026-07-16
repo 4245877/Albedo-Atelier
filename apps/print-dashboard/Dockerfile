@@ -1,6 +1,9 @@
 FROM nginx:1.27-alpine
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# nginx.conf is an envsubst template: the image entrypoint renders it to
+# /etc/nginx/conf.d/default.conf at container start, substituting
+# ${ORCHESTRATOR_API_TOKEN} from the environment (see compose.yml).
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 COPY index.html /usr/share/nginx/html/index.html
 COPY styles.css /usr/share/nginx/html/styles.css
 # Dashboard ES modules: entry (app.js) + shared modules + render/ folder.

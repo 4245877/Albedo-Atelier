@@ -98,13 +98,14 @@ export class CameraService {
       return entry.frame;
     }
 
-    // go2rtc/WebRTC cameras have no usable still-image endpoint (frame.jpeg
-    // hangs on the K2). The live picture is delivered to the browser over
-    // WebRTC; a JPEG snapshot is simply not available, so report that honestly
-    // instead of blocking the request for the full timeout.
+    // go2rtc cameras: delegate to the manual-snapshot path, which is the one
+    // that honors the configured snapshotUrl with a short timeout (this GET is
+    // the documented external contract — fulfillment's Telegram snapshots).
+    // Without a snapshotUrl there is no still endpoint and it refuses honestly;
+    // either way a stale cached frame is never served past the window above,
+    // and `fresh` really does re-pull.
     if (isGo2RtcCamera(printer)) {
-      if (entry?.frame) return entry.frame;
-      throw new CameraError(id, "снимок недоступен — камера транслируется по WebRTC");
+      return this.captureFresh(printer);
     }
 
     const frame = await captureCameraFrame(printer);

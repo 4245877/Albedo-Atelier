@@ -6,6 +6,7 @@ import type { PrinterConfig } from "../infra/printers/config";
 import type { PrinterLiveStatus } from "../infra/printers/status";
 import {
   buildNightPlan,
+  materialsIncompatible,
   parseEtaMinutes,
   windowLengthMinutes,
   type NightPlanContext
@@ -139,4 +140,64 @@ test("blockers list concrete reasons a job cannot launch tonight", () => {
   assert.ok(entry.blockers.some((b) => b.includes("не в сети")));
   assert.ok(entry.blockers.some((b) => b.includes("файл")));
   assert.ok(entry.blockers.some((b) => b.includes("окно")), "an over-long print does not fit the window");
+});
+
+test("an unknown ETA is a hard blocker, not a discount (unattended print)", () => {
+  const ctx: NightPlanContext = {
+    window: "21:30 – 07:30",
+    resolvePrinter: () => moonraker("k2", "K2"),
+    getStatus: (id) => idleStatus(id)
+  };
+  const [entry] = buildNightPlan([job({ eta: "—", file: "a.gcode" })], ctx);
+  assert.ok(
+    entry.blockers.some((b) => b.includes("длительность")),
+    "no ETA → cannot verify the window → blocked"
+  );
+  assert.deepEqual(entry.candidate.blockers, entry.blockers, "the candidate carries the blockers for the UI");
+});
+
+test("an unconfirmed printer state (unknown) is a hard blocker", () => {
+  const ctx: NightPlanContext = {
+    window: "21:30 – 07:30",
+    resolvePrinter: () => moonraker("k2", "K2"),
+    getStatus: (id) => ({ ...idleStatus(id), status: "unknown" })
+  };
+  const [entry] = buildNightPlan([job({ file: "a.gcode" })], ctx);
+  assert.ok(entry.blockers.some((b) => b.includes("не подтверждено")));
+});
+
+test("a material contradiction is a hard blocker; a matching token in a list is not", () => {
+  const ctx: NightPlanContext = {
+    window: "21:30 – 07:30",
+    resolvePrinter: () => moonraker("k2", "K2", "PETG"),
+    getStatus: (id) => idleStatus(id)
+  };
+  const [entry] = buildNightPlan([job({ material: "PLA", file: "a.gcode" })], ctx);
+  assert.ok(entry.blockers.some((b) => b.includes("материал")));
+
+  const multi: NightPlanContext = {
+    ...ctx,
+    resolvePrinter: () => moonraker("k2", "K2", "PLA / PETG / TPU")
+  };
+  const [ok] = buildNightPlan([job({ material: "PLA", file: "a.gcode" })], multi);
+  assert.deepEqual(ok.blockers, [], "PLA is among the loaded alternatives");
+});
+
+test("an unsafe job file path is a blocker", () => {
+  const ctx: NightPlanContext = {
+    window: "21:30 – 07:30",
+    resolvePrinter: () => moonraker("k2", "K2"),
+    getStatus: (id) => idleStatus(id)
+  };
+  const [entry] = buildNightPlan([job({ file: "../evil.gcode" })], ctx);
+  assert.ok(entry.blockers.some((b) => b.includes("проверку пути")));
+});
+
+test("materialsIncompatible only reports a concrete contradiction", () => {
+  assert.equal(materialsIncompatible("PLA", "PETG"), true);
+  assert.equal(materialsIncompatible("PLA", "PLA"), false);
+  assert.equal(materialsIncompatible("pla", "PLA / PETG / TPU"), false);
+  assert.equal(materialsIncompatible("ABS", "PLA / PETG / TPU"), true);
+  assert.equal(materialsIncompatible("—", "PLA"), false, "unknown job material — nothing to contradict");
+  assert.equal(materialsIncompatible("PLA", ""), false, "unknown loaded material — nothing to contradict");
 });

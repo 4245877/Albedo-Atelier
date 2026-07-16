@@ -44,6 +44,13 @@ export interface NightCandidate {
   eta: string;
   risk: number;
   riskLabel: string;
+  /**
+   * The concrete, hard reasons this job cannot launch tonight (mirrors
+   * NightPlanEntry.blockers). Empty → startable; the dashboard disables the
+   * night-start button and lists these otherwise, so the UI never claims a
+   * blocked job "fits the window".
+   */
+  blockers: string[];
 }
 
 export interface NightPrint {

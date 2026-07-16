@@ -91,6 +91,12 @@ services:
     depends_on:
       print-orchestrator:
         condition: service_healthy
+    environment:
+      # nginx injects this as `Authorization: Bearer …` on the proxied control
+      # API (see nginx.conf template): the LAN-trusted dashboard keeps working
+      # while the token gates direct orchestrator access. Must match the
+      # orchestrator's ORCHESTRATOR_API_TOKEN (both read the same .env).
+      ORCHESTRATOR_API_TOKEN: ${ORCHESTRATOR_API_TOKEN:-}
     ports:
       - "0.0.0.0:8090:8080"
     healthcheck:

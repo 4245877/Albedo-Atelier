@@ -95,3 +95,74 @@ test("a go2rtc still capture that never yields a frame surfaces a clear error", 
     (err: unknown) => err instanceof CameraError && /go2rtc/.test((err as CameraError).message)
   );
 });
+
+/*
+ * getFrame() serves GET /api/printers/:id/camera.jpg — the documented external
+ * contract (fulfillment's Telegram snapshots). For go2rtc cameras it must
+ * honor the configured snapshotUrl instead of erroring out or replaying a
+ * stale cached frame forever.
+ */
+
+test("getFrame for a go2rtc camera with a snapshotUrl captures via that URL", async () => {
+  const requested: string[] = [];
+  globalThis.fetch = (async (url: string | URL) => {
+    requested.push(String(url));
+    return new Response(Buffer.from([0xff, 0xd8, 0xff, 0xd9]), {
+      status: 200,
+      headers: { "content-type": "image/jpeg" }
+    });
+  }) as typeof fetch;
+
+  const cameras = new CameraService();
+  const frame = await cameras.getFrame(go2rtcPrinter());
+
+  assert.equal(frame.mime, "image/jpeg");
+  assert.equal(requested[0], "http://go2rtc:1984/api/frame.jpeg?src=k2");
+
+  // Immediately after, the short-lived cache answers without a second pull…
+  await cameras.getFrame(go2rtcPrinter());
+  assert.equal(requested.length, 1, "a recent frame is served from the cache");
+
+  // …but `fresh` really does re-pull instead of replaying the cache.
+  const fresh = await cameras.getFrame(go2rtcPrinter(), { fresh: true });
+  assert.equal(requested.length, 2, "fresh bypasses the cache");
+  assert.equal(fresh.mime, "image/jpeg");
+});
+
+test("getFrame for a go2rtc camera without a snapshotUrl refuses honestly", async () => {
+  let fetched = false;
+  globalThis.fetch = (async () => {
+    fetched = true;
+    return new Response(null, { status: 500 });
+  }) as typeof fetch;
+
+  const cameras = new CameraService();
+  await assert.rejects(
+    () => cameras.getFrame(go2rtcPrinter({ snapshotUrl: "" })),
+    (err: unknown) => err instanceof CameraError && /WebRTC/.test((err as CameraError).message)
+  );
+  assert.equal(fetched, false);
+});
+
+test("getFrame surfaces a capture failure instead of an infinitely stale frame", async () => {
+  // First call succeeds and caches a frame; the camera then stops answering.
+  // Once the cache window has passed, the failure must surface — the old frame
+  // must not be replayed forever as if it were live.
+  let failing = false;
+  globalThis.fetch = (async () => {
+    if (failing) throw new Error("aborted");
+    return new Response(Buffer.from([0xff, 0xd8, 0xff, 0xd9]), {
+      status: 200,
+      headers: { "content-type": "image/jpeg" }
+    });
+  }) as typeof fetch;
+
+  const cameras = new CameraService();
+  await cameras.getFrame(go2rtcPrinter());
+
+  failing = true;
+  await assert.rejects(
+    () => cameras.getFrame(go2rtcPrinter(), { fresh: true }),
+    (err: unknown) => err instanceof CameraError && /go2rtc/.test((err as CameraError).message)
+  );
+});

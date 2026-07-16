@@ -1,6 +1,7 @@
 import type { NightCandidate, QueueJob } from "../domain/dashboard/types";
 import { parseLocalTimeWindow } from "../shared/time";
 import type { PrinterConfig } from "../infra/printers/config";
+import { normalizeStartablePath } from "../infra/printers/files";
 import { supportsPrinterStart, type PrinterLiveStatus } from "../infra/printers/status";
 import { isBusyStatus } from "./printerView";
 
@@ -64,6 +65,29 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(value)));
 }
 
+/** "неизвестно" material values that cannot be compared. */
+function isUnknownMaterial(value: string): boolean {
+  const material = value.trim();
+  return !material || material === "—";
+}
+
+/**
+ * Whether a job's declared material contradicts what the printer is declared
+ * to hold. The loaded value may list alternatives ("PLA / PETG / TPU"), so it
+ * is tokenized and the job's material must match one token (case-insensitive).
+ * Unknown on either side ("", "—") is NOT a mismatch — there is nothing to
+ * contradict; only a concrete disagreement reports true.
+ */
+export function materialsIncompatible(needed: string, loaded: string): boolean {
+  if (isUnknownMaterial(needed) || isUnknownMaterial(loaded)) return false;
+  const wanted = needed.trim().toLowerCase();
+  return !loaded
+    .split(/[/,;+]/)
+    .map((token) => token.trim().toLowerCase())
+    .filter(Boolean)
+    .includes(wanted);
+}
+
 function evaluate(job: QueueJob, ctx: NightPlanContext, windowMinutes: number | null): NightPlanEntry {
   const printer = ctx.resolvePrinter(job);
   const status = printer ? ctx.getStatus(printer.id) : undefined;
@@ -88,19 +112,42 @@ function evaluate(job: QueueJob, ctx: NightPlanContext, windowMinutes: number | 
       blockers.push(`«${printer.name}» в состоянии ошибки`);
       risk += 30;
     } else if (status.status !== "idle") {
-      risk += 12;
+      // Unattended start demands a confirmed idle. "unknown" means the device
+      // has not answered honestly yet — that is a blocker, not a discount.
+      blockers.push(`состояние «${printer.name}» не подтверждено (${status.status})`);
+      risk += 25;
     }
     if (!printer.material) risk += 12;
+
+    // A print nobody is watching must not run with the wrong filament: a
+    // concrete material contradiction blocks the launch. Unknown material on
+    // either side stays a soft risk (nothing to contradict).
+    if (materialsIncompatible(job.material, printer.material)) {
+      blockers.push(
+        `материал не совпадает: заданию нужен ${job.material}, в «${printer.name}» заправлен ${printer.material}`
+      );
+      risk += 30;
+    }
   }
 
   if (!job.file) {
     blockers.push("у задания не задан файл для запуска на принтере");
     risk += 15;
+  } else {
+    try {
+      normalizeStartablePath(job.file);
+    } catch {
+      blockers.push(`файл «${job.file}» не пройдёт проверку пути (см. правила запуска)`);
+      risk += 15;
+    }
   }
 
   const etaMinutes = parseEtaMinutes(job.eta);
   if (etaMinutes === null) {
-    risk += 12;
+    // With no known duration there is no way to verify the job fits the night
+    // window — for an unattended print that is a hard blocker, not a shrug.
+    blockers.push("длительность печати неизвестна — нельзя проверить, что она впишется в окно");
+    risk += 25;
   } else if (windowMinutes !== null && etaMinutes > windowMinutes) {
     blockers.push("печать не впишется в ночное окно");
     risk += 40;
@@ -118,7 +165,10 @@ function evaluate(job: QueueJob, ctx: NightPlanContext, windowMinutes: number | 
       printer: printer?.name ?? job.printer,
       eta: job.eta,
       risk: finalRisk,
-      riskLabel: riskLabel(finalRisk)
+      riskLabel: riskLabel(finalRisk),
+      // The dashboard shows the same hard reasons and disables the start
+      // button, instead of claiming the job "fits the window" unconditionally.
+      blockers: [...blockers]
     }
   };
 }

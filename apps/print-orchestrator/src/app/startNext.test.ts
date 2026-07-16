@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 
-import { JobError } from "../core/errors";
+import { JobError, MaterialError, ValidationError } from "../core/errors";
 import { FarmStore } from "./farmStore";
 
 /*
@@ -113,6 +113,100 @@ test("an empty ready queue is an honest error", async () => {
   await store.start();
 
   await assert.rejects(() => store.startNext(), /нет заданий/);
+
+  await store.stop();
+});
+
+test("two concurrent start-next requests dispatch the single ready job exactly once", async () => {
+  const store = new FarmStore(file);
+  await store.start();
+  store.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
+
+  const results = await Promise.allSettled([store.startNext(), store.startNext()]);
+  const fulfilled = results.filter((r) => r.status === "fulfilled");
+  const rejected = results.filter(
+    (r): r is PromiseRejectedResult => r.status === "rejected"
+  );
+
+  assert.equal(fulfilled.length, 1, "exactly one request started the job");
+  assert.equal(rejected.length, 1);
+  assert.match(String(rejected[0].reason), /нет заданий/);
+  assert.equal(startCalls.length, 1, "the device received exactly one start command");
+  assert.deepEqual(store.reads.getQueue(), []);
+
+  await store.stop();
+});
+
+test("a declared material contradiction refuses the start (MaterialError)", async () => {
+  const store = new FarmStore(file);
+  await store.start();
+  store.addQueueJob({ title: "Vase", printer: "k2", material: "PETG", file: "vase.gcode" });
+
+  await assert.rejects(
+    () => store.startNext(),
+    (err: unknown) => {
+      assert.ok(err instanceof MaterialError);
+      assert.match((err as MaterialError).message, /не совпадает/);
+      return true;
+    }
+  );
+  assert.equal(startCalls.length, 0);
+  assert.equal(store.reads.getQueue().length, 1, "the job stays queued for the operator");
+
+  await store.stop();
+});
+
+test("adding a queue job with an unsafe or non-G-code file is refused", async () => {
+  const store = new FarmStore(file);
+  await store.start();
+
+  for (const bad of ["../../etc/shadow.gcode", "/abs/path.gcode", "part.stl"]) {
+    assert.throws(
+      () => store.addQueueJob({ title: "Evil", printer: "k2", file: bad }),
+      ValidationError,
+      bad
+    );
+  }
+  assert.deepEqual(store.reads.getQueue(), [], "nothing was queued");
+
+  await store.stop();
+});
+
+test("a legacy persisted job with an unsafe path is refused at dispatch, not sent", async () => {
+  // A state file written before add-time validation existed: the job carries a
+  // traversal path. startPrint re-validates at dispatch, so the driver never
+  // sees it.
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      version: 1,
+      queue: {
+        seq: 1,
+        jobs: [
+          {
+            id: "q1",
+            title: "Legacy",
+            printer: "k2",
+            material: "PLA",
+            eta: "1ч",
+            at: "в очереди",
+            status: "ready",
+            file: "../../etc/shadow.gcode"
+          }
+        ]
+      }
+    })
+  );
+
+  const store = new FarmStore(file);
+  await store.start();
+
+  await assert.rejects(
+    () => store.startNext(),
+    (err: unknown) => err instanceof ValidationError
+  );
+  assert.equal(startCalls.length, 0, "the traversal path never reached the device");
+  assert.equal(store.reads.getQueue().length, 1);
 
   await store.stop();
 });

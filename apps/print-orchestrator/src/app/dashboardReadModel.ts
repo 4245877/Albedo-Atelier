@@ -5,6 +5,7 @@ import type {
   DashboardSnapshot,
   FeedEvent,
   MaintenanceRow,
+  MaterialMismatch,
   MaterialsSection,
   NightPrint,
   PerformanceSection,
@@ -24,7 +25,7 @@ import type { PrinterConfig, PrinterConfigSource } from "../infra/printers/confi
 import type { AutomationStore } from "./automationStore";
 import type { CameraService } from "./cameraService";
 import type { EventFeed } from "./eventFeed";
-import { buildNightPlan, type NightPlanEntry } from "./nightPlanner";
+import { buildNightPlan, materialsIncompatible, type NightPlanEntry } from "./nightPlanner";
 import { buildPrinterView, isBusyStatus } from "./printerView";
 import type { PrinterPoller } from "./printerPoller";
 import type { QueueStore } from "./queueStore";
@@ -260,10 +261,26 @@ export class DashboardReadModel {
   }
 
   getMaterials(): MaterialsSection {
-    // No stock tracking is connected: report nothing instead of fake spools.
+    // No stock tracking is connected: report no spools instead of fake ones.
     // The per-printer loaded material (from config) is visible on the printer
-    // views themselves.
-    return { filament: [], resin: [], mismatch: [], queueNeeds: [] };
+    // views themselves. What IS known is a contradiction between a queued
+    // job's declared material and its target printer's declared load — the
+    // same check that blocks night starts and start-next.
+    const mismatch: MaterialMismatch[] = [];
+    for (const job of this.queue.list()) {
+      if (job.status !== "ready") continue;
+      const printer = this.resolvePrinter(job.printer);
+      if (!printer) continue;
+      if (materialsIncompatible(job.material, printer.material)) {
+        mismatch.push({
+          job: job.title,
+          needs: job.material,
+          printer: printer.name,
+          loaded: printer.material
+        });
+      }
+    }
+    return { filament: [], resin: [], mismatch, queueNeeds: [] };
   }
 
   getToday(): TodaySection {

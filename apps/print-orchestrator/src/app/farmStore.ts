@@ -1,11 +1,10 @@
-import { JobError, NotFoundError, PrinterOfflineError } from "../core/errors";
+import { JobError, MaterialError, NotFoundError, PrinterOfflineError } from "../core/errors";
 import type { Automation, NightCandidate, NightPrint, QueueJob } from "../domain/dashboard/types";
 import { env } from "../shared/env";
 import { FulfillmentInventoryClient } from "../infra/fulfillment/inventoryClient";
 import { loadPrintersConfig, type PrinterConfig, type PrinterConfigSource } from "../infra/printers/config";
 import {
   fetchPrinterFiles,
-  normalizeStartablePath,
   supportsPrinterFiles,
   type PrinterFilesListing
 } from "../infra/printers/files";
@@ -18,7 +17,7 @@ import { runDriverOperation } from "./driverErrors";
 import { EventFeed } from "./eventFeed";
 import { FilamentConsumption } from "./filamentConsumption";
 import { FilamentSync } from "./filamentSync";
-import type { NightPlanEntry } from "./nightPlanner";
+import { materialsIncompatible, type NightPlanEntry } from "./nightPlanner";
 import { PrinterPoller } from "./printerPoller";
 import type { StoreLogger } from "../shared/logger";
 import { QueueStore, type NewQueueJobInput } from "./queueStore";
@@ -69,6 +68,21 @@ export class FarmStore {
 
   /** Current selection in the night-print candidate list (ephemeral UI state). */
   private nightPick = 0;
+
+  /**
+   * Serializes queue dispatches (start-next and night start share the queue):
+   * two parallel requests can otherwise pick the same job, both see the same
+   * idle status and both send a start before the job is removed. The second
+   * request re-reads the queue after the first completes, so it either takes
+   * the next job or fails honestly with an empty queue.
+   */
+  private queueDispatchChain: Promise<unknown> = Promise.resolve();
+
+  private runQueueDispatch<T>(task: () => Promise<T>): Promise<T> {
+    const next = this.queueDispatchChain.catch(() => {}).then(task);
+    this.queueDispatchChain = next.catch(() => {});
+    return next;
+  }
 
   constructor(
     stateFilePath: string = env.stateFilePath,
@@ -284,41 +298,52 @@ export class FarmStore {
   }
 
   /**
-   * Starts an on-device file picked in the file browser. The path is
-   * re-normalized here (no `..`/absolute/non-G-code paths reach the device),
-   * then the existing {@link PrinterCommandService.startPrint} does the rest:
-   * it re-checks live offline/busy/unsupported state at start time, because
-   * the printer may have changed state since the file list was fetched.
+   * Starts an on-device file picked in the file browser.
+   * {@link PrinterCommandService.startPrint} is the single choke point: it
+   * normalizes the path (no `..`/absolute/non-G-code paths reach the device)
+   * and re-checks the live offline/busy/unsupported state at start time,
+   * because the printer may have changed state since the file list was fetched.
    */
   startPrinterFile(id: string, file: string) {
-    return this.commands.startPrint(id, normalizeStartablePath(file));
+    return this.commands.startPrint(id, file);
   }
 
   /**
    * Starts the next ready queue job on its target printer. Resolves the printer
    * from the job's printer field, dispatches a real remote start (Moonraker),
    * and drops the job from the queue once the device has accepted it. Fails
-   * honestly when the job has no file, the printer is unknown/offline/busy, or
-   * the protocol does not support remote start.
+   * honestly when the job has no file or an invalid file path, the printer is
+   * unknown/offline/busy, or the protocol does not support remote start.
+   * Serialized via {@link runQueueDispatch} so two parallel requests cannot
+   * dispatch the same job twice.
    */
-  async startNext(): Promise<{ job: QueueJob; printer: string }> {
-    const job = this.queue.findNextReady();
-    if (!job) {
-      throw new JobError("В очереди нет заданий, готовых к запуску");
-    }
-    const printer = this.reads.resolvePrinter(job.printer);
-    if (!printer) {
-      throw new JobError(`Принтер «${job.printer}» не найден в конфигурации фермы`);
-    }
-    if (!job.file) {
-      throw new JobError(
-        `У задания «${job.title}» не задан файл — укажите имя .gcode на принтере, чтобы запустить его удалённо`
-      );
-    }
+  startNext(): Promise<{ job: QueueJob; printer: string }> {
+    return this.runQueueDispatch(async () => {
+      const job = this.queue.findNextReady();
+      if (!job) {
+        throw new JobError("В очереди нет заданий, готовых к запуску");
+      }
+      const printer = this.reads.resolvePrinter(job.printer);
+      if (!printer) {
+        throw new JobError(`Принтер «${job.printer}» не найден в конфигурации фермы`);
+      }
+      if (!job.file) {
+        throw new JobError(
+          `У задания «${job.title}» не задан файл — укажите имя .gcode на принтере, чтобы запустить его удалённо`
+        );
+      }
+      // A concrete material contradiction refuses the start (same rule as the
+      // night planner); unknown material on either side is not a contradiction.
+      if (materialsIncompatible(job.material, printer.material)) {
+        throw new MaterialError(
+          `Материал задания «${job.title}» (${job.material}) не совпадает с заправленным в «${printer.name}» (${printer.material})`
+        );
+      }
 
-    await this.commands.startPrint(printer.id, job.file);
-    this.queue.remove(job.id);
-    return { job, printer: printer.name };
+      await this.commands.startPrint(printer.id, job.file);
+      this.queue.remove(job.id);
+      return { job, printer: printer.name };
+    });
   }
 
   toggleAutomation(id: string, on?: boolean): Automation {
@@ -336,32 +361,34 @@ export class FarmStore {
     return this.reads.getNight();
   }
 
-  async startNight(): Promise<{ candidate: NightCandidate; window: string }> {
-    const plan = this.reads.getNightPlan();
-    if (plan.length === 0) {
-      throw new JobError(
-        "Нет кандидатов на ночь — добавьте в очередь готовые задания (или включите подсказки ночной печати)"
-      );
-    }
+  startNight(): Promise<{ candidate: NightCandidate; window: string }> {
+    return this.runQueueDispatch(async () => {
+      const plan = this.reads.getNightPlan();
+      if (plan.length === 0) {
+        throw new JobError(
+          "Нет кандидатов на ночь — добавьте в очередь готовые задания (или включите подсказки ночной печати)"
+        );
+      }
 
-    const entry: NightPlanEntry = plan[Math.min(this.nightPick, plan.length - 1)];
-    if (entry.blockers.length > 0) {
-      throw new JobError(
-        `Нельзя запустить «${entry.job.title}» на ночь: ${entry.blockers.join("; ")}`
-      );
-    }
+      const entry: NightPlanEntry = plan[Math.min(this.nightPick, plan.length - 1)];
+      if (entry.blockers.length > 0) {
+        throw new JobError(
+          `Нельзя запустить «${entry.job.title}» на ночь: ${entry.blockers.join("; ")}`
+        );
+      }
 
-    // blockers === [] guarantees a resolved printer and a file (see nightPlanner),
-    // but re-narrow for the type checker before dispatch.
-    const printer = entry.printer;
-    const file = entry.job.file;
-    if (!printer || !file) {
-      throw new JobError(`Нельзя запустить «${entry.job.title}» на ночь — недостаточно данных`);
-    }
+      // blockers === [] guarantees a resolved printer and a file (see nightPlanner),
+      // but re-narrow for the type checker before dispatch.
+      const printer = entry.printer;
+      const file = entry.job.file;
+      if (!printer || !file) {
+        throw new JobError(`Нельзя запустить «${entry.job.title}» на ночь — недостаточно данных`);
+      }
 
-    await this.commands.startPrint(printer.id, file);
-    this.queue.remove(entry.job.id);
-    return { candidate: entry.candidate, window: env.nightWindow };
+      await this.commands.startPrint(printer.id, file);
+      this.queue.remove(entry.job.id);
+      return { candidate: entry.candidate, window: env.nightWindow };
+    });
   }
 
   // ── Config resolution (shared by the collaborators) ──────────────────────

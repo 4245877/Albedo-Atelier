@@ -1,5 +1,6 @@
 import { ValidationError } from "../core/errors";
 import type { QueueJob } from "../domain/dashboard/types";
+import { normalizeStartablePath } from "../infra/printers/files";
 import type { EventFeed } from "./eventFeed";
 import type { PersistedQueue } from "../infra/persistence/stateStore";
 
@@ -51,7 +52,15 @@ export class QueueStore {
     }
 
     const printer = typeof input.printer === "string" ? input.printer.trim() : "";
-    const file = typeof input.file === "string" && input.file.trim() ? input.file.trim() : "";
+    // The file goes to the printer driver verbatim on start, so it is held to
+    // the same rules as the file browser right at the door: relative, no
+    // `..`/`.`, printable G-code extension. startPrint re-validates at dispatch
+    // (a legacy persisted job may predate this check), but a bad path should
+    // fail here, when the operator is looking, not at night when it launches.
+    const file =
+      typeof input.file === "string" && input.file.trim()
+        ? normalizeStartablePath(input.file)
+        : "";
     const job: QueueJob = {
       id: `q${++this.queueSeq}`,
       title,

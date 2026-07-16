@@ -40,15 +40,32 @@ only over the compose network. Only the dashboard (`8090`) and the go2rtc WebRTC
 media port (`8555`, required for live K2 video) are exposed on `0.0.0.0`; the
 go2rtc API (`1985`) is bound to localhost.
 
-> ⚠️ **Trust assumption:** the dashboard on `8090` is served on the LAN and
-> proxies the control API same-origin (`/api/print-orchestrator/*`). Unless
-> `ORCHESTRATOR_API_TOKEN` is set, that means **anyone who can reach `8090` on
-> the LAN can drive the printers** (pause/resume/cancel/light) with no
-> authentication — the guard logs a warning on startup when it is unset. This is
-> acceptable only on a trusted home network. **Do not expose `8090` to an
-> untrusted network** (public IP, port-forward, shared VLAN). To gate it, set
-> `ORCHESTRATOR_API_TOKEN` (and inject it from the proxy) or put HTTP Basic Auth
-> in front of nginx.
+> ⚠️ **Trust assumption:** the dashboard on `8090` is served on the LAN without
+> its own login and proxies the control API same-origin
+> (`/api/print-orchestrator/*`), so **anyone who can reach `8090` on the LAN can
+> drive the printers** (pause/resume/cancel/light). **Do not expose `8090` to an
+> untrusted network** (public IP, port-forward, shared VLAN); for extra gating
+> put HTTP Basic Auth in front of nginx.
+>
+> What *is* enforced in code:
+>
+> - **CSRF / foreign origins:** the orchestrator refuses state-changing requests
+>   whose `Origin` is neither the dashboard's own host nor in
+>   `CORS_ALLOW_ORIGINS` (403) — a malicious web page in a LAN browser cannot
+>   fire pause/cancel POSTs, and CORS stays closed besides. The dashboard proxy
+>   additionally refuses `camera.jpg?ensureLight=…` (403), so a drive-by `<img>`
+>   cannot flip the chamber light through the published port.
+> - **API token:** `ORCHESTRATOR_API_TOKEN` (set in `.env`; generate with
+>   `openssl rand -hex 24`) is required on every state-changing request and on
+>   the side-effectful `camera.jpg?ensureLight=1`; other reads stay open. The
+>   dashboard's nginx injects the token for the LAN dashboard (compose passes
+>   the same variable to both containers), so the buttons keep working while
+>   direct access to the control API (compose network / `print-farm`) is gated.
+>   Mirror the value in fulfillment's `PRINTER_ORCHESTRATOR_API_TOKEN`. When the
+>   token is unset the guard is disabled and a warning is logged on startup.
+> - **go2rtc:** only the signaling WebSocket (`/go2rtc/api/ws`) is proxied; the
+>   rest of the go2rtc HTTP API (config editing, restart) is not reachable
+>   through the dashboard, and go2rtc's own API port stays bound to localhost.
 
 ### Fulfillment integration
 

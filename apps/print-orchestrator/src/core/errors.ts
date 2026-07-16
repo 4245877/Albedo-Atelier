@@ -17,6 +17,14 @@ export class AuthorizationError extends AppError {
   }
 }
 
+/** A missing/invalid API token on an action that requires one. */
+export class UnauthorizedError extends AppError {
+  constructor(message = "Valid API token required") {
+    super(message, "UNAUTHORIZED", 401);
+    this.name = "UnauthorizedError";
+  }
+}
+
 export class NotFoundError extends AppError {
   constructor(resource: string) {
     super(`${resource} not found`, "NOT_FOUND", 404);

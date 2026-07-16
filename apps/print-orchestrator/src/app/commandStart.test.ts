@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 
-import { JobError, PrinterOfflineError } from "../core/errors";
+import { JobError, PrinterOfflineError, ValidationError } from "../core/errors";
 import type { PrinterConfig } from "../infra/printers/config";
 import type { PrinterLiveStatus } from "../infra/printers/status";
 import type { CameraService } from "./cameraService";
@@ -12,10 +12,10 @@ import type { PrinterPoller } from "./printerPoller";
 import type { SnapshotStore } from "../infra/persistence/snapshotStore";
 
 /*
- * Pre-dispatch guards of the shared remote start (`startPrint`) — the one code
- * path used by the queue (`start-next`), night mode and the new
- * `POST /api/printers/:id/print`. Every case here fails before any device I/O,
- * so no network is touched.
+ * Guards of the shared remote start (`startPrint`) — the one code path used by
+ * the queue (`start-next`), night mode and `POST /api/printers/:id/print`.
+ * Most cases fail before any device I/O; the fresh-status re-check is fed by
+ * an injected live-status stub, so no network is touched anywhere.
  */
 
 function makePrinter(over: Partial<PrinterConfig> = {}): PrinterConfig {
@@ -78,7 +78,12 @@ function makeStatus(over: Partial<PrinterLiveStatus> = {}): PrinterLiveStatus {
   };
 }
 
-function makeService(printer: PrinterConfig, status: PrinterLiveStatus | undefined) {
+function makeService(
+  printer: PrinterConfig,
+  status: PrinterLiveStatus | undefined,
+  /** Fresh-status source for the pre-dispatch re-check; defaults to the cached status. */
+  liveStatus?: () => Promise<PrinterLiveStatus>
+) {
   const poller = {
     getStatus: () => status,
     setStatus: () => {}
@@ -92,7 +97,12 @@ function makeService(printer: PrinterConfig, status: PrinterLiveStatus | undefin
     {} as LightScheduler,
     cameras,
     events,
-    {} as SnapshotStore
+    {} as SnapshotStore,
+    liveStatus ??
+      (async () => {
+        if (!status) throw new Error("no live status stubbed");
+        return status;
+      })
   );
 }
 
@@ -134,4 +144,73 @@ test("startPrint reports remote start as unsupported for Bambu and Creality WS",
       protocol
     );
   }
+});
+
+test("startPrint rejects unsafe or non-G-code paths before touching the device", async () => {
+  const service = makeService(makePrinter(), makeStatus());
+  for (const file of ["../secret.gcode", "/etc/shadow.gcode", "notes.txt", "dir/../x.gcode"]) {
+    await assert.rejects(
+      () => service.startPrint("k2", file),
+      (error: unknown) => error instanceof ValidationError,
+      file
+    );
+  }
+});
+
+test("startPrint refuses when the fresh device check does not confirm idle", async () => {
+  // The poll cache optimistically says idle, but the device answers "unknown"
+  // when re-checked right before dispatch — the start must not fire blind.
+  let liveCalls = 0;
+  const service = makeService(makePrinter(), makeStatus({ status: "idle" }), async () => {
+    liveCalls += 1;
+    return makeStatus({ status: "unknown" });
+  });
+  await assert.rejects(
+    service.startPrint("k2", "model.gcode"),
+    (error: unknown) =>
+      error instanceof JobError && error.message.includes("подтверждённого idle")
+  );
+  assert.equal(liveCalls, 1, "the device state was re-checked fresh");
+});
+
+test("startPrint refuses when the device turns out busy at the fresh check", async () => {
+  const service = makeService(makePrinter(), makeStatus({ status: "idle" }), async () =>
+    makeStatus({ status: "printing", currentFile: "other.gcode" })
+  );
+  await assert.rejects(
+    service.startPrint("k2", "model.gcode"),
+    (error: unknown) => error instanceof JobError && error.message.includes("занят")
+  );
+});
+
+const realFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+test("a just-dispatched start holds the printer against a double start", async () => {
+  // The device accepts the start but keeps reporting idle for a moment (the
+  // real Moonraker lag). The second request must be refused by the hold, not
+  // dispatched again on the strength of the stale idle.
+  const startCalls: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes("/printer/print/start")) {
+      startCalls.push(url);
+      return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  }) as typeof globalThis.fetch;
+
+  const service = makeService(makePrinter(), makeStatus({ status: "idle" }));
+
+  await service.startPrint("k2", "model.gcode");
+  assert.equal(startCalls.length, 1);
+
+  await assert.rejects(
+    service.startPrint("k2", "model.gcode"),
+    (error: unknown) => error instanceof JobError && error.message.includes("только что"),
+    "the second start within the hold window is refused"
+  );
+  assert.equal(startCalls.length, 1, "no second start command reached the device");
 });

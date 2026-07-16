@@ -1,13 +1,15 @@
 import { JobError, PrinterOfflineError } from "../core/errors";
 import type { PrinterView } from "../domain/printers/types";
 import type { PrinterConfig } from "../infra/printers/config";
+import { normalizeStartablePath } from "../infra/printers/files";
 import {
   getPrinterLiveStatus,
   sendPrinterCommand,
   sendPrinterStart,
   supportsPrinterLight,
   supportsPrinterStart,
-  type PrinterCommand
+  type PrinterCommand,
+  type PrinterLiveStatus
 } from "../infra/printers/status";
 import type { CameraService } from "./cameraService";
 import { runDriverOperation, toDriverError } from "./driverErrors";
@@ -25,12 +27,32 @@ export interface SnapshotResult {
 }
 
 /**
+ * After a remote start is dispatched, the device can keep reporting `idle` for
+ * a few seconds while it spools up. Within this hold a second start on the
+ * same printer is refused even if a fresh status still reads idle, so two
+ * quick requests cannot both slip through the pre-dispatch check.
+ */
+const RECENT_START_HOLD_MS = 15 * 1000;
+
+/**
  * Operator actions dispatched to the real printer drivers. Each command checks
  * the live state first, dispatches, records the action in the feed, then
- * re-polls the printer so the returned view reflects reality.
+ * re-polls the printer so the returned view reflects reality. Print-affecting
+ * commands are serialized per printer (see {@link runExclusive}), and a start
+ * re-verifies the device state fresh right before dispatch — the poll cache
+ * can be a full poll interval stale.
  */
 export class PrinterCommandService {
   private logger: StoreLogger = {};
+  /**
+   * Per-printer serialization for print-affecting commands, so two concurrent
+   * requests (queue start-next, night start, direct print, pause/cancel) can
+   * never interleave their check-then-dispatch sections on one device.
+   * Failures do not break the chain: the next task still runs.
+   */
+  private chain = new Map<string, Promise<unknown>>();
+  /** Per-printer wall-clock until which a just-dispatched start blocks another. */
+  private recentStarts = new Map<string, number>();
 
   constructor(
     private readonly configById: (id: string) => PrinterConfig,
@@ -38,50 +60,67 @@ export class PrinterCommandService {
     private readonly lights: LightScheduler,
     private readonly cameras: CameraService,
     private readonly events: EventFeed,
-    private readonly snapshots: SnapshotStore
+    private readonly snapshots: SnapshotStore,
+    /** Live telemetry source; injectable so tests need no real device. */
+    private readonly liveStatus: (
+      printer: PrinterConfig
+    ) => Promise<PrinterLiveStatus> = getPrinterLiveStatus
   ) {}
+
+  private runExclusive<T>(id: string, task: () => Promise<T>): Promise<T> {
+    const prev = (this.chain.get(id) ?? Promise.resolve()).catch(() => {});
+    const next = prev.then(task);
+    this.chain.set(id, next.catch(() => {}));
+    return next;
+  }
 
   /** Wires the store logger in once it is available (after config load). */
   useLogger(logger: StoreLogger): void {
     this.logger = logger;
   }
 
-  async pause(id: string): Promise<PrinterView> {
-    const printer = this.getReachableConfig(id);
-    const status = this.poller.getStatus(id);
-    if (status?.status !== "printing") {
-      throw new JobError(`Принтер «${printer.name}» не печатает — ставить на паузу нечего`);
-    }
-    await this.dispatch(printer, "pause");
-    this.events.push("⏸", `Оператор поставил <b>${printer.name}</b> на паузу`, "info");
-    return this.refresh(printer);
+  pause(id: string): Promise<PrinterView> {
+    return this.runExclusive(id, async () => {
+      const printer = this.getReachableConfig(id);
+      const status = this.poller.getStatus(id);
+      if (status?.status !== "printing") {
+        throw new JobError(`Принтер «${printer.name}» не печатает — ставить на паузу нечего`);
+      }
+      await this.dispatch(printer, "pause");
+      this.events.push("⏸", `Оператор поставил <b>${printer.name}</b> на паузу`, "info");
+      return this.refresh(printer);
+    });
   }
 
-  async resume(id: string): Promise<PrinterView> {
-    const printer = this.getReachableConfig(id);
-    const status = this.poller.getStatus(id);
-    if (status?.status !== "paused") {
-      throw new JobError(`Печать на «${printer.name}» не стоит на паузе`);
-    }
-    await this.dispatch(printer, "resume");
-    this.events.push("▶", `<b>${printer.name}</b> продолжил печать`, "ok");
-    return this.refresh(printer);
+  resume(id: string): Promise<PrinterView> {
+    return this.runExclusive(id, async () => {
+      const printer = this.getReachableConfig(id);
+      const status = this.poller.getStatus(id);
+      if (status?.status !== "paused") {
+        throw new JobError(`Печать на «${printer.name}» не стоит на паузе`);
+      }
+      await this.dispatch(printer, "resume");
+      this.events.push("▶", `<b>${printer.name}</b> продолжил печать`, "ok");
+      return this.refresh(printer);
+    });
   }
 
-  async cancel(id: string): Promise<PrinterView> {
-    const printer = this.getReachableConfig(id);
-    const status = this.poller.getStatus(id);
-    if (!status || !isBusyStatus(status.status)) {
-      throw new JobError(`На «${printer.name}» нет активной печати для отмены`);
-    }
-    const job = status.currentFile;
-    await this.dispatch(printer, "cancel");
-    this.events.push(
-      "✕",
-      `Печать «${job ?? "—"}» на <b>${printer.name}</b> отменена оператором`,
-      "err"
-    );
-    return this.refresh(printer);
+  cancel(id: string): Promise<PrinterView> {
+    return this.runExclusive(id, async () => {
+      const printer = this.getReachableConfig(id);
+      const status = this.poller.getStatus(id);
+      if (!status || !isBusyStatus(status.status)) {
+        throw new JobError(`На «${printer.name}» нет активной печати для отмены`);
+      }
+      const job = status.currentFile;
+      await this.dispatch(printer, "cancel");
+      this.events.push(
+        "✕",
+        `Печать «${job ?? "—"}» на <b>${printer.name}</b> отменена оператором`,
+        "err"
+      );
+      return this.refresh(printer);
+    });
   }
 
   async setLight(id: string, on: boolean): Promise<PrinterView> {
@@ -117,12 +156,25 @@ export class PrinterCommandService {
   }
 
   /**
-   * Starts a print of a file already present on the printer. Refuses unless the
-   * device is online and genuinely idle (never interrupts a running print), and
-   * unless the protocol supports remote start. Re-polls so the returned view
-   * reflects the device actually beginning the job.
+   * Starts a print of a file already present on the printer. The single choke
+   * point for every remote start (queue start-next, night start, the file
+   * browser and `POST /:id/print`), so the guarantees hold for all of them:
+   *
+   * - the path is re-validated here (no `..`/absolute/non-G-code path can
+   *   reach the device, whatever the caller);
+   * - the check-then-dispatch section runs in the per-printer command chain,
+   *   so two concurrent starts cannot interleave;
+   * - the device state is re-fetched fresh right before dispatch and must be
+   *   a confirmed `idle` — a stale poll cache or an unconfirmed (`unknown`)
+   *   state refuses instead of firing blind;
+   * - a just-dispatched start holds the printer for {@link RECENT_START_HOLD_MS},
+   *   so a second request cannot double-start while the device still reports
+   *   idle for a moment after accepting the job.
+   *
+   * Re-polls so the returned view reflects the device actually beginning the job.
    */
   async startPrint(id: string, file: string): Promise<PrinterView> {
+    const target = normalizeStartablePath(file);
     const printer = this.getReachableConfig(id);
     if (!supportsPrinterStart(printer)) {
       throw new JobError(
@@ -130,17 +182,47 @@ export class PrinterCommandService {
       );
     }
 
-    const status = this.poller.getStatus(id);
-    if (status && isBusyStatus(status.status)) {
+    // Fast honest failure from the poll cache before taking the lock; the
+    // authoritative check below is against a fresh device read.
+    const cached = this.poller.getStatus(id);
+    if (cached && isBusyStatus(cached.status)) {
       throw new JobError(`«${printer.name}» уже занят печатью — дождитесь завершения`);
     }
-    if (status && status.status !== "idle" && status.status !== "unknown") {
-      throw new JobError(`«${printer.name}» не готов к запуску (состояние: ${status.status})`);
-    }
 
-    await this.dispatchStart(printer, file);
-    this.events.push("▶", `Оператор запустил печать «${file}» на <b>${printer.name}</b>`, "ok");
-    return this.refresh(printer);
+    return this.runExclusive(id, async () => {
+      const holdUntil = this.recentStarts.get(printer.id) ?? 0;
+      if (holdUntil > Date.now()) {
+        throw new JobError(
+          `На «${printer.name}» только что отправлена команда запуска — дождитесь, пока принтер подтвердит состояние`
+        );
+      }
+      this.recentStarts.delete(printer.id);
+
+      const status = await this.liveStatus(printer);
+      this.poller.setStatus(printer.id, status);
+      if (!status.online) {
+        throw new PrinterOfflineError(id);
+      }
+      if (isBusyStatus(status.status)) {
+        throw new JobError(`«${printer.name}» уже занят печатью — дождитесь завершения`);
+      }
+      if (status.status !== "idle") {
+        throw new JobError(
+          `«${printer.name}» не готов к запуску (состояние: ${status.status}) — запуск разрешён только из подтверждённого idle`
+        );
+      }
+
+      this.recentStarts.set(printer.id, Date.now() + RECENT_START_HOLD_MS);
+      try {
+        await this.dispatchStart(printer, target);
+      } catch (error) {
+        // The device never accepted the job — release the hold immediately.
+        this.recentStarts.delete(printer.id);
+        throw error;
+      }
+      this.events.push("▶", `Оператор запустил печать «${target}» на <b>${printer.name}</b>`, "ok");
+      return this.refresh(printer);
+    });
   }
 
   /**
@@ -187,7 +269,7 @@ export class PrinterCommandService {
 
   /** Re-polls one printer right after a command so the view reflects reality. */
   private async refresh(printer: PrinterConfig): Promise<PrinterView> {
-    const status = await getPrinterLiveStatus(printer);
+    const status = await this.liveStatus(printer);
     this.poller.setStatus(printer.id, status);
     return buildPrinterView(printer, status, this.cameras.getEntry(printer.id));
   }

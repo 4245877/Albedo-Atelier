@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 
-import { ValidationError } from "../../core/errors";
+import { UnauthorizedError, ValidationError } from "../../core/errors";
+import { isRequestAuthorized } from "../../http/security";
 import { farmStore as defaultFarmStore } from "../../app/farmStore";
 
 /** The farm facade the routes call; injectable so the HTTP layer is testable. */
@@ -82,6 +83,12 @@ export async function registerPrinterRoutes(
     async (request, reply) => {
       const ensureLight =
         request.query.ensureLight === "1" || request.query.ensureLight === "true";
+      // ensureLight switches the chamber light on — a side effect, so this GET
+      // is the one read that requires the API token (when one is configured).
+      // Plain frame reads stay open, like every other read.
+      if (ensureLight && !isRequestAuthorized(request)) {
+        throw new UnauthorizedError("Параметр ensureLight требует API-токен (Authorization: Bearer)");
+      }
       const frame = await farmStore.getCameraFrame(request.params.id, { ensureLight });
       reply
         .header("Cache-Control", "no-store")
