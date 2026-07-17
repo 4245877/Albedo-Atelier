@@ -15,6 +15,32 @@ function readInteger(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
+/**
+ * A strictly-positive integer setting (upload/analysis limits). Unset → the
+ * documented default; present-but-invalid → a clear startup error rather than a
+ * silently-wrong limit, matching {@link readInteger}'s fail-fast style.
+ */
+function readPositiveInt(name: string, value: string | undefined, fallback: number): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Invalid ${name}: «${value}» (expected a positive integer)`);
+  }
+  return parsed;
+}
+
+/** A strictly-positive number setting (e.g. a compression ratio); same rules as {@link readPositiveInt}. */
+function readPositiveNumber(name: string, value: string | undefined, fallback: number): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Invalid ${name}: «${value}» (expected a positive number)`);
+  }
+  return parsed;
+}
+
+const MB = 1024 * 1024;
+
 export type LightScheduleMode = "solar" | "fixed";
 
 /**
@@ -191,6 +217,51 @@ const stateFilePath =
  */
 const queueDbPath =
   process.env.QUEUE_DB_PATH || path.resolve(path.dirname(stateFilePath), "queue.db");
+
+/**
+ * Root of the content-addressed artifact blob store (`sha256/<prefix>/<hash>`),
+ * kept next to {@link stateFilePath} on the same mounted `/app/data` volume so
+ * uploaded model/G-code bytes survive a restart. Never stored in SQLite — the
+ * database keeps only the relative storage key.
+ */
+const artifactStorageRoot =
+  process.env.ARTIFACT_STORAGE_ROOT || path.resolve(path.dirname(stateFilePath), "artifacts");
+
+/**
+ * Directory uploads are staged in before the atomic move into blob storage.
+ * Defaults under the storage root so the rename stays on one filesystem
+ * (atomic); an override on another device falls back to a copy.
+ */
+const uploadTmpDir = process.env.UPLOAD_TMP_DIR || path.join(artifactStorageRoot, ".tmp");
+
+/**
+ * Upload + analysis limits and locations. All numeric values are strictly
+ * positive: an invalid override fails startup with a clear message
+ * (see {@link readPositiveInt}); an unset one uses the documented default here.
+ * Defaults are deliberately generous enough for real FDM slices yet bounded so a
+ * hostile upload cannot exhaust disk, memory or CPU.
+ */
+export const uploads = Object.freeze({
+  storageRoot: artifactStorageRoot,
+  tmpDir: uploadTmpDir,
+  /** Maximum size of a single uploaded file (bytes). */
+  maxFileBytes: readPositiveInt("MAX_UPLOAD_FILE_BYTES", process.env.MAX_UPLOAD_FILE_BYTES, 200 * MB),
+  /** Maximum number of files the dashboard may add in one batch (advisory; enforced client-side). */
+  maxFiles: readPositiveInt("MAX_UPLOAD_FILES", process.env.MAX_UPLOAD_FILES, 20),
+  /** Maximum combined size of one batch (advisory; enforced client-side). */
+  maxTotalBytes: readPositiveInt("MAX_UPLOAD_TOTAL_BYTES", process.env.MAX_UPLOAD_TOTAL_BYTES, 500 * MB),
+  /** Per-file analysis wall-clock budget (ms) before it is failed as timed out. */
+  analysisTimeoutMs: readPositiveInt("ANALYSIS_TIMEOUT_MS", process.env.ANALYSIS_TIMEOUT_MS, 30000),
+  /** How many files may be analysed concurrently by the in-process worker pool. */
+  analysisConcurrency: readPositiveInt("ANALYSIS_CONCURRENCY", process.env.ANALYSIS_CONCURRENCY, 2),
+  /** ZIP (3MF) safety caps — see the SafeZip reader. */
+  zipMaxEntries: readPositiveInt("UPLOAD_ZIP_MAX_ENTRIES", process.env.UPLOAD_ZIP_MAX_ENTRIES, 10000),
+  zipMaxEntryBytes: readPositiveInt("UPLOAD_ZIP_MAX_ENTRY_BYTES", process.env.UPLOAD_ZIP_MAX_ENTRY_BYTES, 256 * MB),
+  zipMaxTotalBytes: readPositiveInt("UPLOAD_ZIP_MAX_TOTAL_BYTES", process.env.UPLOAD_ZIP_MAX_TOTAL_BYTES, 512 * MB),
+  zipMaxRatio: readPositiveNumber("UPLOAD_ZIP_MAX_RATIO", process.env.UPLOAD_ZIP_MAX_RATIO, 200),
+  /** Maximum size of any single XML document parsed from a 3MF. */
+  xmlMaxBytes: readPositiveInt("UPLOAD_XML_MAX_BYTES", process.env.UPLOAD_XML_MAX_BYTES, 64 * MB)
+});
 
 export const env = Object.freeze({
   nodeEnv: process.env.NODE_ENV ?? "development",

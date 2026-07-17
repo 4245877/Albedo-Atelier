@@ -2243,3 +2243,209 @@ html.modal-open { overflow: hidden; }
   font-size: 12.5px;
   color: var(--gold-bright);
 }
+
+/* ══ Раздел «Загрузка и анализ» ═══════════════════════════════════
+   Тема-независимо: всё на переменных (--ink/--gold/--ok/--warn/--danger),
+   поэтому и в тёмном, и в светлом облике зала выглядит согласованно. */
+
+.upload-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 26px 18px;
+  border: 1.5px dashed var(--gold-line);
+  border-radius: var(--radius);
+  background: var(--gold-soft);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s, transform 0.15s;
+}
+.upload-drop:hover,
+.upload-drop:focus-visible {
+  border-color: var(--gold);
+  outline: none;
+}
+.upload-drop.is-drag {
+  border-color: var(--gold-bright);
+  background: var(--gold-soft);
+  transform: scale(1.006);
+}
+.upload-drop-icon {
+  font-size: 26px;
+  color: var(--gold-bright);
+  line-height: 1;
+}
+.upload-drop-text b {
+  color: var(--ink);
+}
+.upload-drop-text span {
+  color: var(--ink-soft);
+}
+.upload-pick {
+  background: none;
+  border: none;
+  color: var(--gold-bright);
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+}
+.upload-drop-hint {
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.upload-list {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.upload-item {
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius-sm);
+  background: var(--card-inner);
+  padding: 12px 14px;
+}
+.upload-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.upload-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.upload-name b {
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40ch;
+}
+.upload-size {
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+.upload-fmt {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 2px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--gold-line);
+  color: var(--gold-bright);
+  background: var(--gold-soft);
+}
+.upload-tag {
+  font-size: 11px;
+  color: var(--ink-faint);
+  border: 1px solid var(--card-edge);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
+.upload-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--card-edge);
+  color: var(--ink-soft);
+}
+.upload-chip .dot {
+  width: 7px;
+  height: 7px;
+}
+.chip-ok { color: var(--ok-ink); border-color: var(--ok); background: var(--ok-soft); }
+.chip-warn { color: var(--warn-ink); border-color: var(--warn); background: var(--warn-soft); }
+.chip-error { color: var(--danger-ink); border-color: var(--danger); background: var(--danger-soft); }
+.chip-info { color: var(--gold-bright); border-color: var(--gold-line); background: var(--gold-soft); }
+
+.upload-progress {
+  margin-top: 10px;
+  height: 6px;
+  border-radius: 4px;
+  background: var(--card-edge);
+  overflow: hidden;
+}
+.upload-progress span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--gold-deep), var(--gold-bright));
+  transition: width 0.15s ease;
+}
+.upload-pct {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--ink-faint);
+  text-align: right;
+}
+
+.upload-analysis {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--card-edge);
+}
+.upload-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 3px 14px;
+  margin: 0;
+  font-size: 13px;
+}
+.upload-meta dt {
+  color: var(--ink-faint);
+}
+.upload-meta dd {
+  margin: 0;
+  color: var(--ink);
+}
+.upload-findings {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 13px;
+}
+.upload-warn { color: var(--warn-ink); }
+.upload-block { color: var(--danger-ink); }
+.upload-error {
+  color: var(--danger-ink);
+  font-size: 13px;
+  margin-top: 8px;
+}
+.upload-actions {
+  margin-top: 10px;
+}
+.upload-task {
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.upload-task code {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+}
+
+@media (max-width: 560px) {
+  .upload-meta { grid-template-columns: 1fr; gap: 1px 0; }
+  .upload-meta dt { margin-top: 6px; }
+}

@@ -99,9 +99,15 @@ export const PRINT_RUN_TRANSITIONS: TransitionMap<PrintRunState> = {
   CANCELLED: []
 };
 
-/** ArtifactAnalysis lifecycle — may re-run from a terminal state. */
+/**
+ * ArtifactAnalysis lifecycle — the *technical* job state. A worker picks a
+ * `pending` row up (`running`) then finishes it (`ready`/`failed`); either
+ * terminal may be re-run (`pending`). `running → pending` is the crash-recovery
+ * edge: a `running` row orphaned by a restart is reset and re-queued.
+ */
 export const ARTIFACT_ANALYSIS_TRANSITIONS: TransitionMap<ArtifactAnalysisState> = {
-  pending: ["ready", "failed"],
+  pending: ["running", "ready", "failed"],
+  running: ["ready", "failed", "pending"],
   ready: ["pending"],
   failed: ["pending"]
 };

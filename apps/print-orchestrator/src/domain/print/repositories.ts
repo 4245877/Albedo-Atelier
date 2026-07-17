@@ -52,12 +52,16 @@ export interface WritableRepository<T extends { id: string; version: number }> {
 
 export interface ArtifactRepository extends WritableRepository<Artifact> {
   findByLegacyRef(legacyRef: string): Artifact | null;
+  /** Any artifact whose `source` (storage key) matches — used to tell whether a blob is still referenced. */
+  findBySource(source: string): Artifact | null;
   list(): Artifact[];
 }
 
 export interface ArtifactAnalysisRepository extends WritableRepository<ArtifactAnalysis> {
   listByArtifact(artifactId: string): ArtifactAnalysis[];
   latestForArtifact(artifactId: string): ArtifactAnalysis | null;
+  /** Not-yet-finished analyses (`pending`/`running`), oldest first, for startup recovery. */
+  listUnfinished(): ArtifactAnalysis[];
 }
 
 /** Optional filter for a task listing. */
@@ -67,6 +71,8 @@ export interface TaskQuery {
 
 export interface PrintTaskRepository extends WritableRepository<PrintTask> {
   findByLegacyRef(legacyRef: string): PrintTask | null;
+  /** The (single) task created for an uploaded artifact; oldest first if several. */
+  findByArtifactId(artifactId: string): PrintTask | null;
   list(query?: TaskQuery): PrintTask[];
 }
 

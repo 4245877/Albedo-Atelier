@@ -71,9 +71,70 @@ On first boot the existing `state.json` operator queue is imported **once** into
 this model (old ids kept as `legacyRef`, guarded by an `app_meta` marker); there
 is **no** ongoing dual-write — after the import the two evolve independently. The
 legacy `/api/queue` and the dashboard are unchanged: this stage lays the durable
-foundation, and remote start, slicing/analysis, automatic distribution and
-fulfillment integration are explicitly left to later modules (their ports exist,
-but nothing is faked).
+foundation, and remote start, automatic distribution and fulfillment integration
+are explicitly left to later modules (their ports exist, but nothing is faked).
+
+## File upload & analysis (`/api/print/artifacts`)
+
+Operators upload sliceable models and G-code straight into the SQLite model —
+**never** the legacy queue or `state.json`. One file per request keeps per-file
+upload progress accurate in the dashboard.
+
+**Content-addressed storage.** The SHA-256 is computed *while streaming*; the
+file is written to a temp dir and **atomically moved** to
+`ARTIFACT_STORAGE_ROOT/sha256/<prefix>/<full-hash>` only once complete. Bytes
+live on disk, never in SQLite; the DB stores only the relative storage key
+(`Artifact.source`), never an absolute path. Identical content is stored **once**
+(the API reports `blobExisted: true` on a re-upload). Temp files are removed on
+any error — over-limit, aborted connection, DB failure — and a blob orphaned by a
+post-commit DB error is cleaned up unless another artifact already references it.
+
+**One transaction per upload.** After the blob lands, an `Artifact`, a
+`PrintTask` in **`DRAFT`** (deliberately *not* enqueued — no `QueueEntry`), a
+`pending` `ArtifactAnalysis` and their `AuditEvent`s are created together.
+
+**Analysis is off-request.** A bounded in-process worker pool
+(`ANALYSIS_CONCURRENCY`, `ANALYSIS_TIMEOUT_MS`) analyses the file; the dashboard
+polls the analysis row. `pending`/`running` analyses left by a crash are
+re-queued on the next boot. Technical **state** (`pending` → `running` → `ready`/
+`failed`) is kept distinct from the **verdict** (`needs_preparation`,
+`schedulable`, `needs_input`, `review`, `blocked`). A successful analysis leaves
+the task a `DRAFT`; a `blocked` verdict parks it in `NEEDS_REVIEW`. A `schedulable`
+verdict means *fit for later planning only* — never an auto-start authorisation.
+
+**Content-based format detection** (magic bytes + structure, never the extension
+alone; a mismatch is escalated to at least `review`), then:
+
+- **STL** — binary + ASCII; variant, triangle count, per-axis bounds, bounding
+  box; detects truncated/over-declared binary, empty model, non-finite coords.
+  Units are `unknown` (STL carries none) — only heuristic size warnings, never a
+  millimetre claim. Always `needs_preparation` (a source model needs slicing).
+- **3MF** — treated as an untrusted ZIP: a hand-rolled `SafeZip` reader (Node
+  `zlib`, no third-party unzip) enforces entry-count, per-entry/total decoded
+  size and compression-ratio caps, and rejects path traversal, absolute paths,
+  symlink entries and duplicates **before** inflating anything; the model XML is
+  parsed with DTDs/entities forbidden (no XXE / billion-laughs) and a size cap.
+  Extracts unit, object/build-item counts, a transform-aware bounding box,
+  slicer metadata, thumbnails and embedded profiles; classifies as generic model
+  / slicer project / sliced-or-G-code 3MF / unknown. A plain project is
+  `needs_preparation` (never auto-ready); a sliced payload follows G-code rules.
+- **G-code** — streamed line by line (constant memory, never executed): slicer +
+  version, estimated time, material + usage, layer height, nozzle diameter,
+  temperatures, tool count, firmware flavor, target printer, and a toolpath
+  bounding box computed with the coordinate model (G90/G91, M82/M83, G92,
+  G20/G21) and a reported confidence. Unknown target/slicer, a risky command
+  (`M500`/`M502`/`M302`) or low bbox confidence force at least `review` — foreign
+  G-code is never assumed safe for the night queue.
+
+Runtime dependencies added for this: **`@fastify/multipart`** (streaming
+multipart with a size limit) and **`fast-xml-parser`** (pure-JS XML, no network/
+DTD). ZIP handling uses Node's built-in `zlib` — no unzip dependency.
+
+Layering: analyzers + service under `src/app/artifacts/`, the blob store under
+`src/infra/storage/`, migration `002_artifact_analysis` extends
+`artifact_analyses` (new `running` state + typed `verdict`/`detected_format`/
+`warnings`/`blockers`/`data`/`analyzer_version` columns; migration `001` is left
+as shipped).
 
 Printer lights are governed by the **solar light policy** (`LIGHT_*`
 variables; `src/app/solarLightPolicy.ts`), applied on each poll to every
@@ -367,6 +428,7 @@ the guard is disabled and a startup warning is logged. CORS is closed by default
 - `GET /api/printers/:id/camera.jpg` · `GET /api/printers/:id/camera.mp4`
 - `GET /api/queue` · `GET /api/queue/night`
 - `GET /api/print/tasks` · `GET /api/print/tasks/:id` (task + full chain + audit) · `GET /api/print/queue` (legacy-shape projection of the SQLite model) · `GET /api/print/audit`
+- `GET /api/print/artifacts` (uploads + latest analysis + draft task) · `GET /api/print/artifacts/:id` (artifact + analyses + audit) · `GET /api/print/artifacts/config` (upload limits for the dashboard)
 - `GET /api/materials` · `GET /api/cameras` · `GET /api/maintenance`
 - `GET /api/events` · `GET /api/critical` · `GET /api/warnings`
 - `GET /api/system` · `GET /api/today` · `GET /api/performance` · `GET /api/plan`
@@ -394,4 +456,6 @@ instead of fabricating a result.
 - `DELETE /api/queue/:id` — remove a job by id (the other escape hatch for a wedged queue); `404` when the id is unknown
 - `POST /api/print/tasks` — create a task in the persistent model, body `{ title, printer?, material?, file?, night?, priority?, eta?, at? }`
 - `POST /api/print/tasks/:id/hold` (body `{ reason? }`) · `.../release` · `.../cancel` (body `{ reason? }`, kept as history) · `.../assign` (body `{ printer }`, reserves the bed)
+- `POST /api/print/artifacts` — `multipart/form-data` upload of one `.stl`/`.3mf`/`.gcode` file (field `file`); returns the created `Artifact` + `DRAFT` `PrintTask` + `pending` `ArtifactAnalysis` and `blobExisted` (`201` new blob, `200` de-duplicated, `413` over the size limit)
+- `POST /api/print/artifacts/:id/analyze` — re-run analysis (after a `failed` attempt); returns the fresh `pending` analysis
 - `POST /api/automations/:id/toggle` — body `{ "on"?: boolean }` (omit to flip)

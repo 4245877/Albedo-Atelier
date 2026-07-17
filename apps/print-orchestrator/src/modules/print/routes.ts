@@ -1,8 +1,10 @@
+import fastifyMultipart from "@fastify/multipart";
 import type { FastifyInstance } from "fastify";
 
 import { farmStore } from "../../app/farmStore";
 import type { CreateTaskInput } from "../../app/printQueue/printQueueService";
 import { ValidationError } from "../../core/errors";
+import { uploads } from "../../shared/env";
 
 /**
  * The persistent print-queue API under `/api/print` — the surface for the new
@@ -23,8 +25,24 @@ import { ValidationError } from "../../core/errors";
  *   POST /tasks/:id/release  return to the queue
  *   POST /tasks/:id/cancel   cancel (kept as history) body: { reason? }
  *   POST /tasks/:id/assign   bind to a printer        body: { printer }
+ *
+ * Uploads (the new SQLite-only file-analysis surface; see modules/print):
+ *   GET  /artifacts              list uploaded artifacts (+ latest analysis, draft task)
+ *   GET  /artifacts/:id          one artifact with its analyses + audit
+ *   GET  /artifacts/config       upload limits for the dashboard
+ *   POST /artifacts              multipart upload of one file → Artifact + DRAFT task + pending analysis
+ *   POST /artifacts/:id/analyze  re-run analysis (after a failed attempt)
  */
 export async function registerPrintQueueRoutes(app: FastifyInstance): Promise<void> {
+  // Scoped to this plugin: multipart is only for the upload route. One file per
+  // request (accurate per-file progress on the client), streamed — never
+  // buffered — with the configured single-file size limit enforced by the plugin.
+  await app.register(fastifyMultipart, {
+    limits: { fileSize: uploads.maxFileBytes, files: 1, fields: 8 }
+  });
+
+  registerArtifactRoutes(app);
+
   app.get("/tasks", async () => ({ tasks: farmStore.printQueue.listTasks() }));
 
   app.get<{ Params: { id: string } }>("/tasks/:id", async (request) =>
@@ -72,6 +90,57 @@ export async function registerPrintQueueRoutes(app: FastifyInstance): Promise<vo
       return { ok: true, assignment: farmStore.printQueue.assignTask(request.params.id, printer) };
     }
   );
+}
+
+/**
+ * The `/api/print/artifacts` upload + analysis surface. Kept separate from the
+ * task/queue routes above but on the same plugin, so the shared CSRF/token guard
+ * covers the mutations (upload, re-analyze) exactly like every other action.
+ * These never touch `/api/queue` or `state.json`.
+ */
+function registerArtifactRoutes(app: FastifyInstance): void {
+  app.get("/artifacts", async () => ({ artifacts: farmStore.artifacts.listArtifacts() }));
+
+  app.get("/artifacts/config", async () => ({
+    maxFileBytes: uploads.maxFileBytes,
+    maxFiles: uploads.maxFiles,
+    maxTotalBytes: uploads.maxTotalBytes,
+    acceptedExtensions: [".stl", ".3mf", ".gcode"]
+  }));
+
+  app.get<{ Params: { id: string } }>("/artifacts/:id", async (request) =>
+    farmStore.artifacts.getArtifactDetail(request.params.id)
+  );
+
+  app.post("/artifacts", async (request, reply) => {
+    if (!request.isMultipart()) {
+      throw new ValidationError("Ожидается multipart/form-data с одним файлом");
+    }
+    const part = await request.file();
+    if (!part) throw new ValidationError("Файл не передан");
+
+    const result = await farmStore.artifacts.ingest({
+      source: part.file,
+      fileName: part.filename || "upload.bin",
+      mimeType: part.mimetype,
+      // The multipart plugin flags the part truncated when it hit the size limit.
+      truncated: () => part.file.truncated
+    });
+
+    reply.code(result.blobExisted ? 200 : 201);
+    return {
+      ok: true,
+      blobExisted: result.blobExisted,
+      artifact: result.artifact,
+      task: result.task,
+      analysis: result.analysis
+    };
+  });
+
+  app.post<{ Params: { id: string } }>("/artifacts/:id/analyze", async (request) => ({
+    ok: true,
+    analysis: farmStore.artifacts.reanalyze(request.params.id)
+  }));
 }
 
 /** A trimmed non-empty string, or undefined — the shape the service expects. */

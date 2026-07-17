@@ -335,7 +335,7 @@ export function renderMaintenance(state) {
 const QUICK = [
   ["＋", "Добавить принтер", { act: "add-printer" }],
   ["▦", "Добавить задание", { act: "add-job" }],
-  ["⇪", "Загрузить файл", { act: "upload-file" }],
+  ["⇪", "Загрузить файл", { goto: "uploads" }],
   ["☰", "Открыть очередь", { goto: "queue" }],
   ["☾", "Ночная печать", { goto: "night" }],
   ["◉", "Камеры", { goto: "cameras" }],

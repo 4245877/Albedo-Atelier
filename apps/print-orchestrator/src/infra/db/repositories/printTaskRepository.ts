@@ -103,6 +103,13 @@ export class SqlitePrintTaskRepository
     return this.queryOne("SELECT * FROM print_tasks WHERE legacy_ref = ?", legacyRef);
   }
 
+  findByArtifactId(artifactId: string): PrintTask | null {
+    return this.queryOne(
+      "SELECT * FROM print_tasks WHERE artifact_id = ? ORDER BY created_at, id LIMIT 1",
+      artifactId
+    );
+  }
+
   list(query?: TaskQuery): PrintTask[] {
     const states = query?.states;
     if (states && states.length > 0) {

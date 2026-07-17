@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 import { NotFoundError, VersionConflictError } from "../../../core/errors";
-import type { Metadata } from "../../../domain/print/types";
+import type { AnalysisFinding, Metadata } from "../../../domain/print/types";
 
 /**
  * Shared plumbing for the SQLite repository adapters.
@@ -65,6 +65,35 @@ export function parseMetadata(value: unknown): Metadata {
 
 export function metadataToText(value: Metadata): string {
   return JSON.stringify(value ?? {});
+}
+
+/**
+ * Parses a JSON array of {@link AnalysisFinding} (the `warnings`/`blockers`
+ * columns); anything unusable — bad JSON, non-array, malformed entries —
+ * degrades to `[]` so a corrupt cell never throws mid-read. Each entry is
+ * narrowed to `{ code, message }`.
+ */
+export function parseFindings(value: unknown): AnalysisFinding[] {
+  if (typeof value !== "string" || value.trim() === "") return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item): AnalysisFinding[] => {
+      if (item !== null && typeof item === "object") {
+        const record = item as Record<string, unknown>;
+        const code = typeof record.code === "string" ? record.code : "";
+        const message = typeof record.message === "string" ? record.message : "";
+        if (code || message) return [{ code, message }];
+      }
+      return [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function findingsToText(value: readonly AnalysisFinding[]): string {
+  return JSON.stringify(value ?? []);
 }
 
 // ── Base repository (insert / getById / optimistic update) ───────────────────

@@ -80,6 +80,10 @@ export class SqliteArtifactRepository
     return this.queryOne("SELECT * FROM artifacts WHERE legacy_ref = ?", legacyRef);
   }
 
+  findBySource(source: string): Artifact | null {
+    return this.queryOne("SELECT * FROM artifacts WHERE source = ? LIMIT 1", source);
+  }
+
   list(): Artifact[] {
     return this.query("SELECT * FROM artifacts ORDER BY created_at, id");
   }

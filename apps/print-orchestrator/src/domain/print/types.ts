@@ -65,26 +65,80 @@ export interface Artifact {
 
 // ── ArtifactAnalysis ─────────────────────────────────────────────────────────
 
-/** `pending` — queued/awaiting an analyzer; terminal `ready`/`failed`. */
-export type ArtifactAnalysisState = "pending" | "ready" | "failed";
+/**
+ * The **technical** state of the analysis job (deliberately kept separate from
+ * its {@link AnalysisVerdict result}): `pending` — queued/awaiting a worker;
+ * `running` — a worker is analysing it now; terminal `ready` (a verdict was
+ * produced) / `failed` (the analyzer itself errored/timed out). A `pending` or
+ * `running` row left behind by a crash is recovered on the next boot.
+ */
+export type ArtifactAnalysisState = "pending" | "running" | "ready" | "failed";
 
 /**
- * The result of analysing an {@link Artifact} — slicing estimates, detected
- * material, geometry. The analyzer itself (OrcaSlicer et al.) is out of scope
- * for this stage: this record and its repository exist so a future analyzer
- * module has a typed home to write into, but nothing here fabricates estimates.
+ * The **format** the analyzer actually determined the bytes to be — from magic
+ * bytes and internal structure, never from the file name alone. `unknown` is a
+ * file whose content matches no supported format (or contradicts its extension).
+ */
+export type DetectedFormat = "stl" | "3mf" | "gcode" | "unknown";
+
+/**
+ * The **result** of a completed analysis — what should happen to the file next.
+ * Distinct from {@link ArtifactAnalysisState}: an analysis can be technically
+ * `ready` while its verdict is `blocked`. Values:
+ *   - `needs_preparation` — a valid source model (STL / generic 3MF) that still
+ *     needs a profile + slicing before it can be scheduled;
+ *   - `schedulable` — a sliced file with enough data and no critical problem
+ *     (fit for *planning* only — not an authorisation to auto-start);
+ *   - `needs_input` — usable but missing operator input (material, units, …);
+ *   - `review` — unknown/foreign/potentially-unsafe parameters need a human;
+ *   - `blocked` — corrupt, format-mismatched, or carrying a critical problem.
+ */
+export type AnalysisVerdict =
+  | "needs_preparation"
+  | "schedulable"
+  | "needs_input"
+  | "review"
+  | "blocked";
+
+/**
+ * One structured warning or blocker from an analyzer. `code` is a stable machine
+ * key the dashboard/tests branch on; `message` is the operator-facing text.
+ */
+export interface AnalysisFinding {
+  code: string;
+  message: string;
+}
+
+/**
+ * The result of analysing an {@link Artifact} — the detected format, a
+ * pass/fail-style {@link AnalysisVerdict verdict}, structured warnings/blockers,
+ * and whatever slicing estimates/geometry the analyzer could extract. The
+ * built-in analyzers (STL / 3MF / G-code) write this; nothing fabricates
+ * estimates for an un-sliced model.
  */
 export interface ArtifactAnalysis {
   id: string;
   artifactId: string;
   state: ArtifactAnalysisState;
-  /** Which analyzer produced this (e.g. "orcaslicer"); null until one runs. */
+  /** Content-verified format; null until the analysis reaches `ready`/`failed`. */
+  detectedFormat: DetectedFormat | null;
+  /** The analysis result; null while `pending`/`running` and on `failed`. */
+  verdict: AnalysisVerdict | null;
+  /** Which analyzer produced this (e.g. "stl", "gcode", "3mf"); null until one runs. */
   analyzer: string | null;
+  /** The analyzer's own version, so a re-analysis after an upgrade is comparable. */
+  analyzerVersion: string | null;
   estimatedDurationS: number | null;
   estimatedFilamentG: number | null;
   material: string | null;
   nozzleDiameterMm: number | null;
   layerHeightMm: number | null;
+  /** Non-blocking findings (units ambiguous, unknown command, …). */
+  warnings: AnalysisFinding[];
+  /** Critical findings that force `review`/`blocked` (corrupt, path traversal, …). */
+  blockers: AnalysisFinding[];
+  /** Analyzer-specific structured payload (bbox, slicer, plate data, …). */
+  data: Metadata;
   /** Failure detail when `state === "failed"`. */
   error: string | null;
   createdAt: IsoTimestamp;

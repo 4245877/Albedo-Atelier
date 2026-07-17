@@ -3,9 +3,11 @@ import path from "node:path";
 import { JobError, MaterialError, NotFoundError, PrinterOfflineError } from "../core/errors";
 import type { Automation, NightCandidate, NightPrint, QueueJob } from "../domain/dashboard/types";
 import type { PrintQueueStore } from "../domain/print/repositories";
-import { env } from "../shared/env";
+import { env, uploads } from "../shared/env";
 import { importLegacyQueue } from "../infra/db/legacyImport";
 import { openPrintQueueStore } from "../infra/db/store";
+import { ArtifactStorage } from "../infra/storage/artifactStorage";
+import { ArtifactService } from "./artifacts/artifactService";
 import { PrintQueueService } from "./printQueue/printQueueService";
 import { FulfillmentInventoryClient } from "../infra/fulfillment/inventoryClient";
 import { loadPrintersConfig, type PrinterConfig, type PrinterConfigSource } from "../infra/printers/config";
@@ -62,8 +64,17 @@ export class FarmStore {
    * one-time legacy import runs when this is first initialised.
    */
   private readonly dbPath: string;
+  private readonly storageRoot: string;
+  private readonly uploadTmpDir: string;
   private printQueueStore: PrintQueueStore | null = null;
   private printQueueService: PrintQueueService | null = null;
+  /**
+   * Content-addressed blob store + upload/analysis service for the file-upload
+   * feature, opened lazily alongside {@link printQueueService}. Both write only
+   * into the SQLite model — never the legacy JSON queue.
+   */
+  private artifactStorage: ArtifactStorage | null = null;
+  private artifactService: ArtifactService | null = null;
   /** Legacy queue snapshot captured at load, fed once into the SQLite import. */
   private readonly legacyQueueJobs: QueueJob[];
 
@@ -116,6 +127,16 @@ export class FarmStore {
       : path.resolve(path.dirname(stateFilePath), "queue.db")
   ) {
     this.dbPath = dbPath;
+    // Blob storage lives next to the queue DB. The singleton uses the configured
+    // roots (honouring ARTIFACT_STORAGE_ROOT/UPLOAD_TMP_DIR); a test store with a
+    // custom state file gets isolated siblings so uploads never touch real data.
+    const usingDefaults = stateFilePath === env.stateFilePath;
+    this.storageRoot = usingDefaults
+      ? uploads.storageRoot
+      : path.resolve(path.dirname(stateFilePath), "artifacts");
+    this.uploadTmpDir = usingDefaults
+      ? uploads.tmpDir
+      : path.resolve(this.storageRoot, ".tmp");
     this.state = new StateStore(stateFilePath);
     const persisted = this.state.load();
     this.legacyQueueJobs = persisted.queue.jobs;
@@ -192,11 +213,22 @@ export class FarmStore {
    * exactly once, on the first call.
    */
   get printQueue(): PrintQueueService {
-    return this.ensurePrintQueue();
+    this.ensurePrintQueue();
+    return this.printQueueService as PrintQueueService;
   }
 
-  private ensurePrintQueue(logger: StoreLogger = {}): PrintQueueService {
-    if (this.printQueueService) return this.printQueueService;
+  /**
+   * The upload/analysis service (SQLite + content-addressed blobs), opened on
+   * first access together with {@link printQueue}. Unfinished analyses are
+   * re-queued once when the store is first initialised.
+   */
+  get artifacts(): ArtifactService {
+    this.ensurePrintQueue();
+    return this.artifactService as ArtifactService;
+  }
+
+  private ensurePrintQueue(logger: StoreLogger = {}): void {
+    if (this.printQueueService) return;
     const store = openPrintQueueStore(this.dbPath, logger);
     // Seed the new model from the old JSON queue exactly once. Guarded by an
     // in-DB marker, so this is a no-op on every subsequent boot — there is no
@@ -204,7 +236,26 @@ export class FarmStore {
     importLegacyQueue(store, this.legacyQueueJobs, { logger });
     this.printQueueStore = store;
     this.printQueueService = new PrintQueueService(store);
-    return this.printQueueService;
+
+    this.artifactStorage = new ArtifactStorage({
+      root: this.storageRoot,
+      tmpDir: this.uploadTmpDir
+    });
+    this.artifactService = new ArtifactService(store, this.artifactStorage, {
+      limits: {
+        zipMaxEntries: uploads.zipMaxEntries,
+        zipMaxEntryBytes: uploads.zipMaxEntryBytes,
+        zipMaxTotalBytes: uploads.zipMaxTotalBytes,
+        zipMaxRatio: uploads.zipMaxRatio,
+        xmlMaxBytes: uploads.xmlMaxBytes
+      },
+      maxFileBytes: uploads.maxFileBytes,
+      timeoutMs: uploads.analysisTimeoutMs,
+      concurrency: uploads.analysisConcurrency,
+      logger
+    });
+    // Re-queue analyses left `pending`/`running` by a previous crash/restart.
+    this.artifactService.recover();
   }
 
   /** Loads the printer config and starts the background poll loop. */
@@ -249,10 +300,14 @@ export class FarmStore {
     // minute while running), then wait for every scheduled write to settle.
     this.state.save();
     await this.state.flush();
+    // Stop accepting new analysis work (in-flight jobs finish on their own).
+    this.artifactService?.close();
     // Close the queue database last, after all writes have settled.
     this.printQueueStore?.close();
     this.printQueueStore = null;
     this.printQueueService = null;
+    this.artifactService = null;
+    this.artifactStorage = null;
   }
 
   /** Awaits all pending state writes (used on shutdown and in tests). */

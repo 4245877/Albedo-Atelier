@@ -40,6 +40,18 @@ export class ValidationError extends AppError {
 }
 
 /**
+ * An upload exceeded a configured size limit (single file, or a decoded ZIP
+ * entry / total). A 413 the dashboard shows against the offending file without
+ * failing the rest of a multi-file batch.
+ */
+export class PayloadTooLargeError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super(message, "PAYLOAD_TOO_LARGE", 413, details);
+    this.name = "PayloadTooLargeError";
+  }
+}
+
+/**
  * Domain error taxonomy for the farm. Each maps to a stable `code` the
  * dashboard can branch on, and an HTTP status. These make the failure modes
  * from the brief explicit: an offline printer, a lost connection, a camera

@@ -20,6 +20,7 @@ import { ensureReveal, renderNav, setupNav, setupStickyOffsets } from "./nav.js"
 import { renderBoard } from "./render/board.js";
 import { syncModals } from "./render/modals.js";
 import { renderTopbar } from "./render/sections.js";
+import { setupUploads } from "./render/uploads.js";
 import { setNightWindow, setupTheme } from "./theme.js";
 import { $, esc, toast } from "./util.js";
 
@@ -141,6 +142,8 @@ installActions({ getState: () => state, refresh });
 setupTheme();
 renderNav();
 renderTopbar(state, backendReachable);
+// Раздел загрузки живёт независимо от опроса доски: инициализируем один раз.
+setupUploads();
 tickClock();
 setInterval(tickClock, 1000);
 
