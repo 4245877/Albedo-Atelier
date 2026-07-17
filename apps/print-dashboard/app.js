@@ -20,6 +20,7 @@ import { ensureReveal, renderNav, setupNav, setupStickyOffsets } from "./nav.js"
 import { renderBoard } from "./render/board.js";
 import { syncModals } from "./render/modals.js";
 import { renderTopbar } from "./render/sections.js";
+import { setupScheduler } from "./render/scheduler.js";
 import { setupSlicing } from "./render/slicing.js";
 import { setupUploads } from "./render/uploads.js";
 import { setNightWindow, setupTheme } from "./theme.js";
@@ -147,6 +148,8 @@ renderTopbar(state, backendReachable);
 setupUploads();
 // Раздел слайсинга (профили OrcaSlicer, наборы, подготовка) — тоже независим.
 setupSlicing();
+// Раздел планировщика (ручная очередь, совместимость, план, ночь) — независим.
+setupScheduler();
 tickClock();
 setInterval(tickClock, 1000);
 

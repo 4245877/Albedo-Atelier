@@ -15,6 +15,19 @@ function readInteger(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
+function readFloat(value: string | undefined, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Number.parseFloat(value);
+  if (Number.isNaN(parsed)) {
+    throw new Error(`Invalid number environment value: ${value}`);
+  }
+
+  return parsed;
+}
+
 /**
  * A strictly-positive integer setting (upload/analysis limits). Unset → the
  * documented default; present-but-invalid → a clear startup error rather than a
@@ -330,6 +343,14 @@ export const env = Object.freeze({
    * {@link env.lightSchedule} (`LIGHT_*`), so this stays a plain fixed window.
    */
   nightWindow: process.env.NIGHT_PRINT_WINDOW ?? "21:30 – 07:30",
+  /**
+   * Manual-scheduler night ETA safety buffer as a fraction (0.2 → +20%). Applied
+   * to the source ETA for unattended-night recommendations while the farm has no
+   * historical P90; the result stays flagged provisional. Configurable per the brief.
+   */
+  nightEtaSafetyBuffer: readFloat(process.env.NIGHT_ETA_SAFETY_BUFFER, 0.2),
+  /** Telemetry older than this (ms) is treated as stale by the scheduler → review. */
+  schedulerTelemetryStaleMs: readInteger(process.env.SCHEDULER_TELEMETRY_STALE_MS, 120_000),
   /** Chamber-light schedule (`LIGHT_*`); invalid values degrade, never throw. */
   lightSchedule: parseLightScheduleEnv(
     process.env,

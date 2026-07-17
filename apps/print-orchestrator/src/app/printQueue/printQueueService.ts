@@ -17,6 +17,7 @@ import type {
   AuditEntityType,
   AuditEvent,
   BedCycle,
+  DayNightPreference,
   DispatchAttempt,
   Metadata,
   PrintRun,
@@ -39,6 +40,40 @@ export interface CreateTaskInput {
   /** Presentation-only fields the legacy queue rendered; kept in task metadata. */
   eta?: string;
   at?: string;
+}
+
+/**
+ * Operator input for the manual scheduler queue. Unlike {@link CreateTaskInput}
+ * (the legacy-style quick add that parks printer-less tasks in review), a
+ * manually-scheduled task always enters the queue `WAITING` — the planner is what
+ * assigns a printer — and carries the scheduling intent the heuristic reads.
+ */
+export interface ManualTaskInput {
+  title: string;
+  /** An existing artifact (e.g. an uploaded/sliced model) to attach; must exist. */
+  artifactId?: string | null;
+  material?: string | null;
+  priority?: number;
+  notBefore?: string | null;
+  deadline?: string | null;
+  dayNightPreference?: DayNightPreference;
+  /** Hard-pin to a printer id up front (optional). */
+  pinnedPrinterId?: string | null;
+  unattendedAllowed?: boolean;
+  night?: boolean;
+}
+
+/** A partial update of a task's scheduling parameters (all fields optional). */
+export interface TaskSchedulingPatch {
+  priority?: number;
+  notBefore?: string | null;
+  deadline?: string | null;
+  dayNightPreference?: DayNightPreference;
+  unattendedAllowed?: boolean;
+  night?: boolean;
+  material?: string | null;
+  /** Optimistic guard: when set, the update fails if the task version moved. */
+  expectedVersion?: number;
 }
 
 /** The full durable chain for one task — what a task-detail API returns. */
@@ -195,6 +230,11 @@ export class PrintQueueService {
         state: runnable ? "QUEUED" : "NEEDS_REVIEW",
         reason: runnable ? null : "не задан принтер",
         night: input.night === true,
+        notBefore: null,
+        deadline: null,
+        dayNightPreference: input.night === true ? "night" : "any",
+        pinnedPrinterId: null,
+        unattendedAllowed: false,
         createdAt: iso,
         updatedAt: iso,
         version: 1,
@@ -322,6 +362,172 @@ export class PrintQueueService {
         actor,
         detail: { position: newPosition }
       });
+      return saved;
+    });
+  }
+
+  // ── Manual scheduler queue (operator-facing) ─────────────────────────────────
+
+  /**
+   * Adds a task straight into the manual scheduler queue: task `QUEUED`, entry
+   * `WAITING`, with the operator's scheduling intent. No target printer is
+   * required — the planner assigns one — so, unlike {@link createTask}, a
+   * printer-less task is *not* parked in review. A pin, when given, is recorded as
+   * both `pinnedPrinterId` and the `targetPrinter` hint.
+   */
+  addTask(input: ManualTaskInput, actor?: string): TaskDetail {
+    const title = input.title?.trim();
+    if (!title) throw new ValidationError("Поле «title» обязательно");
+    const iso = this.nowIso();
+    const notBefore = parseIsoOrNull(input.notBefore, "notBefore");
+    const deadline = parseIsoOrNull(input.deadline, "deadline");
+    const pinned = input.pinnedPrinterId?.trim() || null;
+
+    return this.store.transaction(() => {
+      const repos = this.store.repositories;
+      if (input.artifactId) {
+        if (!repos.artifacts.getById(input.artifactId)) {
+          throw new NotFoundError(`Артефакт «${input.artifactId}»`);
+        }
+      }
+
+      const night = input.night === true;
+      const task: PrintTask = {
+        id: newId(ID_PREFIX.printTask),
+        artifactId: input.artifactId ?? null,
+        title,
+        material: input.material?.trim() || null,
+        targetPrinter: pinned,
+        priority: Number.isFinite(input.priority) ? Number(input.priority) : 0,
+        state: "QUEUED",
+        reason: null,
+        night,
+        notBefore,
+        deadline,
+        dayNightPreference: input.dayNightPreference ?? (night ? "night" : "any"),
+        pinnedPrinterId: pinned,
+        unattendedAllowed: input.unattendedAllowed === true,
+        createdAt: iso,
+        updatedAt: iso,
+        version: 1,
+        legacyRef: null,
+        metadata: {}
+      };
+      repos.tasks.insert(task);
+      this.recordAudit({
+        entityType: "print_task",
+        entityId: task.id,
+        action: "created",
+        to: task.state,
+        actor,
+        detail: { via: "scheduler" }
+      });
+
+      const entry: QueueEntry = {
+        id: newId(ID_PREFIX.queueEntry),
+        taskId: task.id,
+        position: this.nextPosition(),
+        state: "WAITING",
+        enqueuedAt: iso,
+        updatedAt: iso,
+        version: 1
+      };
+      repos.queue.insert(entry);
+      this.recordAudit({
+        entityType: "queue_entry",
+        entityId: entry.id,
+        action: "enqueued",
+        to: entry.state,
+        actor
+      });
+
+      return this.getTaskDetail(task.id);
+    });
+  }
+
+  /**
+   * Updates a task's scheduling parameters (priority, notBefore, deadline,
+   * day/night preference, unattended permission, material). Refuses on a terminal
+   * or in-flight task, and honours an optional optimistic `expectedVersion`.
+   */
+  setTaskScheduling(id: string, patch: TaskSchedulingPatch, actor?: string): PrintTask {
+    return this.store.transaction(() => {
+      const task = this.getTask(id);
+      if (isTaskTerminal(task.state) || task.state === "PRINTING" || task.state === "DISPATCHING") {
+        throw new ValidationError(
+          `Параметры планирования нельзя менять для задания в состоянии «${task.state}»`
+        );
+      }
+      const next: PrintTask = {
+        ...task,
+        priority: Number.isFinite(patch.priority) ? Number(patch.priority) : task.priority,
+        notBefore:
+          patch.notBefore === undefined ? task.notBefore : parseIsoOrNull(patch.notBefore, "notBefore"),
+        deadline:
+          patch.deadline === undefined ? task.deadline : parseIsoOrNull(patch.deadline, "deadline"),
+        dayNightPreference: patch.dayNightPreference ?? task.dayNightPreference,
+        unattendedAllowed:
+          typeof patch.unattendedAllowed === "boolean" ? patch.unattendedAllowed : task.unattendedAllowed,
+        night: typeof patch.night === "boolean" ? patch.night : task.night,
+        material: patch.material === undefined ? task.material : patch.material?.trim() || null,
+        version: patch.expectedVersion ?? task.version,
+        updatedAt: this.nowIso()
+      };
+      const saved = this.store.repositories.tasks.update(next);
+      this.recordAudit({
+        entityType: "print_task",
+        entityId: task.id,
+        action: "scheduling_updated",
+        actor,
+        detail: {
+          priority: saved.priority,
+          notBefore: saved.notBefore,
+          deadline: saved.deadline,
+          dayNight: saved.dayNightPreference,
+          unattended: saved.unattendedAllowed
+        }
+      });
+      return saved;
+    });
+  }
+
+  /** Pins a task to a specific printer (also updates the `targetPrinter` hint). */
+  pinPrinter(id: string, printerId: string, actor?: string): PrintTask {
+    const pinned = printerId.trim();
+    if (!pinned) throw new ValidationError("Не указан принтер для закрепления");
+    return this.store.transaction(() => {
+      const task = this.getTask(id);
+      if (isTaskTerminal(task.state)) {
+        throw new ValidationError(`Нельзя закрепить принтер для завершённого задания «${task.state}»`);
+      }
+      const saved = this.store.repositories.tasks.update({
+        ...task,
+        pinnedPrinterId: pinned,
+        targetPrinter: pinned,
+        updatedAt: this.nowIso()
+      });
+      this.recordAudit({
+        entityType: "print_task",
+        entityId: task.id,
+        action: "pinned",
+        actor,
+        detail: { printerId: pinned }
+      });
+      return saved;
+    });
+  }
+
+  /** Removes a task's printer pin (leaves the soft `targetPrinter` hint intact). */
+  unpinPrinter(id: string, actor?: string): PrintTask {
+    return this.store.transaction(() => {
+      const task = this.getTask(id);
+      if (task.pinnedPrinterId === null) return task;
+      const saved = this.store.repositories.tasks.update({
+        ...task,
+        pinnedPrinterId: null,
+        updatedAt: this.nowIso()
+      });
+      this.recordAudit({ entityType: "print_task", entityId: task.id, action: "unpinned", actor });
       return saved;
     });
   }
@@ -882,4 +1088,18 @@ export class PrintQueueService {
 
 function isTaskTerminal(state: PrintTask["state"]): boolean {
   return state === "COMPLETED" || state === "FAILED" || state === "CANCELLED";
+}
+
+/**
+ * Normalises an optional ISO timestamp: `null`/empty clears it, a valid ISO
+ * string is canonicalised, and anything unparseable is a `ValidationError` (so a
+ * bad `notBefore`/`deadline` fails loudly instead of silently becoming null).
+ */
+function parseIsoOrNull(value: string | null | undefined, field: string): string | null {
+  if (value === null || value === undefined) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const ms = Date.parse(trimmed);
+  if (!Number.isFinite(ms)) throw new ValidationError(`Поле «${field}» — некорректная дата: «${value}»`);
+  return new Date(ms).toISOString();
 }

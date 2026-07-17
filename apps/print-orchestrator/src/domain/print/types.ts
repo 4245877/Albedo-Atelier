@@ -168,6 +168,15 @@ export type PrintTaskState =
   | "NEEDS_REVIEW";
 
 /**
+ * The operator's day/night scheduling intent for a task. `any` — the planner may
+ * place it whenever a printer is free; `day` — prefer attended (daytime) hours;
+ * `night` — a candidate for the night batch (still only *recommended*, never
+ * auto-started, and only when {@link PrintTask.unattendedAllowed} is set and every
+ * night gate passes). Purely a planning/theme hint — not an authorisation to run.
+ */
+export type DayNightPreference = "any" | "day" | "night";
+
+/**
  * A durable print job: the operator's intent plus its current lifecycle state.
  * Holds only *hints* about where/what to print (`targetPrinter`, `material`) —
  * the actual binding to a device is an {@link Assignment}, so a task can be
@@ -189,6 +198,16 @@ export interface PrintTask {
   reason: string | null;
   /** Marked as a night-print candidate. */
   night: boolean;
+  /** Earliest ISO time the task may start; null = no lower bound. */
+  notBefore: IsoTimestamp | null;
+  /** ISO time the task should be finished by; null = no deadline. */
+  deadline: IsoTimestamp | null;
+  /** Day/night scheduling preference; default `any`. */
+  dayNightPreference: DayNightPreference;
+  /** Hard binding to one printer id — the planner must place it there or not at all. Null = unpinned. */
+  pinnedPrinterId: string | null;
+  /** Explicit permission for an unattended (bed-not-cleared) night recommendation. */
+  unattendedAllowed: boolean;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
   version: number;
@@ -239,6 +258,18 @@ export interface Plan {
   /** Optional scheduling window label (e.g. "21:30 – 07:30"). */
   window: string | null;
   state: PlanState;
+  /**
+   * Revision counter within a plan lineage. A recompute never edits a plan in
+   * place: it supersedes the previous draft with a fresh DRAFT whose `revision`
+   * is one higher — so a confirmed plan is immutable and its history survives.
+   */
+  revision: number;
+  /** The plan this one was recomputed from (its predecessor revision); null for the first. */
+  basePlanId: string | null;
+  /** When the operator confirmed it (DRAFT → ACTIVE); null while still a draft. */
+  confirmedAt: IsoTimestamp | null;
+  /** Who confirmed it; null while still a draft. */
+  confirmedBy: string | null;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
   version: number;

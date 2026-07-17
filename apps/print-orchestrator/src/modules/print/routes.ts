@@ -2,8 +2,13 @@ import fastifyMultipart from "@fastify/multipart";
 import type { FastifyInstance } from "fastify";
 
 import { farmStore } from "../../app/farmStore";
-import type { CreateTaskInput } from "../../app/printQueue/printQueueService";
+import type {
+  CreateTaskInput,
+  ManualTaskInput,
+  TaskSchedulingPatch
+} from "../../app/printQueue/printQueueService";
 import { ValidationError } from "../../core/errors";
+import type { DayNightPreference } from "../../domain/print/types";
 import { uploads } from "../../shared/env";
 import { registerSlicingRoutes } from "./slicingRoutes";
 
@@ -44,6 +49,7 @@ export async function registerPrintQueueRoutes(app: FastifyInstance): Promise<vo
 
   registerArtifactRoutes(app);
   registerSlicingRoutes(app);
+  registerSchedulerRoutes(app);
 
   app.get("/tasks", async () => ({ tasks: farmStore.printQueue.listTasks() }));
 
@@ -145,9 +151,153 @@ function registerArtifactRoutes(app: FastifyInstance): void {
   }));
 }
 
+/**
+ * The manual-scheduler API under `/api/print/scheduler`. Every handler goes
+ * through the application services (`farmStore.printQueue` / `farmStore.scheduler`)
+ * — the HTTP layer only shapes untrusted input and never touches SQLite, and
+ * never the legacy `/api/queue` or `state.json`.
+ *
+ * Queue:
+ *   GET  /scheduler/queue                the open scheduler queue (task + entry + artifact)
+ *   POST /scheduler/queue                add a task           body: { title, artifactId?, material?, priority?, notBefore?, deadline?, dayNightPreference?, pinnedPrinterId?, unattendedAllowed?, night? }
+ *   POST /scheduler/tasks/:id/params     update scheduling    body: { priority?, notBefore?, deadline?, dayNightPreference?, unattendedAllowed?, night?, material?, expectedVersion? }
+ *   POST /scheduler/tasks/:id/reorder    move in queue        body: { position, expectedVersion }
+ *   POST /scheduler/tasks/:id/pin        pin a printer        body: { printer }
+ *   POST /scheduler/tasks/:id/unpin      remove the pin
+ *
+ * Planning:
+ *   GET  /scheduler/compatibility        task × printer matrix (compatible/review/blocked)
+ *   GET  /scheduler/plans                all plans (revisions/history)
+ *   GET  /scheduler/plans/:id            one plan with assignments + explanations + unplaced
+ *   POST /scheduler/plans                build a fresh DRAFT plan   body: { name?, window? }
+ *   POST /scheduler/plans/:id/recompute  recompute into a new DRAFT revision
+ *   POST /scheduler/plans/:id/confirm    confirm a DRAFT (→ ACTIVE)
+ *   GET  /scheduler/night                night (unattended) candidates + rejections
+ */
+function registerSchedulerRoutes(app: FastifyInstance): void {
+  app.get("/scheduler/queue", async () => ({ queue: farmStore.printQueue.listOpenQueue() }));
+
+  app.post<{ Body: unknown }>("/scheduler/queue", async (request) => ({
+    ok: true,
+    task: farmStore.printQueue.addTask(shapeManualTask(request.body))
+  }));
+
+  app.post<{ Params: { id: string }; Body: unknown }>(
+    "/scheduler/tasks/:id/params",
+    async (request) => ({
+      ok: true,
+      task: farmStore.printQueue.setTaskScheduling(request.params.id, shapeSchedulingPatch(request.body))
+    })
+  );
+
+  app.post<{ Params: { id: string }; Body: { position?: unknown; expectedVersion?: unknown } }>(
+    "/scheduler/tasks/:id/reorder",
+    async (request) => {
+      const position = Number(request.body?.position);
+      const expectedVersion = Number(request.body?.expectedVersion);
+      if (!Number.isFinite(position)) throw new ValidationError("Поле «position» обязательно (число)");
+      if (!Number.isFinite(expectedVersion)) {
+        throw new ValidationError("Поле «expectedVersion» обязательно (число)");
+      }
+      return {
+        ok: true,
+        entry: farmStore.printQueue.reorderTask(request.params.id, position, expectedVersion)
+      };
+    }
+  );
+
+  app.post<{ Params: { id: string }; Body: { printer?: unknown } }>(
+    "/scheduler/tasks/:id/pin",
+    async (request) => {
+      const printer = optionalString(request.body?.printer);
+      if (!printer) throw new ValidationError("Поле «printer» обязательно");
+      return { ok: true, task: farmStore.printQueue.pinPrinter(request.params.id, printer) };
+    }
+  );
+
+  app.post<{ Params: { id: string } }>("/scheduler/tasks/:id/unpin", async (request) => ({
+    ok: true,
+    task: farmStore.printQueue.unpinPrinter(request.params.id)
+  }));
+
+  app.get("/scheduler/compatibility", async () => farmStore.scheduler.compatibilityMatrix());
+
+  app.get("/scheduler/plans", async () => ({ plans: farmStore.scheduler.listPlans() }));
+
+  app.get<{ Params: { id: string } }>("/scheduler/plans/:id", async (request) =>
+    farmStore.scheduler.getPlan(request.params.id)
+  );
+
+  app.post<{ Body: { name?: unknown; window?: unknown } }>("/scheduler/plans", async (request) => ({
+    ok: true,
+    plan: farmStore.scheduler.buildDraftPlan({
+      name: optionalString(request.body?.name),
+      window: optionalString(request.body?.window)
+    })
+  }));
+
+  app.post<{ Params: { id: string } }>("/scheduler/plans/:id/recompute", async (request) => ({
+    ok: true,
+    plan: farmStore.scheduler.recomputePlan(request.params.id)
+  }));
+
+  app.post<{ Params: { id: string } }>("/scheduler/plans/:id/confirm", async (request) => ({
+    ok: true,
+    plan: farmStore.scheduler.confirmPlan(request.params.id)
+  }));
+
+  app.get("/scheduler/night", async () => farmStore.scheduler.nightCandidates());
+}
+
 /** A trimmed non-empty string, or undefined — the shape the service expects. */
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function toDayNight(value: unknown): DayNightPreference | undefined {
+  return value === "any" || value === "day" || value === "night" ? value : undefined;
+}
+
+/** Narrows an untrusted body into {@link ManualTaskInput}; `title` is validated by the service. */
+function shapeManualTask(body: unknown): ManualTaskInput {
+  const src = (body ?? {}) as Record<string, unknown>;
+  const input: ManualTaskInput = {
+    title: typeof src.title === "string" ? src.title : ""
+  };
+  const artifactId = optionalString(src.artifactId);
+  if (artifactId) input.artifactId = artifactId;
+  const material = optionalString(src.material);
+  if (material) input.material = material;
+  const notBefore = optionalString(src.notBefore);
+  if (notBefore) input.notBefore = notBefore;
+  const deadline = optionalString(src.deadline);
+  if (deadline) input.deadline = deadline;
+  const dayNight = toDayNight(src.dayNightPreference);
+  if (dayNight) input.dayNightPreference = dayNight;
+  const pinned = optionalString(src.pinnedPrinterId ?? src.printer);
+  if (pinned) input.pinnedPrinterId = pinned;
+  if (src.unattendedAllowed === true) input.unattendedAllowed = true;
+  if (src.night === true) input.night = true;
+  if (typeof src.priority === "number" && Number.isFinite(src.priority)) input.priority = src.priority;
+  return input;
+}
+
+/** Narrows an untrusted body into {@link TaskSchedulingPatch}; only present fields are set. */
+function shapeSchedulingPatch(body: unknown): TaskSchedulingPatch {
+  const src = (body ?? {}) as Record<string, unknown>;
+  const patch: TaskSchedulingPatch = {};
+  if (typeof src.priority === "number" && Number.isFinite(src.priority)) patch.priority = src.priority;
+  if ("notBefore" in src) patch.notBefore = optionalString(src.notBefore) ?? null;
+  if ("deadline" in src) patch.deadline = optionalString(src.deadline) ?? null;
+  const dayNight = toDayNight(src.dayNightPreference);
+  if (dayNight) patch.dayNightPreference = dayNight;
+  if (typeof src.unattendedAllowed === "boolean") patch.unattendedAllowed = src.unattendedAllowed;
+  if (typeof src.night === "boolean") patch.night = src.night;
+  if ("material" in src) patch.material = optionalString(src.material) ?? null;
+  if (typeof src.expectedVersion === "number" && Number.isFinite(src.expectedVersion)) {
+    patch.expectedVersion = src.expectedVersion;
+  }
+  return patch;
 }
 
 /**

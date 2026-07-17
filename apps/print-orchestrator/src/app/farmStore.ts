@@ -15,6 +15,10 @@ import { PresetImportService } from "./slicing/presetImportService";
 import { ProfileService, type SlicerPrinterRef } from "./slicing/profileService";
 import { SliceService } from "./slicing/sliceService";
 import { PrintQueueService } from "./printQueue/printQueueService";
+import {
+  SchedulerService,
+  type SchedulerPrinterRef
+} from "./scheduling/schedulerService";
 import { FulfillmentInventoryClient } from "../infra/fulfillment/inventoryClient";
 import { loadPrintersConfig, type PrinterConfig, type PrinterConfigSource } from "../infra/printers/config";
 import {
@@ -90,6 +94,12 @@ export class FarmStore {
   private presetImportService: PresetImportService | null = null;
   private profileService: ProfileService | null = null;
   private sliceService: SliceService | null = null;
+  /**
+   * Cached OrcaSlicer runtime availability, probed on start and re-probed by the
+   * slicing runtime report. The manual scheduler reads it synchronously to gate
+   * un-sliced work (no runtime → honest blocker, never a faked slice).
+   */
+  private sliceRuntimeAvailable = false;
   /** Legacy queue snapshot captured at load, fed once into the SQLite import. */
   private readonly legacyQueueJobs: QueueJob[];
 
@@ -261,6 +271,49 @@ export class FarmStore {
     };
   }
 
+  /**
+   * The manual-scheduler service (SQLite-backed), built on each access over the
+   * lazily-opened store with the *current* printer telemetry and runtime flag. It
+   * reads live evidence and delegates decisions to the pure `domain/scheduling`;
+   * it never touches the legacy `/api/queue` or `state.json`.
+   */
+  get scheduler(): SchedulerService {
+    this.ensurePrintQueue();
+    const store = this.printQueueStore as PrintQueueStore;
+    return new SchedulerService(store, () => this.schedulerPrinters(), {
+      now: () => new Date(),
+      runtimeAvailable: this.sliceRuntimeAvailable,
+      nightSafetyBufferRatio: env.nightEtaSafetyBuffer,
+      nightWindow: env.nightWindow,
+      compatibility: { telemetryStaleMs: env.schedulerTelemetryStaleMs },
+      unknownEtaAssumptionS: 4 * 60 * 60
+    });
+  }
+
+  /** The live printer telemetry + config joined into the shape the scheduler needs. */
+  private schedulerPrinters(): SchedulerPrinterRef[] {
+    const now = Date.now();
+    return this.reads.listPrinters().map((view) => {
+      const config = this.configs.find((c) => c.id === view.id) ?? null;
+      const updatedMs = view.updatedAt ? Date.parse(view.updatedAt) : NaN;
+      return {
+        id: view.id,
+        name: view.name,
+        model: view.model,
+        protocol: config?.protocol ?? null,
+        material: view.liveMaterial ?? view.material,
+        nozzleMm: view.nozzleDiameter,
+        buildVolume: null,
+        online: view.online,
+        status: view.status,
+        remoteStartSupported: view.remoteStartSupported,
+        ams: null,
+        telemetryAgeMs: Number.isFinite(updatedMs) ? Math.max(0, now - updatedMs) : null,
+        materialRemainingSufficient: null
+      };
+    });
+  }
+
   private ensurePrintQueue(logger: StoreLogger = {}): void {
     if (this.printQueueService) return;
     const store = openPrintQueueStore(this.dbPath, logger);
@@ -344,6 +397,16 @@ export class FarmStore {
     // Open the queue database and run the one-time import at startup (with the
     // real logger), rather than lazily on the first API hit.
     this.ensurePrintQueue(logger);
+
+    // Probe the OrcaSlicer runtime once so the scheduler can gate un-sliced work
+    // synchronously; best-effort — a failed probe just leaves it unavailable.
+    if (this.sliceRunner) {
+      try {
+        this.sliceRuntimeAvailable = (await this.sliceRunner.probe()).available;
+      } catch {
+        this.sliceRuntimeAvailable = false;
+      }
+    }
 
     // Import the OrcaSlicer catalog once, before accepting traffic — best-effort so
     // a missing/broken catalog can never stop the farm from starting.
