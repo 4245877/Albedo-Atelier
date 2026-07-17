@@ -15,7 +15,11 @@ export const ID_PREFIX = {
   bedCycle: "bed",
   dispatchAttempt: "dsp",
   printRun: "run",
-  auditEvent: "aud"
+  auditEvent: "aud",
+  // slicing domain (domain/slicing)
+  profileRevision: "prof",
+  profileSet: "pset",
+  sliceVariant: "slc"
 } as const;
 
 export type IdPrefix = (typeof ID_PREFIX)[keyof typeof ID_PREFIX];

@@ -1,0 +1,100 @@
+{
+    "close_fan_the_first_x_layers": [
+        "3"
+    ],
+    "cool_plate_temp": [
+        "82"
+    ],
+    "cool_plate_temp_initial_layer": [
+        "80"
+    ],
+    "during_print_exhaust_fan_speed": [
+        "30"
+    ],
+    "eng_plate_temp": [
+        "82"
+    ],
+    "eng_plate_temp_initial_layer": [
+        "80"
+    ],
+    "fan_cooling_layer_time": [
+        "60"
+    ],
+    "fan_max_speed": [
+        "40"
+    ],
+    "fan_min_speed": [
+        "7"
+    ],
+    "filament_density": [
+        "1.25"
+    ],
+    "filament_flow_ratio": [
+        "1"
+    ],
+    "filament_max_volumetric_speed": [
+        "14"
+    ],
+    "filament_settings_id": [
+        "VVM PETG 0.6@BBL A1"
+    ],
+    "filament_type": [
+        "PETG"
+    ],
+    "filament_vendor": [
+        "Creality Hyper"
+    ],
+    "from": "User",
+    "full_fan_speed_layer": [
+        "4"
+    ],
+    "hot_plate_temp": [
+        "82"
+    ],
+    "hot_plate_temp_initial_layer": [
+        "80"
+    ],
+    "inherits": "Bambu PLA Basic @BBL A1",
+    "internal_bridge_fan_speed": [
+        "50"
+    ],
+    "is_custom_defined": "0",
+    "name": "VVM PETG 0.6@BBL A1",
+    "nozzle_temperature": [
+        "242"
+    ],
+    "nozzle_temperature_initial_layer": [
+        "245"
+    ],
+    "nozzle_temperature_range_high": [
+        "220"
+    ],
+    "slow_down_layer_time": [
+        "9"
+    ],
+    "supertack_plate_temp": [
+        "82"
+    ],
+    "supertack_plate_temp_initial_layer": [
+        "80"
+    ],
+    "support_material_interface_fan_speed": [
+        "40"
+    ],
+    "temperature_vitrification": [
+        "76"
+    ],
+    "textured_cool_plate_temp": [
+        "82"
+    ],
+    "textured_cool_plate_temp_initial_layer": [
+        "80"
+    ],
+    "textured_plate_temp": [
+        "82"
+    ],
+    "textured_plate_temp_initial_layer": [
+        "80"
+    ],
+    "version": "1.10.0.35"
+}

@@ -68,6 +68,29 @@ export function metadataToText(value: Metadata): string {
 }
 
 /**
+ * Like {@link parseMetadata} but preserves the SQL NULL / absent distinction: a
+ * null/empty cell reads back as `null` (not `{}`), so a column that means "no value
+ * recorded yet" (e.g. slice dimensions before a slice runs) round-trips faithfully.
+ */
+export function parseMetadataOrNull(value: unknown): Metadata | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Metadata)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Serialises a nullable metadata object; `null`/`undefined` stays SQL NULL. */
+export function metadataToTextOrNull(value: Metadata | null | undefined): string | null {
+  return value === null || value === undefined ? null : JSON.stringify(value);
+}
+
+/**
  * Parses a JSON array of {@link AnalysisFinding} (the `warnings`/`blockers`
  * columns); anything unusable — bad JSON, non-array, malformed entries —
  * degrades to `[]` so a corrupt cell never throws mid-read. Each entry is

@@ -406,7 +406,10 @@ export type AuditEntityType =
   | "assignment"
   | "bed_cycle"
   | "dispatch_attempt"
-  | "print_run";
+  | "print_run"
+  | "profile_revision"
+  | "profile_set"
+  | "slice_variant";
 
 /**
  * An append-only record of a domain change — every state transition and

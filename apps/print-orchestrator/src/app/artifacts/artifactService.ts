@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import type { Readable } from "node:stream";
 
 import { NotFoundError, ValidationError } from "../../core/errors";
@@ -193,6 +194,74 @@ export class ArtifactService {
     } catch (dbError) {
       await this.cleanupOrphanBlob(committed);
       throw dbError;
+    }
+  }
+
+  /**
+   * Registers an already-on-disk file (an OrcaSlicer output) as a NEW artifact —
+   * content-addressed through the same {@link ArtifactStorage} the uploads use —
+   * and analyses it **synchronously** with the existing analyzer. Unlike
+   * {@link ingest} it creates no draft task (the output belongs to a slice variant,
+   * not the upload queue) and enqueues no background work: the slice pipeline awaits
+   * the finished analysis so it can copy the ETA/usage/geometry onto the variant.
+   * The `metadata` (e.g. `{ sliceVariantId }`) is merged onto the artifact.
+   */
+  async ingestOutputFile(input: {
+    filePath: string;
+    fileName: string;
+    actor?: string;
+    metadata?: Metadata;
+  }): Promise<{ artifact: Artifact; analysis: ArtifactAnalysis }> {
+    const fileName = sanitizeName(input.fileName);
+    const actor = input.actor ?? this.defaultActor;
+
+    const staged = await this.storage.stage(fs.createReadStream(input.filePath), {
+      maxBytes: this.options.maxFileBytes
+    });
+    const committed = await this.storage.commit(staged);
+
+    try {
+      const created = this.store.transaction(() => {
+        const repos = this.store.repositories;
+        const iso = this.nowIso();
+        const artifact: Artifact = {
+          id: newId(ID_PREFIX.artifact),
+          kind: kindForName(fileName),
+          name: fileName,
+          source: committed.key,
+          sizeBytes: committed.sizeBytes,
+          sha256: committed.sha256,
+          createdAt: iso,
+          updatedAt: iso,
+          version: 1,
+          legacyRef: null,
+          metadata: { ...(input.metadata ?? {}), source: "slice", blobExisted: committed.deduplicated }
+        };
+        repos.artifacts.insert(artifact);
+        this.recordAudit({ entityType: "artifact", entityId: artifact.id, action: "sliced", actor });
+
+        const analysis = this.newPendingAnalysis(artifact.id, iso);
+        repos.artifactAnalyses.insert(analysis);
+        this.recordAudit({
+          entityType: "artifact_analysis",
+          entityId: analysis.id,
+          action: "created",
+          to: analysis.state,
+          actor
+        });
+        return { artifact, analysisId: analysis.id };
+      });
+
+      await this.runAnalysis(created.analysisId);
+      const analysis =
+        this.store.repositories.artifactAnalyses.getById(created.analysisId) ??
+        (() => {
+          throw new NotFoundError(`Анализ «${created.analysisId}»`);
+        })();
+      return { artifact: created.artifact, analysis };
+    } catch (error) {
+      await this.cleanupOrphanBlob(committed);
+      throw error;
     }
   }
 

@@ -3,11 +3,17 @@ import path from "node:path";
 import { JobError, MaterialError, NotFoundError, PrinterOfflineError } from "../core/errors";
 import type { Automation, NightCandidate, NightPrint, QueueJob } from "../domain/dashboard/types";
 import type { PrintQueueStore } from "../domain/print/repositories";
-import { env, uploads } from "../shared/env";
+import { env, slicing, uploads } from "../shared/env";
 import { importLegacyQueue } from "../infra/db/legacyImport";
 import { openPrintQueueStore } from "../infra/db/store";
 import { ArtifactStorage } from "../infra/storage/artifactStorage";
+import { OrcaCatalogSource } from "../infra/slicing/catalogSource";
+import { OrcaCliRunner } from "../infra/slicing/orcaCliRunner";
+import type { SliceRunner } from "../infra/slicing/sliceRunner";
 import { ArtifactService } from "./artifacts/artifactService";
+import { PresetImportService } from "./slicing/presetImportService";
+import { ProfileService, type SlicerPrinterRef } from "./slicing/profileService";
+import { SliceService } from "./slicing/sliceService";
 import { PrintQueueService } from "./printQueue/printQueueService";
 import { FulfillmentInventoryClient } from "../infra/fulfillment/inventoryClient";
 import { loadPrintersConfig, type PrinterConfig, type PrinterConfigSource } from "../infra/printers/config";
@@ -75,6 +81,15 @@ export class FarmStore {
    */
   private artifactStorage: ArtifactStorage | null = null;
   private artifactService: ArtifactService | null = null;
+  /**
+   * OrcaSlicer preset import + profile/slice services, opened lazily alongside the
+   * artifact service. The slice runner spawns the pinned OrcaSlicer CLI (or reports
+   * it unavailable); all three write only into the SQLite model.
+   */
+  private sliceRunner: SliceRunner | null = null;
+  private presetImportService: PresetImportService | null = null;
+  private profileService: ProfileService | null = null;
+  private sliceService: SliceService | null = null;
   /** Legacy queue snapshot captured at load, fed once into the SQLite import. */
   private readonly legacyQueueJobs: QueueJob[];
 
@@ -227,6 +242,25 @@ export class FarmStore {
     return this.artifactService as ArtifactService;
   }
 
+  /**
+   * The OrcaSlicer preset/slicing services (SQLite-backed), opened on first access
+   * together with {@link printQueue}. Exposes the preset importer, the profile/set
+   * management service and the slice pipeline. Unfinished slice variants are
+   * recovered and (when enabled) the catalog is imported once on first init.
+   */
+  get slicing(): {
+    presets: PresetImportService;
+    profiles: ProfileService;
+    slices: SliceService;
+  } {
+    this.ensurePrintQueue();
+    return {
+      presets: this.presetImportService as PresetImportService,
+      profiles: this.profileService as ProfileService,
+      slices: this.sliceService as SliceService
+    };
+  }
+
   private ensurePrintQueue(logger: StoreLogger = {}): void {
     if (this.printQueueService) return;
     const store = openPrintQueueStore(this.dbPath, logger);
@@ -256,6 +290,48 @@ export class FarmStore {
     });
     // Re-queue analyses left `pending`/`running` by a previous crash/restart.
     this.artifactService.recover();
+
+    // OrcaSlicer preset + slicing services. The runner spawns the pinned CLI when
+    // configured; with none, slices honestly block (nothing is faked).
+    this.sliceRunner = new OrcaCliRunner({
+      command: slicing.command,
+      baseArgs: slicing.baseArgs,
+      extraArgs: slicing.extraArgs,
+      pinnedVersion: slicing.pinnedVersion,
+      workerVersion: slicing.workerVersion,
+      networkIsolated: slicing.networkIsolated,
+      logger
+    });
+    this.presetImportService = new PresetImportService(
+      store,
+      new OrcaCatalogSource(slicing.catalogDir),
+      { logger }
+    );
+    this.profileService = new ProfileService(store, this.sliceRunner, () => this.slicerPrinters(), {
+      logger
+    });
+    this.sliceService = new SliceService(store, this.artifactStorage, this.artifactService, this.sliceRunner, {
+      tmpRoot: slicing.tmpRoot,
+      timeoutMs: slicing.timeoutMs,
+      concurrency: slicing.concurrency,
+      logger
+    });
+    // Recover slice variants left `pending`/`running` by a crash. The one-time
+    // catalog import is driven from start() (awaited there) so the profiles are
+    // ready before the server accepts traffic; a lazy init (no start) imports on
+    // the first explicit POST /slicing/presets/import instead.
+    this.sliceService.recover();
+  }
+
+  /** The farm printers projected into the shape the slicing compatibility checks use. */
+  private slicerPrinters(): SlicerPrinterRef[] {
+    return this.configs.map((c) => ({
+      id: c.id,
+      name: c.name,
+      model: c.model ?? null,
+      material: c.material ?? null,
+      protocol: c.protocol ?? null
+    }));
   }
 
   /** Loads the printer config and starts the background poll loop. */
@@ -268,6 +344,20 @@ export class FarmStore {
     // Open the queue database and run the one-time import at startup (with the
     // real logger), rather than lazily on the first API hit.
     this.ensurePrintQueue(logger);
+
+    // Import the OrcaSlicer catalog once, before accepting traffic — best-effort so
+    // a missing/broken catalog can never stop the farm from starting.
+    if (slicing.autoImport && this.presetImportService) {
+      try {
+        const result = await this.presetImportService.import("system");
+        logger.info?.(
+          { active: result.counts.active, quarantined: result.counts.quarantined, invalid: result.counts.invalid },
+          "orca preset catalog imported"
+        );
+      } catch (error) {
+        logger.warn?.({ err: error }, "orca preset import on boot failed");
+      }
+    }
 
     const { printers, source } = await loadPrintersConfig();
     this.configs = printers;
@@ -300,14 +390,19 @@ export class FarmStore {
     // minute while running), then wait for every scheduled write to settle.
     this.state.save();
     await this.state.flush();
-    // Stop accepting new analysis work (in-flight jobs finish on their own).
+    // Stop accepting new analysis/slice work (in-flight jobs finish on their own).
     this.artifactService?.close();
+    this.sliceService?.close();
     // Close the queue database last, after all writes have settled.
     this.printQueueStore?.close();
     this.printQueueStore = null;
     this.printQueueService = null;
     this.artifactService = null;
     this.artifactStorage = null;
+    this.sliceRunner = null;
+    this.presetImportService = null;
+    this.profileService = null;
+    this.sliceService = null;
   }
 
   /** Awaits all pending state writes (used on shutdown and in tests). */

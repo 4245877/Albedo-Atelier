@@ -1,0 +1,366 @@
+{
+  "catalogVersion": 1,
+  "generator": "scripts/stage-orca-presets.py",
+  "stagedAt": "2026-07-17T10:42:05+00:00",
+  "slicer": "OrcaSlicer",
+  "sources": [
+    {
+      "id": "bambu-lab-a1-0.4-petg",
+      "file": "sources/bambu-lab-a1-0.4-petg.orca_printer",
+      "originalName": "Bambu Lab A1 0.4 PETG.orca_printer",
+      "sha256": "391dfe02b3b415978bfc770a881bea15c6173f8fa94972d6fd48c60357a8874f",
+      "sizeBytes": 16112,
+      "bundleType": "printer config bundle",
+      "orcaVersion": "02.03.00.62"
+    },
+    {
+      "id": "creality-k2-petg-0.4-fast",
+      "file": "sources/creality-k2-petg-0.4-fast.orca_printer",
+      "originalName": "Creality K2 PETG 0.4 FAST.orca_printer",
+      "sha256": "828b5a94eba7059a99696160484cf3efbe1b744b3ef7c4721ab0b9aab8dbcb44",
+      "sizeBytes": 11497,
+      "bundleType": "printer config bundle",
+      "orcaVersion": "02.03.00.62"
+    },
+    {
+      "id": "printer-presets",
+      "file": "sources/printer-presets.zip",
+      "originalName": "Printer presets.zip",
+      "sha256": "e062ffedd653ae5d28ddd1d4ad9917c243eee9ef6e6b9d6531489a7e5826b91d",
+      "sizeBytes": 9116,
+      "bundleType": null,
+      "orcaVersion": null
+    }
+  ],
+  "profiles": [
+    {
+      "logicalId": "filament:Creality",
+      "type": "filament",
+      "name": "Creality",
+      "file": "profiles/filament/creality.json",
+      "sha256": "413fca1bfd3b0651b2c7be314208a733f322a7b73e03167da8925b1bbc4a64c5",
+      "sizeBytes": 7070,
+      "inherits": null,
+      "from": "User",
+      "sources": [
+        "bambu-lab-a1-0.4-petg",
+        "creality-k2-petg-0.4-fast"
+      ]
+    },
+    {
+      "logicalId": "filament:Creality Hyper PLA @BBL A1 - Copy",
+      "type": "filament",
+      "name": "Creality Hyper PLA @BBL A1 - Copy",
+      "file": "profiles/filament/creality-hyper-pla-at-bbl-a1-copy.json",
+      "sha256": "fffa34a72203a190904b2093529560ba6b7a33058d54addb83421550c01fbcb1",
+      "sizeBytes": 634,
+      "inherits": "Bambu PLA Basic @BBL A1",
+      "from": "User",
+      "sources": [
+        "bambu-lab-a1-0.4-petg"
+      ]
+    },
+    {
+      "logicalId": "filament:Creality PLA",
+      "type": "filament",
+      "name": "Creality PLA",
+      "file": "profiles/filament/creality-pla.json",
+      "sha256": "e575fb2ac8bb314caa07f43aba822666877ba83e35f5b1f20f554a969b189bf7",
+      "sizeBytes": 1660,
+      "inherits": "Creality",
+      "from": "User",
+      "sources": [
+        "bambu-lab-a1-0.4-petg",
+        "creality-k2-petg-0.4-fast"
+      ]
+    },
+    {
+      "logicalId": "filament:ENYONE PLA",
+      "type": "filament",
+      "name": "ENYONE PLA",
+      "file": "profiles/filament/enyone-pla.json",
+      "sha256": "3ae078eb836308cc4dc0294a1e2c82e366cd0f572058ec827ec293dee0f060db",
+      "sizeBytes": 1601,
+      "inherits": "Creality",
+      "from": "User",
+      "sources": [
+        "bambu-lab-a1-0.4-petg",
+        "creality-k2-petg-0.4-fast"
+      ]
+    },
+    {
+      "logicalId": "filament:PETG @K2",
+      "type": "filament",
+      "name": "PETG @K2",
+      "file": "profiles/filament/petg-at-k2.json",
+      "sha256": "8340af42e93fee7244730b924032378a5e8601b06f1ca9aac349a0dafb80d065",
+      "sizeBytes": 2023,
+      "inherits": "Creality Generic PLA @K2-all",
+      "from": "User",
+      "sources": [
+        "creality-k2-petg-0.4-fast"
+      ]
+    },
+    {
+      "logicalId": "filament:PETG @K2 Balance",
+      "type": "filament",
+      "name": "PETG @K2 Balance",
+      "file": "profiles/filament/petg-at-k2-balance.json",
+      "sha256": "f42e626b6f5e4e770de806e70f06a6a2adffe178b41df2ae5f75671d148c2e05",
+      "sizeBytes": 2039,
+      "inherits": "Creality Generic PLA @K2-all",
+      "from": "User",
+      "sources": [
+        "creality-k2-petg-0.4-fast"
+      ]
+    },
+    {
+      "logicalId": "filament:PETG @K2 FAST",
+      "type": "filament",
+      "name": "PETG @K2 FAST",
+      "file": "profiles/filament/petg-at-k2-fast.json",
+      "sha256": "71dc402939f0223b0084b8df017c573fdb3dce6f2f4cac33503735070a84bf19",
+      "sizeBytes": 2033,
+      "inherits": "Creality Generic PLA @K2-all",
+      "from": "User",
+      "sources": [
+        "creality-k2-petg-0.4-fast"
+      ]
+    },
+    {
+      "logicalId": "filament:PETG @K2 FAST1",
+      "type": "filament",
+      "name": "PETG @K2 FAST1",
+      "file": "profiles/filament/petg-at-k2-fast1.json",
+      "sha256": "2f52fc36b00ed846795d42fd8f5c429a90a303993afb45cab80dd0970834080d",
+      "sizeBytes": 2035,
+      "inherits": "Creality Generic PLA @K2-all",
+      "from": "User",
+      "sources": [
+        "creality-k2-petg-0.4-fast"
+      ]
+    },
+    {
+      "logicalId": "filament:VVM PETG 0.4@BBL A1",
+      "type": "filament",
+      "name": "VVM PETG 0.4@BBL A1",
+      "file": "profiles/filament/vvm-petg-0.4-at-bbl-a1.json",
+      "sha256": "9ad49b654c05ca785c522742d737933f54f7c52c8e0d33dd5e7d68b44efc2bfa",
+      "sizeBytes": 1939,
+      "inherits": "Bambu PLA Basic @BBL A1",
+      "from": "User",
+      "sources": [
+        "bambu-lab-a1-0.4-petg"
+      ]
+    },
+    {
+      "logicalId": "filament:VVM PETG 0.6@BBL A1",
+      "type": "filament",
+      "name": "VVM PETG 0.6@BBL A1",
+      "file": "profiles/filament/vvm-petg-0.6-at-bbl-a1.json",
+      "sha256": "f7db4499a7b350fb5b06445c8dbda334f65f50e21a35c74071f14e482ee1b208",
+      "sizeBytes": 1939,
+      "inherits": "Bambu PLA Basic @BBL A1",
+      "from": "User",
+      "sources": [
+        "bambu-lab-a1-0.4-petg"
+      ]
+    },
+    {
+      "logicalId": "filament:VVM PETG 0.8@BBL A1",
+      "type": "filament",
+      "name": "VVM PETG 0.8@BBL A1",
+      "file": "profiles/filament/vvm-petg-0.8-at-bbl-a1.json",
+      "sha256": "e153e6c07792f7debe6323bf4413c3f82f3547fccc6c3fcb793179a5ebbd83ed",
+      "sizeBytes": 2289,
+      "inherits": "Bambu PLA Basic @BBL A1",
+      "from": "User",
+      "sources": [
+        "bambu-lab-a1-0.4-petg"
+      ]
+    },
+    {
+      "logicalId": "machine:Bambu Lab A1 0.4 PETG",
+      "type": "machine",
+      "name": "Bambu Lab A1 0.4 PETG",
+      "file": "profiles/machine/bambu-lab-a1-0.4-petg.json",
+      "sha256": "ec0f5f53e3f10fbd5330ea3e87db918fa156d5a8bd4cd8ad6620b67c072e1385",
+      "sizeBytes": 28890,
+      "inherits": "Bambu Lab A1 0.4 nozzle",
+      "from": "User",
+      "sources": [
+        "bambu-lab-a1-0.4-petg",
+        "printer-presets"
+      ]
+    },
+    {
+      "logicalId": "machine:Creality K2 PETG 0.4 Balance",
+      "type": "machine",
+      "name": "Creality K2 PETG 0.4 Balance",
+      "file": "profiles/machine/creality-k2-petg-0.4-balance.json",
+      "sha256": "1950422b9768fcfdc199bc6a76efcf92311eb853588f450d94b269a241496c02",
+      "sizeBytes": 6951,
+      "inherits": "Creality K2 0.2 nozzle",
+      "from": "User",
+      "sources": [
+        "printer-presets"
+      ]
+    },
+    {
+      "logicalId": "machine:Creality K2 PETG 0.4 FAST",
+      "type": "machine",
+      "name": "Creality K2 PETG 0.4 FAST",
+      "file": "profiles/machine/creality-k2-petg-0.4-fast.json",
+      "sha256": "7d991f2f58f351f99622671bc1f8d44b82eef5a0b54cceb1495730177222b94c",
+      "sizeBytes": 6945,
+      "inherits": "Creality K2 0.2 nozzle",
+      "from": "User",
+      "sources": [
+        "creality-k2-petg-0.4-fast"
+      ]
+    },
+    {
+      "logicalId": "process:0.08mm SuperDetail @Creality K2 0.2 nozzle - Copy",
+      "type": "process",
+      "name": "0.08mm SuperDetail @Creality K2 0.2 nozzle - Copy",
+      "file": "profiles/process/0.08mm-superdetail-at-creality-k2-0.2-nozzle-copy.json",
+      "sha256": "f4bd85c6084a400eae40b3769508f38055b0814707dd5ff123ba41599dc7d62a",
+      "sizeBytes": 372,
+      "inherits": "0.08mm SuperDetail @Creality K2 0.2 nozzle",
+      "from": "User",
+      "sources": [
+        "creality-k2-petg-0.4-fast"
+      ]
+    },
+    {
+      "logicalId": "process:@BBL A1 0.4 PLA",
+      "type": "process",
+      "name": "@BBL A1 0.4 PLA",
+      "file": "profiles/process/at-bbl-a1-0.4-pla.json",
+      "sha256": "a4ceaa6aa25038f351399b500ba7c610ab508f4a93726181ba95ed4696d0ddf6",
+      "sizeBytes": 1087,
+      "inherits": "0.20mm Strength @BBL A1",
+      "from": "User",
+      "sources": [
+        "bambu-lab-a1-0.4-petg"
+      ]
+    },
+    {
+      "logicalId": "process:@BBL A1 0.4 PLA тест",
+      "type": "process",
+      "name": "@BBL A1 0.4 PLA тест",
+      "file": "profiles/process/at-bbl-a1-0.4-pla-test.json",
+      "sha256": "4d0ab4813a062359f3a45dffcfb820d9de286f5f36eb2e4760584a50115ce0f6",
+      "sizeBytes": 1293,
+      "inherits": "0.20mm Strength @BBL A1",
+      "from": "User",
+      "sources": [
+        "bambu-lab-a1-0.4-petg"
+      ]
+    },
+    {
+      "logicalId": "process:Creality K2 0.4",
+      "type": "process",
+      "name": "Creality K2 0.4",
+      "file": "profiles/process/creality-k2-0.4.json",
+      "sha256": "bb3e33e8ea8627af802284be6c5b29467d4b353cc3fc02c6db77153584b27962",
+      "sizeBytes": 304,
+      "inherits": "0.08mm SuperDetail @Creality K2 0.2 nozzle",
+      "from": "User",
+      "sources": [
+        "creality-k2-petg-0.4-fast"
+      ]
+    },
+    {
+      "logicalId": "process:Creality K2 0.4 Balance",
+      "type": "process",
+      "name": "Creality K2 0.4 Balance",
+      "file": "profiles/process/creality-k2-0.4-balance.json",
+      "sha256": "9655f5f5ca9997b360c611b27c9146f7ceda8fb614c3dc380526b96b65221fdd",
+      "sizeBytes": 1790,
+      "inherits": "0.08mm SuperDetail @Creality K2 0.2 nozzle",
+      "from": "User",
+      "sources": [
+        "creality-k2-petg-0.4-fast"
+      ]
+    },
+    {
+      "logicalId": "process:Creality K2 0.4 FAST",
+      "type": "process",
+      "name": "Creality K2 0.4 FAST",
+      "file": "profiles/process/creality-k2-0.4-fast.json",
+      "sha256": "218f8df872bd56d5850a64a338f04f92692f0ea69bed302d2e96c7960c545340",
+      "sizeBytes": 1367,
+      "inherits": "0.08mm SuperDetail @Creality K2 0.2 nozzle",
+      "from": "User",
+      "sources": [
+        "creality-k2-petg-0.4-fast"
+      ]
+    },
+    {
+      "logicalId": "process:Creality K2 0.4 FAST1",
+      "type": "process",
+      "name": "Creality K2 0.4 FAST1",
+      "file": "profiles/process/creality-k2-0.4-fast1.json",
+      "sha256": "36e5d1109ab12ec78ac12eccad09f3b922bd57d7a877d2477bb45ed024af552d",
+      "sizeBytes": 2120,
+      "inherits": "0.08mm SuperDetail @Creality K2 0.2 nozzle",
+      "from": "User",
+      "sources": [
+        "creality-k2-petg-0.4-fast"
+      ]
+    },
+    {
+      "logicalId": "process:PETG 0.4mm @BBL A1",
+      "type": "process",
+      "name": "PETG 0.4mm @BBL A1",
+      "file": "profiles/process/petg-0.4mm-at-bbl-a1.json",
+      "sha256": "34b9e9070f8e68655456520fda1fb7ff10009e2e943ee31a4b7062d0e7adb00c",
+      "sizeBytes": 975,
+      "inherits": "0.20mm Standard @BBL A1",
+      "from": "User",
+      "sources": [
+        "bambu-lab-a1-0.4-petg"
+      ]
+    },
+    {
+      "logicalId": "process:PETG 0.4mm Quality @BBL A1",
+      "type": "process",
+      "name": "PETG 0.4mm Quality @BBL A1",
+      "file": "profiles/process/petg-0.4mm-quality-at-bbl-a1.json",
+      "sha256": "a0c38b3ba0c045f0503b62080c01f673f4ac77b17e4f6414588504f949899e8f",
+      "sizeBytes": 1387,
+      "inherits": "0.20mm Standard @BBL A1",
+      "from": "User",
+      "sources": [
+        "bambu-lab-a1-0.4-petg"
+      ]
+    },
+    {
+      "logicalId": "process:PETG 0.6mm @BBL A1",
+      "type": "process",
+      "name": "PETG 0.6mm @BBL A1",
+      "file": "profiles/process/petg-0.6mm-at-bbl-a1.json",
+      "sha256": "27abd1745e9a38827a278fa815e84c6693f409e4ee8f1fa4403c9b85938b9315",
+      "sizeBytes": 1746,
+      "inherits": "0.20mm Standard @BBL A1",
+      "from": "User",
+      "sources": [
+        "bambu-lab-a1-0.4-petg"
+      ]
+    },
+    {
+      "logicalId": "process:PETG 0.8mm @BBL A1",
+      "type": "process",
+      "name": "PETG 0.8mm @BBL A1",
+      "file": "profiles/process/petg-0.8mm-at-bbl-a1.json",
+      "sha256": "ad4ec8f911b313886480b667c28e0a7f5c5af0d11ab6c096872ba7b1c1447712",
+      "sizeBytes": 1755,
+      "inherits": "0.20mm Standard @BBL A1",
+      "from": "User",
+      "sources": [
+        "bambu-lab-a1-0.4-petg"
+      ]
+    }
+  ]
+}

@@ -11,7 +11,10 @@ import { SqliteDispatchAttemptRepository } from "./dispatchAttemptRepository";
 import { SqlitePlanRepository } from "./planRepository";
 import { SqlitePrintRunRepository } from "./printRunRepository";
 import { SqlitePrintTaskRepository } from "./printTaskRepository";
+import { SqliteProfileRevisionRepository } from "./profileRevisionRepository";
+import { SqliteProfileSetRepository } from "./profileSetRepository";
 import { SqliteQueueEntryRepository } from "./queueEntryRepository";
+import { SqliteSliceVariantRepository } from "./sliceVariantRepository";
 
 /**
  * The SQLite adapter for the {@link PrintQueueStore} port: it owns the
@@ -35,7 +38,10 @@ export class SqlitePrintQueueStore implements PrintQueueStore {
       dispatchAttempts: new SqliteDispatchAttemptRepository(db),
       printRuns: new SqlitePrintRunRepository(db),
       audit: new SqliteAuditEventRepository(db),
-      meta: new SqliteAppMetaRepository(db)
+      meta: new SqliteAppMetaRepository(db),
+      profileRevisions: new SqliteProfileRevisionRepository(db),
+      profileSets: new SqliteProfileSetRepository(db),
+      sliceVariants: new SqliteSliceVariantRepository(db)
     };
   }
 

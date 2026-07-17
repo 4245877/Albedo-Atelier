@@ -5,6 +5,7 @@ import { farmStore } from "../../app/farmStore";
 import type { CreateTaskInput } from "../../app/printQueue/printQueueService";
 import { ValidationError } from "../../core/errors";
 import { uploads } from "../../shared/env";
+import { registerSlicingRoutes } from "./slicingRoutes";
 
 /**
  * The persistent print-queue API under `/api/print` — the surface for the new
@@ -42,6 +43,7 @@ export async function registerPrintQueueRoutes(app: FastifyInstance): Promise<vo
   });
 
   registerArtifactRoutes(app);
+  registerSlicingRoutes(app);
 
   app.get("/tasks", async () => ({ tasks: farmStore.printQueue.listTasks() }));
 

@@ -39,6 +39,21 @@ function readPositiveNumber(name: string, value: string | undefined, fallback: n
   return parsed;
 }
 
+/** A boolean env flag (`true/1/yes/on` → true); unset → the default. */
+function readBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value.trim() === "") return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+/** Splits a shell-ish args string on whitespace (container-mode base args); empty → []. */
+function readArgs(value: string | undefined): string[] {
+  if (!value || value.trim() === "") return [];
+  return value.trim().split(/\s+/);
+}
+
 const MB = 1024 * 1024;
 
 export type LightScheduleMode = "solar" | "fixed";
@@ -261,6 +276,42 @@ export const uploads = Object.freeze({
   zipMaxRatio: readPositiveNumber("UPLOAD_ZIP_MAX_RATIO", process.env.UPLOAD_ZIP_MAX_RATIO, 200),
   /** Maximum size of any single XML document parsed from a 3MF. */
   xmlMaxBytes: readPositiveInt("UPLOAD_XML_MAX_BYTES", process.env.UPLOAD_XML_MAX_BYTES, 64 * MB)
+});
+
+/**
+ * OrcaSlicer preset-catalog + slicing-runtime configuration.
+ *
+ * `command` is the executable the slicing worker spawns; when unset there is **no**
+ * runtime and every slice is honestly `blocked` (nothing is faked). For network
+ * isolation, set `command` to a container runtime and `baseArgs` to its
+ * `run --rm --network none …` flags, and flag `networkIsolated`. The pinned version
+ * defaults to the OrcaSlicer release the vendored bundles came from; the worker
+ * version is bumped in code when the slice logic changes (both feed the cache key).
+ */
+export const slicing = Object.freeze({
+  /** The vendored catalog root (`config/slicers/orca`); ships in the image. */
+  catalogDir:
+    process.env.ORCA_CATALOG_DIR || path.resolve(process.cwd(), "config", "slicers", "orca"),
+  /** Executable to spawn (OrcaSlicer, or a container runtime); null → runtime unavailable. */
+  command: process.env.ORCA_SLICER_CMD?.trim() || null,
+  /** Args prepended before the slice args (container `run … <image> orca-slicer`). */
+  baseArgs: readArgs(process.env.ORCA_SLICER_BASE_ARGS),
+  /** Extra args appended before the model path (advanced tuning). */
+  extraArgs: readArgs(process.env.ORCA_SLICER_EXTRA_ARGS),
+  /** The pinned OrcaSlicer version (the bundles were exported from 2.3.0). */
+  pinnedVersion: process.env.ORCA_SLICER_VERSION?.trim() || "2.3.0",
+  /** The slice worker's own version — bump when the slice logic changes (cache key input). */
+  workerVersion: "orca-slice-1",
+  /** True when the slicer runs with the network disabled (container mode). */
+  networkIsolated: readBoolean(process.env.ORCA_SLICER_NETWORK_ISOLATED, false),
+  /** Per-slice wall-clock budget (ms) before the process is killed. */
+  timeoutMs: readPositiveInt("ORCA_SLICE_TIMEOUT_MS", process.env.ORCA_SLICE_TIMEOUT_MS, 600000),
+  /** How many slices may run at once (slicing is heavy — default 1). */
+  concurrency: readPositiveInt("ORCA_SLICE_CONCURRENCY", process.env.ORCA_SLICE_CONCURRENCY, 1),
+  /** Base directory each slice gets an isolated work dir under (on the data volume). */
+  tmpRoot: process.env.ORCA_SLICE_TMP_DIR || path.resolve(path.dirname(stateFilePath), "slice-tmp"),
+  /** Import the catalog into the DB on first boot (idempotent). */
+  autoImport: readBoolean(process.env.ORCA_AUTO_IMPORT, true)
 });
 
 export const env = Object.freeze({

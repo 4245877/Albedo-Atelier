@@ -3,6 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { StoreLogger } from "../../../shared/logger";
 import { migration001 } from "./001_initial";
 import { migration002 } from "./002_artifact_analysis";
+import { migration003 } from "./003_slicing";
 
 /**
  * One forward-only schema migration. `up` receives the open connection and runs
@@ -21,7 +22,7 @@ export interface Migration {
  * Append new migrations here with the next version number; never edit or
  * reorder an already-shipped one (a deployed database has recorded it as run).
  */
-export const MIGRATIONS: readonly Migration[] = [migration001, migration002];
+export const MIGRATIONS: readonly Migration[] = [migration001, migration002, migration003];
 
 const MIGRATIONS_TABLE = "schema_migrations";
 

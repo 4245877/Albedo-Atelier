@@ -1,4 +1,9 @@
 import type {
+  ProfileRevisionRepository,
+  ProfileSetRepository,
+  SliceVariantRepository
+} from "../slicing/repositories";
+import type {
   Artifact,
   ArtifactAnalysis,
   Assignment,
@@ -141,6 +146,10 @@ export interface Repositories {
   printRuns: PrintRunRepository;
   audit: AuditEventRepository;
   meta: AppMetaRepository;
+  // slicing domain (domain/slicing)
+  profileRevisions: ProfileRevisionRepository;
+  profileSets: ProfileSetRepository;
+  sliceVariants: SliceVariantRepository;
 }
 
 /**
