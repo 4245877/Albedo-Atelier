@@ -57,6 +57,7 @@ function printer(id: string, over: Partial<SchedulerPrinterRef> = {}): Scheduler
     ams: null,
     telemetryAgeMs: 1000,
     materialRemainingSufficient: null,
+    printingTimeLeftMs: null,
     ...over
   };
 }
@@ -296,6 +297,46 @@ function insertSlicedTask(
   return task;
 }
 
+/** Seeds an approved machine profile set bound to a printer id (no slice) — the bed source. */
+function insertApprovedMachineSet(
+  db: PrintQueueStore,
+  printerId: string,
+  bed: { w: number; d: number; h: number } = { w: 300, d: 300, h: 300 }
+): void {
+  const repos = db.repositories;
+  const machine = revision(`am_${printerId}`, "machine", {
+    nozzle_diameter: "0.4",
+    // OrcaSlicer stores printable_area as an array of "XxY" polygon points.
+    printable_area: [`0x0`, `${bed.w}x0`, `${bed.w}x${bed.d}`, `0x${bed.d}`],
+    printable_height: String(bed.h),
+    gcode_flavor: "klipper"
+  });
+  const process = revision(`ap_${printerId}`, "process", { layer_height: "0.2" });
+  const filament = revision(`af_${printerId}`, "filament", { filament_type: "PLA" });
+  repos.profileRevisions.insert(machine);
+  repos.profileRevisions.insert(process);
+  repos.profileRevisions.insert(filament);
+  repos.profileSets.insert({
+    id: `apset_${printerId}`,
+    name: `approved_${printerId}`,
+    machineRevisionId: machine.id,
+    processRevisionId: process.id,
+    filamentRevisionId: filament.id,
+    printerId,
+    printerClass: null,
+    validation: "valid",
+    approved: true,
+    approvedBy: "operator",
+    approvedAt: ISO,
+    warnings: [],
+    blockers: [],
+    createdAt: ISO,
+    updatedAt: ISO,
+    version: 1,
+    metadata: {}
+  });
+}
+
 // ── Compatibility matrix ─────────────────────────────────────────────────────
 
 test("compatibility matrix: a matching gcode task is compatible; a nozzle mismatch is blocked", () => {
@@ -489,4 +530,124 @@ test("night candidates: a task without unattended permission is never eligible",
   const svc = makeService(db, [printer("p1", { materialRemainingSufficient: true })]);
   const report = svc.nightCandidates();
   assert.equal(report.candidates.length, 0);
+});
+
+// ── #1 build volume from the approved machine profile ──────────────────────────
+
+test("a G-code task fits when the bed comes from the printer's approved machine profile", () => {
+  const db = store();
+  insertGcodeTask(db, "g1"); // 100³ model, PLA, 0.4 nozzle, no slice
+  insertApprovedMachineSet(db, "p1", { w: 300, d: 300, h: 300 });
+  // The printer carries no explicit config build volume → the profile is the source.
+  const svc = makeService(db, [printer("p1", { buildVolume: null })]);
+  const r = svc.compatibilityMatrix().rows[0].results[0];
+  assert.equal(r.verdict, "compatible");
+  assert.ok(!r.reviews.some((x) => x.code === "build_volume_unknown"), "bed is known from the profile");
+});
+
+test("a config build volume that disagrees with the profile is a review, not silent", () => {
+  const db = store();
+  insertGcodeTask(db, "g1");
+  insertApprovedMachineSet(db, "p1", { w: 300, d: 300, h: 300 });
+  // Config says a smaller (but still fitting) bed than the profile → conflict review.
+  const svc = makeService(db, [printer("p1", { buildVolume: { x: 250, y: 250, z: 250 } })]);
+  const r = svc.compatibilityMatrix().rows[0].results[0];
+  assert.equal(r.verdict, "review");
+  assert.ok(r.reviews.some((x) => x.code === "build_volume_conflict"));
+});
+
+// ── #2/#3 night gate: ready G-code + operator material override ─────────────────
+
+test("night: a ready G-code task with a material override is eligible (no slice/profile needed)", () => {
+  const db = store();
+  insertGcodeTask(db, "n1", { unattended: true }); // gcode, clean analysis, ETA 3600, no slice
+  const svc = makeService(db, [printer("p1")]);
+  // Unknown remaining material → rejected.
+  assert.equal(svc.nightCandidates().candidates.length, 0);
+  // The operator asserts enough filament → the candidate clears the gate.
+  svc.setMaterialOverride("p1", { coverageHours: 10 });
+  const report = svc.nightCandidates();
+  assert.equal(report.candidates.length, 1);
+  assert.equal(report.candidates[0].taskId, "n1");
+});
+
+test("setMaterialOverride refuses a printer the farm does not know", () => {
+  const db = store();
+  const svc = makeService(db, [printer("p1")]);
+  assert.throws(() => svc.setMaterialOverride("ghost-9000", { coverageHours: 5 }), /конфигурации фермы/);
+});
+
+// ── #4 confirm supersede + revalidate ──────────────────────────────────────────
+
+test("confirmPlan supersedes the previous ACTIVE plan — never two live plans at once", () => {
+  const db = store();
+  insertGcodeTask(db, "t1");
+  const svc = makeService(db, [printer("p1")]);
+  const first = svc.confirmPlan(svc.buildDraftPlan().plan.id);
+  const second = svc.confirmPlan(svc.buildDraftPlan().plan.id);
+  assert.equal(second.plan.state, "ACTIVE");
+  assert.equal(db.repositories.plans.getById(first.plan.id)?.state, "CANCELLED");
+  assert.equal(db.repositories.plans.list().filter((p) => p.state === "ACTIVE").length, 1);
+});
+
+test("confirmPlan refuses a draft whose task is no longer schedulable (409)", () => {
+  const db = store();
+  insertGcodeTask(db, "t1");
+  const svc = makeService(db, [printer("p1")]);
+  const draft = svc.buildDraftPlan();
+  assert.equal(draft.assignments.length, 1);
+  // The task leaves the schedulable set after the draft was built.
+  const task = db.repositories.tasks.getById("t1")!;
+  db.repositories.tasks.update({ ...task, state: "CANCELLED" });
+  assert.throws(() => svc.confirmPlan(draft.plan.id), /устарел/);
+});
+
+// ── #5 free-time from telemetry + confirmed assignments ─────────────────────────
+
+test("a printer currently printing pushes the task start past its remaining time", () => {
+  const db = store();
+  insertGcodeTask(db, "t1", { durationS: 3600 });
+  const svc = makeService(db, [printer("p1", { status: "printing", printingTimeLeftMs: 2 * 3600 * 1000 })]);
+  const ex = svc.buildDraftPlan().assignments[0].explanation!;
+  assert.ok(ex.startMs >= NOW.getTime() + 2 * 3600 * 1000 - 1000, "starts after the current print finishes");
+});
+
+test("a printing printer with unknown remaining time warns that free-time is estimated", () => {
+  const db = store();
+  insertGcodeTask(db, "t1", { durationS: 3600 });
+  const svc = makeService(db, [printer("p1", { status: "printing", printingTimeLeftMs: null })]);
+  const ex = svc.buildDraftPlan().assignments[0].explanation!;
+  assert.ok(ex.warnings.some((w) => /оценено приблизительно/.test(w)));
+});
+
+test("night gate: a printer physically printing with no bed cycle is not a clear bed", () => {
+  const db = store();
+  insertGcodeTask(db, "n1", { unattended: true });
+  const svc = makeService(db, [printer("p1", { status: "printing", printingTimeLeftMs: null })]);
+  svc.setMaterialOverride("p1", { coverageHours: 10 });
+  const report = svc.nightCandidates();
+  assert.equal(report.candidates.length, 0);
+  assert.ok(report.rejected.some((r) => r.reasons.some((x) => /стол не свободен/.test(x))));
+});
+
+// ── #13 / #14 planning hygiene ──────────────────────────────────────────────────
+
+test("an ASSIGNED task is excluded from planning and the compatibility matrix", () => {
+  const db = store();
+  const task = insertGcodeTask(db, "t1");
+  db.repositories.tasks.update({ ...task, state: "ASSIGNED" });
+  const svc = makeService(db, [printer("p1")]);
+  assert.equal(svc.buildDraftPlan().assignments.length, 0);
+  assert.equal(svc.compatibilityMatrix().rows.length, 0);
+});
+
+test("building a fresh draft supersedes an earlier outstanding draft (no orphans)", () => {
+  const db = store();
+  insertGcodeTask(db, "t1");
+  const svc = makeService(db, [printer("p1")]);
+  const first = svc.buildDraftPlan();
+  const second = svc.buildDraftPlan();
+  assert.equal(db.repositories.plans.getById(first.plan.id)?.state, "CANCELLED");
+  assert.equal(second.plan.state, "DRAFT");
+  assert.equal(db.repositories.plans.list().filter((p) => p.state === "DRAFT").length, 1);
 });

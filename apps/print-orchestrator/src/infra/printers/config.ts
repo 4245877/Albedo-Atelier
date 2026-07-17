@@ -56,6 +56,12 @@ export interface PrinterConfig {
   nozzleDiameterMm?: number | null;
   /** Optional configured nozzle hardware type; same "из конфигурации" fallback role. */
   nozzleType?: string;
+  /**
+   * Optional explicit build volume in mm (`{x,y,z}`). When set it is the *priority*
+   * source the manual scheduler uses for fit checks; otherwise the scheduler falls
+   * back to the printer's approved machine profile. Null when not configured.
+   */
+  buildVolume?: { x: number; y: number; z: number } | null;
   /** Optional UI colour for the material chip. */
   swatch: string;
   /** Explicit camera snapshot URL; empty when the camera is not set up. */
@@ -139,6 +145,21 @@ function normalizeType(value: unknown): PrinterTechnology {
   return String(value ?? "").trim().toLowerCase() === "resin" ? "Resin" : "FDM";
 }
 
+/**
+ * An explicit `{x,y,z}` build volume in mm — accepted only when all three axes are
+ * finite and positive; anything else (missing, partial, non-numeric) is dropped to
+ * null so the scheduler falls back to the approved machine profile instead of a
+ * half-specified box.
+ */
+function normalizeBuildVolume(value: unknown): { x: number; y: number; z: number } | null {
+  if (!isObject(value)) return null;
+  const x = Number(value.x);
+  const y = Number(value.y);
+  const z = Number(value.z);
+  if ([x, y, z].every((n) => Number.isFinite(n) && n > 0)) return { x, y, z };
+  return null;
+}
+
 function normalizeLightConfig(value: unknown, protocol: PrinterProtocol): PrinterLightConfig {
   const object = isObject(value) ? value : {};
   const pin = asString(object.pin);
@@ -189,6 +210,7 @@ export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
     nozzleDiameterMm:
       Number.isFinite(nozzleDiameterValue) && nozzleDiameterValue > 0 ? nozzleDiameterValue : null,
     nozzleType: asString(value.nozzleType),
+    buildVolume: normalizeBuildVolume(value.buildVolume),
     swatch: asString(value.swatch),
     snapshotUrl: asString(value.snapshotUrl),
     streamUrl: asString(value.streamUrl),

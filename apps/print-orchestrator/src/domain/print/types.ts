@@ -425,6 +425,37 @@ export interface PrintRun {
   metadata: Metadata;
 }
 
+// ── MaterialOverride ─────────────────────────────────────────────────────────
+
+/**
+ * An operator's manual assertion about a printer's remaining filament, standing in
+ * for the remaining-material telemetry the farm does not have. It is the only
+ * source that can satisfy the night gate's "enough material" criterion: without one
+ * the gate honestly reports the remainder as unknown and refuses the candidate.
+ *
+ * Deliberately explicit and expiring: it records *who* asserted it and *until when*
+ * ({@link expiresAt}), and — when the operator gave a figure — for how many print
+ * hours the loaded spool is believed to last ({@link coverageHours}). A print is
+ * only considered covered when its (buffered) ETA fits inside that coverage.
+ */
+export interface MaterialOverride {
+  id: string;
+  /** The farm printer id this assertion is about. */
+  printerId: string;
+  /** The operator's verdict: true = enough loaded, false = explicitly not enough. */
+  sufficient: boolean;
+  /** Believed print-hours the loaded spool lasts; null = a blanket "enough" with no figure. */
+  coverageHours: number | null;
+  note: string | null;
+  /** Who asserted it (operator name/id); null when not recorded. */
+  author: string | null;
+  createdAt: IsoTimestamp;
+  /** When the assertion stops counting; null = no expiry (stands until replaced). */
+  expiresAt: IsoTimestamp | null;
+  version: number;
+  metadata: Metadata;
+}
+
 // ── AuditEvent ───────────────────────────────────────────────────────────────
 
 /** The entities an {@link AuditEvent} can be about. */
@@ -438,6 +469,7 @@ export type AuditEntityType =
   | "bed_cycle"
   | "dispatch_attempt"
   | "print_run"
+  | "material_override"
   | "profile_revision"
   | "profile_set"
   | "slice_variant";

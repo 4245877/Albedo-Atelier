@@ -176,3 +176,65 @@ test("every mutation is journalled in the audit log", () => {
   assert.ok(store.repositories.audit.list().some((e) => e.entityType === "assignment"));
   store.close();
 });
+
+// ── #7 priority band ─────────────────────────────────────────────────────────
+
+test("addTask rejects an out-of-range priority instead of poisoning the score", () => {
+  const { service, store } = makeService();
+  assert.throws(() => service.addTask({ title: "huge", priority: 1e308 }), /Приоритет/);
+  assert.throws(() => service.addTask({ title: "neg", priority: -1000 }), /Приоритет/);
+  // A value inside the band is accepted.
+  assert.equal(service.addTask({ title: "ok", priority: 50 }).task.priority, 50);
+  store.close();
+});
+
+test("setTaskScheduling rejects an out-of-range priority", () => {
+  const { service, store } = makeService();
+  const t = service.addTask({ title: "t" }).task;
+  assert.throws(() => service.setTaskScheduling(t.id, { priority: 1e308 }), /Приоритет/);
+  store.close();
+});
+
+// ── #8 notBefore/deadline order ──────────────────────────────────────────────
+
+test("addTask rejects a notBefore after the deadline (unsatisfiable window)", () => {
+  const { service, store } = makeService();
+  assert.throws(
+    () =>
+      service.addTask({
+        title: "impossible",
+        notBefore: "2026-07-20T00:00:00.000Z",
+        deadline: "2026-07-18T00:00:00.000Z"
+      }),
+    /notBefore/
+  );
+  store.close();
+});
+
+test("setTaskScheduling validates the effective window when only one side is patched", () => {
+  const { service, store } = makeService();
+  const t = service.addTask({ title: "t", deadline: "2026-07-18T00:00:00.000Z" }).task;
+  // Patch only notBefore to sit after the existing deadline → rejected.
+  assert.throws(
+    () => service.setTaskScheduling(t.id, { notBefore: "2026-07-20T00:00:00.000Z" }),
+    /notBefore/
+  );
+  store.close();
+});
+
+// ── #9 pin validation against the farm config ────────────────────────────────
+
+test("pinPrinter and addTask refuse a printer the farm does not know (when a config check is wired)", () => {
+  const store = openPrintQueueStore(":memory:");
+  const service = new PrintQueueService(store, {
+    now: () => new Date(Date.UTC(2026, 6, 17)),
+    isPrinterConfigured: (id) => id === "k2"
+  });
+  const t = service.addTask({ title: "t" }).task;
+  assert.throws(() => service.pinPrinter(t.id, "ghost-9000"), /конфигурации фермы/);
+  // A known printer pins fine.
+  assert.equal(service.pinPrinter(t.id, "k2").pinnedPrinterId, "k2");
+  // Creating a task pinned to an unknown printer is refused up front.
+  assert.throws(() => service.addTask({ title: "u", pinnedPrinterId: "ghost-9000" }), /конфигурации фермы/);
+  store.close();
+});

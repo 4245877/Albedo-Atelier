@@ -113,3 +113,26 @@ test("a deadline that cannot be met is warned about", () => {
   );
   assert.ok(result.assignments[0].warnings.some((w) => /дедлайн/i.test(w)));
 });
+
+test("manual queue order breaks a tie: a lower queueRank is planned first", () => {
+  // Two otherwise-identical tasks on one printer; the front-of-queue one runs first.
+  const front = task({ taskId: "front", queueRank: 0, compatiblePrinterIds: ["p1"], createdAtMs: NOW - 1000 });
+  const back = task({ taskId: "back", queueRank: 1, compatiblePrinterIds: ["p1"], createdAtMs: NOW - 1000 });
+  // Feed them in the "wrong" array order to prove the score, not input order, decides.
+  const result = buildPlan([back, front], [printer("p1")], config);
+  const frontA = result.assignments.find((a) => a.taskId === "front")!;
+  const backA = result.assignments.find((a) => a.taskId === "back")!;
+  assert.ok(frontA.startMs <= backA.startMs, "front-of-queue task is scheduled first");
+});
+
+test("a printer whose free-time is only estimated warns the waiting task", () => {
+  const result = buildPlan(
+    [task({ compatiblePrinterIds: ["p1"], etaSeconds: 3600 })],
+    [printer("p1", { freeAtMs: NOW + 3 * 3600 * 1000, freeAtEstimated: true })],
+    config
+  );
+  assert.ok(
+    result.assignments[0].warnings.some((w) => /оценено приблизительно/.test(w)),
+    "an estimated free-time is disclosed as a warning"
+  );
+});

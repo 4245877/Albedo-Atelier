@@ -44,7 +44,7 @@ export function setupScheduler() {
   void loadAll();
 }
 
-async function loadAll() {
+async function loadAll(options = {}) {
   try {
     const [queue, matrix, plans, night] = await Promise.all([
       apiGet("/api/print/scheduler/queue").catch(() => ({ queue: [] })),
@@ -57,12 +57,14 @@ async function loadAll() {
     state.plans = plans.plans || [];
     state.night = night;
 
-    // Latest plan (highest revision) — show its assignments + explanations.
+    // Freshest live plan — show its assignments + explanations.
     const latest = pickLatestPlan(state.plans);
     state.plan = latest ? await apiGet(`/api/print/scheduler/plans/${latest.id}`).catch(() => null) : null;
 
     state.loaded = true;
-    render();
+    // A background poll must not wipe out an operator's half-filled form or open
+    // editor; only skip the re-render in that case, the state is already updated.
+    if (!(options.fromPoll && isEditing())) render();
     ensurePolling();
   } catch {
     const body = $("#scheduler-body");
@@ -70,13 +72,26 @@ async function loadAll() {
   }
 }
 
+/** The freshest plan worth showing: newest non-terminal (drafts/active), not a cancelled/superseded one. */
 function pickLatestPlan(plans) {
-  if (!plans.length) return null;
-  return [...plans].sort((a, b) => (b.revision - a.revision) || (a.createdAt < b.createdAt ? 1 : -1))[0];
+  const live = plans.filter((p) => p.state !== "CANCELLED" && p.state !== "COMPLETED");
+  if (!live.length) return null;
+  return [...live].sort(
+    (a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0) || b.revision - a.revision
+  )[0];
+}
+
+/** True while the operator is mid-edit — an open params editor or focus in a section input. */
+function isEditing() {
+  const body = $("#scheduler-body");
+  if (!body) return false;
+  if (body.querySelector('[data-sch-form="params"]:not([hidden])')) return true;
+  const active = document.activeElement;
+  return Boolean(active && body.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName));
 }
 
 function ensurePolling() {
-  if (pollTimer === null) pollTimer = setInterval(() => void loadAll(), POLL_MS);
+  if (pollTimer === null) pollTimer = setInterval(() => void loadAll({ fromPoll: true }), POLL_MS);
 }
 
 /* ── Отрисовка ──────────────────────────────────────────────── */
@@ -214,8 +229,10 @@ function planHtml() {
        </ul></div>`
     : "";
 
-  return panel(`План печати ${stateChip}`,
-    `${confirmed}<div class="sch-lanes">${timeline || `<div class="slice-empty">Ни одно задание не размещено.</div>`}</div>${unplaced}`,
+  // The state chip is HTML — it belongs in the (unescaped) panel body, not the
+  // title (panel() esc()-escapes the title, which would show raw <span> markup).
+  return panel("План печати",
+    `<div class="sch-plan-status">${stateChip}${confirmed}</div><div class="sch-lanes">${timeline || `<div class="slice-empty">Ни одно задание не размещено.</div>`}</div>${unplaced}`,
     controls);
 }
 
@@ -331,6 +348,9 @@ function wireDelegates() {
 }
 
 async function saveParams(taskId, form, d) {
+  // Send the task version we rendered so a racing edit conflicts (409) instead of
+  // silently clobbering the other operator's change — the same guard reorder uses.
+  const row = state.queue.find((r) => r.task.id === taskId);
   const payload = {
     priority: Number(d.priority) || 0,
     dayNightPreference: d.dayNightPreference || "any",
@@ -338,6 +358,7 @@ async function saveParams(taskId, form, d) {
     deadline: d.deadline ? inputToIso(d.deadline) : null,
     unattendedAllowed: form.querySelector('[name="unattended"]').checked
   };
+  if (row && typeof row.task.version === "number") payload.expectedVersion = row.task.version;
   try {
     await apiPost(`/api/print/scheduler/tasks/${taskId}/params`, payload);
     const pin = d.pin;

@@ -15,6 +15,7 @@ export const ID_PREFIX = {
   bedCycle: "bed",
   dispatchAttempt: "dsp",
   printRun: "run",
+  materialOverride: "mat",
   auditEvent: "aud",
   // slicing domain (domain/slicing)
   profileRevision: "prof",

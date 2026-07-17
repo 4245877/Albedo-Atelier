@@ -8,9 +8,10 @@ import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 
 /*
  * The `/api/print/scheduler` HTTP surface end-to-end through the real farmStore
- * singleton, with no printers configured — so it exercises the routing, the
- * CSRF/token guard on mutations, and the honest "no compatible printers" path.
- * env freezes on first import, so process.env is set before anything reads it.
+ * singleton, with no printers configured (the store is never started) — so it
+ * exercises the routing, the CSRF/token guard on mutations, the honest "no
+ * compatible printers" path, and pin validation against the farm config. env
+ * freezes on first import, so process.env is set before anything reads it.
  */
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "scheduler-routes-"));
 const TOKEN = "scheduler-test-token";
@@ -94,14 +95,17 @@ test("params, pin/unpin and reorder round-trip over HTTP", async () => {
   assert.equal(params.json().task.priority, 7);
   assert.equal(params.json().task.dayNightPreference, "night");
 
+  // A pin to a printer the farm does not know is refused (400) — no printers are
+  // configured in this harness, so any pin is an unknown-printer pin.
   const pin = await app.inject({
     method: "POST",
     url: `/api/print/scheduler/tasks/${taskId}/pin`,
     headers: auth,
-    payload: { printer: "k2" }
+    payload: { printer: "ghost-9000" }
   });
-  assert.equal(pin.json().task.pinnedPrinterId, "k2");
+  assert.equal(pin.statusCode, 400);
 
+  // Unpin is always safe (idempotent) and leaves the task unpinned.
   const unpin = await app.inject({
     method: "POST",
     url: `/api/print/scheduler/tasks/${taskId}/unpin`,
@@ -154,4 +158,18 @@ test("GET /scheduler/night reports candidates with the configured buffer", async
   const body = res.json();
   assert.ok("candidates" in body && "rejected" in body);
   assert.equal(typeof body.safetyBufferRatio, "number");
+});
+
+test("material override: unknown printer is refused (400); the active list starts empty", async () => {
+  const list = await app.inject({ method: "GET", url: "/api/print/scheduler/material" });
+  assert.equal(list.statusCode, 200);
+  assert.deepEqual(list.json().overrides, [], "no printers configured → no overrides");
+
+  const bad = await app.inject({
+    method: "POST",
+    url: "/api/print/scheduler/printers/ghost-9000/material",
+    headers: auth,
+    payload: { coverageHours: 8 }
+  });
+  assert.equal(bad.statusCode, 400);
 });

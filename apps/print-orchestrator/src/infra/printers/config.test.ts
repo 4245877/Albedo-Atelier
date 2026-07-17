@@ -61,6 +61,22 @@ test("explicit on/off G-code wins over invert (the operator already encoded inte
 
 // ── id validation & uniqueness ────────────────────────────────────────────
 
+test("buildVolume is accepted only when x/y/z are all finite and positive", () => {
+  const ok = normalizePrinterConfig({
+    id: "k2",
+    name: "X",
+    host: "127.0.0.1",
+    buildVolume: { x: 300, y: 300, z: 300 }
+  });
+  assert.deepEqual(ok?.buildVolume, { x: 300, y: 300, z: 300 });
+
+  // A partial / non-numeric / non-positive box is dropped to null (fall back to the profile).
+  for (const bad of [{ x: 300, y: 300 }, { x: "abc", y: 300, z: 300 }, { x: 0, y: 300, z: 300 }, "300x300x300"]) {
+    const p = normalizePrinterConfig({ id: "k2", name: "X", host: "127.0.0.1", buildVolume: bad });
+    assert.equal(p?.buildVolume ?? null, null, `dropped: ${JSON.stringify(bad)}`);
+  }
+});
+
 test("an unsafe printer id (path traversal / separators) is rejected", () => {
   for (const id of ["../evil", "a/b", "a b", "..", "a.b", "a:b", ""]) {
     assert.equal(

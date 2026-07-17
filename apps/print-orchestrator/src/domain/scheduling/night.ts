@@ -28,8 +28,20 @@ export interface NightGateInput {
   printerId: string;
   /** Priority carried through so at-most-one-per-printer picks the strongest. */
   priority: number;
+  /**
+   * True for un-sliced source (STL / generic 3MF) that must be sliced before it
+   * can print; false for a ready G-code task. Selects which readiness gate the
+   * task must pass — the slicing infrastructure gates apply only when it is true.
+   */
+  needsSlicing: boolean;
   readySliceVariant: boolean;
   profileSetApproved: boolean;
+  /**
+   * For a ready G-code task (`needsSlicing === false`): the source/output artifact
+   * passed analysis and carries no blockers — the equivalent readiness proof to a
+   * ready slice + approved set, since a verified G-code file needs no slicing.
+   */
+  gcodeReady: boolean;
   /** Verified/analysis ETA in seconds, or null when unknown. */
   etaSeconds: number | null;
   /** Whether remaining material covers the print. null = unknown → fails the gate. */
@@ -61,8 +73,14 @@ export function evaluateNightGate(input: NightGateInput, config: NightConfig): N
   const blockers: string[] = [];
 
   if (!input.unattendedAllowed) blockers.push("задание не разрешено для печати без присмотра");
-  if (!input.readySliceVariant) blockers.push("нет готового слайса");
-  if (!input.profileSetApproved) blockers.push("набор профилей не утверждён");
+  if (input.needsSlicing) {
+    // Un-sliced work still needs the full slicing readiness proof.
+    if (!input.readySliceVariant) blockers.push("нет готового слайса");
+    if (!input.profileSetApproved) blockers.push("набор профилей не утверждён");
+  } else if (!input.gcodeReady) {
+    // A verified G-code file needs no slicing — only a clean analysis of the file.
+    blockers.push("G-code не прошёл анализ или содержит блокеры");
+  }
   if (input.etaSeconds === null) blockers.push("ETA неизвестна");
   if (input.materialSufficient === null) blockers.push("остаток материала неизвестен");
   else if (input.materialSufficient === false) blockers.push("недостаточно материала");

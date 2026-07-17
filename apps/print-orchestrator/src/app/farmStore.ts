@@ -296,6 +296,10 @@ export class FarmStore {
     return this.reads.listPrinters().map((view) => {
       const config = this.configs.find((c) => c.id === view.id) ?? null;
       const updatedMs = view.updatedAt ? Date.parse(view.updatedAt) : NaN;
+      // Remaining print time is only meaningful while the device reports printing.
+      const printing = view.status === "printing" || view.status === "paused";
+      const printingTimeLeftMs =
+        printing && view.minutesLeft !== null ? Math.max(0, view.minutesLeft) * 60_000 : null;
       return {
         id: view.id,
         name: view.name,
@@ -303,13 +307,18 @@ export class FarmStore {
         protocol: config?.protocol ?? null,
         material: view.liveMaterial ?? view.material,
         nozzleMm: view.nozzleDiameter,
-        buildVolume: null,
+        // Explicit config build volume (priority); the scheduler otherwise reads the
+        // approved machine profile bound to this printer.
+        buildVolume: config?.buildVolume ?? null,
         online: view.online,
         status: view.status,
         remoteStartSupported: view.remoteStartSupported,
         ams: null,
         telemetryAgeMs: Number.isFinite(updatedMs) ? Math.max(0, now - updatedMs) : null,
-        materialRemainingSufficient: null
+        // Remaining-material telemetry does not exist; the scheduler resolves
+        // sufficiency from operator material overrides instead.
+        materialRemainingSufficient: null,
+        printingTimeLeftMs
       };
     });
   }
@@ -322,7 +331,11 @@ export class FarmStore {
     // ongoing dual-write between the JSON store and SQLite.
     importLegacyQueue(store, this.legacyQueueJobs, { logger });
     this.printQueueStore = store;
-    this.printQueueService = new PrintQueueService(store);
+    this.printQueueService = new PrintQueueService(store, {
+      // Refuse a pin to a printer the farm does not know (evaluated lazily, so the
+      // config loaded in start() is in place by the time an operator pins).
+      isPrinterConfigured: (id) => this.configs.some((c) => c.id === id)
+    });
 
     this.artifactStorage = new ArtifactStorage({
       root: this.storageRoot,

@@ -10,6 +10,7 @@ import type {
   AuditEvent,
   BedCycle,
   DispatchAttempt,
+  MaterialOverride,
   Plan,
   PrintRun,
   PrintTask,
@@ -116,6 +117,13 @@ export interface PrintRunRepository extends WritableRepository<PrintRun> {
   findByLegacyRef(legacyRef: string): PrintRun | null;
 }
 
+export interface MaterialOverrideRepository extends WritableRepository<MaterialOverride> {
+  /** Overrides for a printer, newest first. */
+  listByPrinter(printerId: string): MaterialOverride[];
+  /** Every recorded override, newest first. */
+  list(): MaterialOverride[];
+}
+
 /** Append-only: no update, no version. */
 export interface AuditEventRepository {
   insert(event: AuditEvent): AuditEvent;
@@ -144,6 +152,7 @@ export interface Repositories {
   bedCycles: BedCycleRepository;
   dispatchAttempts: DispatchAttemptRepository;
   printRuns: PrintRunRepository;
+  materialOverrides: MaterialOverrideRepository;
   audit: AuditEventRepository;
   meta: AppMetaRepository;
   // slicing domain (domain/slicing)

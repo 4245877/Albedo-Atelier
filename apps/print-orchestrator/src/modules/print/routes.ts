@@ -241,12 +241,60 @@ function registerSchedulerRoutes(app: FastifyInstance): void {
     plan: farmStore.scheduler.recomputePlan(request.params.id)
   }));
 
-  app.post<{ Params: { id: string } }>("/scheduler/plans/:id/confirm", async (request) => ({
-    ok: true,
-    plan: farmStore.scheduler.confirmPlan(request.params.id)
-  }));
+  app.post<{ Params: { id: string }; Body: { expectedVersion?: unknown } }>(
+    "/scheduler/plans/:id/confirm",
+    async (request) => {
+      const raw = request.body?.expectedVersion;
+      const expectedVersion =
+        typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
+      return {
+        ok: true,
+        plan: farmStore.scheduler.confirmPlan(request.params.id, undefined, expectedVersion)
+      };
+    }
+  );
 
   app.get("/scheduler/night", async () => farmStore.scheduler.nightCandidates());
+
+  // Operator material overrides — the manual "enough filament loaded" assertion the
+  // night gate reads (the farm has no remaining-material telemetry).
+  app.get("/scheduler/material", async () => ({
+    overrides: farmStore.scheduler.listActiveMaterialOverrides()
+  }));
+
+  app.post<{ Params: { id: string }; Body: unknown }>(
+    "/scheduler/printers/:id/material",
+    async (request) => ({
+      ok: true,
+      override: farmStore.scheduler.setMaterialOverride(request.params.id, shapeMaterialOverride(request.body))
+    })
+  );
+}
+
+/** Narrows an untrusted body into the material-override input; only present fields are set. */
+function shapeMaterialOverride(body: unknown): {
+  sufficient?: boolean;
+  coverageHours?: number | null;
+  note?: string | null;
+  validForHours?: number | null;
+} {
+  const src = (body ?? {}) as Record<string, unknown>;
+  const out: {
+    sufficient?: boolean;
+    coverageHours?: number | null;
+    note?: string | null;
+    validForHours?: number | null;
+  } = {};
+  if (typeof src.sufficient === "boolean") out.sufficient = src.sufficient;
+  if (typeof src.coverageHours === "number" && Number.isFinite(src.coverageHours)) {
+    out.coverageHours = src.coverageHours;
+  }
+  if (typeof src.validForHours === "number" && Number.isFinite(src.validForHours)) {
+    out.validForHours = src.validForHours;
+  }
+  const note = optionalString(src.note);
+  if (note) out.note = note;
+  return out;
 }
 
 /** A trimmed non-empty string, or undefined — the shape the service expects. */

@@ -9,6 +9,8 @@ import {
 import type {
   Assignment,
   AuditEntityType,
+  BedCycleState,
+  MaterialOverride,
   Metadata,
   Plan,
   PrintTask
@@ -23,7 +25,7 @@ import {
   type CompatibilityTaskInput,
   type Dimensions
 } from "../../domain/scheduling/compatibility";
-import type { EtaSource } from "../../domain/scheduling/eta";
+import { applySafetyBuffer, type EtaSource } from "../../domain/scheduling/eta";
 import {
   buildPlan,
   type PlannerPrinterInput,
@@ -77,6 +79,12 @@ export interface SchedulerPrinterRef {
   telemetryAgeMs: number | null;
   /** Whether remaining material covers a print; null = unknown (fails the night gate honestly). */
   materialRemainingSufficient: boolean | null;
+  /**
+   * Remaining time of the print currently on this printer, in ms; null when it is
+   * not printing or the device reports no estimate. Drives the planner's free-time
+   * so a plan never promises a start on a printer that is still busy.
+   */
+  printingTimeLeftMs: number | null;
 }
 
 export interface SchedulerConfig {
@@ -145,6 +153,9 @@ export interface NightCandidatesReport {
   rejected: { taskId: string; title: string; printerId: string; reasons: string[] }[];
 }
 
+/** Default validity of a material override when the operator gives no window (a night's worth). */
+const DEFAULT_OVERRIDE_VALID_HOURS = 16;
+
 export class SchedulerService {
   private readonly compatibilityConfig: CompatibilityConfig;
 
@@ -202,26 +213,56 @@ export class SchedulerService {
       if (base.state === "COMPLETED" || base.state === "CANCELLED") {
         throw new JobError(`План «${planId}» в состоянии «${base.state}» — пересчёт невозможен`);
       }
-      const detail = this.createDraft({
-        name: base.name,
-        window: base.window,
-        base
-      });
-      if (base.state === "DRAFT") {
-        this.cancelDraft(base, "superseded");
-      }
-      return detail;
+      // createDraft seeds the new revision from `base` and then supersedes every
+      // other DRAFT (including a DRAFT base) via {@link supersedeOtherDrafts}. A
+      // confirmed (ACTIVE) base is deliberately left untouched — the new draft just
+      // carries a higher revision and points back to it.
+      return this.createDraft({ name: base.name, window: base.window, base });
     });
   }
 
-  /** Manually confirms a DRAFT plan (DRAFT → ACTIVE). The only path to a confirmed plan. */
-  confirmPlan(planId: string, actor?: string): PlanDetail {
+  /**
+   * Manually confirms a DRAFT plan (DRAFT → ACTIVE) — the only path to a confirmed
+   * plan. In one transaction it also (a) **supersedes** the previous ACTIVE plan
+   * (→ CANCELLED), so there is never more than one live plan, and (b) **revalidates**
+   * the draft: every placed task must still be schedulable at confirm time, else it
+   * refuses (409) rather than confirming a plan that assigns a cancelled/held task.
+   * An optional {@link expectedVersion} guards against confirming a stale draft.
+   */
+  confirmPlan(planId: string, actor?: string, expectedVersion?: number): PlanDetail {
     return this.store.transaction(() => {
       const plan = this.requirePlan(planId);
       if (plan.state !== "DRAFT") {
         throw new JobError(`Подтвердить можно только черновик; план «${planId}» — «${plan.state}»`);
       }
+      if (expectedVersion !== undefined && plan.version !== expectedVersion) {
+        throw new JobError(
+          `План «${planId}» изменился (версия ${plan.version} ≠ ожидаемой ${expectedVersion}) — обновите черновик`
+        );
+      }
+
+      // Re-check that every placed task is still schedulable; a task cancelled/held
+      // since the draft was built makes the plan unexecutable.
+      const stale = this.staleAssignments(plan.id);
+      if (stale.length > 0) {
+        throw new JobError(
+          `План устарел: задания больше не готовы к планированию (${stale
+            .map((s) => s.title)
+            .join(", ")}) — пересчитайте черновик`,
+          { staleTasks: stale }
+        );
+      }
+
       assertTransition("план", PLAN_TRANSITIONS, plan.state, "ACTIVE");
+
+      // Supersede the currently-confirmed plan, if any, before this one goes ACTIVE
+      // (also what the single-ACTIVE storage guard requires).
+      for (const other of this.store.repositories.plans.list()) {
+        if (other.id !== plan.id && other.state === "ACTIVE") {
+          this.cancelActive(other, `superseded by ${plan.id}`);
+        }
+      }
+
       const iso = this.nowIso();
       const saved = this.store.repositories.plans.update({
         ...plan,
@@ -239,6 +280,42 @@ export class SchedulerService {
         actor
       });
       return this.buildPlanDetail(saved);
+    });
+  }
+
+  /** Placed tasks in a plan that are no longer schedulable (title + id), for a confirm-time check. */
+  private staleAssignments(planId: string): { taskId: string; title: string }[] {
+    const schedulable = new Set(this.schedulableTasks().map((t) => t.id));
+    const stale: { taskId: string; title: string }[] = [];
+    const seen = new Set<string>();
+    for (const a of this.assignmentsOf(planId)) {
+      if (a.state === "CANCELLED" || a.state === "RELEASED") continue;
+      if (seen.has(a.taskId) || schedulable.has(a.taskId)) continue;
+      seen.add(a.taskId);
+      const task = this.store.repositories.tasks.getById(a.taskId);
+      stale.push({ taskId: a.taskId, title: task?.title ?? a.taskId });
+    }
+    return stale;
+  }
+
+  /** Supersedes a confirmed (ACTIVE) plan: cancels its still-open assignments, plan → CANCELLED. */
+  private cancelActive(plan: Plan, reason: string): void {
+    const repos = this.store.repositories;
+    for (const a of this.assignmentsOf(plan.id)) {
+      if (a.state === "PROPOSED" || a.state === "RESERVED") {
+        assertTransition("назначение", ASSIGNMENT_TRANSITIONS, a.state, "CANCELLED");
+        repos.assignments.update({ ...a, state: "CANCELLED", updatedAt: this.nowIso() });
+      }
+    }
+    assertTransition("план", PLAN_TRANSITIONS, plan.state, "CANCELLED");
+    repos.plans.update({ ...plan, state: "CANCELLED", updatedAt: this.nowIso() });
+    this.recordAudit({
+      entityType: "plan",
+      entityId: plan.id,
+      action: "superseded",
+      from: plan.state,
+      to: "CANCELLED",
+      detail: { reason }
     });
   }
 
@@ -280,6 +357,72 @@ export class SchedulerService {
     };
   }
 
+  // ── Material overrides (operator-facing) ─────────────────────────────────────────
+
+  /**
+   * Records the operator assertion "this printer has enough loaded filament" —
+   * the manual stand-in for the remaining-material telemetry the farm lacks, and
+   * the only thing that lets a night candidate clear the material gate. The printer
+   * must exist in the farm config; the assertion carries an author and an expiry.
+   */
+  setMaterialOverride(
+    printerId: string,
+    input: {
+      sufficient?: boolean;
+      coverageHours?: number | null;
+      note?: string | null;
+      validForHours?: number | null;
+      author?: string;
+    } = {}
+  ): MaterialOverride {
+    const id = printerId.trim();
+    if (!id) throw new ValidationError("Не указан принтер");
+    if (!this.listPrinters().some((p) => p.id === id)) {
+      throw new ValidationError(`Принтер «${id}» отсутствует в конфигурации фермы`);
+    }
+    const coverageHours =
+      input.coverageHours === null || input.coverageHours === undefined
+        ? null
+        : requirePositive(input.coverageHours, "coverageHours");
+    const validForHours =
+      input.validForHours === null || input.validForHours === undefined
+        ? DEFAULT_OVERRIDE_VALID_HOURS
+        : requirePositive(input.validForHours, "validForHours");
+
+    const nowMs = this.config.now().getTime();
+    const iso = new Date(nowMs).toISOString();
+    return this.store.transaction(() => {
+      const override: MaterialOverride = {
+        id: newId(ID_PREFIX.materialOverride),
+        printerId: id,
+        sufficient: input.sufficient !== false,
+        coverageHours,
+        note: input.note?.trim() || null,
+        author: input.author ?? this.actor,
+        createdAt: iso,
+        expiresAt: new Date(nowMs + validForHours * 3_600_000).toISOString(),
+        version: 1,
+        metadata: {}
+      };
+      this.store.repositories.materialOverrides.insert(override);
+      this.recordAudit({
+        entityType: "material_override",
+        entityId: override.id,
+        action: "created",
+        actor: input.author,
+        detail: { printerId: id, sufficient: override.sufficient, coverageHours, validForHours }
+      });
+      return override;
+    });
+  }
+
+  /** The active (unexpired) material override for every printer that has one. */
+  listActiveMaterialOverrides(): MaterialOverride[] {
+    return this.listPrinters()
+      .map((p) => this.activeMaterialOverride(p.id))
+      .filter((o): o is MaterialOverride => o !== null);
+  }
+
   // ── Internals: evidence resolution ────────────────────────────────────────────
 
   private evaluate(task: PrintTask, printer: SchedulerPrinterRef): CompatibilityResult {
@@ -303,9 +446,9 @@ export class SchedulerService {
       protocol: printer.protocol,
       material: printer.material,
       nozzleMm: printer.nozzleMm,
-      // The machine profile's bed (when a ready slice pins one) wins over the
-      // config fallback; null when neither is known → an honest `review`.
-      buildVolume: buildVolume ?? printer.buildVolume,
+      // Already resolved (config field > ready-slice machine bed > approved profile
+      // bed); null only when no source knows it → an honest `review`.
+      buildVolume,
       online: printer.online,
       status: printer.status,
       remoteStartSupported: printer.remoteStartSupported,
@@ -321,7 +464,13 @@ export class SchedulerService {
   private resolveEvidence(
     task: PrintTask,
     printer: SchedulerPrinterRef
-  ): { taskInput: CompatibilityTaskInput; evidence: CompatibilityEvidence; buildVolume: Dimensions | null } {
+  ): {
+    taskInput: CompatibilityTaskInput;
+    evidence: CompatibilityEvidence;
+    buildVolume: Dimensions | null;
+    needsSlicing: boolean;
+    gcodeReady: boolean;
+  } {
     const repos = this.store.repositories;
     const artifact = task.artifactId ? repos.artifacts.getById(task.artifactId) : null;
     const needsSlicing = artifact ? artifact.kind !== "gcode" : true;
@@ -333,6 +482,13 @@ export class SchedulerService {
 
     // Source/output analysis for dimensions/nozzle/material when there is no slice.
     const analysis = artifact ? repos.artifactAnalyses.latestForArtifact(artifact.id) : null;
+    // A ready G-code file's readiness proof (the night gate uses it in place of a
+    // ready slice + approved set): the analysis finished and found no blockers.
+    const gcodeReady =
+      analysis !== null &&
+      analysis.state === "ready" &&
+      analysis.verdict !== "blocked" &&
+      analysis.blockers.length === 0;
 
     const dimensions =
       readDims(variant?.dimensions ?? null) ?? readDims(analysis?.data ?? null) ?? null;
@@ -341,13 +497,18 @@ export class SchedulerService {
     const material =
       task.material ?? filamentFields?.filamentType ?? analysis?.material ?? null;
     const gcodeFlavor = machineFields?.gcodeFlavor ?? null;
-    const buildVolume =
-      machineFields &&
-      machineFields.bedWidthMm !== null &&
-      machineFields.bedDepthMm !== null &&
-      machineFields.bedHeightMm !== null
-        ? { x: machineFields.bedWidthMm, y: machineFields.bedDepthMm, z: machineFields.bedHeightMm }
-        : null;
+
+    // Build volume, in priority order: the explicit config field, then the ready
+    // slice's own machine bed, then the approved machine profile bound to this
+    // printer. The bed is a real, stored value — never invented — so a plain G-code
+    // task no longer stalls on "рабочая область неизвестна".
+    const sliceBed = bedDimsOf(machineFields);
+    const profileBed = this.printerProfileBuildVolume(printer.id);
+    const configBed = printer.buildVolume;
+    const profileDerived = sliceBed ?? profileBed;
+    const buildVolume = configBed ?? profileDerived;
+    const buildVolumeConflict =
+      configBed !== null && profileDerived !== null && dimsDiffer(configBed, profileDerived);
 
     const bed = repos.bedCycles.findOpenByPrinter(printer.id);
 
@@ -368,14 +529,47 @@ export class SchedulerService {
       profileSetApproved: profileSet ? profileSet.approved : null,
       profileSetBlocked: profileSet ? profileSet.validation === "blocked" : false,
       runtimeAvailable: this.config.runtimeAvailable,
-      bedCycle: bed ? bed.state : "CLEAR",
+      bedCycle: this.bedStateFor(printer, bed ? bed.state : null),
+      buildVolumeConflict,
       telemetryAgeMs: printer.telemetryAgeMs,
       maintenanceBlockers: [],
       sliceEtaS: variant?.orcaEtaS ?? null,
       gcodeEtaS: analysis?.estimatedDurationS ?? null
     };
 
-    return { taskInput, evidence, buildVolume };
+    return { taskInput, evidence, buildVolume, needsSlicing, gcodeReady };
+  }
+
+  /**
+   * The bed occupancy to reason with. A tracked cycle is authoritative; without
+   * one we infer honestly from live telemetry instead of assuming CLEAR — a printer
+   * that is physically printing (a legacy start outside the model) reads `RUNNING`,
+   * and a printer we cannot observe reads `UNKNOWN`, so neither is silently treated
+   * as a free bed.
+   */
+  private bedStateFor(printer: SchedulerPrinterRef, trackedState: BedCycleState | null): BedCycleState {
+    if (trackedState !== null) return trackedState;
+    if (printer.status === "printing" || printer.status === "paused") return "RUNNING";
+    const staleMs = this.compatibilityConfig.telemetryStaleMs;
+    const fresh = printer.telemetryAgeMs !== null && printer.telemetryAgeMs <= staleMs;
+    if (printer.online && fresh && printer.status === "idle") return "CLEAR";
+    return "UNKNOWN";
+  }
+
+  /** The build volume from the approved machine profile bound to this printer id, or null. */
+  private printerProfileBuildVolume(printerId: string): Dimensions | null {
+    const set = this.approvedMachineSetFor(printerId);
+    return set ? bedDimsOf(this.machineFieldsOf(set)) : null;
+  }
+
+  /** The most recently approved, non-blocked profile set bound to this exact printer id. */
+  private approvedMachineSetFor(printerId: string): ProfileSet | null {
+    const sets = this.store.repositories.profileSets
+      .list()
+      .filter((s) => s.printerId === printerId && s.approved && s.validation !== "blocked");
+    // `list()` is newest-first by created_at; prefer the most recent approval.
+    sets.sort((a, b) => (b.approvedAt ?? b.updatedAt).localeCompare(a.approvedAt ?? a.updatedAt));
+    return sets[0] ?? null;
   }
 
   /** A ready SliceVariant for this task targeting this printer (by id or class), or null. */
@@ -401,24 +595,59 @@ export class SchedulerService {
   }
 
   private nightGateFor(task: PrintTask, printer: SchedulerPrinterRef): NightGateInput {
-    const { evidence } = this.resolveEvidence(task, printer);
+    const { evidence, needsSlicing, gcodeReady } = this.resolveEvidence(task, printer);
     const staleMs = this.compatibilityConfig.telemetryStaleMs;
     const telemetryFresh =
       evidence.telemetryAgeMs !== null && evidence.telemetryAgeMs <= staleMs;
     const etaSeconds = evidence.sliceEtaS ?? evidence.gcodeEtaS ?? null;
+    const bufferedEtaSeconds =
+      etaSeconds !== null ? applySafetyBuffer(etaSeconds, this.config.nightSafetyBufferRatio) : null;
     return {
       taskId: task.id,
       printerId: printer.id,
       priority: task.priority,
+      needsSlicing,
       readySliceVariant: evidence.readySliceVariant,
       profileSetApproved: evidence.profileSetApproved === true,
+      gcodeReady,
       etaSeconds,
-      materialSufficient: printer.materialRemainingSufficient,
+      // Compare the buffered ETA against the operator's material-coverage override.
+      materialSufficient: this.resolveMaterialSufficient(printer, bufferedEtaSeconds),
       telemetryFresh,
       bedCycle: evidence.bedCycle,
       maintenanceBlockers: evidence.maintenanceBlockers,
       unattendedAllowed: task.unattendedAllowed
     };
+  }
+
+  /**
+   * Whether the printer's loaded filament covers a print of `bufferedEtaSeconds`.
+   * A live telemetry hint (rare today) wins; otherwise the operator's material
+   * override decides, and with neither the answer is honestly `null` (unknown),
+   * which fails the night gate rather than assuming enough.
+   */
+  private resolveMaterialSufficient(
+    printer: SchedulerPrinterRef,
+    bufferedEtaSeconds: number | null
+  ): boolean | null {
+    if (printer.materialRemainingSufficient !== null) return printer.materialRemainingSufficient;
+    const override = this.activeMaterialOverride(printer.id);
+    if (!override) return null;
+    if (!override.sufficient) return false;
+    if (override.coverageHours === null) return true; // a blanket "enough" assertion
+    if (bufferedEtaSeconds === null) return null; // can't verify coverage against an unknown ETA
+    return bufferedEtaSeconds <= override.coverageHours * 3600;
+  }
+
+  /** The newest still-valid (unexpired) material override for a printer, or null. */
+  private activeMaterialOverride(printerId: string): MaterialOverride | null {
+    const nowMs = this.config.now().getTime();
+    for (const override of this.store.repositories.materialOverrides.listByPrinter(printerId)) {
+      if (override.expiresAt === null) return override;
+      const expMs = Date.parse(override.expiresAt);
+      if (!Number.isFinite(expMs) || expMs > nowMs) return override;
+    }
+    return null;
   }
 
   private collectNightRejections(
@@ -462,7 +691,9 @@ export class SchedulerService {
       compat.set(task.id, printers.map((p) => this.evaluate(task, p)));
     }
 
-    const plannerTasks: PlannerTaskInput[] = tasks.map((task) => {
+    // `tasks` is in queue order (schedulableTasks reads listOpen), so the index is
+    // the operator's manual rank — feeding it to the planner makes a reorder move.
+    const plannerTasks: PlannerTaskInput[] = tasks.map((task, index) => {
       const results = compat.get(task.id) ?? [];
       const compatible = results.filter((r) => r.verdict === "compatible");
       const eta = compatible.find((r) => r.eta.seconds !== null)?.eta ?? compatible[0]?.eta ?? null;
@@ -478,17 +709,22 @@ export class SchedulerService {
         requiredNozzleMm: null,
         etaSeconds: eta?.seconds ?? null,
         compatiblePrinterIds: compatible.map((r) => r.printerId),
-        previousPrinterId: previousByTask.get(task.id) ?? null
+        previousPrinterId: previousByTask.get(task.id) ?? null,
+        queueRank: index
       };
     });
 
-    const plannerPrinters: PlannerPrinterInput[] = printers.map((p) => ({
-      printerId: p.id,
-      name: p.name,
-      freeAtMs: now,
-      currentMaterial: p.material,
-      currentNozzleMm: p.nozzleMm
-    }));
+    const plannerPrinters: PlannerPrinterInput[] = printers.map((p) => {
+      const { freeAtMs, estimated } = this.printerFreeAt(p, now);
+      return {
+        printerId: p.id,
+        name: p.name,
+        freeAtMs,
+        freeAtEstimated: estimated,
+        currentMaterial: p.material,
+        currentNozzleMm: p.nozzleMm
+      };
+    });
 
     const planResult = buildPlan(plannerTasks, plannerPrinters, {
       nowMs: now,
@@ -564,7 +800,70 @@ export class SchedulerService {
       });
     }
 
+    // A fresh draft supersedes every other outstanding DRAFT, so repeated or
+    // parallel builds cannot leave a pile of orphan drafts competing to be "the
+    // plan". Confirmed (ACTIVE) plans are left untouched — only confirm supersedes
+    // those.
+    this.supersedeOtherDrafts(plan.id);
+
     return this.buildPlanDetail(plan);
+  }
+
+  /** Cancels every DRAFT plan except `keepId` (they are superseded by the new draft). */
+  private supersedeOtherDrafts(keepId: string): void {
+    for (const other of this.store.repositories.plans.list()) {
+      if (other.id !== keepId && other.state === "DRAFT") {
+        this.cancelDraft(other, "superseded");
+      }
+    }
+  }
+
+  /**
+   * When a printer becomes free, from live telemetry and confirmed work. A printer
+   * that is printing pushes free-time out by its reported remaining time; if it is
+   * printing but reports no remaining time, the free-time is *estimated* (flagged so
+   * placements warn) rather than pretended to be now. Assignments already committed
+   * by a confirmed (ACTIVE) plan push it out further still.
+   */
+  private printerFreeAt(printer: SchedulerPrinterRef, nowMs: number): { freeAtMs: number; estimated: boolean } {
+    let freeAtMs = nowMs;
+    let estimated = false;
+
+    if (printer.status === "printing" || printer.status === "paused") {
+      if (printer.printingTimeLeftMs !== null && printer.printingTimeLeftMs > 0) {
+        freeAtMs = Math.max(freeAtMs, nowMs + printer.printingTimeLeftMs);
+      } else {
+        // Busy, but no remaining estimate — advance by the disclosed assumption and
+        // mark it estimated so a task placed here is warned, not promised.
+        freeAtMs = Math.max(freeAtMs, nowMs + this.config.unknownEtaAssumptionS * 1000);
+        estimated = true;
+      }
+    }
+
+    for (const assignment of this.activeAssignmentsForPrinter(printer.id)) {
+      const endMs = readExplanation(assignment.metadata)?.endMs ?? null;
+      if (endMs !== null) freeAtMs = Math.max(freeAtMs, endMs);
+      else estimated = true; // a committed assignment with unknown end is an estimate too
+    }
+
+    return { freeAtMs, estimated };
+  }
+
+  /** Open assignments (not released/cancelled) a confirmed ACTIVE plan holds on a printer. */
+  private activeAssignmentsForPrinter(printerId: string): Assignment[] {
+    const out: Assignment[] = [];
+    for (const plan of this.store.repositories.plans.list()) {
+      if (plan.state !== "ACTIVE") continue;
+      for (const a of this.assignmentsOf(plan.id)) {
+        if (
+          a.printerId === printerId &&
+          (a.state === "PROPOSED" || a.state === "RESERVED" || a.state === "ACTIVE")
+        ) {
+          out.push(a);
+        }
+      }
+    }
+    return out;
   }
 
   /** Cancels a draft plan and its still-proposed assignments (used when superseded). */
@@ -621,7 +920,14 @@ export class SchedulerService {
 
   // ── Internals: shared ─────────────────────────────────────────────────────────
 
-  /** Open-queue tasks eligible for planning: WAITING entries whose task is not terminal/in-flight. */
+  /**
+   * Open-queue tasks eligible for planning, in queue order: a `WAITING` entry whose
+   * task is still awaiting placement (`QUEUED`/`PLANNED`). An `ASSIGNED` task already
+   * holds a printer/bed (via {@link PrintQueueService.assignTask}) and must not be
+   * planned onto a second one; a `NEEDS_REVIEW` task is parked for a human. Neither
+   * is schedulable, so both are excluded here (the one place planning, the matrix,
+   * and the night gate read).
+   */
   private schedulableTasks(): PrintTask[] {
     const repos = this.store.repositories;
     const tasks: PrintTask[] = [];
@@ -629,12 +935,7 @@ export class SchedulerService {
       if (entry.state !== "WAITING") continue;
       const task = repos.tasks.getById(entry.taskId);
       if (!task) continue;
-      if (
-        task.state === "QUEUED" ||
-        task.state === "PLANNED" ||
-        task.state === "ASSIGNED" ||
-        task.state === "NEEDS_REVIEW"
-      ) {
+      if (task.state === "QUEUED" || task.state === "PLANNED") {
         tasks.push(task);
       }
     }
@@ -679,6 +980,33 @@ export class SchedulerService {
 }
 
 // ── Free helpers ────────────────────────────────────────────────────────────────
+
+/** A finite, strictly-positive number, else a 400 — for operator-supplied hours. */
+function requirePositive(value: number, field: string): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new ValidationError(`Поле «${field}» должно быть положительным числом`);
+  }
+  return value;
+}
+
+/** The `{x,y,z}` build volume from parsed machine fields, or null when any axis is unknown. */
+function bedDimsOf(machine: ReturnType<typeof readMachine> | null): Dimensions | null {
+  if (
+    machine &&
+    machine.bedWidthMm !== null &&
+    machine.bedDepthMm !== null &&
+    machine.bedHeightMm !== null
+  ) {
+    return { x: machine.bedWidthMm, y: machine.bedDepthMm, z: machine.bedHeightMm };
+  }
+  return null;
+}
+
+/** True when two build volumes differ on any axis by more than a rounding tolerance. */
+function dimsDiffer(a: Dimensions, b: Dimensions): boolean {
+  const eps = 0.5; // mm — profiles/config round bed sizes; ignore sub-mm noise
+  return Math.abs(a.x - b.x) > eps || Math.abs(a.y - b.y) > eps || Math.abs(a.z - b.z) > eps;
+}
 
 /** Reads a `{x,y,z}` bounding box from a slice/analysis metadata blob; null when absent. */
 function readDims(meta: Metadata | null): Dimensions | null {

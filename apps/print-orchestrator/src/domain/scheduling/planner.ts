@@ -39,6 +39,13 @@ export interface PlannerTaskInput {
   compatiblePrinterIds: string[];
   /** Printer id this task held in the base plan (for stability); null when none. */
   previousPrinterId: string | null;
+  /**
+   * The task's 0-based position in the operator's manual queue order (front = 0),
+   * so a manual reorder actually shifts scheduling urgency (the dashboard promises
+   * "порядок = приоритет планирования"). Undefined leaves ordering to the other
+   * factors alone.
+   */
+  queueRank?: number;
 }
 
 export interface PlannerPrinterInput {
@@ -46,6 +53,13 @@ export interface PlannerPrinterInput {
   name: string;
   /** Epoch ms at which the printer becomes free (now if already idle). */
   freeAtMs: number;
+  /**
+   * True when {@link freeAtMs} is an *estimate* rather than an observed fact —
+   * e.g. the printer is currently printing but reported no remaining time, so the
+   * free moment was assumed. A task that has to wait on such a printer gets an
+   * honest warning instead of a promise the timeline cannot keep.
+   */
+  freeAtEstimated?: boolean;
   currentMaterial: string | null;
   currentNozzleMm: number | null;
 }
@@ -55,6 +69,8 @@ export interface PlannerWeights {
   agePerDay: number;
   deadlineUrgency: number;
   scarcity: number;
+  /** Boost for the manual queue order: front-of-queue gets the most, decaying by rank. */
+  queueOrder: number;
   waitPerHour: number;
   materialSwap: number;
   nozzleSwap: number;
@@ -68,6 +84,7 @@ export const DEFAULT_WEIGHTS: PlannerWeights = {
   agePerDay: 4,
   deadlineUrgency: 200,
   scarcity: 8,
+  queueOrder: 8,
   waitPerHour: 6,
   materialSwap: 20,
   nozzleSwap: 25,
@@ -138,6 +155,12 @@ export function urgencyScore(
   }
   const options = Math.max(1, task.compatiblePrinterIds.length);
   score += weights.scarcity / options;
+  if (task.queueRank !== undefined && task.queueRank >= 0) {
+    // Manual queue order: decays with rank so moving a task up the queue lifts it
+    // in planning (a real effect, not just a tiebreak) without overriding a hard
+    // deadline or a pin.
+    score += weights.queueOrder / (1 + task.queueRank);
+  }
   if (task.pinnedPrinterId) score += 1000; // pinned work is scheduled first
   return score;
 }
@@ -146,6 +169,7 @@ interface PrinterState {
   printerId: string;
   name: string;
   freeAtMs: number;
+  freeAtEstimated: boolean;
   material: string | null;
   nozzleMm: number | null;
 }
@@ -164,6 +188,7 @@ export function buildPlan(
       printerId: p.printerId,
       name: p.name,
       freeAtMs: Math.max(now, p.freeAtMs),
+      freeAtEstimated: p.freeAtEstimated === true && p.freeAtMs > now,
       material: p.currentMaterial,
       nozzleMm: p.currentNozzleMm
     });
@@ -208,6 +233,11 @@ export function buildPlan(
     const end = task.etaSeconds !== null ? start + task.etaSeconds * 1000 : null;
 
     const warnings: string[] = [];
+    if (chosen.freeAtEstimated && start > now + 60_000) {
+      warnings.push(
+        "Освобождение принтера оценено приблизительно — текущая печать без известного остатка времени"
+      );
+    }
     if (task.etaSeconds === null) {
       warnings.push("ETA неизвестна — время освобождения принтера оценено приблизительно");
     }
@@ -241,8 +271,12 @@ export function buildPlan(
       warnings
     });
 
-    // Advance the chosen printer's state so the next task sees it occupied.
+    // Advance the chosen printer's state so the next task sees it occupied. Once
+    // any placement rests on an estimate (an estimated free-time, or this task's
+    // own unknown ETA), everything scheduled after it on this printer is an
+    // estimate too — carry the flag forward so later tasks warn honestly.
     chosen.freeAtMs = start + durationS * 1000;
+    chosen.freeAtEstimated = chosen.freeAtEstimated || task.etaSeconds === null;
     if (task.material) chosen.material = task.material;
     if (task.requiredNozzleMm !== null) chosen.nozzleMm = task.requiredNozzleMm;
   }

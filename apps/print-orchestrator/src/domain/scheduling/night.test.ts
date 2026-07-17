@@ -10,8 +10,10 @@ function gate(over: Partial<NightGateInput> = {}): NightGateInput {
     taskId: "t1",
     printerId: "p1",
     priority: 0,
+    needsSlicing: true,
     readySliceVariant: true,
     profileSetApproved: true,
+    gcodeReady: false,
     etaSeconds: 3600,
     materialSufficient: true,
     telemetryFresh: true,
@@ -57,6 +59,22 @@ test("stale telemetry / unapproved set / no slice each fail the gate", () => {
   assert.equal(evaluateNightGate(gate({ telemetryFresh: false }), config).eligible, false);
   assert.equal(evaluateNightGate(gate({ profileSetApproved: false }), config).eligible, false);
   assert.equal(evaluateNightGate(gate({ readySliceVariant: false }), config).eligible, false);
+});
+
+test("a ready G-code task is not blocked by slice/profile gates — only a clean analysis", () => {
+  // needsSlicing === false: no slice, no approved set, but a clean gcode analysis.
+  const ok = evaluateNightGate(
+    gate({ needsSlicing: false, readySliceVariant: false, profileSetApproved: false, gcodeReady: true }),
+    config
+  );
+  assert.equal(ok.eligible, true, "verified G-code passes without slicing infrastructure");
+
+  const noAnalysis = evaluateNightGate(
+    gate({ needsSlicing: false, readySliceVariant: false, profileSetApproved: false, gcodeReady: false }),
+    config
+  );
+  assert.equal(noAnalysis.eligible, false);
+  assert.ok(noAnalysis.blockers.some((b) => /G-code/.test(b)));
 });
 
 test("selectNightSlots keeps exactly one candidate per printer and rejects the rest", () => {

@@ -90,6 +90,12 @@ export interface CompatibilityEvidence {
   runtimeAvailable: boolean;
   /** Bed occupancy for the printer, or null when unknown. */
   bedCycle: BedCycleState | null;
+  /**
+   * True when the printer's build volume from its config disagrees with the one
+   * read from its approved machine profile — a `review` so a human reconciles them
+   * rather than the planner silently trusting one source.
+   */
+  buildVolumeConflict?: boolean;
   /** Telemetry age in ms, or null when there is no telemetry at all. */
   telemetryAgeMs: number | null;
   /** Maintenance blockers preventing use (empty = none). */
@@ -248,6 +254,12 @@ export function evaluateCompatibility(
   }
 
   // ── Dimensions vs build volume ────────────────────────────────────────────────
+  if (evidence.buildVolumeConflict) {
+    review(
+      "build_volume_conflict",
+      `Рабочая область «${printer.name}» из конфигурации расходится с утверждённым профилем`
+    );
+  }
   if (task.dimensions === null) {
     review("dimensions_unknown", "Размеры модели не определены");
   } else if (printer.buildVolume === null) {

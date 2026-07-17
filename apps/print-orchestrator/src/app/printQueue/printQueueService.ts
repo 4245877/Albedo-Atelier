@@ -108,16 +108,27 @@ const POSITION_STEP = 10;
  * a future remote-start module and status poller will drive; they never open a
  * device connection themselves.
  */
+/** Allowed operator priority band. Beyond this a single job would dominate/break the score. */
+const PRIORITY_MIN = -10;
+const PRIORITY_MAX = 100;
+
 export class PrintQueueService {
   private readonly now: () => Date;
   private readonly defaultActor: string;
+  private readonly isPrinterConfigured: ((printerId: string) => boolean) | null;
 
   constructor(
     private readonly store: PrintQueueStore,
-    options: { now?: () => Date; actor?: string } = {}
+    options: {
+      now?: () => Date;
+      actor?: string;
+      /** Farm-config check for a printer id; when set, pins to unknown printers are refused. */
+      isPrinterConfigured?: (printerId: string) => boolean;
+    } = {}
   ) {
     this.now = options.now ?? (() => new Date());
     this.defaultActor = options.actor ?? "operator";
+    this.isPrinterConfigured = options.isPrinterConfigured ?? null;
   }
 
   // ── Reads ──────────────────────────────────────────────────────────────────
@@ -226,7 +237,7 @@ export class PrintQueueService {
         title,
         material: input.material?.trim() || null,
         targetPrinter: printer,
-        priority: Number.isFinite(input.priority) ? Number(input.priority) : 0,
+        priority: normalizePriority(input.priority, 0),
         state: runnable ? "QUEUED" : "NEEDS_REVIEW",
         reason: runnable ? null : "не задан принтер",
         night: input.night === true,
@@ -381,7 +392,10 @@ export class PrintQueueService {
     const iso = this.nowIso();
     const notBefore = parseIsoOrNull(input.notBefore, "notBefore");
     const deadline = parseIsoOrNull(input.deadline, "deadline");
+    assertWindowOrder(notBefore, deadline);
+    const priority = normalizePriority(input.priority, 0);
     const pinned = input.pinnedPrinterId?.trim() || null;
+    if (pinned) this.assertPrinterConfigured(pinned);
 
     return this.store.transaction(() => {
       const repos = this.store.repositories;
@@ -398,7 +412,7 @@ export class PrintQueueService {
         title,
         material: input.material?.trim() || null,
         targetPrinter: pinned,
-        priority: Number.isFinite(input.priority) ? Number(input.priority) : 0,
+        priority,
         state: "QUEUED",
         reason: null,
         night,
@@ -458,13 +472,18 @@ export class PrintQueueService {
           `Параметры планирования нельзя менять для задания в состоянии «${task.state}»`
         );
       }
+      const notBefore =
+        patch.notBefore === undefined ? task.notBefore : parseIsoOrNull(patch.notBefore, "notBefore");
+      const deadline =
+        patch.deadline === undefined ? task.deadline : parseIsoOrNull(patch.deadline, "deadline");
+      // Validate the *effective* pair — a patch that moves only one of the two can
+      // still leave notBefore after the deadline.
+      assertWindowOrder(notBefore, deadline);
       const next: PrintTask = {
         ...task,
-        priority: Number.isFinite(patch.priority) ? Number(patch.priority) : task.priority,
-        notBefore:
-          patch.notBefore === undefined ? task.notBefore : parseIsoOrNull(patch.notBefore, "notBefore"),
-        deadline:
-          patch.deadline === undefined ? task.deadline : parseIsoOrNull(patch.deadline, "deadline"),
+        priority: patch.priority === undefined ? task.priority : normalizePriority(patch.priority, task.priority),
+        notBefore,
+        deadline,
         dayNightPreference: patch.dayNightPreference ?? task.dayNightPreference,
         unattendedAllowed:
           typeof patch.unattendedAllowed === "boolean" ? patch.unattendedAllowed : task.unattendedAllowed,
@@ -495,6 +514,7 @@ export class PrintQueueService {
   pinPrinter(id: string, printerId: string, actor?: string): PrintTask {
     const pinned = printerId.trim();
     if (!pinned) throw new ValidationError("Не указан принтер для закрепления");
+    this.assertPrinterConfigured(pinned);
     return this.store.transaction(() => {
       const task = this.getTask(id);
       if (isTaskTerminal(task.state)) {
@@ -1054,6 +1074,13 @@ export class PrintQueueService {
     return assignment;
   }
 
+  /** Refuses a pin to a printer the farm does not know (when a config check is wired). */
+  private assertPrinterConfigured(printerId: string): void {
+    if (this.isPrinterConfigured && !this.isPrinterConfigured(printerId)) {
+      throw new ValidationError(`Принтер «${printerId}» отсутствует в конфигурации фермы`);
+    }
+  }
+
   private nextPosition(): number {
     const max = this.store.repositories.queue.maxPosition();
     return (max ?? 0) + POSITION_STEP;
@@ -1088,6 +1115,36 @@ export class PrintQueueService {
 
 function isTaskTerminal(state: PrintTask["state"]): boolean {
   return state === "COMPLETED" || state === "FAILED" || state === "CANCELLED";
+}
+
+/**
+ * Coerces an operator-supplied priority: absent/non-finite falls back, and a value
+ * outside the allowed band is a `ValidationError` (400) rather than silently
+ * clamped — an unbounded priority (e.g. `1e308`) would make the whole planning
+ * score `Infinity` and swamp every other factor.
+ */
+function normalizePriority(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  if (value < PRIORITY_MIN || value > PRIORITY_MAX) {
+    throw new ValidationError(`Приоритет должен быть в диапазоне ${PRIORITY_MIN}…${PRIORITY_MAX}`);
+  }
+  return value;
+}
+
+/**
+ * Rejects an impossible scheduling window: a `notBefore` at or after the `deadline`
+ * is unsatisfiable, so it fails loudly at write time instead of surfacing only as a
+ * warning buried in a later plan. Either side null (no bound) is always fine.
+ */
+function assertWindowOrder(notBefore: string | null, deadline: string | null): void {
+  if (notBefore === null || deadline === null) return;
+  const nb = Date.parse(notBefore);
+  const dl = Date.parse(deadline);
+  if (Number.isFinite(nb) && Number.isFinite(dl) && nb >= dl) {
+    throw new ValidationError(
+      `«notBefore» (${notBefore}) не может быть позже дедлайна (${deadline})`
+    );
+  }
 }
 
 /**
