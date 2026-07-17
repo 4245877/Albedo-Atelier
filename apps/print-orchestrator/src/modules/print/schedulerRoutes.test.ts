@@ -120,7 +120,9 @@ test("params, pin/unpin and reorder round-trip over HTTP", async () => {
     payload: { position: 5, expectedVersion: version }
   });
   assert.equal(reorder.statusCode, 200);
-  assert.equal(reorder.json().entry.position, 5);
+  // Positions are renormalised to POSITION_STEP multiples on every reorder (so the
+  // dashboard's neighbour ± 1 never collapses a gap); the sole entry lands at 10.
+  assert.equal(reorder.json().entry.position, 10);
 
   // A stale expectedVersion now conflicts (409).
   const stale = await app.inject({

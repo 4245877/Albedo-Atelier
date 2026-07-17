@@ -47,6 +47,42 @@ test("reorderTask enforces the optimistic version (a stale write conflicts)", ()
   assert.throws(() => svc.reorderTask(task.id, 5, entry.version), VersionConflictError);
 });
 
+test("reorder renormalises positions so repeated neighbour±1 moves never wedge", () => {
+  const svc = service();
+  const a = svc.addTask({ title: "A" }).task;
+  const b = svc.addTask({ title: "B" }).task;
+  const c = svc.addTask({ title: "C" }).task;
+
+  const order = (): string[] => svc.listOpenQueue().map((r) => r.task.title);
+  const positions = (): number[] => svc.listOpenQueue().map((r) => r.entry.position);
+
+  // Mimic the dashboard's "move up": position = upper-neighbour.position − 1, with
+  // a reload (a fresh listOpenQueue) between moves, exactly as render/scheduler.js does.
+  const moveUp = (taskId: string): void => {
+    const queue = svc.listOpenQueue();
+    const idx = queue.findIndex((r) => r.task.id === taskId);
+    assert.ok(idx > 0, "task must have an upper neighbour to move up");
+    svc.reorderTask(taskId, queue[idx - 1].entry.position - 1, queue[idx].entry.version);
+  };
+
+  assert.deepEqual(order(), ["A", "B", "C"]);
+  moveUp(c.id); // C past B
+  assert.deepEqual(order(), ["A", "C", "B"]);
+  moveUp(c.id); // C past A → front
+  assert.deepEqual(order(), ["C", "A", "B"]);
+  moveUp(b.id); // B past A
+  assert.deepEqual(order(), ["C", "B", "A"]);
+
+  // Positions stay on the POSITION_STEP grid after every move (gaps never collapse),
+  // so the next neighbour ± 1 always lands in a clean gap — the arrows keep biting.
+  // Before the fix the gaps shrank until equal positions made ↑/↓ visually inert.
+  assert.deepEqual(positions(), [10, 20, 30]);
+  const gaps = positions();
+  for (let i = 1; i < gaps.length; i++) {
+    assert.ok(gaps[i] - gaps[i - 1] >= 2, "adjacent gap must stay ≥ 2 for neighbour ± 1 to be collision-free");
+  }
+});
+
 test("pinPrinter binds a printer and unpinPrinter clears it", () => {
   const svc = service();
   const { task } = svc.addTask({ title: "A" });

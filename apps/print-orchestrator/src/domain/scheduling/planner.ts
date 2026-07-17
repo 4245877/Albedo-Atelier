@@ -148,8 +148,13 @@ export function urgencyScore(
 ): number {
   let score = 0;
   score += task.priority * weights.priority;
-  score += Math.max(0, (nowMs - task.createdAtMs) / DAY_MS) * weights.agePerDay;
-  if (task.deadlineMs !== null) {
+  // Guard every timestamp term against a non-finite value (NaN/±Infinity): a
+  // single NaN would poison `score`, and NaN comparisons make the ordering sort
+  // non-deterministically. The API never feeds a NaN here (it canonicalises
+  // timestamps), but this is a public domain function, so it defends itself.
+  const ageMs = Number.isFinite(task.createdAtMs) ? nowMs - task.createdAtMs : 0;
+  score += Math.max(0, ageMs / DAY_MS) * weights.agePerDay;
+  if (task.deadlineMs !== null && Number.isFinite(task.deadlineMs)) {
     const hoursLeft = Math.max(0.5, (task.deadlineMs - nowMs) / HOUR_MS);
     score += weights.deadlineUrgency / hoursLeft;
   }
@@ -198,7 +203,9 @@ export function buildPlan(
     const ua = urgencyScore(a, weights, now);
     const ub = urgencyScore(b, weights, now);
     if (ub !== ua) return ub - ua;
-    return a.createdAtMs - b.createdAtMs; // older first on ties
+    // `|| 0` keeps the tiebreak total even if a createdAtMs is non-finite (a real
+    // epoch is a large positive number, so it is unaffected) — older first on ties.
+    return (a.createdAtMs || 0) - (b.createdAtMs || 0);
   });
 
   const assignments: PlannerAssignment[] = [];
@@ -321,7 +328,9 @@ function scoreCandidate(
   if (task.pinnedPrinterId === printer.printerId) {
     add("закреплён", 500);
   }
-  if (task.deadlineMs !== null && task.etaSeconds !== null) {
+  if (task.deadlineMs !== null && Number.isFinite(task.deadlineMs) && task.etaSeconds !== null) {
+    // A non-finite deadline must be neutral, not scored as a miss: `end <= NaN` is
+    // false, which would otherwise charge every candidate the deadline-miss penalty.
     const end = start + task.etaSeconds * 1000;
     if (end <= task.deadlineMs) add("успевает к дедлайну", weights.deadlineOk);
     else add("не успевает к дедлайну", -weights.deadlineMiss);

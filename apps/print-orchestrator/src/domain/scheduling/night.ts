@@ -113,6 +113,17 @@ export interface NightSlotSelection {
  * eligible candidates, keeps the strongest per printer and rejects the rest with
  * a clear reason. Selection is deterministic — priority desc, then longer buffered
  * ETA (a longer print benefits most from the unattended slot), then task id.
+ *
+ * Scope note (deliberate, safe while nothing auto-starts): "one per printer per
+ * night" is enforced only *within a single evaluation* — it is recomputed on every
+ * request and never persisted, and "night" here is a label, not a computed
+ * calendar night. This is sound today because this report is advisory: nothing
+ * starts or reserves a print, so there is no cross-request state to keep. Before
+ * any unattended auto-start / remote-start is wired, this must become a persisted
+ * slot keyed by printer and local calendar date (a `night_slots` table with a
+ * UNIQUE(printer_id, local_date) guard), and the local night must be computed with
+ * a timezone-/DST-aware window — reuse `isWithinLocalTimeWindow` from the light
+ * scheduler, which already handles a cross-midnight 22:00–08:00 window.
  */
 export function selectNightSlots(
   evaluations: NightGateInput[],

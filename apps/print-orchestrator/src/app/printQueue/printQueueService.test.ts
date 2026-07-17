@@ -149,7 +149,9 @@ test("reorderTask uses optimistic concurrency on the queue entry", () => {
   const entry = store.repositories.queue.findByTaskId(created.task.id)!;
 
   const moved = service.reorderTask(created.task.id, 99, entry.version);
-  assert.equal(moved.position, 99);
+  // Positions are renormalised to POSITION_STEP multiples on every reorder (so the
+  // dashboard's neighbour ± 1 never collapses a gap); the sole entry lands at 10.
+  assert.equal(moved.position, 10);
   assert.equal(moved.version, entry.version + 1);
 
   // Replaying the same (now stale) expected version conflicts.

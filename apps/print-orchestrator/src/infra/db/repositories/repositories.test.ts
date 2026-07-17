@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { NotFoundError, VersionConflictError } from "../../../core/errors";
 import type { PrintQueueStore } from "../../../domain/print/repositories";
-import type { Artifact, PrintTask, QueueEntry } from "../../../domain/print/types";
+import type { Assignment, Artifact, Plan, PrintTask, QueueEntry } from "../../../domain/print/types";
 import { openPrintQueueStore } from "../store";
 
 function freshStore(): PrintQueueStore {
@@ -169,6 +169,54 @@ test("bed cycle findOpenByPrinter returns the live (non-CLEAR) cycle only", () =
     metadata: {}
   });
   assert.equal(beds.findOpenByPrinter("K2")?.id, "b2");
+  store.close();
+});
+
+test("assignment listByPlan returns only a plan's assignments, oldest first", () => {
+  const store = freshStore();
+  const repos = store.repositories;
+  const plan = (id: string): Plan => ({
+    id,
+    name: null,
+    window: null,
+    state: "DRAFT",
+    revision: 1,
+    basePlanId: null,
+    confirmedAt: null,
+    confirmedBy: null,
+    createdAt: ISO,
+    updatedAt: ISO,
+    version: 1,
+    metadata: {}
+  });
+  const assignment = (id: string, taskId: string, planId: string | null, createdAt: string): Assignment => ({
+    id,
+    taskId,
+    printerId: "K2",
+    planId,
+    bedCycleId: null,
+    state: "PROPOSED",
+    createdAt,
+    updatedAt: createdAt,
+    version: 1,
+    legacyRef: null,
+    metadata: {}
+  });
+
+  // FKs are ON: tasks and plans must exist before their assignments reference them.
+  repos.tasks.insert(task("t1"));
+  repos.tasks.insert(task("t2"));
+  repos.plans.insert(plan("p1"));
+  repos.plans.insert(plan("p2"));
+  // Insert out of created_at order to prove the query, not insertion order, sorts.
+  repos.assignments.insert(assignment("a2", "t2", "p1", "2026-07-17T02:00:00.000Z"));
+  repos.assignments.insert(assignment("a1", "t1", "p1", "2026-07-17T01:00:00.000Z"));
+  repos.assignments.insert(assignment("a3", "t1", "p2", "2026-07-17T03:00:00.000Z"));
+  repos.assignments.insert(assignment("a4", "t2", null, "2026-07-17T04:00:00.000Z"));
+
+  assert.deepEqual(repos.assignments.listByPlan("p1").map((a) => a.id), ["a1", "a2"]);
+  assert.deepEqual(repos.assignments.listByPlan("p2").map((a) => a.id), ["a3"]);
+  assert.deepEqual(repos.assignments.listByPlan("nope"), []);
   store.close();
 });
 

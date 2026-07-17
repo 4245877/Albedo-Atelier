@@ -264,7 +264,14 @@ export interface Plan {
    * is one higher — so a confirmed plan is immutable and its history survives.
    */
   revision: number;
-  /** The plan this one was recomputed from (its predecessor revision); null for the first. */
+  /**
+   * The plan this one was recomputed from (its predecessor revision); null for the
+   * first. Note: unlike `assignments.plan_id`, this column carries no SQL foreign
+   * key — it was added by `ALTER TABLE` in 004, and SQLite cannot add a FK to an
+   * existing table without a full table rebuild. The risk is only theoretical
+   * (plans are never deleted, so the reference cannot dangle); rebuild the table to
+   * add the constraint if plan deletion is ever introduced.
+   */
   basePlanId: string | null;
   /** When the operator confirmed it (DRAFT → ACTIVE); null while still a draft. */
   confirmedAt: IsoTimestamp | null;

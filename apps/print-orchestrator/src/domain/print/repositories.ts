@@ -96,6 +96,8 @@ export interface PlanRepository extends WritableRepository<Plan> {
 
 export interface AssignmentRepository extends WritableRepository<Assignment> {
   listByTask(taskId: string): Assignment[];
+  /** Every assignment attached to a plan (any state), oldest first — one indexed query per plan. */
+  listByPlan(planId: string): Assignment[];
   /** The current non-terminal assignment on a printer, if any. */
   findOpenByPrinter(printerId: string): Assignment | null;
 }

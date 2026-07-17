@@ -247,6 +247,10 @@ function registerSchedulerRoutes(app: FastifyInstance): void {
       const raw = request.body?.expectedVersion;
       const expectedVersion =
         typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
+      // Actor is intentionally omitted → the service stamps confirmedBy = "operator".
+      // The whole API is guarded by one shared token (single-operator model), so
+      // there is no distinct principal to attribute yet; when per-user auth lands,
+      // pass the authenticated identity here as the second argument.
       return {
         ok: true,
         plan: farmStore.scheduler.confirmPlan(request.params.id, undefined, expectedVersion)

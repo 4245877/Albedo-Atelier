@@ -355,25 +355,55 @@ export class PrintQueueService {
    */
   reorderTask(id: string, newPosition: number, expectedVersion: number, actor?: string): QueueEntry {
     return this.store.transaction(() => {
-      const entry = this.store.repositories.queue.findByTaskId(id);
+      const repos = this.store.repositories;
+      const entry = repos.queue.findByTaskId(id);
       if (!entry) throw new NotFoundError(`Запись очереди для задания «${id}»`);
-      // Write against the caller's expected version: the repo's optimistic guard
-      // throws VersionConflictError (rolling back the transaction, so no audit is
-      // written) when it no longer matches the stored row.
-      const saved = this.store.repositories.queue.update({
-        ...entry,
-        version: expectedVersion,
-        position: newPosition,
-        updatedAt: this.nowIso()
-      });
+
+      // Re-space the whole open queue onto POSITION_STEP multiples, with `entry`
+      // slotted at `newPosition`. Renumbering on every move is what keeps ↑/↓
+      // working: the dashboard moves a task by asking for `neighbour.position ± 1`,
+      // which only lands in a clean gap while adjacent positions differ by ≥ 2.
+      // Without this the gaps collapse after enough reorders, equal positions fall
+      // back to enqueue time, and the arrows silently stop moving anything.
+      const ordered = repos.queue
+        .listOpen()
+        .map((e) => (e.id === entry.id ? { entry: e, sortPos: newPosition } : { entry: e, sortPos: e.position }))
+        .sort((a, b) =>
+          a.sortPos !== b.sortPos
+            ? a.sortPos - b.sortPos
+            : a.entry.enqueuedAt !== b.entry.enqueuedAt
+              ? a.entry.enqueuedAt < b.entry.enqueuedAt
+                ? -1
+                : 1
+              : a.entry.id < b.entry.id
+                ? -1
+                : 1
+        );
+
+      // Each entry is updated at most once: the moved one under the caller's
+      // optimistic guard (a racing reorder throws VersionConflictError, rolling the
+      // whole transaction back so no audit is written), the rest only when their
+      // normalised position actually changes.
+      let moved: QueueEntry | null = null;
+      for (let index = 0; index < ordered.length; index++) {
+        const e = ordered[index].entry;
+        const position = (index + 1) * POSITION_STEP;
+        if (e.id === entry.id) {
+          moved = repos.queue.update({ ...entry, version: expectedVersion, position, updatedAt: this.nowIso() });
+        } else if (e.position !== position) {
+          repos.queue.update({ ...e, position, updatedAt: this.nowIso() });
+        }
+      }
+      if (!moved) throw new NotFoundError(`Запись очереди для задания «${id}»`);
+
       this.recordAudit({
         entityType: "queue_entry",
         entityId: entry.id,
         action: "reordered",
         actor,
-        detail: { position: newPosition }
+        detail: { position: moved.position }
       });
-      return saved;
+      return moved;
     });
   }
 

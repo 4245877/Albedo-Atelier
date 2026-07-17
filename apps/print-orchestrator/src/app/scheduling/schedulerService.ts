@@ -520,6 +520,11 @@ export class SchedulerService {
       dimensions,
       requiredNozzleMm,
       gcodeFlavor,
+      // No AMS/multi-material requirement is recorded anywhere in the model yet
+      // (neither the task nor the analyzers detect it), so this stays an honest
+      // `null` = unknown rather than a fabricated boolean. The compatibility AMS
+      // branch only fires on `true`, so it is dormant — not wrong — until a real
+      // source (a task field or a multi-filament analysis signal) feeds it.
       amsRequired: null,
       needsSlicing
     };
@@ -582,6 +587,21 @@ export class SchedulerService {
       variants.find((v) => v.targetPrinterId === null) ??
       null
     );
+  }
+
+  /**
+   * The task's *printer-agnostic* required nozzle Ø (mm), from its artifact
+   * analysis; null when unknown. The compatibility matrix resolves nozzle per
+   * (task, printer) — including a printer-specific slice's machine profile — and
+   * blocks a mismatch there; the planner only needs the task's own requirement so
+   * its "nozzle swap" penalty and warning have a real value to compare against
+   * (they were dead while this was hard-coded null).
+   */
+  private taskRequiredNozzleMm(task: PrintTask): number | null {
+    if (!task.artifactId) return null;
+    const analysis = this.store.repositories.artifactAnalyses.latestForArtifact(task.artifactId);
+    const nozzle = analysis?.nozzleDiameterMm ?? null;
+    return nozzle !== null && Number.isFinite(nozzle) && nozzle > 0 ? nozzle : null;
   }
 
   private machineFieldsOf(set: ProfileSet): ReturnType<typeof readMachine> | null {
@@ -706,7 +726,7 @@ export class SchedulerService {
         deadlineMs: task.deadline ? Date.parse(task.deadline) || null : null,
         pinnedPrinterId: task.pinnedPrinterId,
         material: task.material,
-        requiredNozzleMm: null,
+        requiredNozzleMm: this.taskRequiredNozzleMm(task),
         etaSeconds: eta?.seconds ?? null,
         compatiblePrinterIds: compatible.map((r) => r.printerId),
         previousPrinterId: previousByTask.get(task.id) ?? null,
@@ -899,15 +919,11 @@ export class SchedulerService {
   }
 
   private assignmentsOf(planId: string): Assignment[] {
-    // Assignments are looked up per task then filtered by plan; the set per plan is small.
-    const tasks = this.store.repositories.tasks.list();
-    const out: Assignment[] = [];
-    for (const task of tasks) {
-      for (const a of this.store.repositories.assignments.listByTask(task.id)) {
-        if (a.planId === planId) out.push(a);
-      }
-    }
-    return out.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+    // One indexed lookup on assignments.plan_id (migration 006), already ordered by
+    // created_at, id — not a scan of every task's assignments. This is called on
+    // every plan view/confirm/supersede and free-time projection, so it must not
+    // degrade as the (never-deleted) task history grows.
+    return this.store.repositories.assignments.listByPlan(planId);
   }
 
   private previousPlacements(planId: string): Map<string, string> {

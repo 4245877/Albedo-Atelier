@@ -59,5 +59,9 @@ export function resolveEta(inputs: EtaInputs): EtaEstimate {
  * the result as {@link EtaEstimate.preliminary}. A non-positive ratio is a no-op.
  */
 export function applySafetyBuffer(seconds: number, bufferRatio: number): number {
-  return Math.round(seconds * (1 + Math.max(0, bufferRatio)));
+  // A non-finite ratio (NaN/±Infinity) collapses to no buffer rather than
+  // producing a NaN duration — `Math.max(0, NaN)` is NaN, not 0, so it must be
+  // screened explicitly before it reaches the multiply.
+  const ratio = Number.isFinite(bufferRatio) ? Math.max(0, bufferRatio) : 0;
+  return Math.round(seconds * (1 + ratio));
 }

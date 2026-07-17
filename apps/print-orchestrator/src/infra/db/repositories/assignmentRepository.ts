@@ -94,6 +94,13 @@ export class SqliteAssignmentRepository
     );
   }
 
+  listByPlan(planId: string): Assignment[] {
+    return this.query(
+      "SELECT * FROM assignments WHERE plan_id = ? ORDER BY created_at, id",
+      planId
+    );
+  }
+
   findOpenByPrinter(printerId: string): Assignment | null {
     return this.queryOne(
       `SELECT * FROM assignments WHERE printer_id = ? AND state IN ${OPEN_STATES}

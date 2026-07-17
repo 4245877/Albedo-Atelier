@@ -32,3 +32,9 @@ test("applySafetyBuffer adds the ratio and a non-positive ratio is a no-op", () 
   assert.equal(applySafetyBuffer(1000, 0), 1000);
   assert.equal(applySafetyBuffer(1000, -1), 1000);
 });
+
+test("applySafetyBuffer treats a non-finite ratio as no buffer (never returns NaN)", () => {
+  // Math.max(0, NaN) is NaN, not 0, so a NaN ratio must be screened out explicitly.
+  assert.equal(applySafetyBuffer(1000, NaN), 1000);
+  assert.equal(applySafetyBuffer(1000, Infinity), 1000);
+});

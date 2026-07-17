@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildPlan, type PlannerPrinterInput, type PlannerTaskInput } from "./planner";
+import {
+  buildPlan,
+  DEFAULT_WEIGHTS,
+  urgencyScore,
+  type PlannerPrinterInput,
+  type PlannerTaskInput
+} from "./planner";
 
 const NOW = Date.parse("2026-07-17T12:00:00.000Z");
 
@@ -44,6 +50,28 @@ test("a task is placed and carries a full explanation", () => {
   assert.ok(a.scoreBreakdown.length >= 0);
   assert.ok(typeof a.reason === "string" && a.reason.length > 0);
   assert.equal(a.etaSeconds, 3600);
+});
+
+test("a non-finite deadline never poisons ordering or scores (NaN-resistant domain)", () => {
+  // deadlineMs = NaN is unreachable through the API (it canonicalises timestamps),
+  // but urgencyScore/buildPlan are public domain functions and must stay finite:
+  // one NaN would make the urgency sort non-deterministic and would charge every
+  // candidate the deadline-miss penalty (`end <= NaN` is false).
+  assert.ok(Number.isFinite(urgencyScore(task({ deadlineMs: NaN }), DEFAULT_WEIGHTS, NOW)));
+
+  const result = buildPlan(
+    [task({ taskId: "t1", deadlineMs: NaN }), task({ taskId: "t2", deadlineMs: NaN, createdAtMs: NaN })],
+    [printer("p1"), printer("p2")],
+    config
+  );
+  assert.equal(result.unplaced.length, 0);
+  for (const a of result.assignments) {
+    assert.ok(Number.isFinite(a.score), "assignment score stays finite");
+    assert.ok(
+      !a.scoreBreakdown.some((c) => c.label === "не успевает к дедлайну"),
+      "a NaN deadline must be neutral, not a deadline-miss penalty"
+    );
+  }
 });
 
 test("a pinned task goes to its printer even against a cheaper alternative", () => {
