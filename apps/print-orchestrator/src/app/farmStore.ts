@@ -1,6 +1,12 @@
+import path from "node:path";
+
 import { JobError, MaterialError, NotFoundError, PrinterOfflineError } from "../core/errors";
 import type { Automation, NightCandidate, NightPrint, QueueJob } from "../domain/dashboard/types";
+import type { PrintQueueStore } from "../domain/print/repositories";
 import { env } from "../shared/env";
+import { importLegacyQueue } from "../infra/db/legacyImport";
+import { openPrintQueueStore } from "../infra/db/store";
+import { PrintQueueService } from "./printQueue/printQueueService";
 import { FulfillmentInventoryClient } from "../infra/fulfillment/inventoryClient";
 import { loadPrintersConfig, type PrinterConfig, type PrinterConfigSource } from "../infra/printers/config";
 import {
@@ -49,6 +55,18 @@ export class FarmStore {
   private readonly startedAt = Date.now();
 
   private readonly state: StateStore;
+  /**
+   * The persistent print-queue backbone (SQLite). Opened lazily on first use —
+   * never in the constructor — so merely importing the {@link farmStore}
+   * singleton (as many tests and route modules do) opens no database file. The
+   * one-time legacy import runs when this is first initialised.
+   */
+  private readonly dbPath: string;
+  private printQueueStore: PrintQueueStore | null = null;
+  private printQueueService: PrintQueueService | null = null;
+  /** Legacy queue snapshot captured at load, fed once into the SQLite import. */
+  private readonly legacyQueueJobs: QueueJob[];
+
   private readonly events: EventFeed;
   private readonly cameras = new CameraService();
   private readonly snapshots: SnapshotStore;
@@ -89,10 +107,18 @@ export class FarmStore {
 
   constructor(
     stateFilePath: string = env.stateFilePath,
-    snapshotsDir: string = env.snapshotsDir
+    snapshotsDir: string = env.snapshotsDir,
+    // Default the queue DB next to the state file. For the singleton (default
+    // state path) this is env.queueDbPath, honouring QUEUE_DB_PATH; a test that
+    // passes its own temp state file gets an isolated sibling queue.db.
+    dbPath: string = stateFilePath === env.stateFilePath
+      ? env.queueDbPath
+      : path.resolve(path.dirname(stateFilePath), "queue.db")
   ) {
+    this.dbPath = dbPath;
     this.state = new StateStore(stateFilePath);
     const persisted = this.state.load();
+    this.legacyQueueJobs = persisted.queue.jobs;
     const persist = (): void => this.state.save();
 
     this.events = new EventFeed(persisted.feed, persist);
@@ -160,12 +186,37 @@ export class FarmStore {
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
 
+  /**
+   * The persistent print-queue service (SQLite-backed), opened on first access.
+   * Idempotent: the database is opened, migrated and the legacy queue imported
+   * exactly once, on the first call.
+   */
+  get printQueue(): PrintQueueService {
+    return this.ensurePrintQueue();
+  }
+
+  private ensurePrintQueue(logger: StoreLogger = {}): PrintQueueService {
+    if (this.printQueueService) return this.printQueueService;
+    const store = openPrintQueueStore(this.dbPath, logger);
+    // Seed the new model from the old JSON queue exactly once. Guarded by an
+    // in-DB marker, so this is a no-op on every subsequent boot — there is no
+    // ongoing dual-write between the JSON store and SQLite.
+    importLegacyQueue(store, this.legacyQueueJobs, { logger });
+    this.printQueueStore = store;
+    this.printQueueService = new PrintQueueService(store);
+    return this.printQueueService;
+  }
+
   /** Loads the printer config and starts the background poll loop. */
   async start(logger: StoreLogger = {}): Promise<void> {
     this.state.useLogger(logger);
     if (this.state.loadWarning) {
       logger.warn?.({ warning: this.state.loadWarning }, "state store problem");
     }
+
+    // Open the queue database and run the one-time import at startup (with the
+    // real logger), rather than lazily on the first API hit.
+    this.ensurePrintQueue(logger);
 
     const { printers, source } = await loadPrintersConfig();
     this.configs = printers;
@@ -198,6 +249,10 @@ export class FarmStore {
     // minute while running), then wait for every scheduled write to settle.
     this.state.save();
     await this.state.flush();
+    // Close the queue database last, after all writes have settled.
+    this.printQueueStore?.close();
+    this.printQueueStore = null;
+    this.printQueueService = null;
   }
 
   /** Awaits all pending state writes (used on shutdown and in tests). */

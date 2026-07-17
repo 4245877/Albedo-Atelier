@@ -6,10 +6,10 @@
   "main": "dist/src/server.js",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "dev": "tsx watch src/server.ts",
-    "start": "node dist/src/server.js",
+    "dev": "NODE_OPTIONS=\"--experimental-sqlite --disable-warning=ExperimentalWarning\" tsx watch src/server.ts",
+    "start": "node --experimental-sqlite --disable-warning=ExperimentalWarning dist/src/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "TZ=UTC node --import tsx --test \"src/**/*.test.ts\""
+    "test": "TZ=UTC node --experimental-sqlite --disable-warning=ExperimentalWarning --import tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {
     "fastify": "^5.4.0",

@@ -184,6 +184,14 @@ export function parseLightScheduleEnv(
 const stateFilePath =
   process.env.STATE_FILE_PATH || path.resolve(process.cwd(), "data", "state.json");
 
+/**
+ * SQLite database backing the persistent print-queue model (tasks, assignments,
+ * the print-run chain, audit log). Kept next to {@link stateFilePath} so the
+ * same mounted `/app/data` volume holds both; defaults to `<state dir>/queue.db`.
+ */
+const queueDbPath =
+  process.env.QUEUE_DB_PATH || path.resolve(path.dirname(stateFilePath), "queue.db");
+
 export const env = Object.freeze({
   nodeEnv: process.env.NODE_ENV ?? "development",
   serviceName: process.env.SERVICE_NAME ?? "print-orchestrator",
@@ -218,6 +226,8 @@ export const env = Object.freeze({
    * container `<cwd>` is `/app`, and compose mounts a volume at `/app/data`.
    */
   stateFilePath,
+  /** SQLite database file for the persistent print-queue model (see above). */
+  queueDbPath,
   /**
    * Directory the saved camera snapshots (JPEG/PNG files) are written to, kept
    * next to {@link stateFilePath} so the same mounted volume holds both. The

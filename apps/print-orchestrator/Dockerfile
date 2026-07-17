@@ -42,5 +42,8 @@ RUN mkdir -p /app/data && chown -R node:node /app/data
 EXPOSE 3100
 
 # Starts as root only to chown the data volume, then execs `node` as UID 1000.
+# --experimental-sqlite enables the built-in node:sqlite driver (required on
+# Node 22; a harmless no-op on newer runtimes); the warning is silenced so it
+# does not repeat on every boot.
 ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["node", "dist/src/server.js"]
+CMD ["node", "--experimental-sqlite", "--disable-warning=ExperimentalWarning", "dist/src/server.js"]

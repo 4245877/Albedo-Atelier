@@ -35,6 +35,46 @@ would make a restart re-announce pre-existing conditions. Material stock,
 maintenance history and automations are still honest stubs with no runtime state
 yet; the persistence layer is structured to hold them once they are implemented.
 
+## Persistent print-queue model (SQLite)
+
+Alongside the JSON state above, the orchestrator now carries a durable,
+relational model of the print queue in **SQLite** (`QUEUE_DB_PATH`, default
+`<state dir>/queue.db` on the same `/app/data` volume; WAL + foreign keys on,
+schema managed by numbered migrations). It is the backbone the flat "queue jobs"
+are being grown into, and it keeps the three concerns the flat model conflated
+strictly apart:
+
+- **task state** (`PrintTask`) — what the operator wants,
+- **assignment state** (`Assignment`) — the binding of a task to a printer/bed,
+- **actual-print state** (`PrintRun`) — what the machine actually did.
+
+A launched task is **never deleted**: the chain `PrintTask → Assignment →
+DispatchAttempt → PrintRun` is preserved by foreign keys, so how a task was
+launched survives as history. Bed occupancy is tracked as a `BedCycle`
+(`CLEAR → RESERVED → RUNNING → AWAITING_CLEARANCE → CLEAR`, plus `UNKNOWN` for a
+lost state), so a printer is never assigned onto a bed that still holds the last
+part. Every state move is validated against the domain transition maps
+(`src/domain/print/states.ts`) before it is written, contended rows carry an
+optimistic `version`, related changes run in one transaction, and every mutation
+appends an `AuditEvent` (the structured successor to the JSON event feed).
+
+Layering (the domain layer never imports `node:sqlite`):
+
+- `src/domain/print/` — entity types, state machines, repository **ports**.
+- `src/infra/db/` — connection + migrations, SQLite repository adapters, and the
+  one-time legacy import.
+- `src/app/printQueue/` — `PrintQueueService` (transactional orchestration) and
+  the legacy-format projection.
+- `src/modules/print/` — the `/api/print` HTTP surface.
+
+On first boot the existing `state.json` operator queue is imported **once** into
+this model (old ids kept as `legacyRef`, guarded by an `app_meta` marker); there
+is **no** ongoing dual-write — after the import the two evolve independently. The
+legacy `/api/queue` and the dashboard are unchanged: this stage lays the durable
+foundation, and remote start, slicing/analysis, automatic distribution and
+fulfillment integration are explicitly left to later modules (their ports exist,
+but nothing is faked).
+
 Printer lights are governed by the **solar light policy** (`LIGHT_*`
 variables; `src/app/solarLightPolicy.ts`), applied on each poll to every
 supported printer with this priority (top wins):
@@ -326,6 +366,7 @@ the guard is disabled and a startup warning is logged. CORS is closed by default
 - `GET /api/printers` · `GET /api/printers/active` · `GET /api/printers/:id`
 - `GET /api/printers/:id/camera.jpg` · `GET /api/printers/:id/camera.mp4`
 - `GET /api/queue` · `GET /api/queue/night`
+- `GET /api/print/tasks` · `GET /api/print/tasks/:id` (task + full chain + audit) · `GET /api/print/queue` (legacy-shape projection of the SQLite model) · `GET /api/print/audit`
 - `GET /api/materials` · `GET /api/cameras` · `GET /api/maintenance`
 - `GET /api/events` · `GET /api/critical` · `GET /api/warnings`
 - `GET /api/system` · `GET /api/today` · `GET /api/performance` · `GET /api/plan`
@@ -351,4 +392,6 @@ instead of fabricating a result.
 - `POST /api/queue/start-next` · `POST /api/queue/night/start` · `POST /api/queue/night/pick`
 - `POST /api/queue/:id/review` — park a job in `review` (body `{ reason? }`) so a job that can never start (unknown printer, no/invalid file, material mismatch) stops blocking `start-next`
 - `DELETE /api/queue/:id` — remove a job by id (the other escape hatch for a wedged queue); `404` when the id is unknown
+- `POST /api/print/tasks` — create a task in the persistent model, body `{ title, printer?, material?, file?, night?, priority?, eta?, at? }`
+- `POST /api/print/tasks/:id/hold` (body `{ reason? }`) · `.../release` · `.../cancel` (body `{ reason? }`, kept as history) · `.../assign` (body `{ printer }`, reserves the bed)
 - `POST /api/automations/:id/toggle` — body `{ "on"?: boolean }` (omit to flip)

@@ -93,3 +93,38 @@ export class JobError extends AppError {
     this.name = "JobError";
   }
 }
+
+/**
+ * An illegal state-machine transition was attempted on a queue entity (e.g.
+ * moving a `COMPLETED` task back to `PRINTING`). Raised by the domain
+ * transition rules, never by SQLite — a 409 the dashboard can branch on.
+ */
+export class StateTransitionError extends AppError {
+  constructor(entity: string, from: string, to: string) {
+    super(
+      `Недопустимый переход ${entity}: ${from} → ${to}`,
+      "STATE_TRANSITION",
+      409,
+      { entity, from, to }
+    );
+    this.name = "StateTransitionError";
+  }
+}
+
+/**
+ * An optimistic-concurrency clash: the caller's `version` no longer matches the
+ * stored row, so someone else changed it first. The caller should re-read and
+ * retry. A 409 distinct from {@link StateTransitionError} so clients can tell a
+ * genuine conflict from an illegal move.
+ */
+export class VersionConflictError extends AppError {
+  constructor(entity: string, id: string, expectedVersion: number) {
+    super(
+      `Конфликт версий ${entity} «${id}»: ожидалась версия ${expectedVersion}, запись изменена другим процессом`,
+      "VERSION_CONFLICT",
+      409,
+      { entity, id, expectedVersion }
+    );
+    this.name = "VersionConflictError";
+  }
+}

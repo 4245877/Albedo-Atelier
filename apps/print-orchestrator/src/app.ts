@@ -13,6 +13,7 @@ import { farmStore } from "./app/farmStore";
 import { registerAutomationRoutes } from "./modules/automation/routes";
 import { registerDashboardRoutes } from "./modules/dashboard/routes";
 import { registerMonitoringRoutes } from "./modules/monitoring/routes";
+import { registerPrintQueueRoutes } from "./modules/print/routes";
 import { registerPrinterRoutes } from "./modules/printers/routes";
 import { registerQueueRoutes } from "./modules/queue/routes";
 import { loggerConfig } from "./shared/logger";
@@ -92,6 +93,8 @@ export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
   app.register(registerDashboardRoutes, { prefix: "/api" });
   app.register(registerPrinterRoutes, { prefix: "/api/printers" });
   app.register(registerQueueRoutes, { prefix: "/api/queue" });
+  // Persistent print-queue model (SQLite) — the durable successor to /api/queue.
+  app.register(registerPrintQueueRoutes, { prefix: "/api/print" });
   app.register(registerAutomationRoutes, { prefix: "/api/automations" });
   app.register(registerMonitoringRoutes, { prefix: "/api/monitoring" });
 
