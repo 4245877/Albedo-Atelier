@@ -1,4 +1,5 @@
 import { VideoRTC } from "./video-rtc.js";
+import { FrameFreshness } from "./render/cameraFreshness.js";
 
 /*
  * Живой видеоэлемент дашборда, построенный на go2rtc VideoRTC (см. video-rtc.js).
@@ -56,6 +57,51 @@ class CameraStream extends VideoRTC {
     this.video.addEventListener("stalled", () => this.setMaybeWaiting("ждём кадр…"));
     this.video.addEventListener("emptied", () => this.setLive(false, "подключение…"));
     this.video.addEventListener("error", () => this.setLive(false, "ошибка видео"));
+
+    // Вачдог свежести кадров: события выше умеют только ЗАЖЕЧЬ значок, а
+    // замёрзший WebRTC-track не эмитит ничего — LIVE горел бы вечно. Раз в
+    // секунду сверяем счётчик реально декодированных кадров: track есть, но
+    // кадры стоят дольше порога → честный STALE вместо LIVE.
+    this.freshness = new FrameFreshness();
+    this.freshTimer = setInterval(() => this.checkFreshness(), 1000);
+  }
+
+  /** Счётчик декодированных кадров, где браузер его отдаёт (иначе null). */
+  decodedFrames() {
+    const v = this.video;
+    if (!v) return null;
+    if (typeof v.getVideoPlaybackQuality === "function") {
+      const q = v.getVideoPlaybackQuality();
+      if (q && typeof q.totalVideoFrames === "number") return q.totalVideoFrames;
+    }
+    if (typeof v.webkitDecodedFrameCount === "number") return v.webkitDecodedFrameCount;
+    return null;
+  }
+
+  checkFreshness() {
+    if (!this.overlay) return;
+    const now = Date.now();
+    const frames = this.decodedFrames();
+    if (frames !== null) this.freshness.sample(now, frames);
+    const hasTrack = Boolean(this.video?.srcObject?.getVideoTracks?.().length);
+    // Без счётчика кадров вачдог молчит — событийная логика остаётся.
+    if (frames === null) return;
+    const state = this.freshness.classify(now, hasTrack);
+    if (state === "live") {
+      this.setLive(true);
+    } else if (state === "stale") {
+      this.setLive(false, "кадры не обновляются…");
+    } else {
+      this.setLive(false, "нет сигнала");
+    }
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback?.();
+    if (this.freshTimer) {
+      clearInterval(this.freshTimer);
+      this.freshTimer = null;
+    }
   }
 
   setLive(live, text) {

@@ -6,7 +6,15 @@ on:
   pull_request:
 
 jobs:
-  # The Node service: typecheck (tests included), unit + integration tests, build.
+  # The Node service: typecheck (tests included), the full unit + integration
+  # suite, build. The suite now includes the P0 regressions AND the
+  # canonical-dispatch safety net: SQLite migration tests (008 fail-closed),
+  # queue invariant tests (partial unique indexes, 409s), canonical dispatch
+  # tests (preview conflicts, timeout → UNKNOWN, restart recovery, idempotency),
+  # artifact hash/verdict gates, start-guard + run reconciliation, graceful
+  # shutdown ordering, reconnect/completion, retention/orphan sweeps and the
+  # proxy/auth/security-header tests. No real printers are contacted: printers
+  # are fakes/mocks, SQLite is in-memory or tmpdir.
   print-orchestrator:
     runs-on: ubuntu-latest
     defaults:
@@ -29,15 +37,20 @@ jobs:
       - name: Typecheck (source + tests)
         run: pnpm run typecheck
 
-      - name: Unit + integration tests
+      - name: Unit + integration tests (dispatch, invariants, guards, shutdown, retention, security)
         run: pnpm test
 
       - name: Build
         run: pnpm run build
 
+      - name: Dependency vulnerability audit (production deps)
+        # Fail on known-vulnerable production dependencies; moderate+ severity.
+        run: pnpm audit --prod --audit-level moderate
+
   # The dashboard: pure ES-module unit tests (view helpers, the polling-race
-  # guard) and the nginx go2rtc-hardening structural checks. No install needed —
-  # the suite is `node --test` with no dependencies.
+  # guard, the optimistic-locking edit snapshot, camera frame freshness) and
+  # the nginx hardening/structural checks. No install needed — the suite is
+  # `node --test` with no dependencies.
   print-dashboard:
     runs-on: ubuntu-latest
     defaults:
@@ -50,29 +63,47 @@ jobs:
         with:
           node-version: 22
 
-      - name: Dashboard tests (view helpers, polling race, nginx hardening)
+      - name: Dashboard tests (view helpers, polling race, edit snapshots, camera freshness, nginx hardening)
         run: node --test "tests/**/*.test.mjs"
 
-      - name: Validate the nginx go2rtc/API hardening config parses
+      - name: Validate the rendered nginx config with the PINNED image (nginx -t)
+        # Uses the exact image the Dockerfile pins (version + digest), so CI
+        # validates the config against the nginx that will actually run it.
         run: |
-          sudo apt-get update && sudo apt-get install -y nginx
-          work="$(mktemp -d)"; mkdir -p "$work/logs" "$work/temp"
-          # Render the envsubst template (token) and stub the compose-only upstream
-          # hostnames so `nginx -t` does not attempt DNS resolution at test time.
-          sed -e 's/${ORCHESTRATOR_API_TOKEN}/ci-token/g' \
-              -e 's#http://go2rtc:1984#http://127.0.0.1:19984#g' \
-              -e 's#http://print-orchestrator:3100#http://127.0.0.1:13100#g' \
-              nginx.conf > "$work/default.conf"
-          cat > "$work/nginx.conf" <<EOF
-          worker_processes 1;
-          pid $work/nginx.pid;
-          error_log $work/logs/error.log;
-          events { worker_connections 64; }
-          http {
-            access_log off;
-            client_body_temp_path $work/temp; proxy_temp_path $work/temp;
-            fastcgi_temp_path $work/temp; uwsgi_temp_path $work/temp; scgi_temp_path $work/temp;
-            include $work/default.conf;
-          }
-          EOF
-          nginx -t -c "$work/nginx.conf"
+          image="$(grep -oP '^FROM \K\S+' Dockerfile)"
+          docker run --rm -e ORCHESTRATOR_API_TOKEN=ci-token \
+            -v "$PWD/nginx.conf:/etc/nginx/templates/default.conf.template:ro" \
+            "$image" sh -c '
+              /docker-entrypoint.d/20-envsubst-on-templates.sh >/dev/null 2>&1
+              sed -i "s|proxy_pass http://go2rtc:1984|proxy_pass http://127.0.0.1:19984|; s|proxy_pass http://print-orchestrator:3100|proxy_pass http://127.0.0.1:13100|" /etc/nginx/conf.d/default.conf
+              nginx -t'
+
+      - name: Build the dashboard image
+        run: docker build -t atelier-print-dashboard:ci .
+
+      - name: Image vulnerability scan (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: atelier-print-dashboard:ci
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+  # The orchestrator container image: build + scan (base image and OS packages).
+  orchestrator-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the orchestrator image
+        run: docker build -t atelier-print-orchestrator:ci apps/print-orchestrator
+
+      - name: Image vulnerability scan (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: atelier-print-orchestrator:ci
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true

@@ -84,6 +84,17 @@ export class SqliteArtifactRepository
     return this.queryOne("SELECT * FROM artifacts WHERE source = ? LIMIT 1", source);
   }
 
+  countBySource(source: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM artifacts WHERE source = ?")
+      .get(source) as { n: number | bigint } | undefined;
+    return Number(row?.n ?? 0);
+  }
+
+  delete(id: string): void {
+    this.db.prepare("DELETE FROM artifacts WHERE id = ?").run(id);
+  }
+
   list(): Artifact[] {
     return this.query("SELECT * FROM artifacts ORDER BY created_at, id");
   }

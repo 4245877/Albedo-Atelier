@@ -87,6 +87,12 @@ export class PrinterPoller {
 
   /** Per-printer identity of the in-flight print, for stable idempotent deduction. */
   private printRuns = new Map<string, PrintRun>();
+  /** Canonical-run reconciliation hook (see constructor). */
+  private readonly runObserver?: (
+    printerId: string,
+    prev: PrinterLiveStatus | undefined,
+    next: PrinterLiveStatus
+  ) => void;
 
   constructor(
     private readonly enabledConfigs: () => PrinterConfig[],
@@ -105,8 +111,20 @@ export class PrinterPoller {
     /** Loaded-reel sync; when absent a disabled no-op instance is used. */
     filamentSync?: FilamentSync,
     /** Light-policy collaborators (solar schedule, monitoring lease); injectable. */
-    lightPolicy?: Pick<LightSchedulerDeps, "solarPolicy" | "monitoringLease">
+    lightPolicy?: Pick<LightSchedulerDeps, "solarPolicy" | "monitoringLease"> & {
+      /**
+       * Canonical-run reconciliation hook: called once per printer per poll with
+       * the previous and fresh status, AFTER the transition is recorded. The farm
+       * wires {@link RunLifecycleService.observe} here; it must never throw.
+       */
+      runObserver?: (
+        printerId: string,
+        prev: PrinterLiveStatus | undefined,
+        next: PrinterLiveStatus
+      ) => void;
+    }
   ) {
+    this.runObserver = lightPolicy?.runObserver;
     this.today = new TodayCounters(initialToday);
     this.filament = filament ?? new FilamentConsumption(undefined, events);
     this.filamentSync = filamentSync ?? new FilamentSync(undefined);
@@ -172,6 +190,14 @@ export class PrinterPoller {
           // only time we watched the printer actually printing counts.
           this.accruePrintingTime(printer.id, prev);
           this.statuses.set(printer.id, status);
+          // Reconcile the canonical SQLite run with the observed reality. The
+          // observer is self-guarding; the extra try keeps the poll loop alive
+          // whatever happens inside.
+          try {
+            this.runObserver?.(printer.id, prev, status);
+          } catch (error) {
+            this.logger.error?.({ err: error, printer: printer.id }, "run observer failed");
+          }
           // Keep fulfillment's loaded-reel binding current from live telemetry,
           // so the completion deduction always has a target with no manual entry.
           // Runs every poll (deduped internally), so the binding exists well

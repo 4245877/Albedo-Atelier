@@ -167,6 +167,38 @@ export class StateTransitionError extends AppError {
 }
 
 /**
+ * A database uniqueness invariant refused the write — e.g. a second active run
+ * for one printer, a second live assignment for one task, or a repeated
+ * dispatch idempotency key racing itself. The SQLite partial unique indexes
+ * (migration 008) are the last line of defence behind the service checks; this
+ * surfaces their refusal as a 409 instead of a raw driver error.
+ */
+export class UniqueConstraintError extends AppError {
+  constructor(entity: string, detail?: string) {
+    super(
+      `Конфликт уникальности ${entity}${detail ? ` (${detail})` : ""} — параллельная операция уже создала конкурирующую запись`,
+      "UNIQUE_CONFLICT",
+      409,
+      { entity, detail }
+    );
+    this.name = "UniqueConstraintError";
+  }
+}
+
+/**
+ * The immutable set the operator previewed/confirmed no longer matches reality:
+ * the queue, the task version, the artifact hash or the printer state moved
+ * between preview and start. Fail-closed: nothing is dispatched; the operator
+ * must refresh the preview and confirm again.
+ */
+export class PreviewConflictError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super(message, "PREVIEW_CONFLICT", 409, details);
+    this.name = "PreviewConflictError";
+  }
+}
+
+/**
  * An optimistic-concurrency clash: the caller's `version` no longer matches the
  * stored row, so someone else changed it first. The caller should re-read and
  * retry. A 409 distinct from {@link StateTransitionError} so clients can tell a

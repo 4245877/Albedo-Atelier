@@ -49,7 +49,28 @@ export async function registerQueueRoutes(app: FastifyInstance): Promise<void> {
     job: farmStore.removeQueueJob(request.params.id)
   }));
 
-  app.post("/night/start", async () => ({ ok: true, ...(await farmStore.startNight()) }));
+  // The body carries the immutable preview identity the operator confirmed
+  // (taskId + taskVersion + artifact hash from GET /night). Drift between the
+  // preview and this call — queue change, task edit, re-analysis, file change —
+  // answers 409 PREVIEW_CONFLICT instead of starting something unseen. A
+  // body-less call (legacy client) still re-validates everything server-side.
+  app.post<{
+    Body: { taskId?: unknown; expectedTaskVersion?: unknown; artifactSha256?: unknown };
+  }>("/night/start", async (request) => {
+    const body = request.body ?? {};
+    const preview: {
+      taskId?: string;
+      expectedTaskVersion?: number;
+      artifactSha256?: string | null;
+    } = {};
+    if (typeof body.taskId === "string" && body.taskId.trim()) preview.taskId = body.taskId.trim();
+    if (typeof body.expectedTaskVersion === "number" && Number.isFinite(body.expectedTaskVersion)) {
+      preview.expectedTaskVersion = body.expectedTaskVersion;
+    }
+    if (typeof body.artifactSha256 === "string") preview.artifactSha256 = body.artifactSha256;
+    else if (body.artifactSha256 === null) preview.artifactSha256 = null;
+    return { ok: true, ...(await farmStore.startNight(preview)) };
+  });
 
   app.post("/night/pick", async () => ({ ok: true, night: farmStore.advanceNightPick() }));
 }

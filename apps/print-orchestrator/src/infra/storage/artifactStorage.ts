@@ -199,6 +199,36 @@ export class ArtifactStorage {
   }
 
   /**
+   * Every stored blob key (`sha256/<2>/<hash>`), for the orphan sweep. Reads
+   * the directory tree; unknown stray files are skipped (and left in place —
+   * the sweep only ever touches well-formed keys).
+   */
+  async listKeys(): Promise<string[]> {
+    const base = path.join(this.root, KEY_PREFIX);
+    let shards: string[];
+    try {
+      shards = await fsp.readdir(base);
+    } catch {
+      return [];
+    }
+    const keys: string[] = [];
+    for (const shard of shards) {
+      if (!/^[0-9a-f]{2}$/.test(shard)) continue;
+      let files: string[];
+      try {
+        files = await fsp.readdir(path.join(base, shard));
+      } catch {
+        continue;
+      }
+      for (const file of files) {
+        const key = `${KEY_PREFIX}/${shard}/${file}`;
+        if (KEY_RE.test(key)) keys.push(key);
+      }
+    }
+    return keys;
+  }
+
+  /**
    * The absolute on-disk path for a storage key — used internally and by the
    * analyzer. Rejects any key that is not a well-formed `sha256/<..>/<..>` (no
    * traversal, no absolute paths): the key is never derived from a user-supplied

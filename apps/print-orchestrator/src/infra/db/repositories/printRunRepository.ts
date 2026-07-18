@@ -15,6 +15,7 @@ import {
 } from "./shared";
 
 const RUN_STATES: readonly PrintRunState[] = [
+  "PENDING",
   "RUNNING",
   "PAUSED",
   "SUCCEEDED",
@@ -22,6 +23,9 @@ const RUN_STATES: readonly PrintRunState[] = [
   "CANCELLED",
   "UNKNOWN"
 ];
+
+/** SQL fragment listing the states that hold a printer (see uq_* indexes in 008). */
+const ACTIVE_STATES_SQL = "('PENDING','RUNNING','PAUSED','UNKNOWN')";
 
 function toState(value: unknown): PrintRunState {
   return RUN_STATES.includes(value as PrintRunState) ? (value as PrintRunState) : "UNKNOWN";
@@ -38,6 +42,10 @@ const mapper: RowMapper<PrintRun> = {
     "printer_id",
     "bed_cycle_id",
     "state",
+    "file",
+    "artifact_id",
+    "artifact_sha256",
+    "idempotency_key",
     "started_at",
     "ended_at",
     "progress",
@@ -58,6 +66,10 @@ const mapper: RowMapper<PrintRun> = {
       printer_id: r.printerId,
       bed_cycle_id: r.bedCycleId,
       state: r.state,
+      file: r.file,
+      artifact_id: r.artifactId,
+      artifact_sha256: r.artifactSha256,
+      idempotency_key: r.idempotencyKey,
       started_at: r.startedAt,
       ended_at: r.endedAt,
       progress: r.progress,
@@ -79,6 +91,10 @@ const mapper: RowMapper<PrintRun> = {
       printerId: asString(row.printer_id),
       bedCycleId: asStringOrNull(row.bed_cycle_id),
       state: toState(row.state),
+      file: asStringOrNull(row.file),
+      artifactId: asStringOrNull(row.artifact_id),
+      artifactSha256: asStringOrNull(row.artifact_sha256),
+      idempotencyKey: asStringOrNull(row.idempotency_key),
       startedAt: asStringOrNull(row.started_at),
       endedAt: asStringOrNull(row.ended_at),
       progress: asNumberOrNull(row.progress),
@@ -107,5 +123,29 @@ export class SqlitePrintRunRepository
 
   findByLegacyRef(legacyRef: string): PrintRun | null {
     return this.queryOne("SELECT * FROM print_runs WHERE legacy_ref = ?", legacyRef);
+  }
+
+  findActiveByPrinter(printerId: string): PrintRun | null {
+    return this.queryOne(
+      `SELECT * FROM print_runs WHERE printer_id = ? AND state IN ${ACTIVE_STATES_SQL}`,
+      printerId
+    );
+  }
+
+  findActiveByTask(taskId: string): PrintRun | null {
+    return this.queryOne(
+      `SELECT * FROM print_runs WHERE task_id = ? AND state IN ${ACTIVE_STATES_SQL}`,
+      taskId
+    );
+  }
+
+  findByIdempotencyKey(key: string): PrintRun | null {
+    return this.queryOne("SELECT * FROM print_runs WHERE idempotency_key = ?", key);
+  }
+
+  listActive(): PrintRun[] {
+    return this.query(
+      `SELECT * FROM print_runs WHERE state IN ${ACTIVE_STATES_SQL} ORDER BY created_at, id`
+    );
   }
 }

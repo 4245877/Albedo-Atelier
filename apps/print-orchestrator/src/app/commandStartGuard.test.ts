@@ -256,6 +256,7 @@ test("clearStartGuard lifts a held guard when idle, but refuses while the printe
     file: "model.gcode",
     state: "UNKNOWN",
     jobRef: "q1",
+    runId: null,
     requestedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   });

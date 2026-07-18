@@ -30,25 +30,31 @@ test("a fresh store with no file starts empty", () => {
   assert.deepEqual(store.reads.getFeed(), []);
 });
 
-test("the operator queue and its id sequence survive a restart", async () => {
+test("the operator queue survives a restart (canonical SQLite, stable task ids)", async () => {
   const first = new FarmStore(file);
-  first.addQueueJob({ title: "Chalice", printer: "K2", material: "PLA" });
-  first.addQueueJob({ title: "Base" }); // no printer → review
+  const chalice = first.addQueueJob({ title: "Chalice", printer: "K2", material: "PLA" });
+  const base = first.addQueueJob({ title: "Base" }); // no printer → review
   await first.flush();
+  await first.stop();
 
+  // A restarted store on the same paths reads the same SQLite queue — same
+  // ids, same order, same statuses. No legacy JSON is consulted for this.
   const restarted = new FarmStore(file);
   const queue = restarted.reads.getQueue();
   assert.equal(queue.length, 2);
-  assert.equal(queue[0].id, "q1");
+  assert.equal(queue[0].id, chalice.id);
   assert.equal(queue[0].title, "Chalice");
   assert.equal(queue[0].status, "ready");
-  assert.equal(queue[1].id, "q2");
+  assert.equal(queue[1].id, base.id);
   assert.equal(queue[1].status, "review");
   assert.equal(queue[1].reason, "не задан принтер");
 
-  // The id sequence continues from the restored value — no collision with q2.
-  const added = restarted.addQueueJob({ title: "Lid", printer: "K2" });
-  assert.equal(added.id, "q3");
+  // A restart must not duplicate anything (idempotent one-time import).
+  const again = new FarmStore(file);
+  assert.equal(again.reads.getQueue().length, 2, "no duplicates after another restart");
+  const added = again.addQueueJob({ title: "Lid", printer: "K2" });
+  assert.notEqual(added.id, chalice.id);
+  assert.equal(again.reads.getQueue().length, 3);
 });
 
 test("the event feed survives a restart", async () => {
@@ -63,15 +69,21 @@ test("the event feed survives a restart", async () => {
   );
 });
 
-test("the persisted file is the JSON contract the dashboard shapes rely on", async () => {
+test("the persisted JSON keeps its shape, but the queue section is frozen (SQLite is canonical)", async () => {
   const first = new FarmStore(file);
   first.addQueueJob({ title: "Chalice", printer: "K2", material: "PLA", eta: "2ч" });
   await first.flush();
 
   const raw = JSON.parse(fs.readFileSync(file, "utf8"));
   assert.equal(raw.version, 1);
-  assert.equal(raw.queue.seq, 1);
-  assert.equal(raw.queue.jobs[0].title, "Chalice");
+  // New jobs land ONLY in SQLite — the legacy queue section stays as it was
+  // (empty here), preserved verbatim for rollback, never written to.
+  assert.ok(Array.isArray(raw.queue.jobs));
+  assert.equal(raw.queue.jobs.length, 0, "the JSON queue no longer receives new jobs");
   assert.ok(Array.isArray(raw.feed));
+  assert.ok(
+    raw.feed.some((e: { text: string }) => e.text.includes("Chalice")),
+    "the add event still lands in the feed"
+  );
   assert.ok("today" in raw);
 });

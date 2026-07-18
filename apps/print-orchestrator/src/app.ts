@@ -18,10 +18,29 @@ import { registerPrinterRoutes } from "./modules/printers/routes";
 import { registerQueueRoutes } from "./modules/queue/routes";
 import { loggerConfig } from "./shared/logger";
 
+const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
 export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
   const app = Fastify({
     logger: loggerConfig,
     ...options
+  });
+
+  // Shutdown drain: once the process received a stop signal, no NEW mutation
+  // is accepted (503) — reads keep working while in-flight requests finish, and
+  // nothing can start a print into a farm that is closing its database.
+  let shuttingDown = false;
+  (app as FastifyInstance & { markShuttingDown?: () => void }).markShuttingDown = () => {
+    shuttingDown = true;
+  };
+  app.addHook("onRequest", (request, reply, done) => {
+    if (shuttingDown && MUTATING.has(request.method)) {
+      reply.code(503).send({
+        error: { code: "SHUTTING_DOWN", message: "Сервис завершает работу — изменения не принимаются" }
+      });
+      return;
+    }
+    done();
   });
 
   // CORS (allowlisted, not wildcard) + shared-secret guard on state-changing

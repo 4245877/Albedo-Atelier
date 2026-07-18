@@ -89,8 +89,15 @@ export const DISPATCH_ATTEMPT_TRANSITIONS: TransitionMap<DispatchAttemptState> =
   FAILED: []
 };
 
-/** PrintRun lifecycle — the observed physical print. */
+/**
+ * PrintRun lifecycle — the observed physical print. `PENDING` is the reserved
+ * run written by the dispatch transaction *before* the command is sent:
+ * `PENDING → RUNNING` on device ACK/observation, `PENDING → CANCELLED/FAILED`
+ * on a definitive rejection, `PENDING → UNKNOWN` when the outcome was lost
+ * (timeout) — never auto-failed and never silently retried.
+ */
 export const PRINT_RUN_TRANSITIONS: TransitionMap<PrintRunState> = {
+  PENDING: ["RUNNING", "FAILED", "CANCELLED", "UNKNOWN"],
   RUNNING: ["PAUSED", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"],
   PAUSED: ["RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"],
   UNKNOWN: ["RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"],

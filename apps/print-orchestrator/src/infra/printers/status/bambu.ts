@@ -239,11 +239,27 @@ function ensureBambuClient(printer: PrinterConfig): void {
 
   if (bambuClients.has(printer.id)) return;
 
-  const port = printer.port ?? 8883;
   // Bambu's local MQTT uses a per-printer self-signed certificate with no CA to
   // verify against, so `rejectUnauthorized: false` is required to connect at all
-  // — verification would need certificate pinning per device. This is a known
-  // Bambu LAN constraint; keep the orchestrator on a trusted network segment.
+  // — verification would need certificate pinning per device. Because that
+  // disables TLS authentication entirely, it is an EXPLICIT OPT-IN: the
+  // per-printer `allowInsecureTls: true` in printers.json, or the global
+  // `BAMBU_ALLOW_INSECURE_TLS=1`. Without it the adapter refuses honestly.
+  const insecureAllowed =
+    printer.allowInsecureTls === true || process.env.BAMBU_ALLOW_INSECURE_TLS === "1";
+  if (!insecureAllowed) {
+    bambuCache.set(
+      printer.id,
+      makeOfflineStatus(
+        printer,
+        "Bambu LAN MQTT требует TLS без проверки сертификата — подтвердите это явно " +
+          "(allowInsecureTls: true у принтера или BAMBU_ALLOW_INSECURE_TLS=1) на изолированном сегменте сети"
+      )
+    );
+    return;
+  }
+
+  const port = printer.port ?? 8883;
   const client = mqtt.connect(`mqtts://${printer.host}:${port}`, {
     username: "bblp",
     password: printer.accessCode,

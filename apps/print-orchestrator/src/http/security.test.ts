@@ -17,6 +17,9 @@ import Fastify, { type FastifyInstance } from "fastify";
 const TOKEN = "night-farm-token";
 process.env.ORCHESTRATOR_API_TOKEN = TOKEN;
 process.env.CORS_ALLOW_ORIGINS = "http://ally.example";
+// The Host allowlist refuses unknown DNS names (anti-rebinding); the tests
+// below address the service as farm.local, so it is allowlisted here.
+process.env.ALLOWED_HOSTS = "farm.local";
 
 async function buildApp(): Promise<FastifyInstance> {
   const { registerSecurity } = await import("./security");

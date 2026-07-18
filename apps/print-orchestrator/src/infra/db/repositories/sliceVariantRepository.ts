@@ -143,6 +143,16 @@ export class SqliteSliceVariantRepository
     );
   }
 
+  listReferencingArtifact(artifactId: string): SliceVariant[] {
+    return this.query(
+      `SELECT * FROM slice_variants
+        WHERE source_artifact_id = ? OR output_artifact_id = ?
+        ORDER BY created_at DESC, id DESC`,
+      artifactId,
+      artifactId
+    );
+  }
+
   listUnfinished(): SliceVariant[] {
     return this.query(
       "SELECT * FROM slice_variants WHERE state IN ('pending','running') ORDER BY created_at, id"

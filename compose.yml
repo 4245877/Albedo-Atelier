@@ -120,7 +120,11 @@ services:
       # orchestrator's ORCHESTRATOR_API_TOKEN (both read the same .env).
       ORCHESTRATOR_API_TOKEN: ${ORCHESTRATOR_API_TOKEN:-}
     ports:
-      - "0.0.0.0:8090:8080"
+      # Fail-closed default: the dashboard (= control plane entry) binds to
+      # loopback. Exposing it to the LAN is an explicit decision — set
+      # DASHBOARD_BIND=0.0.0.0 in .env (and keep ORCHESTRATOR_API_TOKEN set;
+      # see SECURITY.md for the firewall/VLAN checklist).
+      - "${DASHBOARD_BIND:-127.0.0.1}:8090:8080"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080 >/dev/null 2>&1 || exit 1"]
       interval: 10s

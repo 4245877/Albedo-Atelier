@@ -23,6 +23,20 @@ export interface NightPlanContext {
   window: string;
   resolvePrinter: (job: QueueJob) => PrinterConfig | undefined;
   getStatus: (id: string) => PrinterLiveStatus | undefined;
+  /**
+   * Canonical-dispatch decoration: extra hard blockers computed against the
+   * SQLite task/artifact/analysis (unattended permission, artifact hash,
+   * verdict, analysis freshness) plus the immutable preview identity. When
+   * wired, its blockers are merged in so the UI shows exactly what the server
+   * dispatch gate will enforce — the plan can never look startable while the
+   * gate would refuse.
+   */
+  nightGate?: (job: QueueJob) => {
+    blockers: string[];
+    taskId: string;
+    taskVersion: number | null;
+    artifactSha256: string | null;
+  } | null;
 }
 
 /** Minutes of a "HH:MM – HH:MM" window, wrapping across midnight. */
@@ -167,6 +181,18 @@ function evaluate(job: QueueJob, ctx: NightPlanContext, windowMinutes: number | 
     risk += (etaMinutes / windowMinutes) * 30;
   }
 
+  // Merge in the canonical-gate blockers (deduplicated), so the plan and the
+  // server-side dispatch gate can never disagree about startability.
+  const gate = ctx.nightGate?.(job) ?? null;
+  if (gate) {
+    for (const extra of gate.blockers) {
+      if (!blockers.includes(extra)) {
+        blockers.push(extra);
+        risk += 10;
+      }
+    }
+  }
+
   const finalRisk = clamp(risk, 5, 96);
   return {
     job,
@@ -180,7 +206,10 @@ function evaluate(job: QueueJob, ctx: NightPlanContext, windowMinutes: number | 
       riskLabel: riskLabel(finalRisk),
       // The dashboard shows the same hard reasons and disables the start
       // button, instead of claiming the job "fits the window" unconditionally.
-      blockers: [...blockers]
+      blockers: [...blockers],
+      taskId: gate?.taskId ?? job.id,
+      taskVersion: gate?.taskVersion ?? null,
+      artifactSha256: gate?.artifactSha256 ?? null
     }
   };
 }

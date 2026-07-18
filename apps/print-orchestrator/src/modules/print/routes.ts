@@ -98,6 +98,23 @@ export async function registerPrintQueueRoutes(app: FastifyInstance): Promise<vo
       return { ok: true, assignment: farmStore.printQueue.assignTask(request.params.id, printer) };
     }
   );
+
+  // Operator resolution of a run stuck in UNKNOWN (lost completion, restart
+  // mid-print) after physically checking the printer. Refused while the device
+  // is observably printing the run's file; completion is recorded exactly once.
+  app.post<{ Params: { id: string }; Body: { outcome?: unknown; reason?: unknown } }>(
+    "/runs/:id/resolve",
+    async (request) => {
+      const outcome = request.body?.outcome;
+      if (outcome !== "SUCCEEDED" && outcome !== "FAILED" && outcome !== "CANCELLED") {
+        throw new ValidationError("Поле «outcome» обязательно: SUCCEEDED | FAILED | CANCELLED");
+      }
+      return {
+        ok: true,
+        run: farmStore.resolveRun(request.params.id, outcome, optionalString(request.body?.reason))
+      };
+    }
+  );
 }
 
 /**
@@ -149,6 +166,54 @@ function registerArtifactRoutes(app: FastifyInstance): void {
     ok: true,
     analysis: farmStore.artifacts.reanalyze(request.params.id)
   }));
+
+  // Safe manual deletion: refused (400 with the reason) while any live task,
+  // run, analysis or slice variant still uses the artifact; deduplicated blobs
+  // are only unlinked when the last reference goes.
+  app.delete<{ Params: { id: string } }>("/artifacts/:id", async (request) => ({
+    ok: true,
+    ...(await farmStore.artifacts.deleteArtifact(request.params.id))
+  }));
+
+  // Retention sweep (dry-run by default — pass {"dryRun": false} to act).
+  app.post<{ Body: { olderThanDays?: unknown; dryRun?: unknown; maxDelete?: unknown } }>(
+    "/artifacts/retention/sweep",
+    async (request) => {
+      const body = request.body ?? {};
+      const olderThanDays =
+        typeof body.olderThanDays === "number" && Number.isFinite(body.olderThanDays) && body.olderThanDays >= 0
+          ? body.olderThanDays
+          : uploads.retentionDays;
+      const maxDelete =
+        typeof body.maxDelete === "number" && Number.isFinite(body.maxDelete) && body.maxDelete > 0
+          ? Math.floor(body.maxDelete)
+          : undefined;
+      return {
+        ok: true,
+        ...(await farmStore.artifacts.retentionSweep({
+          olderThanDays,
+          dryRun: body.dryRun !== false,
+          maxDelete
+        }))
+      };
+    }
+  );
+
+  // Orphan reconciliation between the blob store and the DB (dry-run by default).
+  app.post<{ Body: { dryRun?: unknown; maxDelete?: unknown } }>(
+    "/artifacts/orphans/sweep",
+    async (request) => {
+      const body = request.body ?? {};
+      const maxDelete =
+        typeof body.maxDelete === "number" && Number.isFinite(body.maxDelete) && body.maxDelete > 0
+          ? Math.floor(body.maxDelete)
+          : undefined;
+      return {
+        ok: true,
+        ...(await farmStore.artifacts.orphanSweep({ dryRun: body.dryRun !== false, maxDelete }))
+      };
+    }
+  );
 }
 
 /**

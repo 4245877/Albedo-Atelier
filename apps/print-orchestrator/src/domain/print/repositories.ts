@@ -61,6 +61,10 @@ export interface ArtifactRepository extends WritableRepository<Artifact> {
   findByLegacyRef(legacyRef: string): Artifact | null;
   /** Any artifact whose `source` (storage key) matches — used to tell whether a blob is still referenced. */
   findBySource(source: string): Artifact | null;
+  /** How many artifact rows share this storage key (dedup refcount for blob deletion). */
+  countBySource(source: string): number;
+  /** Deletes the row (analyses cascade; task refs go NULL). Retention-path only. */
+  delete(id: string): void;
   list(): Artifact[];
   /** Number of artifact rows — for the server-side count quota. */
   count(): number;
@@ -87,6 +91,8 @@ export interface PrintTaskRepository extends WritableRepository<PrintTask> {
   findByLegacyRef(legacyRef: string): PrintTask | null;
   /** The (single) task created for an uploaded artifact; oldest first if several. */
   findByArtifactId(artifactId: string): PrintTask | null;
+  /** EVERY task referencing an artifact — the retention safety check needs all of them. */
+  listByArtifactId(artifactId: string): PrintTask[];
   list(query?: TaskQuery): PrintTask[];
 }
 
@@ -125,6 +131,14 @@ export interface DispatchAttemptRepository extends WritableRepository<DispatchAt
 export interface PrintRunRepository extends WritableRepository<PrintRun> {
   listByTask(taskId: string): PrintRun[];
   findByLegacyRef(legacyRef: string): PrintRun | null;
+  /** The single active (PENDING/RUNNING/PAUSED/UNKNOWN) run holding a printer, if any. */
+  findActiveByPrinter(printerId: string): PrintRun | null;
+  /** The single active run of a task, if any. */
+  findActiveByTask(taskId: string): PrintRun | null;
+  /** The run created for a dispatch idempotency key, if any. */
+  findByIdempotencyKey(key: string): PrintRun | null;
+  /** Every active run — boot-time dispatch recovery reads this. */
+  listActive(): PrintRun[];
 }
 
 export interface MaterialOverrideRepository extends WritableRepository<MaterialOverride> {

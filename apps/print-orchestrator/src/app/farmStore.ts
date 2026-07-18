@@ -1,6 +1,12 @@
 import path from "node:path";
 
-import { JobError, MaterialError, NotFoundError, PrinterOfflineError } from "../core/errors";
+import {
+  JobError,
+  NotFoundError,
+  PreviewConflictError,
+  PrinterOfflineError,
+  PrintIdentityConflictError
+} from "../core/errors";
 import type { Automation, NightCandidate, NightPrint, QueueJob } from "../domain/dashboard/types";
 import type { PrintQueueStore } from "../domain/print/repositories";
 import { env, slicing, uploads } from "../shared/env";
@@ -23,6 +29,7 @@ import { FulfillmentInventoryClient } from "../infra/fulfillment/inventoryClient
 import { loadPrintersConfig, type PrinterConfig, type PrinterConfigSource } from "../infra/printers/config";
 import {
   fetchPrinterFiles,
+  normalizeStartablePath,
   supportsPrinterFiles,
   type PrinterFilesListing
 } from "../infra/printers/files";
@@ -31,11 +38,18 @@ import { AutomationStore } from "./automationStore";
 import { CameraService } from "./cameraService";
 import { PrinterCommandService } from "./commandService";
 import { DashboardReadModel } from "./dashboardReadModel";
+import { DispatchService } from "./dispatch/dispatchService";
+import { evaluateDispatchGate } from "./dispatch/dispatchGate";
+import { RunLifecycleService } from "./dispatch/runLifecycle";
+import { ANALYZER_VERSION } from "./artifacts/analyzers";
 import { runDriverOperation } from "./driverErrors";
 import { EventFeed } from "./eventFeed";
 import { FilamentConsumption } from "./filamentConsumption";
 import { FilamentSync } from "./filamentSync";
-import { materialsIncompatible, type NightPlanEntry } from "./nightPlanner";
+import { classifyDispatchError } from "./startGuard";
+import { supportsPrinterStart } from "../infra/printers/status";
+import { toLegacyQueueJob } from "./printQueue/projection";
+import { windowLengthMinutes, type NightPlanEntry } from "./nightPlanner";
 import { MonitoringLease } from "./monitoringLease";
 import { PrinterPoller } from "./printerPoller";
 import type { StoreLogger } from "../shared/logger";
@@ -79,6 +93,14 @@ export class FarmStore {
   private readonly uploadTmpDir: string;
   private printQueueStore: PrintQueueStore | null = null;
   private printQueueService: PrintQueueService | null = null;
+  /**
+   * The canonical dispatch chokepoint (SQLite-transactional) and the run
+   * lifecycle reconciler. Every physical start — manual, night, retry, future
+   * automatic — goes through {@link DispatchService.dispatch}; the legacy JSON
+   * queue can no longer reach a printer.
+   */
+  private dispatchService: DispatchService | null = null;
+  private runLifecycle: RunLifecycleService | null = null;
   /**
    * Content-addressed blob store + upload/analysis service for the file-upload
    * feature, opened lazily alongside {@link printQueueService}. Both write only
@@ -195,7 +217,15 @@ export class FarmStore {
       this.filament,
       undefined,
       this.filamentSync,
-      { monitoringLease: this.monitoring }
+      {
+        monitoringLease: this.monitoring,
+        // Canonical-run reconciliation: every poll compares the SQLite runs
+        // with the observed device state. Only when the store is already open —
+        // the poll loop must never force a lazy DB open.
+        runObserver: (id, prev, next) => {
+          if (this.printQueueStore) this.runLifecycle?.observe(id, prev, next);
+        }
+      }
     );
     this.commands = new PrinterCommandService(
       (id) => this.configById(id),
@@ -220,11 +250,18 @@ export class FarmStore {
       this.startedAt,
       this.poller,
       this.cameras,
-      this.queue,
+      // The queue the dashboard sees IS the SQLite projection — the legacy
+      // JSON QueueStore no longer feeds any read (or dispatch) path.
+      {
+        list: () => this.printQueue.projectLegacyQueue(),
+        size: () => this.printQueue.projectLegacyQueue().length
+      },
       this.events,
       this.automations,
       () => this.nightPick,
-      this.snapshots
+      this.snapshots,
+      (job) => this.nightGateInfo(job.id),
+      (printerId) => this.activeRunForPrinter(printerId)?.id ?? null
     );
 
     // Snapshot the whole durable state on every save.
@@ -345,6 +382,24 @@ export class FarmStore {
       // config loaded in start() is in place by the time an operator pins).
       isPrinterConfigured: (id) => this.configs.some((c) => c.id === id)
     });
+    this.runLifecycle = new RunLifecycleService(store, { logger });
+    this.dispatchService = new DispatchService({
+      store,
+      resolvePrinter: (reference) => {
+        const wanted = reference.trim().toLowerCase();
+        return this.enabledConfigs().find(
+          (p) => p.id.toLowerCase() === wanted || p.name.toLowerCase() === wanted
+        );
+      },
+      getStatus: (id) => this.poller.getStatus(id),
+      startPhysical: async (printerId, file, runId) => {
+        await this.commands.startPrint(printerId, file, runId, { runId });
+      },
+      classifyError: classifyDispatchError,
+      nightWindow: env.nightWindow,
+      nightSafetyBufferRatio: env.nightEtaSafetyBuffer,
+      logger
+    });
 
     this.artifactStorage = new ArtifactStorage({
       root: this.storageRoot,
@@ -403,26 +458,37 @@ export class FarmStore {
   }
 
   /**
-   * Boot-time reconciliation of durable start guards. An `ACKED` guard whose
-   * originating job is no longer in the legacy queue can be cleared safely —
-   * there is nothing left that could re-dispatch it. Any other guard (`SENT`/
-   * `UNKNOWN`, or `ACKED` with the job still queued) is an *unconfirmed* start
-   * and is deliberately kept: the next start attempt for that printer reconciles
-   * it against the live device before ever sending another command.
+   * Boot-time reconciliation of durable start guards, now run-aware:
+   *
+   *  - a guard bound to a canonical run whose run is already terminal (or gone)
+   *    protects nothing — dropped;
+   *  - a guard bound to a live/unreconciled run is kept together with the run
+   *    (fail-closed): the printer stays held until device evidence or the
+   *    operator resolves it;
+   *  - a legacy `ACKED` guard (no runId) can no longer be re-dispatched by
+   *    anything — the legacy JSON queue lost its dispatch path — so it is
+   *    dropped; legacy `SENT`/`UNKNOWN` guards are kept (physical outcome
+   *    unknown, reconcile against the live device first).
    */
   private sweepStartGuards(logger: StoreLogger): void {
     const store = this.printQueueStore;
     if (!store) return;
     const guards = store.repositories.startGuards.list();
     if (guards.length === 0) return;
-    const queuedIds = new Set(this.queue.list().map((job) => job.id));
+    const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED"]);
     for (const guard of guards) {
-      if (guard.state === "ACKED" && (!guard.jobRef || !queuedIds.has(guard.jobRef))) {
+      if (guard.runId) {
+        const run = store.repositories.printRuns.getById(guard.runId);
+        if (!run || TERMINAL.has(run.state)) {
+          store.repositories.startGuards.delete(guard.printerId);
+          continue;
+        }
+      } else if (guard.state === "ACKED") {
         store.repositories.startGuards.delete(guard.printerId);
         continue;
       }
       logger.warn?.(
-        { printer: guard.printerId, state: guard.state, file: guard.file, jobRef: guard.jobRef },
+        { printer: guard.printerId, state: guard.state, file: guard.file, runId: guard.runId },
         "unconfirmed start guard retained — printer held until reconciled with the live device"
       );
     }
@@ -454,6 +520,16 @@ export class FarmStore {
     // job is already gone (nothing to re-dispatch); keep unconfirmed ones so the
     // next start attempt reconciles them against the live device (fail-closed).
     this.sweepStartGuards(logger);
+
+    // Recover pending/unknown dispatches guard-and-run together: a PENDING run
+    // whose command provably never left is unwound and re-queued; anything
+    // ambiguous is held (never re-dispatched) until reconciled by observation.
+    if (this.runLifecycle) {
+      const recovered = this.runLifecycle.recover();
+      if (recovered.held + recovered.unwound + recovered.running > 0) {
+        logger.info?.(recovered, "canonical run recovery after restart");
+      }
+    }
 
     // Probe the OrcaSlicer runtime once so the scheduler can gate un-sliced work
     // synchronously; best-effort — a failed probe just leaves it unavailable.
@@ -505,28 +581,83 @@ export class FarmStore {
     await this.poller.start(logger);
   }
 
+  /** In-progress shutdown, so a repeated stop() awaits the same sequence (idempotent). */
+  private stopping: Promise<void> | null = null;
+
+  /**
+   * Graceful shutdown in strict order — the database is closed LAST, after
+   * every producer of writes has stopped and the in-flight work has settled:
+   *
+   *  1. stop the poll loop (and await the in-flight poll);
+   *  2. close device connections — no new telemetry/dispatch can start;
+   *  3. stop the analysis/slice workers accepting new jobs;
+   *  4. await the jobs already running, up to a bounded deadline; whatever is
+   *     still unfinished is reported explicitly (its `running` rows are
+   *     recovered to `pending` on the next boot — nothing is lost silently);
+   *  5. flush the JSON state;
+   *  6. only then close SQLite.
+   *
+   * Idempotent: a second call (double signal, test teardown after a signal)
+   * awaits the same shutdown instead of racing a second one into a closed DB.
+   */
   async stop(): Promise<void> {
-    // Await the in-flight poll before closing connections and flushing, so no
-    // late telemetry write races past the final save.
-    await this.poller.stop();
-    shutdownPrinterConnections();
-    // Persist the tail of accrued printing-hours (checkpointed only ~once a
-    // minute while running), then wait for every scheduled write to settle.
-    this.state.save();
-    await this.state.flush();
-    // Stop accepting new analysis/slice work (in-flight jobs finish on their own).
-    this.artifactService?.close();
-    this.sliceService?.close();
-    // Close the queue database last, after all writes have settled.
-    this.printQueueStore?.close();
-    this.printQueueStore = null;
-    this.printQueueService = null;
-    this.artifactService = null;
-    this.artifactStorage = null;
-    this.sliceRunner = null;
-    this.presetImportService = null;
-    this.profileService = null;
-    this.sliceService = null;
+    if (this.stopping) return this.stopping;
+    this.stopping = (async () => {
+      // 1–2. No new polls, no device connections.
+      await this.poller.stop();
+      shutdownPrinterConnections();
+
+      // 3. Workers stop accepting new jobs (queued-but-not-started are dropped;
+      // they live as pending rows in SQLite and are re-queued on next boot).
+      this.artifactService?.close();
+      this.sliceService?.close();
+
+      // 4. Bounded drain of the jobs already executing, so their final writes
+      // land BEFORE the database closes ("database is not open" can no longer
+      // happen on the normal path).
+      const drains: Promise<void>[] = [];
+      if (this.artifactService) drains.push(this.artifactService.whenIdle());
+      if (this.sliceService) drains.push(this.sliceService.whenIdle());
+      if (drains.length > 0) {
+        const drained = await Promise.race([
+          Promise.all(drains).then(() => true),
+          new Promise<false>((resolve) =>
+            setTimeout(() => resolve(false), env.shutdownDrainTimeoutMs).unref?.()
+          )
+        ]);
+        if (!drained) {
+          // Forced shutdown: report exactly what is being abandoned.
+          const unfinished = this.printQueueStore?.repositories.artifactAnalyses
+            .listUnfinished()
+            .map((a) => a.id);
+          // eslint-disable-next-line no-console
+          console.error(
+            JSON.stringify({
+              msg: "shutdown drain deadline hit — unfinished work will be recovered on next boot",
+              unfinishedAnalyses: unfinished ?? []
+            })
+          );
+        }
+      }
+
+      // 5. Persist the tail of accrued printing-hours and settle every write.
+      this.state.save();
+      await this.state.flush();
+
+      // 6. Close the queue database last.
+      this.printQueueStore?.close();
+      this.printQueueStore = null;
+      this.printQueueService = null;
+      this.dispatchService = null;
+      this.runLifecycle = null;
+      this.artifactService = null;
+      this.artifactStorage = null;
+      this.sliceRunner = null;
+      this.presetImportService = null;
+      this.profileService = null;
+      this.sliceService = null;
+    })();
+    return this.stopping;
   }
 
   /** Awaits all pending state writes (used on shutdown and in tests). */
@@ -599,7 +730,24 @@ export class FarmStore {
   resumePrinter(id: string) {
     return this.commands.resume(id);
   }
-  cancelPrinter(id: string, expect?: { job?: string | null }) {
+  /**
+   * Cancels the print on a device. Identity is verified at TWO levels before
+   * anything is sent: the canonical `runId` (when the caller snapshotted one)
+   * against the SQLite active run — this catches a *different run of the same
+   * file name* — and the on-device file name against a fresh device read (in
+   * the command service). Either mismatch is a 409, nothing is cancelled.
+   */
+  cancelPrinter(id: string, expect?: { job?: string | null; runId?: string | null }) {
+    if (expect && expect.runId !== undefined) {
+      const active = this.activeRunForPrinter(id);
+      if ((expect.runId ?? null) !== (active?.id ?? null)) {
+        throw new PrintIdentityConflictError(
+          this.configById(id).name,
+          expect.runId ?? null,
+          active?.id ?? null
+        );
+      }
+    }
     return this.commands.cancel(id, expect);
   }
   setLight(id: string, on: boolean) {
@@ -623,18 +771,90 @@ export class FarmStore {
   snapshotPrinter(id: string) {
     return this.commands.snapshot(id);
   }
-  addQueueJob(input: NewQueueJobInput) {
-    return this.queue.add(input);
+  /**
+   * Adds an operator job — into the canonical SQLite queue (the legacy JSON
+   * queue is no longer written). Field validation mirrors the legacy rules: a
+   * file is normalized at the door, an empty title refuses.
+   */
+  addQueueJob(input: NewQueueJobInput): QueueJob {
+    const file =
+      typeof input.file === "string" && input.file.trim()
+        ? normalizeStartablePath(input.file)
+        : undefined;
+    const detail = this.printQueue.createTask({
+      title: typeof input.title === "string" ? input.title : "",
+      printer: typeof input.printer === "string" ? input.printer : undefined,
+      material: typeof input.material === "string" ? input.material : undefined,
+      eta: typeof input.eta === "string" ? input.eta : undefined,
+      at: typeof input.at === "string" ? input.at : undefined,
+      night: input.night === true,
+      file
+    });
+    const job = toLegacyQueueJob({
+      entry: detail.queueEntry as NonNullable<typeof detail.queueEntry>,
+      task: detail.task,
+      artifact: detail.artifact
+    });
+    this.events.push("＋", `Задание «${detail.task.title}» добавлено в очередь`, "info");
+    return job;
   }
 
-  /** Removes a queue job by id (operator action); 404s when the id is unknown. */
+  /** Resolves a projection job id (task id, or a legacy `qN` id) to the task. */
+  private taskByQueueJobId(id: string) {
+    const repos = (this.printQueueStore as PrintQueueStore).repositories;
+    return repos.tasks.getById(id) ?? repos.tasks.findByLegacyRef(id);
+  }
+
+  /**
+   * Removes a queue job by id (operator action) — the task is CANCELLED in the
+   * canonical model (kept as history), never physically deleted. Refuses for a
+   * task already dispatching/printing: cancelling a live print goes through the
+   * printer cancel flow with run identity, not through a queue row delete.
+   */
   removeQueueJob(id: string): QueueJob {
-    return this.queue.removeById(id);
+    this.ensurePrintQueue();
+    const task = this.taskByQueueJobId(id);
+    if (!task) throw new NotFoundError(`Задание очереди «${id}»`);
+    if (task.state === "DISPATCHING" || task.state === "PRINTING") {
+      throw new JobError(
+        `Задание «${task.title}» уже запущено — отмените печать на принтере, а не строку очереди`
+      );
+    }
+    const entry = (this.printQueueStore as PrintQueueStore).repositories.queue.findByTaskId(task.id);
+    const snapshot = toLegacyQueueJob({
+      entry: entry ?? {
+        id: "",
+        taskId: task.id,
+        position: 0,
+        state: "RELEASED",
+        enqueuedAt: task.createdAt,
+        updatedAt: task.updatedAt,
+        version: 1
+      },
+      task,
+      artifact: task.artifactId
+        ? (this.printQueueStore as PrintQueueStore).repositories.artifacts.getById(task.artifactId)
+        : null
+    });
+    this.printQueue.cancelTask(task.id, "удалено оператором из очереди");
+    this.events.push("✕", `Задание «${task.title}» удалено из очереди`, "info");
+    return snapshot;
   }
 
   /** Parks a queue job in `review` so it stops blocking start-next; 404s when unknown. */
   reviewQueueJob(id: string, reason?: string): QueueJob {
-    return this.queue.moveToReview(id, reason);
+    this.ensurePrintQueue();
+    const task = this.taskByQueueJobId(id);
+    if (!task) throw new NotFoundError(`Задание очереди «${id}»`);
+    const held = this.printQueue.holdTask(task.id, reason);
+    const repos = (this.printQueueStore as PrintQueueStore).repositories;
+    const entry = repos.queue.findByTaskId(held.id);
+    this.events.push("⚑", `Задание «${held.title}» отложено на проверку`, "info");
+    return toLegacyQueueJob({
+      entry: entry as NonNullable<typeof entry>,
+      task: held,
+      artifact: held.artifactId ? repos.artifacts.getById(held.artifactId) : null
+    });
   }
 
   /**
@@ -677,36 +897,28 @@ export class FarmStore {
    * Serialized via {@link runQueueDispatch} so two parallel requests cannot
    * dispatch the same job twice.
    */
-  startNext(): Promise<{ job: QueueJob; printer: string }> {
+  startNext(): Promise<{ job: QueueJob; printer: string; runId: string }> {
     return this.runQueueDispatch(async () => {
-      const job = this.queue.findNextReady();
-      if (!job) {
+      this.ensurePrintQueue();
+      const rows = this.printQueue
+        .listOpenQueue()
+        .filter((row) => row.entry.state === "WAITING" && row.task.state === "QUEUED");
+      if (rows.length === 0) {
         throw new JobError("В очереди нет заданий, готовых к запуску");
       }
-      const printer = this.reads.resolvePrinter(job.printer);
-      if (!printer) {
-        throw new JobError(`Принтер «${job.printer}» не найден в конфигурации фермы`);
-      }
-      if (!job.file) {
-        throw new JobError(
-          `У задания «${job.title}» не задан файл — укажите имя .gcode на принтере, чтобы запустить его удалённо`
-        );
-      }
-      // A concrete material contradiction refuses the start (same rule as the
-      // night planner); unknown material on either side is not a contradiction.
-      if (materialsIncompatible(job.material, printer.material)) {
-        throw new MaterialError(
-          `Материал задания «${job.title}» (${job.material}) не совпадает с заправленным в «${printer.name}» (${printer.material})`
-        );
-      }
-
-      await this.commands.startPrint(printer.id, job.file, job.id);
-      // Remove the launched job and make the removal DURABLE before releasing the
-      // start guard, so a crash in this window cannot re-dispatch the same job.
-      this.queue.remove(job.id);
-      await this.state.flush();
-      this.commands.resolveStartGuard(printer.id);
-      return { job, printer: printer.name };
+      const row = rows[0];
+      const job = toLegacyQueueJob(row);
+      // The canonical dispatch: one SQLite transaction reserves the run,
+      // assignment and guard; only then is the physical command sent. The gate
+      // inside re-checks printer/material/file — no legacy pre-checks needed.
+      const result = await (this.dispatchService as DispatchService).dispatch({
+        taskId: row.task.id,
+        mode: "manual"
+      });
+      // The run is durably RUNNING and the queue entry RELEASED — the guard has
+      // nothing left to protect.
+      this.commands.resolveStartGuard(result.printerId);
+      return { job, printer: result.printerName, runId: result.runId };
     });
   }
 
@@ -725,8 +937,18 @@ export class FarmStore {
     return this.reads.getNight();
   }
 
-  startNight(): Promise<{ candidate: NightCandidate; window: string }> {
+  /**
+   * Launches the confirmed night candidate through the canonical dispatch.
+   * `preview` is the immutable identity the operator confirmed (taskId + task
+   * version + artifact hash from GET /night): any drift — queue change, task
+   * edit, re-analysis, file change — refuses with 409 instead of starting
+   * something the operator did not see.
+   */
+  startNight(
+    preview: { taskId?: string; expectedTaskVersion?: number; artifactSha256?: string | null } = {}
+  ): Promise<{ candidate: NightCandidate; window: string; runId: string }> {
     return this.runQueueDispatch(async () => {
+      this.ensurePrintQueue();
       const plan = this.reads.getNightPlan();
       if (plan.length === 0) {
         throw new JobError(
@@ -734,7 +956,20 @@ export class FarmStore {
         );
       }
 
-      const entry: NightPlanEntry = plan[Math.min(this.nightPick, plan.length - 1)];
+      let entry: NightPlanEntry;
+      if (preview.taskId) {
+        const found = plan.find((e) => e.job.id === preview.taskId);
+        if (!found) {
+          throw new PreviewConflictError(
+            "Подтверждённый ночной кандидат исчез из плана — обновите список и подтвердите заново",
+            { taskId: preview.taskId }
+          );
+        }
+        entry = found;
+      } else {
+        entry = plan[Math.min(this.nightPick, plan.length - 1)];
+      }
+
       // Fail-closed defence in depth: an unattended launch is only ever for a
       // job the operator explicitly marked for night. Even if the plan logic
       // changed, a non-night job can never be physically started here.
@@ -749,21 +984,94 @@ export class FarmStore {
         );
       }
 
-      // blockers === [] guarantees a resolved printer and a file (see nightPlanner),
-      // but re-narrow for the type checker before dispatch.
-      const printer = entry.printer;
-      const file = entry.job.file;
-      if (!printer || !file) {
-        throw new JobError(`Нельзя запустить «${entry.job.title}» на ночь — недостаточно данных`);
-      }
-
-      await this.commands.startPrint(printer.id, file, entry.job.id);
-      // Durable removal before releasing the guard (same rule as start-next).
-      this.queue.remove(entry.job.id);
-      await this.state.flush();
-      this.commands.resolveStartGuard(printer.id);
-      return { candidate: entry.candidate, window: env.nightWindow };
+      // Preview identity: prefer what the CLIENT confirmed; fall back to the
+      // server-built plan entry (still a real guard — the dispatch transaction
+      // re-reads and compares). The dispatch gate re-verifies everything else.
+      const result = await (this.dispatchService as DispatchService).dispatch({
+        taskId: entry.job.id,
+        mode: "night",
+        expectedTaskVersion:
+          preview.expectedTaskVersion ?? entry.candidate.taskVersion ?? undefined,
+        expectedArtifactSha256:
+          preview.artifactSha256 !== undefined
+            ? preview.artifactSha256
+            : entry.candidate.artifactSha256
+      });
+      this.commands.resolveStartGuard(result.printerId);
+      return { candidate: entry.candidate, window: env.nightWindow, runId: result.runId };
     });
+  }
+
+  /**
+   * The canonical night-gate decoration for one projected queue job: the same
+   * fail-closed blockers {@link DispatchService} will enforce, computed against
+   * the SQLite task/artifact/analysis — plus the immutable preview identity.
+   */
+  private nightGateInfo(taskId: string): {
+    blockers: string[];
+    taskId: string;
+    taskVersion: number | null;
+    artifactSha256: string | null;
+  } | null {
+    const store = this.printQueueStore;
+    if (!store) return null;
+    const repos = store.repositories;
+    const task = repos.tasks.getById(taskId) ?? repos.tasks.findByLegacyRef(taskId);
+    if (!task) return null;
+    const artifact = task.artifactId ? repos.artifacts.getById(task.artifactId) : null;
+    const analysis = artifact ? repos.artifactAnalyses.latestForArtifact(artifact.id) : null;
+    const printerRef = task.pinnedPrinterId ?? task.targetPrinter;
+    const printer = printerRef ? this.reads.resolvePrinter(printerRef) : undefined;
+    if (!printer) {
+      // The base planner already reports the unresolved printer; only identity here.
+      return {
+        blockers: [],
+        taskId: task.id,
+        taskVersion: task.version,
+        artifactSha256: artifact?.sha256 ?? null
+      };
+    }
+    const blockers = evaluateDispatchGate({
+      mode: "night",
+      task,
+      entry: repos.queue.findByTaskId(task.id),
+      artifact,
+      analysis,
+      printer,
+      status: this.poller.getStatus(printer.id),
+      remoteStartSupported: supportsPrinterStart(printer),
+      nightWindowMinutes: windowLengthMinutes(env.nightWindow),
+      nightSafetyBufferRatio: env.nightEtaSafetyBuffer,
+      currentAnalyzerVersion: ANALYZER_VERSION
+    });
+    return {
+      blockers: blockers.map((b) => b.message),
+      taskId: task.id,
+      taskVersion: task.version,
+      artifactSha256: artifact?.sha256 ?? null
+    };
+  }
+
+  /**
+   * Operator resolution of a run stuck in UNKNOWN (lost completion, restart
+   * mid-print) after physically checking the printer. Refused while the device
+   * is observably printing the run's file.
+   */
+  resolveRun(runId: string, outcome: "SUCCEEDED" | "FAILED" | "CANCELLED", reason?: string) {
+    this.ensurePrintQueue();
+    const lifecycle = this.runLifecycle as RunLifecycleService;
+    const run = (this.printQueueStore as PrintQueueStore).repositories.printRuns.getById(runId);
+    return lifecycle.resolveRun(runId, outcome, {
+      status: run ? this.poller.getStatus(run.printerId) : undefined,
+      reason,
+      actor: "operator"
+    });
+  }
+
+  /** The active canonical run holding a printer, if any (identity for dangerous commands). */
+  activeRunForPrinter(printerId: string) {
+    if (!this.printQueueStore) return null;
+    return this.runLifecycle?.activeRun(printerId) ?? null;
   }
 
   /**

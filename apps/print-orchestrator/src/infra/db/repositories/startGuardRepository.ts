@@ -18,6 +18,7 @@ function fromRow(row: Row): StartGuard {
     file: asString(row.file),
     state: toState(row.state),
     jobRef: asStringOrNull(row.job_ref),
+    runId: asStringOrNull(row.run_id),
     requestedAt: asString(row.requested_at),
     updatedAt: asString(row.updated_at)
   };
@@ -42,12 +43,13 @@ export class SqliteStartGuardRepository implements StartGuardRepository {
   upsert(guard: StartGuard): void {
     this.db
       .prepare(
-        `INSERT INTO start_guards (printer_id, file, state, job_ref, requested_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO start_guards (printer_id, file, state, job_ref, run_id, requested_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(printer_id) DO UPDATE SET
            file = excluded.file,
            state = excluded.state,
            job_ref = excluded.job_ref,
+           run_id = excluded.run_id,
            requested_at = excluded.requested_at,
            updated_at = excluded.updated_at`
       )
@@ -56,6 +58,7 @@ export class SqliteStartGuardRepository implements StartGuardRepository {
         guard.file,
         guard.state,
         guard.jobRef,
+        guard.runId,
         guard.requestedAt,
         guard.updatedAt
       );

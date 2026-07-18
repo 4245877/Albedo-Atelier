@@ -299,6 +299,12 @@ export const uploads = Object.freeze({
    * event loop and disk busy — the "лимит общей очереди анализа" bound.
    */
   analysisMaxQueue: readPositiveInt("ANALYSIS_MAX_QUEUE", process.env.ANALYSIS_MAX_QUEUE, 200),
+  /**
+   * Default age cutoff (days) for the artifact retention sweep — only provably
+   * unused artifacts older than this are reclaimed, and only when the operator
+   * (or a cron) invokes the sweep endpoint; nothing is deleted spontaneously.
+   */
+  retentionDays: readPositiveInt("ARTIFACT_RETENTION_DAYS", process.env.ARTIFACT_RETENTION_DAYS, 30),
   /** Per-file analysis wall-clock budget (ms) before it is failed as timed out. */
   analysisTimeoutMs: readPositiveInt("ANALYSIS_TIMEOUT_MS", process.env.ANALYSIS_TIMEOUT_MS, 30000),
   /** How many files may be analysed concurrently by the in-process worker pool. */
@@ -357,6 +363,14 @@ export const env = Object.freeze({
   logLevel: process.env.LOG_LEVEL ?? "info",
   /** How often the farm polls real printers for live status. */
   printerPollIntervalMs: readInteger(process.env.PRINTER_POLL_INTERVAL_MS, 10000),
+  /**
+   * How long shutdown waits for in-flight analysis/slice jobs to settle before
+   * closing SQLite anyway. Whatever is still unfinished at the deadline is
+   * reported explicitly and recovered as `pending` on the next boot.
+   */
+  shutdownDrainTimeoutMs: readInteger(process.env.SHUTDOWN_DRAIN_TIMEOUT_MS, 15_000),
+  /** Hard cap on the whole graceful shutdown; past it the process force-exits. */
+  shutdownTimeoutMs: readInteger(process.env.SHUTDOWN_TIMEOUT_MS, 25_000),
   /**
    * Night-print window shown on the dashboard (config, not telemetry). Also
    * drives the dashboard's automatic dark theme and the night-plan duration
@@ -424,5 +438,22 @@ export const env = Object.freeze({
   corsAllowOrigins: (process.env.CORS_ALLOW_ORIGINS ?? "")
     .split(",")
     .map((origin) => origin.trim())
+    .filter(Boolean),
+  /**
+   * Explicit opt-in that lets MUTATIONS through with NO API token configured.
+   * The default is fail-closed: without a token (and without this flag) every
+   * state-changing request is refused 503 — "no auth configured" must never
+   * silently mean "everyone is authorized".
+   */
+  allowUnauthenticatedMutations: process.env.ALLOW_UNAUTHENTICATED_MUTATIONS === "1",
+  /**
+   * Extra DNS *hostnames* allowed in the Host header (comma-separated). Literal
+   * IPs, localhost and the compose service name pass by default; any other DNS
+   * name must be allowlisted here — a DNS-rebinding attack needs a name the
+   * attacker controls, which will not be on this list.
+   */
+  allowedHosts: (process.env.ALLOWED_HOSTS ?? "")
+    .split(",")
+    .map((host) => host.trim().toLowerCase())
     .filter(Boolean)
 });

@@ -46,14 +46,41 @@ test("import creates tasks/entries/artifacts, preserving legacy ids as legacyRef
   s.close();
 });
 
-test("import is one-time: the marker makes a second call a skipped no-op", () => {
+test("import is one-time: a second call with the SAME jobs is a skipped no-op", () => {
   const s = store();
   importLegacyQueue(s, LEGACY);
   assert.equal(s.repositories.meta.get(LEGACY_IMPORT_MARKER) !== null, true);
 
-  const second = importLegacyQueue(s, [{ id: "q9", title: "Late", printer: "K2", material: "PLA", eta: "1ч", status: "ready" }]);
+  const second = importLegacyQueue(s, LEGACY);
   assert.deepEqual(second, { skipped: true, imported: 0 });
-  assert.equal(s.repositories.tasks.findByLegacyRef("q9"), null, "no late import — not dual-write");
+  assert.equal(s.repositories.tasks.list().length, 2, "no duplicates on restart");
+  s.close();
+});
+
+test("a job that appears in legacy JSON AFTER the cutover is imported fail-closed (NEEDS_REVIEW), never runnable", () => {
+  const s = store();
+  importLegacyQueue(s, LEGACY);
+
+  // An older binary (or a hand edit) wrote a new job into state.json after the
+  // marker was set. It must neither vanish (data loss) nor become startable
+  // from a second source of truth: it parks in review for the operator.
+  const second = importLegacyQueue(s, [
+    ...LEGACY,
+    { id: "q9", title: "Late", printer: "K2", material: "PLA", eta: "1ч", status: "ready" }
+  ]);
+  assert.deepEqual(second, { skipped: false, imported: 1 });
+
+  const late = s.repositories.tasks.findByLegacyRef("q9");
+  assert.equal(late?.state, "NEEDS_REVIEW", "late job is parked, not runnable");
+  assert.match(late?.reason ?? "", /после перехода/);
+  assert.equal(s.repositories.queue.findByTaskId(late!.id)?.state, "HELD");
+
+  // Idempotent: a third call imports nothing new.
+  const third = importLegacyQueue(s, [
+    ...LEGACY,
+    { id: "q9", title: "Late", printer: "K2", material: "PLA", eta: "1ч", status: "ready" }
+  ]);
+  assert.deepEqual(third, { skipped: true, imported: 0 });
   s.close();
 });
 

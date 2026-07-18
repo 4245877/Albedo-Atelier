@@ -38,6 +38,13 @@ export interface PrinterView {
   /** When the underlying live status was produced; null before the first report. */
   updatedAt: string | null;
   job: string | null;
+  /**
+   * The canonical SQLite run currently holding this printer (dispatch-created),
+   * or null. The dashboard snapshots it when confirming dangerous commands
+   * (cancel/pause) so the backend can refuse (409) when the physical run
+   * changed under the confirmation — even for a re-print of the same file name.
+   */
+  activeRunId?: string | null;
   progress: number | null;
   /** `[current, target]` °C; target is null when the device does not report it. */
   nozzle: [number, number | null] | null;

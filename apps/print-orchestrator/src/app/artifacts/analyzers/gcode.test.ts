@@ -87,13 +87,33 @@ test("arcs lower the bbox confidence and warn", async () => {
   assert.ok(r.warnings.some((w) => w.code === "gcode_arcs"));
 });
 
-test("a risky command (M502) forces review", async () => {
+test("a forbidden config-mutating command (M502) blocks the file outright", async () => {
   const r = await run(
     "risky.gcode",
     makeGcode({ moves: ["G21", "G90", "M502", "G1 X10 Y10"] })
   );
+  assert.equal(r.verdict, "blocked");
+  assert.ok(r.blockers.some((b) => b.code === "gcode_forbidden_command" && /M502/.test(b.message)));
+});
+
+test("an attended-only command (M600) forces review, not blocked", async () => {
+  const r = await run(
+    "swap.gcode",
+    makeGcode({ moves: ["G21", "G90", "M600", "G1 X10 Y10"] })
+  );
   assert.equal(r.verdict, "review");
-  assert.ok(r.warnings.some((w) => w.code === "gcode_risky_command"));
+  assert.ok(r.warnings.some((w) => w.code === "gcode_risky_command" && /M600/.test(w.message)));
+});
+
+test("firmware/file-system commands are forbidden: M997, M30, SAVE_CONFIG", async () => {
+  for (const cmd of ["M997", "M30 old.gcode", "SAVE_CONFIG"]) {
+    const r = await run(
+      "danger.gcode",
+      makeGcode({ moves: ["G21", "G90", cmd, "G1 X10 Y10"] })
+    );
+    assert.equal(r.verdict, "blocked", cmd);
+    assert.ok(r.blockers.some((b) => b.code === "gcode_forbidden_command"), cmd);
+  }
 });
 
 test("unknown slicer + unknown target → review, never auto-safe", async () => {

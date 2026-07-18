@@ -80,6 +80,15 @@ export interface PrinterConfig {
   apiKey: string;
   serial: string;
   accessCode: string;
+  /**
+   * Explicit opt-in for a TLS connection WITHOUT certificate verification
+   * (Bambu LAN MQTT uses a per-printer self-signed certificate with no CA).
+   * Without this flag (or the global `BAMBU_ALLOW_INSECURE_TLS=1`) the adapter
+   * refuses to connect and reports the printer offline with the reason —
+   * unverified TLS is never a silent default. Optional so existing fixtures
+   * and configs stay valid; absent means `false` (refuse).
+   */
+  allowInsecureTls?: boolean;
   light: PrinterLightConfig;
 }
 
@@ -220,6 +229,7 @@ export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
     apiKey: asString(value.apiKey),
     serial: asString(value.serial),
     accessCode: asString(value.accessCode),
+    allowInsecureTls: value.allowInsecureTls === true,
     light: normalizeLightConfig(value.light, protocol)
   };
 }

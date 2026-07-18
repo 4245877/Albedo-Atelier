@@ -194,7 +194,13 @@ export class PrinterCommandService {
    *
    * Re-polls so the returned view reflects the device actually beginning the job.
    */
-  async startPrint(id: string, file: string, jobRef?: string): Promise<PrinterView> {
+  async startPrint(
+    id: string,
+    file: string,
+    jobRef?: string,
+    opts: { runId?: string } = {}
+  ): Promise<PrinterView> {
+    const runId = opts.runId ?? null;
     const target = normalizeStartablePath(file);
     const printer = this.getReachableConfig(id);
     if (!supportsPrinterStart(printer)) {
@@ -270,6 +276,7 @@ export class PrinterCommandService {
         file: target,
         state: "SENT",
         jobRef: jobRef ?? null,
+        runId,
         requestedAt: nowIso(),
         updatedAt: nowIso()
       });
@@ -293,6 +300,7 @@ export class PrinterCommandService {
             file: target,
             state: "UNKNOWN",
             jobRef: jobRef ?? null,
+            runId,
             requestedAt: nowIso(),
             updatedAt: nowIso()
           });
@@ -312,6 +320,7 @@ export class PrinterCommandService {
             file: target,
             state: "ACKED",
             jobRef,
+            runId,
             requestedAt: nowIso(),
             updatedAt: nowIso()
           });

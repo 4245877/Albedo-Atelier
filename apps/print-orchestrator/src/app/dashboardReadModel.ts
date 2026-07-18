@@ -29,8 +29,26 @@ import type { EventFeed } from "./eventFeed";
 import { buildNightPlan, materialsIncompatible, type NightPlanEntry } from "./nightPlanner";
 import { buildPrinterView, isBusyStatus } from "./printerView";
 import type { PrinterPoller } from "./printerPoller";
-import type { QueueStore } from "./queueStore";
 import type { SnapshotStore } from "../infra/persistence/snapshotStore";
+
+/**
+ * The read model's view of the operator queue. Since the canonical-dispatch
+ * cutover this is a *projection of the SQLite model* (FarmStore wires
+ * `printQueue.projectLegacyQueue()` here) — the legacy JSON `QueueStore` no
+ * longer feeds any read or dispatch path.
+ */
+export interface QueueReader {
+  list(): QueueJob[];
+  size(): number;
+}
+
+/** Canonical night-gate decoration for a queue job (see NightPlanContext.nightGate). */
+export type NightGateFn = (job: QueueJob) => {
+  blockers: string[];
+  taskId: string;
+  taskVersion: number | null;
+  artifactSha256: string | null;
+} | null;
 
 const MS_PER_MIN = 60 * 1000;
 
@@ -77,20 +95,25 @@ export class DashboardReadModel {
     private readonly startedAt: number,
     private readonly poller: PrinterPoller,
     private readonly cameras: CameraService,
-    private readonly queue: QueueStore,
+    private readonly queue: QueueReader,
     private readonly events: EventFeed,
     private readonly automations: AutomationStore,
     private readonly getNightPick: () => number,
-    private readonly snapshots: SnapshotStore
+    private readonly snapshots: SnapshotStore,
+    private readonly nightGate: NightGateFn | null = null,
+    /** Canonical active-run lookup for a printer (identity of dangerous commands). */
+    private readonly activeRunId: ((printerId: string) => string | null) | null = null
   ) {}
 
   private view(printer: PrinterConfig): PrinterView {
-    return buildPrinterView(
+    const view = buildPrinterView(
       printer,
       this.poller.getStatus(printer.id),
       this.cameras.getEntry(printer.id),
       this.snapshots.latest(printer.id)?.url ?? null
     );
+    view.activeRunId = this.activeRunId ? this.activeRunId(printer.id) : null;
+    return view;
   }
 
   listPrinters(): PrinterView[] {
@@ -208,7 +231,8 @@ export class DashboardReadModel {
     return buildNightPlan(this.queue.list(), {
       window: env.nightWindow,
       resolvePrinter: (job) => this.resolvePrinter(job.printer),
-      getStatus: (id) => this.poller.getStatus(id)
+      getStatus: (id) => this.poller.getStatus(id),
+      nightGate: this.nightGate ?? undefined
     });
   }
 
@@ -369,10 +393,10 @@ export class DashboardReadModel {
         val: camsConfigured > 0 ? `${camsOnline}/${camsConfigured} доступны` : "не настроены",
         ok: camsConfigured === 0 ? "warn" : camsOnline === camsConfigured ? "ok" : "warn"
       },
-      { name: "Очередь", val: `${this.queue.size()} заданий · сохраняется на диск`, ok: "ok" },
+      { name: "Очередь", val: `${this.queue.size()} заданий · SQLite (канонический источник)`, ok: "ok" },
       {
         name: "База данных",
-        val: "JSON-файл · очередь, события и счётчики переживают рестарт",
+        val: "SQLite — очередь и запуски; JSON — события и счётчики",
         ok: "ok"
       }
     ];

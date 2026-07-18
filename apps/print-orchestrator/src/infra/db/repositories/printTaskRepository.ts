@@ -131,6 +131,13 @@ export class SqlitePrintTaskRepository
     );
   }
 
+  listByArtifactId(artifactId: string): PrintTask[] {
+    return this.query(
+      "SELECT * FROM print_tasks WHERE artifact_id = ? ORDER BY created_at, id",
+      artifactId
+    );
+  }
+
   list(query?: TaskQuery): PrintTask[] {
     const states = query?.states;
     if (states && states.length > 0) {

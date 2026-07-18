@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-import { NotFoundError, VersionConflictError } from "../../../core/errors";
+import { NotFoundError, UniqueConstraintError, VersionConflictError } from "../../../core/errors";
 import type { AnalysisFinding, Metadata } from "../../../domain/print/types";
 
 /**
@@ -154,7 +154,11 @@ export abstract class BaseRepository<T extends { id: string; version: number }> 
     const stmt = this.db.prepare(
       `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`
     );
-    stmt.run(...columns.map((col) => requireValue(row, col)));
+    try {
+      stmt.run(...columns.map((col) => requireValue(row, col)));
+    } catch (error) {
+      throw mapUniqueViolation(error, this.mapper.entity);
+    }
     return entity;
   }
 
@@ -181,13 +185,18 @@ export abstract class BaseRepository<T extends { id: string; version: number }> 
     const stmt = this.db.prepare(
       `UPDATE ${table} SET ${assignments} WHERE id = ? AND version = ?`
     );
-    const result = stmt.run(
-      ...setColumns.map((col) => requireValue(row, col)),
-      entity.id,
-      entity.version
-    );
+    let result: { changes: number | bigint };
+    try {
+      result = stmt.run(
+        ...setColumns.map((col) => requireValue(row, col)),
+        entity.id,
+        entity.version
+      );
+    } catch (error) {
+      throw mapUniqueViolation(error, label);
+    }
 
-    if (result.changes === 0) {
+    if (Number(result.changes) === 0) {
       const exists = this.db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(entity.id);
       if (!exists) throw new NotFoundError(`${label} «${entity.id}»`);
       throw new VersionConflictError(label, entity.id, entity.version);
@@ -219,4 +228,19 @@ function requireValue(row: Record<string, SqlValue>, column: string): SqlValue {
     throw new Error(`Row mapper produced no value for column "${column}"`);
   }
   return value;
+}
+
+/**
+ * Turns a SQLite UNIQUE-constraint refusal (the partial unique indexes from
+ * migration 008, the queue's task_id UNIQUE, …) into a typed 409 the HTTP layer
+ * already maps, keeping which invariant fired in the detail. Everything else is
+ * re-thrown untouched.
+ */
+export function mapUniqueViolation(error: unknown, entity: string): unknown {
+  const message = error instanceof Error ? error.message : "";
+  if (/UNIQUE constraint failed/i.test(message)) {
+    const detail = /UNIQUE constraint failed: (.+)$/i.exec(message)?.[1]?.trim();
+    return new UniqueConstraintError(entity, detail);
+  }
+  return error;
 }

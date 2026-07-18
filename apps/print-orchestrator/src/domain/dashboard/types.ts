@@ -45,6 +45,15 @@ export interface NightCandidate {
   risk: number;
   riskLabel: string;
   /**
+   * Immutable preview identity of the candidate: the SQLite task id, the task
+   * version and the artifact content hash the candidate was built from. The
+   * dashboard sends these back with night-start; the server refuses (409) when
+   * any of them moved — the operator never confirms one list and starts another.
+   */
+  taskId?: string;
+  taskVersion?: number | null;
+  artifactSha256?: string | null;
+  /**
    * The concrete, hard reasons this job cannot launch tonight (mirrors
    * NightPlanEntry.blockers). Empty → startable; the dashboard disables the
    * night-start button and lists these otherwise, so the UI never claims a

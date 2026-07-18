@@ -12,6 +12,7 @@
 
 import { apiGet, apiPost } from "../api.js";
 import { $, esc, toast } from "../util.js";
+import { createSnapshot, isSnapshotStale, paramsPayload } from "./editSnapshot.js";
 
 const POLL_MS = 8000;
 
@@ -25,6 +26,12 @@ const state = {
 };
 let pollTimer = null;
 let wired = false;
+/**
+ * Immutable per-form edit snapshots, keyed by task id, taken when the operator
+ * OPENS a form. Submits read `expectedVersion` from here — never from the
+ * poll-refreshed `state` — so stale data can only produce an honest 409.
+ */
+const editSnapshots = new Map();
 
 const VERDICT = {
   compatible: { label: "совместимо", cls: "ok" },
@@ -64,7 +71,14 @@ async function loadAll(options = {}) {
     state.loaded = true;
     // A background poll must not wipe out an operator's half-filled form or open
     // editor; only skip the re-render in that case, the state is already updated.
-    if (!(options.fromPoll && isEditing())) render();
+    if (!(options.fromPoll && isEditing())) {
+      editSnapshots.clear();
+      render();
+    } else {
+      // The state moved under an open form: mark stale forms visibly. The form
+      // keeps its snapshot — a submit still sends the OLD version and 409s.
+      markStaleForms();
+    }
     ensurePolling();
   } catch {
     const body = $("#scheduler-body");
@@ -312,7 +326,20 @@ function wireDelegates() {
 
     if (action === "toggle-edit") {
       const form = rowEl?.querySelector('[data-sch-form="params"]');
-      if (form) form.hidden = !form.hidden;
+      if (form) {
+        form.hidden = !form.hidden;
+        if (!form.hidden && taskId) {
+          // Opening the editor freezes the edit snapshot for this task.
+          const row = state.queue.find((r) => r.task.id === taskId);
+          if (row) editSnapshots.set(taskId, createSnapshot(row.task));
+        } else if (form.hidden && taskId) {
+          editSnapshots.delete(taskId);
+        }
+      }
+    } else if (action === "reload-form") {
+      // Operator chose to re-read a stale form: re-render mints new snapshots.
+      editSnapshots.clear();
+      render();
     } else if (action === "up" || action === "down") {
       void moveTask(taskId, action);
     } else if (action === "unpin") {
@@ -348,26 +375,64 @@ function wireDelegates() {
 }
 
 async function saveParams(taskId, form, d) {
-  // Send the task version we rendered so a racing edit conflicts (409) instead of
-  // silently clobbering the other operator's change — the same guard reorder uses.
-  const row = state.queue.find((r) => r.task.id === taskId);
-  const payload = {
-    priority: Number(d.priority) || 0,
-    dayNightPreference: d.dayNightPreference || "any",
+  // Everything the submit asserts — above all `expectedVersion` — comes from
+  // the snapshot frozen when the form OPENED, never from the poll-refreshed
+  // state. Stale data therefore reaches the server with the OLD version and
+  // gets an honest 409 instead of silently clobbering a newer edit.
+  const snapshot = editSnapshots.get(taskId) ?? null;
+  const payload = paramsPayload(snapshot, {
+    priority: d.priority,
+    dayNightPreference: d.dayNightPreference,
     notBefore: d.notBefore ? inputToIso(d.notBefore) : null,
     deadline: d.deadline ? inputToIso(d.deadline) : null,
     unattendedAllowed: form.querySelector('[name="unattended"]').checked
-  };
-  if (row && typeof row.task.version === "number") payload.expectedVersion = row.task.version;
+  });
   try {
     await apiPost(`/api/print/scheduler/tasks/${taskId}/params`, payload);
     const pin = d.pin;
     if (pin) await apiPost(`/api/print/scheduler/tasks/${taskId}/pin`, { printer: pin });
+    editSnapshots.delete(taskId);
     toast("Параметры сохранены", "toast-ok");
     await loadAll();
   } catch (err) {
-    toast(esc(err.message || "Не удалось сохранить"), "toast-danger");
+    const conflict = /409|конфликт|version/i.test(String(err.message || ""));
+    toast(
+      esc(conflict
+        ? "Задание изменено в другом окне — форма перечитана, проверьте и сохраните заново"
+        : err.message || "Не удалось сохранить"),
+      "toast-danger"
+    );
+    editSnapshots.delete(taskId);
     await loadAll();
+  }
+}
+
+/**
+ * Marks every open params form whose task moved on the server since its
+ * snapshot: a visible banner + the honest promise that saving will conflict.
+ * The form's own values and snapshot are NOT touched.
+ */
+function markStaleForms() {
+  const body = $("#scheduler-body");
+  if (!body) return;
+  for (const form of body.querySelectorAll('[data-sch-form="params"]:not([hidden])')) {
+    const rowEl = form.closest("[data-task]");
+    const taskId = rowEl?.dataset.task;
+    if (!taskId) continue;
+    const snapshot = editSnapshots.get(taskId);
+    const current = state.queue.find((r) => r.task.id === taskId)?.task ?? null;
+    const stale = isSnapshotStale(snapshot, current);
+    let banner = form.querySelector(".sch-stale");
+    if (stale && !banner) {
+      banner = document.createElement("div");
+      banner.className = "sch-stale slice-warn";
+      banner.innerHTML =
+        `⚠ Задание изменено в другом окне — форма устарела, сохранение вернёт конфликт. ` +
+        `<button type="button" class="btn btn-sm" data-sch-action="reload-form">Перечитать</button>`;
+      form.prepend(banner);
+    } else if (!stale && banner) {
+      banner.remove();
+    }
   }
 }
 

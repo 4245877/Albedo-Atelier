@@ -30,4 +30,6 @@ export interface SliceVariantRepository extends WritableRepository<SliceVariant>
   /** Not-yet-finished variants (`pending`/`running`), oldest first, for startup recovery. */
   listUnfinished(): SliceVariant[];
   list(): SliceVariant[];
+  /** Every variant referencing the artifact as source or output — retention safety check. */
+  listReferencingArtifact(artifactId: string): SliceVariant[];
 }

@@ -38,6 +38,7 @@ function guard(over: Partial<StartGuard> = {}): StartGuard {
     file: "model.gcode",
     state: "UNKNOWN",
     jobRef: "q1",
+    runId: null,
     requestedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     ...over

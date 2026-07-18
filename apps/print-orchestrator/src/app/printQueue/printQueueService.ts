@@ -604,6 +604,30 @@ export class PrintQueueService {
       const repos = this.store.repositories;
       const task = this.getTask(taskId);
 
+      // Invariants first (the 008 partial unique indexes are the backstop):
+      // one live assignment per task, one per printer, no active run on either.
+      const liveOfTask = repos.assignments
+        .listByTask(taskId)
+        .find((a) => a.state === "RESERVED" || a.state === "ACTIVE");
+      if (liveOfTask) {
+        throw new JobError(
+          `Задание «${task.title}» уже назначено (${liveOfTask.printerId}, ${liveOfTask.state}) — сначала снимите назначение`
+        );
+      }
+      const liveOnPrinter = repos.assignments.findOpenByPrinter(printer);
+      if (liveOnPrinter) {
+        throw new JobError(
+          `Принтер «${printer}» уже занят назначением ${liveOnPrinter.id} (${liveOnPrinter.state})`
+        );
+      }
+      const activeRun =
+        repos.printRuns.findActiveByTask(taskId) ?? repos.printRuns.findActiveByPrinter(printer);
+      if (activeRun) {
+        throw new JobError(
+          `Есть активная печать ${activeRun.id} (${activeRun.state}) — назначение невозможно`
+        );
+      }
+
       const openBed = repos.bedCycles.findOpenByPrinter(printer);
       if (openBed) {
         throw new JobError(
@@ -780,6 +804,26 @@ export class PrintQueueService {
       const task = this.getTask(assignment.taskId);
       const iso = this.nowIso();
 
+      // One active run per task and per printer — checked here for an honest
+      // 409; the 008 partial unique indexes refuse the write regardless.
+      const activeOfTask = repos.printRuns.findActiveByTask(assignment.taskId);
+      if (activeOfTask) {
+        throw new JobError(
+          `У задания «${task.title}» уже есть активная печать (${activeOfTask.id}, ${activeOfTask.state})`
+        );
+      }
+      const activeOnPrinter = repos.printRuns.findActiveByPrinter(assignment.printerId);
+      if (activeOnPrinter) {
+        throw new JobError(
+          `На принтере «${assignment.printerId}» уже есть активная печать (${activeOnPrinter.id}, ${activeOnPrinter.state})`
+        );
+      }
+      if (assignment.state === "RELEASED" || assignment.state === "CANCELLED") {
+        throw new JobError(
+          `Назначение ${assignment.id} уже закрыто (${assignment.state}) — печать по нему невозможна`
+        );
+      }
+
       const run: PrintRun = {
         id: newId(ID_PREFIX.printRun),
         taskId: assignment.taskId,
@@ -788,6 +832,10 @@ export class PrintQueueService {
         printerId: assignment.printerId,
         bedCycleId: assignment.bedCycleId,
         state: "RUNNING",
+        file: null,
+        artifactId: null,
+        artifactSha256: null,
+        idempotencyKey: null,
         startedAt: options.startedAt ?? iso,
         endedAt: null,
         progress: 0,

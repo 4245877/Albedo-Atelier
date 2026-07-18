@@ -101,16 +101,28 @@ test("a night-flagged job with a contradicting material is refused", async () =>
   await store.stop();
 });
 
-test("a fully-qualified night job (marked, known material, valid file, idle) starts exactly once", async () => {
+test("a legacy job with NO analysed artifact/hash can no longer start unattended (fail-closed cutover)", async () => {
+  // Before the canonical-dispatch cutover this exact job (night-marked, known
+  // material, valid file, idle printer) was startable. Unattended dispatch now
+  // requires a registered artifact with an immutable hash and a fresh
+  // `schedulable` gcode analysis — a bare on-printer file name proves nothing,
+  // so the launch is refused and the blockers are shown instead.
   const store = new FarmStore(file);
   await store.start();
   store.addQueueJob({ title: "Chalice", printer: "k2", night: true, material: "PLA", eta: "2ч", file: "chalice.gcode" });
 
-  const result = await store.startNight();
-  assert.equal(result.candidate.title, "Chalice");
-  assert.equal(startCalls.length, 1, "the confirmed unattended job was dispatched once");
-  assert.ok(startCalls[0].includes("filename=chalice.gcode"));
-  assert.deepEqual(store.reads.getQueue(), [], "the launched job left the queue");
+  await assert.rejects(
+    () => store.startNight(),
+    (e: unknown) =>
+      e instanceof JobError &&
+      /unattended|артефакт|анализ/.test(e.message)
+  );
+  assert.equal(startCalls.length, 0, "nothing reached the device");
+  assert.equal(store.reads.getQueue().length, 1, "the job stays queued for the operator");
+
+  // The night plan shows the same hard blockers instead of pretending it fits.
+  const night = store.reads.getNight();
+  assert.ok(night.candidates[0].blockers.length > 0, "the plan lists the blockers");
 
   await store.stop();
 });

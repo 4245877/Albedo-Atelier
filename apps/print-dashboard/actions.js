@@ -66,11 +66,21 @@ export function installActions({ getState, refresh }) {
 
     cancel(p, el) {
       const jobLabel = p.job ? `«${p.job}»` : "текущего задания";
+      // Снимок identity берём В МОМЕНТ подтверждения (не после confirm —
+      // за время диалога состояние могло уехать): имя файла + канонический
+      // runId. runId ловит даже повторную печать того же файла: backend
+      // ответит 409 PRINT_IDENTITY_CONFLICT и ничего не отменит.
+      const expectJob = p.job ?? null;
+      const expectRunId = p.activeRunId ?? null;
       if (!window.confirm(`Отменить печать ${jobLabel} на ${p.name}?`)) return;
-      // Привязываем отмену к КОНКРЕТНОМУ заданию, которое видит оператор: backend
-      // откажет (409 PRINT_IDENTITY_CONFLICT), если принтер уже печатает другое —
-      // так гонка опроса не отменит не ту, только что запущенную печать.
-      runAction(`/api/printers/${p.id}/cancel`, { job: p.job ?? null }, `«${esc(p.name)}»: печать отменена`, "toast-danger", `cancel:${p.id}`, el);
+      runAction(
+        `/api/printers/${p.id}/cancel`,
+        { job: expectJob, runId: expectRunId },
+        `«${esc(p.name)}»: печать отменена`,
+        "toast-danger",
+        `cancel:${p.id}`,
+        el
+      );
     },
 
     "light-on"(p, el) {
@@ -130,7 +140,20 @@ export function installActions({ getState, refresh }) {
       return;
     }
     if (act === "night-start") {
-      runAction("/api/queue/night/start", null, null, "toast-ok", "night-start", el).then((res) => {
+      // Немутабельный предпросмотр: отправляем ИМЕННО тот кандидат (taskId +
+      // версия задания + hash артефакта), который оператор видел в панели.
+      // Любой дрейф между предпросмотром и запуском сервер отвергает 409
+      // PREVIEW_CONFLICT вместо запуска чего-то невиденного.
+      const night = getState()?.night;
+      const pick = night?.candidates?.[night?.pick ?? 0];
+      const preview = pick?.taskId
+        ? {
+            taskId: pick.taskId,
+            ...(typeof pick.taskVersion === "number" ? { expectedTaskVersion: pick.taskVersion } : {}),
+            artifactSha256: pick.artifactSha256 ?? null
+          }
+        : null;
+      runAction("/api/queue/night/start", preview, null, "toast-ok", "night-start", el).then((res) => {
         if (res?.candidate) {
           toast(`Ночная печать «${esc(res.candidate.title)}» запланирована на ${esc(String(res.window).split(" ")[0])}`, "toast-ok");
         }

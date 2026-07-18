@@ -421,6 +421,13 @@ export interface StartGuard {
    * which job to remove. `null` for a direct operator start (no queue job).
    */
   jobRef: string | null;
+  /**
+   * The canonical {@link PrintRun} this guard protects (dispatch-created runs);
+   * `null` for direct operator starts that have no run. Guard and run are
+   * recovered *together* after a restart: an unreconciled guard keeps its run
+   * PENDING/UNKNOWN, and neither is resolved without device evidence.
+   */
+  runId: string | null;
   requestedAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
 }
@@ -428,17 +435,30 @@ export interface StartGuard {
 // ── PrintRun ─────────────────────────────────────────────────────────────────
 
 /**
- * The state of an *actual* print on the machine, as observed. `UNKNOWN` covers
- * a run whose outcome could not be observed (offline during completion,
- * restart mid-print). Terminal: `SUCCEEDED`/`FAILED`/`CANCELLED`.
+ * The state of an *actual* print on the machine, as observed. `PENDING` is a
+ * run *reserved inside the dispatch transaction* before the physical command is
+ * sent — the durable record that a start is about to leave (or has left with an
+ * unconfirmed outcome). `UNKNOWN` covers a run whose outcome could not be
+ * observed (lost response, offline during completion, restart mid-print); it is
+ * never auto-resolved — reconciliation against the live device or the operator
+ * decides. Terminal: `SUCCEEDED`/`FAILED`/`CANCELLED`.
  */
 export type PrintRunState =
+  | "PENDING"
   | "RUNNING"
   | "PAUSED"
   | "SUCCEEDED"
   | "FAILED"
   | "CANCELLED"
   | "UNKNOWN";
+
+/** Run states that hold a printer / block a second dispatch. */
+export const ACTIVE_RUN_STATES: readonly PrintRunState[] = [
+  "PENDING",
+  "RUNNING",
+  "PAUSED",
+  "UNKNOWN"
+];
 
 /**
  * A single physical execution of a task on a printer — the last link of the
@@ -456,6 +476,14 @@ export interface PrintRun {
   printerId: string;
   bedCycleId: string | null;
   state: PrintRunState;
+  /** The normalized on-device file path this run's start command named. */
+  file: string | null;
+  /** The registered artifact the dispatch decision was based on; null for legacy/observed runs. */
+  artifactId: string | null;
+  /** The artifact's content hash captured at dispatch time (immutable identity). */
+  artifactSha256: string | null;
+  /** Caller-supplied dispatch idempotency key; a repeat returns this run, never a second one. */
+  idempotencyKey: string | null;
   startedAt: IsoTimestamp | null;
   endedAt: IsoTimestamp | null;
   /** 0..1 progress when known. */

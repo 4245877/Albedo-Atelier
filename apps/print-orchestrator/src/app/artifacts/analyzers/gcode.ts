@@ -30,8 +30,65 @@ import {
  */
 
 const INCH = 25.4;
-/** Firmware-config-mutating or cold-extrusion commands that warrant a human look. */
-const RISKY_COMMANDS = new Set(["M500", "M502", "M302", "M501"]);
+
+/**
+ * Command policy for print files, by *threat model* rather than a blind
+ * denylist. A normal sliced print needs only: motion (G0–G5, G10/G11, G28/G29,
+ * G90–G92, G20/G21, G4), extrusion mode (M82/M83), temperatures (M104/M109,
+ * M140/M190, M141/M191), fans (M106/M107), steppers (M17/M18/M84), motion
+ * tuning the slicers themselves emit (M201–M205, M220/M221, M900), reports
+ * (M105/M114/M115), display (M117/M118) and tool selects (T*). Those pass.
+ *
+ * Everything else falls in one of two explicit classes:
+ *
+ * - **Forbidden** — mutates firmware/persistent configuration, manages files,
+ *   resets/updates the machine, or chains other jobs. Never needed inside a
+ *   print job; presence makes the file `blocked` (never printable via the
+ *   queue until the file is fixed).
+ * - **Review** — legitimate in *some* attended workflows but incompatible with
+ *   an unattended print (waits for a human, kills power, changes live
+ *   calibration, drives raw pins). Presence forces at least `review`, which
+ *   the dispatch gate refuses for night/unattended.
+ */
+const FORBIDDEN_COMMANDS: ReadonlyMap<string, string> = new Map([
+  ["M500", "запись настроек в EEPROM"],
+  ["M501", "загрузка настроек из EEPROM (подменяет конфигурацию во время печати)"],
+  ["M502", "сброс настроек к заводским"],
+  ["M509", "изменение защиты EEPROM"],
+  ["M997", "перепрошивка firmware"],
+  ["M999", "перезапуск после ошибки (маскирует аварию)"],
+  ["M22", "размонтирование SD-карты"],
+  ["M23", "выбор другого файла на SD (сцепление заданий)"],
+  ["M24", "запуск печати с SD (сцепление заданий)"],
+  ["M28", "запись файла на SD"],
+  ["M29", "завершение записи файла на SD"],
+  ["M30", "удаление файла с SD"],
+  ["M32", "запуск другого файла (сцепление заданий)"],
+  ["SAVE_CONFIG", "запись конфигурации Klipper и перезапуск"],
+  ["FIRMWARE_RESTART", "перезапуск firmware Klipper"],
+  ["RESTART", "перезапуск Klipper"],
+  ["RUN_SHELL_COMMAND", "выполнение shell-команды на хосте"]
+]);
+
+const REVIEW_COMMANDS: ReadonlyMap<string, string> = new Map([
+  ["M0", "остановка с ожиданием человека"],
+  ["M1", "остановка с ожиданием человека"],
+  ["M25", "пауза SD-печати"],
+  ["M112", "аварийный стоп внутри файла"],
+  ["M226", "ожидание состояния пина"],
+  ["M600", "смена филамента — требует присутствия"],
+  ["M80", "управление питанием"],
+  ["M81", "выключение питания"],
+  ["M42", "прямое управление пином"],
+  ["M280", "управление сервоприводом"],
+  ["M302", "разрешение холодной экструзии"],
+  ["M92", "изменение калибровки шагов"],
+  ["M301", "изменение PID хотэнда"],
+  ["M304", "изменение PID стола"],
+  ["PID_CALIBRATE", "калибровка PID во время задания"],
+  ["BED_MESH_CALIBRATE", "калибровка стола во время задания"],
+  ["DELTA_CALIBRATE", "калибровка кинематики"]
+]);
 
 interface Vec3 {
   x: number;
@@ -66,6 +123,7 @@ export async function analyzeGcode(path: string): Promise<AnalyzerResult> {
   let usedInches = false;
   const tools = new Set<number>();
   const riskyFound = new Set<string>();
+  const forbiddenFound = new Set<string>();
 
   // Extracted metadata (null until a line supplies it).
   const meta: {
@@ -116,7 +174,8 @@ export async function analyzeGcode(path: string): Promise<AnalyzerResult> {
       if (code.length === 0) continue;
       const word = code.split(/\s+/)[0].toUpperCase();
 
-      if (RISKY_COMMANDS.has(word)) riskyFound.add(word);
+      if (FORBIDDEN_COMMANDS.has(word)) forbiddenFound.add(word);
+      else if (REVIEW_COMMANDS.has(word)) riskyFound.add(word);
 
       if (word === "G20") {
         unitScale = INCH;
@@ -157,7 +216,14 @@ export async function analyzeGcode(path: string): Promise<AnalyzerResult> {
     warnings.push(finding("gcode_inch_units", "Часть координат в дюймах (G20) — приведены к мм"));
   }
   for (const cmd of riskyFound) {
-    warnings.push(finding("gcode_risky_command", `Потенциально опасная команда ${cmd}`));
+    warnings.push(
+      finding("gcode_risky_command", `Команда ${cmd} требует присмотра: ${REVIEW_COMMANDS.get(cmd)}`)
+    );
+  }
+  for (const cmd of forbiddenFound) {
+    blockers.push(
+      finding("gcode_forbidden_command", `Запрещённая команда ${cmd}: ${FORBIDDEN_COMMANDS.get(cmd)}`)
+    );
   }
   if (motionCommands === 0) {
     warnings.push(finding("gcode_no_toolpath", "Не найдено команд перемещения — это точно печатный G-code?"));

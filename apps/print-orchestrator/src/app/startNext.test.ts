@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 
-import { JobError, MaterialError, ValidationError } from "../core/errors";
+import { JobError, ValidationError } from "../core/errors";
 import { FarmStore } from "./farmStore";
 
 /*
@@ -53,6 +53,24 @@ beforeEach(() => {
         ok: true,
         status: 200,
         json: async () => ({ result: { status: { print_stats: { state: printState } } } })
+      } as unknown as Response;
+    }
+    if (url.includes("/server/files/directory")) {
+      // The canonical dispatch pre-flight verifies the file exists on the
+      // device before reserving anything — answer with the test fixtures.
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          result: {
+            dirs: [],
+            files: [
+              { filename: "chalice.gcode", size: 1000 },
+              { filename: "vase.gcode", size: 1000 },
+              { filename: "x.gcode", size: 1000 }
+            ]
+          }
+        })
       } as unknown as Response;
     }
     return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
@@ -137,7 +155,7 @@ test("two concurrent start-next requests dispatch the single ready job exactly o
   await store.stop();
 });
 
-test("a declared material contradiction refuses the start (MaterialError)", async () => {
+test("a declared material contradiction refuses the start (fail-closed 409)", async () => {
   const store = new FarmStore(file);
   await store.start();
   store.addQueueJob({ title: "Vase", printer: "k2", material: "PETG", file: "vase.gcode" });
@@ -145,8 +163,8 @@ test("a declared material contradiction refuses the start (MaterialError)", asyn
   await assert.rejects(
     () => store.startNext(),
     (err: unknown) => {
-      assert.ok(err instanceof MaterialError);
-      assert.match((err as MaterialError).message, /не совпадает/);
+      assert.ok(err instanceof JobError);
+      assert.match((err as JobError).message, /не совпадает/);
       return true;
     }
   );

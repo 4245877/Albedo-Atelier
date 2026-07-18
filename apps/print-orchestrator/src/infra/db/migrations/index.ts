@@ -8,6 +8,7 @@ import { migration004 } from "./004_scheduling";
 import { migration005 } from "./005_material_overrides";
 import { migration006 } from "./006_assignment_plan_index";
 import { migration007 } from "./007_start_guards";
+import { migration008 } from "./008_canonical_dispatch";
 
 /**
  * One forward-only schema migration. `up` receives the open connection and runs
@@ -33,7 +34,8 @@ export const MIGRATIONS: readonly Migration[] = [
   migration004,
   migration005,
   migration006,
-  migration007
+  migration007,
+  migration008
 ];
 
 const MIGRATIONS_TABLE = "schema_migrations";
