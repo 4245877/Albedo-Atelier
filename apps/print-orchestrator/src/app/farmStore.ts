@@ -39,6 +39,7 @@ import { materialsIncompatible, type NightPlanEntry } from "./nightPlanner";
 import { MonitoringLease } from "./monitoringLease";
 import { PrinterPoller } from "./printerPoller";
 import type { StoreLogger } from "../shared/logger";
+import { warnIfPermsTooOpen } from "../shared/filePerms";
 import { QueueStore, type NewQueueJobInput } from "./queueStore";
 import { SnapshotStore } from "../infra/persistence/snapshotStore";
 import { StateStore } from "../infra/persistence/stateStore";
@@ -202,7 +203,15 @@ export class FarmStore {
       this.poller.lights,
       this.cameras,
       this.events,
-      this.snapshots
+      this.snapshots,
+      // Keep the default live-status source (real device poll).
+      undefined,
+      // Durable start-idempotency guard, resolved lazily: the SQLite store opens
+      // after this service is constructed. Ensures the DB is open on first use.
+      () => {
+        this.ensurePrintQueue();
+        return this.printQueueStore?.repositories.startGuards ?? null;
+      }
     );
     this.reads = new DashboardReadModel(
       () => this.enabledConfigs(),
@@ -352,6 +361,10 @@ export class FarmStore {
       maxFileBytes: uploads.maxFileBytes,
       timeoutMs: uploads.analysisTimeoutMs,
       concurrency: uploads.analysisConcurrency,
+      maxStoredBytes: uploads.maxStoredBytes,
+      maxArtifactCount: uploads.maxArtifactCount,
+      minFreeDiskBytes: uploads.minFreeDiskBytes,
+      analysisMaxQueue: uploads.analysisMaxQueue,
       logger
     });
     // Re-queue analyses left `pending`/`running` by a previous crash/restart.
@@ -389,6 +402,32 @@ export class FarmStore {
     this.sliceService.recover();
   }
 
+  /**
+   * Boot-time reconciliation of durable start guards. An `ACKED` guard whose
+   * originating job is no longer in the legacy queue can be cleared safely —
+   * there is nothing left that could re-dispatch it. Any other guard (`SENT`/
+   * `UNKNOWN`, or `ACKED` with the job still queued) is an *unconfirmed* start
+   * and is deliberately kept: the next start attempt for that printer reconciles
+   * it against the live device before ever sending another command.
+   */
+  private sweepStartGuards(logger: StoreLogger): void {
+    const store = this.printQueueStore;
+    if (!store) return;
+    const guards = store.repositories.startGuards.list();
+    if (guards.length === 0) return;
+    const queuedIds = new Set(this.queue.list().map((job) => job.id));
+    for (const guard of guards) {
+      if (guard.state === "ACKED" && (!guard.jobRef || !queuedIds.has(guard.jobRef))) {
+        store.repositories.startGuards.delete(guard.printerId);
+        continue;
+      }
+      logger.warn?.(
+        { printer: guard.printerId, state: guard.state, file: guard.file, jobRef: guard.jobRef },
+        "unconfirmed start guard retained — printer held until reconciled with the live device"
+      );
+    }
+  }
+
   /** The farm printers projected into the shape the slicing compatibility checks use. */
   private slicerPrinters(): SlicerPrinterRef[] {
     return this.configs.map((c) => ({
@@ -410,6 +449,11 @@ export class FarmStore {
     // Open the queue database and run the one-time import at startup (with the
     // real logger), rather than lazily on the first API hit.
     this.ensurePrintQueue(logger);
+
+    // Reconcile durable start guards left by a previous run: drop those whose
+    // job is already gone (nothing to re-dispatch); keep unconfirmed ones so the
+    // next start attempt reconciles them against the live device (fail-closed).
+    this.sweepStartGuards(logger);
 
     // Probe the OrcaSlicer runtime once so the scheduler can gate un-sliced work
     // synchronously; best-effort — a failed probe just leaves it unavailable.
@@ -438,6 +482,10 @@ export class FarmStore {
     const { printers, source } = await loadPrintersConfig();
     this.configs = printers;
     this.configSource = source;
+
+    // Advisory: the printer config carries device secrets (API keys, access
+    // codes). Warn if it is group/world-readable — never fatal (see helper).
+    warnIfPermsTooOpen(process.env.PRINTERS_CONFIG_PATH ?? "", logger);
 
     if (source.warning) {
       logger.warn?.({ warning: source.warning }, "printers config problem");
@@ -551,8 +599,8 @@ export class FarmStore {
   resumePrinter(id: string) {
     return this.commands.resume(id);
   }
-  cancelPrinter(id: string) {
-    return this.commands.cancel(id);
+  cancelPrinter(id: string, expect?: { job?: string | null }) {
+    return this.commands.cancel(id, expect);
   }
   setLight(id: string, on: boolean) {
     return this.commands.setLight(id, on);
@@ -652,8 +700,12 @@ export class FarmStore {
         );
       }
 
-      await this.commands.startPrint(printer.id, job.file);
+      await this.commands.startPrint(printer.id, job.file, job.id);
+      // Remove the launched job and make the removal DURABLE before releasing the
+      // start guard, so a crash in this window cannot re-dispatch the same job.
       this.queue.remove(job.id);
+      await this.state.flush();
+      this.commands.resolveStartGuard(printer.id);
       return { job, printer: printer.name };
     });
   }
@@ -683,6 +735,14 @@ export class FarmStore {
       }
 
       const entry: NightPlanEntry = plan[Math.min(this.nightPick, plan.length - 1)];
+      // Fail-closed defence in depth: an unattended launch is only ever for a
+      // job the operator explicitly marked for night. Even if the plan logic
+      // changed, a non-night job can never be physically started here.
+      if (entry.job.night !== true) {
+        throw new JobError(
+          `«${entry.job.title}» не отмечено для печати без присмотра — отметьте задание ночным и подтвердите запуск`
+        );
+      }
       if (entry.blockers.length > 0) {
         throw new JobError(
           `Нельзя запустить «${entry.job.title}» на ночь: ${entry.blockers.join("; ")}`
@@ -697,10 +757,22 @@ export class FarmStore {
         throw new JobError(`Нельзя запустить «${entry.job.title}» на ночь — недостаточно данных`);
       }
 
-      await this.commands.startPrint(printer.id, file);
+      await this.commands.startPrint(printer.id, file, entry.job.id);
+      // Durable removal before releasing the guard (same rule as start-next).
       this.queue.remove(entry.job.id);
+      await this.state.flush();
+      this.commands.resolveStartGuard(printer.id);
       return { candidate: entry.candidate, window: env.nightWindow };
     });
+  }
+
+  /**
+   * Operator override to lift a held start guard after physically checking the
+   * printer (e.g. a start whose response was lost and the print did not run).
+   * Refuses while the printer is actually printing.
+   */
+  clearStartGuard(id: string) {
+    return this.commands.clearStartGuard(id);
   }
 
   // ── Config resolution (shared by the collaborators) ──────────────────────

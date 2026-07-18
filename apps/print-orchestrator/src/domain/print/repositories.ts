@@ -14,7 +14,8 @@ import type {
   Plan,
   PrintRun,
   PrintTask,
-  QueueEntry
+  QueueEntry,
+  StartGuard
 } from "./types";
 
 /**
@@ -61,6 +62,13 @@ export interface ArtifactRepository extends WritableRepository<Artifact> {
   /** Any artifact whose `source` (storage key) matches — used to tell whether a blob is still referenced. */
   findBySource(source: string): Artifact | null;
   list(): Artifact[];
+  /** Number of artifact rows — for the server-side count quota. */
+  count(): number;
+  /**
+   * Total on-disk bytes across DISTINCT blobs (dedup-aware: a blob shared by
+   * several artifacts counts once) — the figure the storage-size quota checks.
+   */
+  totalStoredBytes(): number;
 }
 
 export interface ArtifactAnalysisRepository extends WritableRepository<ArtifactAnalysis> {
@@ -143,6 +151,22 @@ export interface AppMetaRepository {
   set(key: string, value: string): void;
 }
 
+/**
+ * Durable idempotency guard for physical start-of-print. At most one row per
+ * printer. Non-versioned (a plain upsert): the state machine lives in the
+ * command service, and writes are synchronous so a failed write is surfaced,
+ * never swallowed — the "одна команда запуска → одна физическая печать"
+ * guarantee cannot rely on a silently-dropped persist.
+ */
+export interface StartGuardRepository {
+  get(printerId: string): StartGuard | null;
+  /** Insert or replace the single guard row for a printer. */
+  upsert(guard: StartGuard): void;
+  delete(printerId: string): void;
+  /** Every outstanding guard, for the boot-time reconciliation sweep. */
+  list(): StartGuard[];
+}
+
 /** The full set of repositories, all bound to one database connection. */
 export interface Repositories {
   artifacts: ArtifactRepository;
@@ -157,6 +181,7 @@ export interface Repositories {
   materialOverrides: MaterialOverrideRepository;
   audit: AuditEventRepository;
   meta: AppMetaRepository;
+  startGuards: StartGuardRepository;
   // slicing domain (domain/slicing)
   profileRevisions: ProfileRevisionRepository;
   profileSets: ProfileSetRepository;

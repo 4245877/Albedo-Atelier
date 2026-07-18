@@ -14,6 +14,7 @@
    ═══════════════════════════════════════════════════════════════ */
 
 import { apiGet, apiPost } from "./api.js";
+import { createLatestOnly } from "./poll.js";
 import { installActions } from "./actions.js";
 import { reconcileCameras } from "./cameraPlayers.js";
 import { ensureReveal, renderNav, setupNav, setupStickyOffsets } from "./nav.js";
@@ -101,17 +102,6 @@ function renderAll() {
   ensureReveal();
 }
 
-async function loadDashboard() {
-  const data = await apiGet("/api/dashboard");
-  state = data;
-  backendReachable = true;
-  // Эффективное ночное окно фермы определяет backend (NIGHT_PRINT_WINDOW);
-  // auto-тема следует ему, а не собственной копии расписания. Старый payload
-  // без этих полей оставляет fallback внутри theme.js.
-  setNightWindow(data.night?.windowStart, data.night?.windowEnd);
-  return data;
-}
-
 function renderBackendError(err) {
   const pills = $("#hero-pills");
   if (pills) {
@@ -122,19 +112,31 @@ function renderBackendError(err) {
   toast(`Не удалось загрузить данные фермы: ${esc(err.message)}`, "toast-danger");
 }
 
-/** Перезагрузить состояние и перерисовать. По умолчанию тихо (для поллинга). */
-async function refresh({ silent = true } = {}) {
-  const wasReachable = backendReachable;
-  try {
-    await loadDashboard();
+/* Опрос доски проходит через createLatestOnly: параллельные/подвисшие запросы
+   отменяются, и применяется результат только самого свежего запуска — старый
+   ответ, пришедший позже нового, отбрасывается и не откатывает UI. */
+const pollDashboard = createLatestOnly({
+  run: (signal) => apiGet("/api/dashboard", { signal }),
+  apply: (data, { wasReachable, silent }) => {
+    state = data;
+    backendReachable = true;
+    // Эффективное ночное окно фермы определяет backend (NIGHT_PRINT_WINDOW);
+    // auto-тема следует ему. Старый payload без этих полей оставляет fallback.
+    setNightWindow(data.night?.windowStart, data.night?.windowEnd);
     renderAll();
     if (everLoaded && !wasReachable) toast("Соединение с backend восстановлено", "toast-ok");
     everLoaded = true;
-  } catch (err) {
+  },
+  onError: (err, { silent }) => {
     backendReachable = false;
     renderTopbar(state, backendReachable);
     if (!silent) renderBackendError(err);
   }
+});
+
+/** Перезагрузить состояние и перерисовать. По умолчанию тихо (для поллинга). */
+function refresh({ silent = true } = {}) {
+  return pollDashboard({ silent, wasReachable: backendReachable });
 }
 
 /* ── Старт ─────────────────────────────────────────────────── */

@@ -1,7 +1,12 @@
 import fs from "node:fs";
 import type { Readable } from "node:stream";
 
-import { NotFoundError, ValidationError } from "../../core/errors";
+import {
+  InsufficientStorageError,
+  NotFoundError,
+  ServiceBusyError,
+  ValidationError
+} from "../../core/errors";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import {
@@ -19,9 +24,10 @@ import type {
   PrintTask
 } from "../../domain/print/types";
 import type { StoreLogger } from "../../shared/logger";
-import type { ArtifactStorage, CommittedBlob } from "../../infra/storage/artifactStorage";
+import { keyFor, type ArtifactStorage, type CommittedBlob, type StagedBlob } from "../../infra/storage/artifactStorage";
 import { AnalysisWorker } from "./analysisWorker";
-import { analyzeFile, type AnalyzerInput, type AnalyzerLimits, type AnalyzerResult } from "./analyzers";
+import type { AnalyzerInput, AnalyzerLimits, AnalyzerResult } from "./analyzers";
+import { analyzeInWorker } from "./analyzers/workerHost";
 
 /** The pluggable analyzer function (real one by default; a stub in tests). */
 export type AnalyzeFn = (input: AnalyzerInput, limits: AnalyzerLimits) => Promise<AnalyzerResult>;
@@ -34,6 +40,14 @@ export interface ArtifactServiceOptions {
   maxFileBytes: number;
   timeoutMs: number;
   concurrency: number;
+  /** Hard cap on total stored bytes (dedup-aware); undefined disables the check. */
+  maxStoredBytes?: number;
+  /** Hard cap on the number of stored artifacts; undefined disables the check. */
+  maxArtifactCount?: number;
+  /** Free-disk reserve before accepting an upload; undefined disables the check. */
+  minFreeDiskBytes?: number;
+  /** Max analyses queued/running before an upload is refused; undefined disables the check. */
+  analysisMaxQueue?: number;
   /** Analyzer implementation; defaults to the built-in {@link analyzeFile}. */
   analyze?: AnalyzeFn;
   logger?: StoreLogger;
@@ -97,7 +111,10 @@ export class ArtifactService {
   ) {
     this.now = options.now ?? (() => new Date());
     this.defaultActor = options.actor ?? "operator";
-    this.analyze = options.analyze ?? analyzeFile;
+    // Default to running the analyzer in a worker thread: heavy/hostile parsing
+    // stays off the main event loop and the timeout can truly terminate it.
+    // Tests inject an in-process stub via `options.analyze`.
+    this.analyze = options.analyze ?? analyzeInWorker(options.timeoutMs);
     this.logger = options.logger ?? {};
     this.worker = new AnalysisWorker(
       options.concurrency,
@@ -119,11 +136,38 @@ export class ArtifactService {
     const fileName = sanitizeName(input.fileName);
     const actor = input.actor ?? this.defaultActor;
 
-    const staged = await this.storage.stage(input.source, {
-      maxBytes: this.options.maxFileBytes,
-      alreadyTruncated: input.truncated
-    });
-    const committed = await this.storage.commit(staged);
+    // Fail-closed admission control BEFORE any bytes are stored: don't accept
+    // analysis work we cannot bound, and don't start filling a disk that is
+    // already low (the JSON state + SQLite share this volume).
+    this.assertAnalysisCapacity();
+    await this.assertDiskHeadroom();
+
+    let staged: StagedBlob;
+    try {
+      staged = await this.storage.stage(input.source, {
+        maxBytes: this.options.maxFileBytes,
+        alreadyTruncated: input.truncated
+      });
+    } catch (error) {
+      throw mapStorageError(error);
+    }
+
+    // Server-side global store quota (count + bytes) — NOT advisory. Discard the
+    // staged temp if accepting it would push the store past its cap.
+    try {
+      await this.assertStoreQuota(staged);
+    } catch (error) {
+      await this.storage.discard(staged.tempPath);
+      throw error;
+    }
+
+    let committed: CommittedBlob;
+    try {
+      committed = await this.storage.commit(staged);
+    } catch (error) {
+      await this.storage.discard(staged.tempPath);
+      throw mapStorageError(error);
+    }
 
     try {
       const result = this.store.transaction<Omit<IngestResult, "blobExisted">>(() => {
@@ -338,12 +382,17 @@ export class ArtifactService {
     }
 
     try {
+      // The analyzer (worker host) enforces the real timeout and terminates the
+      // worker; this outer bound is a safety net (+grace) for an in-process stub
+      // or a host that somehow never settles. The slot is freed only when this
+      // resolves — after the worker has actually settled — so `concurrency`
+      // means at most that many analyzers really executing.
       const result = await this.withTimeout(
         this.analyze(
           { path, sizeBytes: artifact.sizeBytes ?? 0, fileName: artifact.name },
           this.options.limits
         ),
-        this.options.timeoutMs
+        this.options.timeoutMs + 3000
       );
       this.applyResult(analysisId, result);
     } catch (error) {
@@ -560,6 +609,48 @@ export class ArtifactService {
     };
   }
 
+  /** Refuses a new upload when the analysis backlog is at its bound (503). */
+  private assertAnalysisCapacity(): void {
+    const max = this.options.analysisMaxQueue;
+    if (max !== undefined && this.worker.inFlight >= max) {
+      throw new ServiceBusyError(
+        `Очередь анализа переполнена (${this.worker.inFlight}/${max}) — повторите позже`
+      );
+    }
+  }
+
+  /** Refuses a new upload when free disk is below the configured reserve (507). */
+  private async assertDiskHeadroom(): Promise<void> {
+    const min = this.options.minFreeDiskBytes;
+    if (min === undefined) return;
+    const free = await this.storage.freeBytes();
+    if (free !== null && free < min) {
+      throw new InsufficientStorageError(
+        `Недостаточно места на диске (свободно ${free} Б, требуется не менее ${min} Б) — удалите ненужные загрузки`
+      );
+    }
+  }
+
+  /** Refuses a new upload that would exceed the count or total-bytes store quota (507). */
+  private async assertStoreQuota(staged: StagedBlob): Promise<void> {
+    const repos = this.store.repositories;
+    const maxCount = this.options.maxArtifactCount;
+    if (maxCount !== undefined && repos.artifacts.count() >= maxCount) {
+      throw new InsufficientStorageError(
+        `Достигнут лимит числа артефактов (${maxCount}) — удалите ненужные загрузки`
+      );
+    }
+    const maxBytes = this.options.maxStoredBytes;
+    if (maxBytes === undefined) return;
+    // Dedup-aware: identical content already on disk adds nothing to the store.
+    const willAdd = (await this.storage.exists(keyFor(staged.sha256))) ? 0 : staged.sizeBytes;
+    if (repos.artifacts.totalStoredBytes() + willAdd > maxBytes) {
+      throw new InsufficientStorageError(
+        `Достигнут лимит хранилища артефактов (${maxBytes} Б) — удалите ненужные загрузки`
+      );
+    }
+  }
+
   /** Removes a blob a failed DB write orphaned — never a pre-existing/shared one. */
   private async cleanupOrphanBlob(committed: CommittedBlob): Promise<void> {
     if (committed.deduplicated) return; // pre-existing content may be shared → keep
@@ -576,6 +667,9 @@ export class ArtifactService {
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error("Анализ превысил лимит времени")), ms);
     });
+    // If the timeout wins the race, the underlying promise settles later; swallow
+    // its outcome so a late rejection is never an unhandled rejection.
+    promise.catch(() => {});
     try {
       return await Promise.race([promise, timeout]);
     } finally {
@@ -632,4 +726,18 @@ function sanitizeName(name: string): string {
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   return "Ошибка анализа";
+}
+
+/**
+ * Maps a low-level storage failure onto the API taxonomy. A disk-full/quota
+ * error (the write filling the volume mid-stream) becomes a 507 the dashboard
+ * can act on; everything else (including a {@link PayloadTooLargeError} the
+ * stager already raised) passes through unchanged.
+ */
+function mapStorageError(error: unknown): unknown {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  if (code === "ENOSPC" || code === "EDQUOT") {
+    return new InsufficientStorageError("На диске нет места для загрузки — освободите место и повторите");
+  }
+  return error;
 }

@@ -52,6 +52,30 @@ export class PayloadTooLargeError extends AppError {
 }
 
 /**
+ * The server-side artifact store is at capacity, or the disk is too low on free
+ * space, to accept another upload. A 507 (Insufficient Storage) so the dashboard
+ * can tell the operator to free space / prune, distinct from a per-file 413.
+ */
+export class InsufficientStorageError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super(message, "INSUFFICIENT_STORAGE", 507, details);
+    this.name = "InsufficientStorageError";
+  }
+}
+
+/**
+ * The analysis backlog is at its bound, so a new upload cannot be accepted right
+ * now. A 503 (Service Unavailable) — transient; the operator retries once the
+ * queue drains.
+ */
+export class ServiceBusyError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super(message, "SERVICE_BUSY", 503, details);
+    this.name = "ServiceBusyError";
+  }
+}
+
+/**
  * Domain error taxonomy for the farm. Each maps to a stable `code` the
  * dashboard can branch on, and an HTTP status. These make the failure modes
  * from the brief explicit: an offline printer, a lost connection, a camera
@@ -95,6 +119,25 @@ export class MaterialError extends AppError {
   constructor(message: string, details?: unknown) {
     super(message, "MATERIAL_ERROR", 409, details);
     this.name = "MaterialError";
+  }
+}
+
+/**
+ * A dangerous command (cancel/stop) named a specific job to act on, but the
+ * device is printing a *different* one — the caller's view was stale (a dashboard
+ * polling race). Fail-closed: nothing is cancelled. A 409 with its own code so
+ * the dashboard can tell the operator to refresh instead of retrying blindly.
+ */
+export class PrintIdentityConflictError extends AppError {
+  constructor(printerName: string, expected: string | null, actual: string | null) {
+    super(
+      `На «${printerName}» сейчас идёт не то задание, которое вы видели ` +
+        `(ожидалось «${expected ?? "—"}», печатается «${actual ?? "—"}») — обновите панель и повторите`,
+      "PRINT_IDENTITY_CONFLICT",
+      409,
+      { printerName, expected, actual }
+    );
+    this.name = "PrintIdentityConflictError";
   }
 }
 

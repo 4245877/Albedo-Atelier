@@ -21,6 +21,10 @@ process.env.ORCHESTRATOR_API_TOKEN = TOKEN;
 process.env.STATE_FILE_PATH = path.join(TMP, "state.json");
 process.env.MAX_UPLOAD_FILE_BYTES = "4096";
 process.env.ANALYSIS_CONCURRENCY = "2";
+// Isolate from the host's free disk: this suite tests upload ROUTING, not the
+// disk-reserve guard (covered in artifactQuota.test.ts). Without this, a CI/dev
+// disk below the production reserve would (correctly) 507 every upload here.
+process.env.UPLOAD_MIN_FREE_DISK_BYTES = "1048576";
 process.env.PRINTERS_CONFIG_PATH = path.join(TMP, "no-printers.json");
 
 let app: FastifyInstance;

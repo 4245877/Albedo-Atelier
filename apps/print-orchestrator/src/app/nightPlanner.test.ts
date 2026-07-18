@@ -178,15 +178,44 @@ test("a material contradiction is a hard blocker; a matching token in a list is 
     resolvePrinter: () => moonraker("k2", "K2", "PETG"),
     getStatus: (id) => idleStatus(id)
   };
-  const [entry] = buildNightPlan([job({ material: "PLA", file: "a.gcode" })], ctx);
+  const [entry] = buildNightPlan([job({ material: "PLA", file: "a.gcode", night: true })], ctx);
   assert.ok(entry.blockers.some((b) => b.includes("материал")));
 
   const multi: NightPlanContext = {
     ...ctx,
     resolvePrinter: () => moonraker("k2", "K2", "PLA / PETG / TPU")
   };
-  const [ok] = buildNightPlan([job({ material: "PLA", file: "a.gcode" })], multi);
+  // A night-flagged job with a known, matching material has no blockers.
+  const [ok] = buildNightPlan([job({ material: "PLA", file: "a.gcode", night: true })], multi);
   assert.deepEqual(ok.blockers, [], "PLA is among the loaded alternatives");
+});
+
+test("an unmarked ready job is NOT an unattended candidate (no all-ready fallback)", () => {
+  const ctx: NightPlanContext = {
+    window: "21:30 – 07:30",
+    resolvePrinter: () => moonraker("k2", "K2", "PLA"),
+    getStatus: (id) => idleStatus(id)
+  };
+  // Perfectly startable otherwise, but never marked night → blocked for unattended.
+  const [entry] = buildNightPlan([job({ material: "PLA", file: "a.gcode" })], ctx);
+  assert.ok(
+    entry.blockers.some((b) => b.includes("без присмотра")),
+    "an unmarked job can never be launched unattended"
+  );
+});
+
+test("unknown material on either side blocks an unattended launch", () => {
+  const ctx: NightPlanContext = {
+    window: "21:30 – 07:30",
+    resolvePrinter: () => moonraker("k2", "K2", ""), // loaded reel unknown
+    getStatus: (id) => idleStatus(id)
+  };
+  const [loaded] = buildNightPlan([job({ material: "PLA", file: "a.gcode", night: true })], ctx);
+  assert.ok(loaded.blockers.some((b) => b.includes("материал не подтверждён")));
+
+  const jobUnknown: NightPlanContext = { ...ctx, resolvePrinter: () => moonraker("k2", "K2", "PLA") };
+  const [needed] = buildNightPlan([job({ material: "—", file: "a.gcode", night: true })], jobUnknown);
+  assert.ok(needed.blockers.some((b) => b.includes("материал не подтверждён")));
 });
 
 test("an unsafe job file path is a blocker", () => {

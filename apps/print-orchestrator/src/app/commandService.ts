@@ -1,4 +1,4 @@
-import { JobError, PrinterOfflineError } from "../core/errors";
+import { JobError, PrinterOfflineError, PrintIdentityConflictError } from "../core/errors";
 import type { PrinterView } from "../domain/printers/types";
 import type { PrinterConfig } from "../infra/printers/config";
 import { normalizeStartablePath } from "../infra/printers/files";
@@ -13,6 +13,7 @@ import {
 } from "../infra/printers/status";
 import type { CameraService } from "./cameraService";
 import { runDriverOperation, toDriverError } from "./driverErrors";
+import { classifyDispatchError, reconcileStartGuard, type StartGuardStore } from "./startGuard";
 import type { EventFeed } from "./eventFeed";
 import type { LightScheduler } from "./lightScheduler";
 import type { PrinterPoller } from "./printerPoller";
@@ -64,7 +65,13 @@ export class PrinterCommandService {
     /** Live telemetry source; injectable so tests need no real device. */
     private readonly liveStatus: (
       printer: PrinterConfig
-    ) => Promise<PrinterLiveStatus> = getPrinterLiveStatus
+    ) => Promise<PrinterLiveStatus> = getPrinterLiveStatus,
+    /**
+     * Durable start-idempotency guard store, resolved lazily (the DB opens after
+     * this service is constructed). `null` disables durable guarding — used by
+     * unit tests that exercise the in-memory fast-path only.
+     */
+    private readonly guards: () => StartGuardStore | null = () => null
   ) {}
 
   private runExclusive<T>(id: string, task: () => Promise<T>): Promise<T> {
@@ -105,14 +112,28 @@ export class PrinterCommandService {
     });
   }
 
-  cancel(id: string): Promise<PrinterView> {
+  /**
+   * Cancels the print currently on the device. When `expect.job` is supplied the
+   * device is read **fresh** and the cancel is refused with a
+   * {@link PrintIdentityConflictError} if it is printing a different file than
+   * the caller expected — so a stale dashboard snapshot (a polling race) can
+   * never cancel the wrong, newly-started print. Without `expect` the behaviour
+   * is unchanged (server-to-server callers that have no snapshot to assert).
+   */
+  cancel(id: string, expect?: { job?: string | null }): Promise<PrinterView> {
     return this.runExclusive(id, async () => {
       const printer = this.getReachableConfig(id);
-      const status = this.poller.getStatus(id);
-      if (!status || !isBusyStatus(status.status)) {
+      // Fresh device read: the identity check and the cancel must act on the job
+      // ACTUALLY printing now, not a poll-cache snapshot from seconds ago.
+      const status = await this.liveStatus(printer);
+      this.poller.setStatus(printer.id, status);
+      if (!isBusyStatus(status.status)) {
         throw new JobError(`На «${printer.name}» нет активной печати для отмены`);
       }
       const job = status.currentFile;
+      if (expect && expect.job !== undefined && (expect.job ?? null) !== (job ?? null)) {
+        throw new PrintIdentityConflictError(printer.name, expect.job ?? null, job ?? null);
+      }
       await this.dispatch(printer, "cancel");
       this.events.push(
         "✕",
@@ -173,7 +194,7 @@ export class PrinterCommandService {
    *
    * Re-polls so the returned view reflects the device actually beginning the job.
    */
-  async startPrint(id: string, file: string): Promise<PrinterView> {
+  async startPrint(id: string, file: string, jobRef?: string): Promise<PrinterView> {
     const target = normalizeStartablePath(file);
     const printer = this.getReachableConfig(id);
     if (!supportsPrinterStart(printer)) {
@@ -200,6 +221,35 @@ export class PrinterCommandService {
 
       const status = await this.liveStatus(printer);
       this.poller.setStatus(printer.id, status);
+
+      // Reconcile any durable start intent BEFORE anything is (re)sent. This is
+      // what survives a lost Moonraker response, a retry and a process restart:
+      // an earlier start is never re-dispatched without checking the real device.
+      const guards = this.guards();
+      const existing = guards?.get(printer.id) ?? null;
+      if (existing) {
+        const decision = reconcileStartGuard(existing, status, target);
+        if (decision === "already-running") {
+          // The earlier start took — the device is printing it. Confirm the
+          // guard and report success WITHOUT dispatching again; the caller
+          // (queue flow) removes the job as launched.
+          if (guards && existing.state !== "ACKED") {
+            guards.upsert({ ...existing, state: "ACKED", updatedAt: nowIso() });
+          }
+          return buildPrinterView(printer, status, this.cameras.getEntry(printer.id));
+        }
+        if (decision === "busy-other") {
+          // Something else is printing; our guarded start never ran. Drop the
+          // stale guard and refuse — the printer is genuinely busy.
+          guards?.delete(printer.id);
+          throw new JobError(`«${printer.name}» уже занят печатью — дождитесь завершения`);
+        }
+        // held — outcome cannot be confirmed. Fail-closed: never auto-dispatch.
+        throw new JobError(
+          `На «${printer.name}» есть неподтверждённый запуск печати «${existing.file}» — проверьте принтер и снимите блокировку, прежде чем запускать снова`
+        );
+      }
+
       if (!status.online) {
         throw new PrinterOfflineError(id);
       }
@@ -212,16 +262,97 @@ export class PrinterCommandService {
         );
       }
 
+      // Record the intent durably BEFORE dispatch. A failed persist here aborts
+      // the start (fail-closed): a command we cannot account for is never fired.
+      // This write is intentionally synchronous and its failure is not swallowed.
+      guards?.upsert({
+        printerId: printer.id,
+        file: target,
+        state: "SENT",
+        jobRef: jobRef ?? null,
+        requestedAt: nowIso(),
+        updatedAt: nowIso()
+      });
+
       this.recentStarts.set(printer.id, Date.now() + RECENT_START_HOLD_MS);
       try {
-        await this.dispatchStart(printer, target);
+        await sendPrinterStart(printer, target);
       } catch (error) {
-        // The device never accepted the job — release the hold immediately.
-        this.recentStarts.delete(printer.id);
-        throw error;
+        const outcome = classifyDispatchError(error);
+        if (outcome === "rejected") {
+          // The device provably never started — safe to release everything so a
+          // corrected retry can go through.
+          guards?.delete(printer.id);
+          this.recentStarts.delete(printer.id);
+        } else {
+          // Unknown/timeout: the print may be running. Hold the printer — keep
+          // the recent-start hold and mark the guard UNKNOWN so neither a retry
+          // nor a restart re-dispatches it blind.
+          guards?.upsert({
+            printerId: printer.id,
+            file: target,
+            state: "UNKNOWN",
+            jobRef: jobRef ?? null,
+            requestedAt: nowIso(),
+            updatedAt: nowIso()
+          });
+        }
+        throw toDriverError(printer.id, error);
       }
+
+      // Dispatch accepted. A direct operator start (no queue job) has nothing
+      // that could re-dispatch it, so the guard is cleared now. A queue start
+      // keeps its guard ACKED until the caller has *durably* removed the job
+      // (see FarmStore.startNext/startNight), closing the crash-before-removal
+      // window that would otherwise re-launch it.
+      if (guards) {
+        if (jobRef) {
+          guards.upsert({
+            printerId: printer.id,
+            file: target,
+            state: "ACKED",
+            jobRef,
+            requestedAt: nowIso(),
+            updatedAt: nowIso()
+          });
+        } else {
+          guards.delete(printer.id);
+        }
+      }
+
       this.events.push("▶", `Оператор запустил печать «${target}» на <b>${printer.name}</b>`, "ok");
       return this.refresh(printer);
+    });
+  }
+
+  /**
+   * Clears the durable start guard for a printer once its queue job has been
+   * *durably* removed (the queue flow calls this after flushing the removal).
+   * A no-op without a guard store.
+   */
+  resolveStartGuard(printerId: string): void {
+    this.guards()?.delete(printerId);
+  }
+
+  /**
+   * Operator override to lift a held start guard after physically checking the
+   * printer. Refuses while the device is actually printing, so it can never mask
+   * a running job. Returns the refreshed view.
+   */
+  async clearStartGuard(id: string): Promise<PrinterView> {
+    const printer = this.getReachableConfig(id);
+    return this.runExclusive(id, async () => {
+      const status = await this.liveStatus(printer);
+      this.poller.setStatus(printer.id, status);
+      if (isBusyStatus(status.status)) {
+        throw new JobError(
+          `«${printer.name}» сейчас печатает — снимать блокировку запуска нельзя`
+        );
+      }
+      this.guards()?.delete(printer.id);
+      this.recentStarts.delete(printer.id);
+      this.events.push("⚑", `Оператор снял блокировку запуска на <b>${printer.name}</b>`, "info");
+      return buildPrinterView(printer, status, this.cameras.getEntry(printer.id));
     });
   }
 
@@ -263,14 +394,15 @@ export class PrinterCommandService {
     return runDriverOperation(printer.id, () => sendPrinterCommand(printer, command));
   }
 
-  private dispatchStart(printer: PrinterConfig, file: string): Promise<void> {
-    return runDriverOperation(printer.id, () => sendPrinterStart(printer, file));
-  }
-
   /** Re-polls one printer right after a command so the view reflects reality. */
   private async refresh(printer: PrinterConfig): Promise<PrinterView> {
     const status = await this.liveStatus(printer);
     this.poller.setStatus(printer.id, status);
     return buildPrinterView(printer, status, this.cameras.getEntry(printer.id));
   }
+}
+
+/** ISO-8601 stamp for guard records. */
+function nowIso(): string {
+  return new Date().toISOString();
 }

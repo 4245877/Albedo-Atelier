@@ -388,6 +388,43 @@ export interface DispatchAttempt {
   metadata: Metadata;
 }
 
+// ── StartGuard ───────────────────────────────────────────────────────────────
+
+/**
+ * Durable state of one physical start-of-print intent, tracked so a single
+ * operator/queue command can produce **at most one** physical print even across
+ * lost Moonraker responses, retries and process restarts.
+ *
+ *   - `SENT`    — the intent was recorded and a start command left the
+ *     orchestrator, but no outcome is known yet (written *before* dispatch).
+ *   - `ACKED`   — the device accepted the start (HTTP 2xx). The guard is kept
+ *     until the originating queue job has been *durably* removed, so a crash in
+ *     that window cannot re-dispatch it.
+ *   - `UNKNOWN` — the response was lost/timed out or the device answered
+ *     ambiguously. Fail-closed: the printer is held and never auto-restarted;
+ *     the next attempt reconciles against the real device state.
+ *
+ * A definitive device rejection (e.g. file-not-found 404, connection refused)
+ * deletes the guard instead — nothing was started, so a retry is safe.
+ */
+export type StartGuardState = "SENT" | "ACKED" | "UNKNOWN";
+
+/** One outstanding (unreconciled) start intent, keyed by printer. */
+export interface StartGuard {
+  printerId: string;
+  /** The normalized on-device file the start was for. */
+  file: string;
+  state: StartGuardState;
+  /**
+   * The legacy queue job this start originated from, when any — so a boot-time
+   * sweep can drop a guard whose job is already gone, and the queue flow knows
+   * which job to remove. `null` for a direct operator start (no queue job).
+   */
+  jobRef: string | null;
+  requestedAt: IsoTimestamp;
+  updatedAt: IsoTimestamp;
+}
+
 // ── PrintRun ─────────────────────────────────────────────────────────────────
 
 /**

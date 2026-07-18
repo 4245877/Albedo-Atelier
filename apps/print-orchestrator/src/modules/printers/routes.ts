@@ -163,9 +163,23 @@ export async function registerPrinterRoutes(
     printer: await farmStore.resumePrinter(request.params.id)
   }));
 
-  app.post<{ Params: PrinterParams }>("/:id/cancel", async (request) => ({
+  app.post<{ Params: PrinterParams; Body: { job?: unknown } }>("/:id/cancel", async (request) => {
+    // Optional expected-job identity: when the dashboard supplies the job it is
+    // showing, the backend refuses (409) if the device is printing a different
+    // one — a stale snapshot can never cancel the wrong print. A bodyless cancel
+    // (server-to-server) keeps working unchanged.
+    const rawJob = request.body?.job;
+    const expect =
+      typeof rawJob === "string" ? { job: rawJob } : rawJob === null ? { job: null } : undefined;
+    return { ok: true, printer: await farmStore.cancelPrinter(request.params.id, expect) };
+  });
+
+  // Operator override: lift a held start guard (an unconfirmed remote start whose
+  // response was lost) after physically checking the printer. Refused while the
+  // device is actually printing, so it can never mask a running job.
+  app.post<{ Params: PrinterParams }>("/:id/clear-start-guard", async (request) => ({
     ok: true,
-    printer: await farmStore.cancelPrinter(request.params.id)
+    printer: await farmStore.clearStartGuard(request.params.id)
   }));
 
   app.post<{ Params: PrinterParams }>("/:id/snapshot", async (request) => {

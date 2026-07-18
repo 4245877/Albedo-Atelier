@@ -67,7 +67,10 @@ export function installActions({ getState, refresh }) {
     cancel(p, el) {
       const jobLabel = p.job ? `«${p.job}»` : "текущего задания";
       if (!window.confirm(`Отменить печать ${jobLabel} на ${p.name}?`)) return;
-      runAction(`/api/printers/${p.id}/cancel`, null, `«${esc(p.name)}»: печать отменена`, "toast-danger", `cancel:${p.id}`, el);
+      // Привязываем отмену к КОНКРЕТНОМУ заданию, которое видит оператор: backend
+      // откажет (409 PRINT_IDENTITY_CONFLICT), если принтер уже печатает другое —
+      // так гонка опроса не отменит не ту, только что запущенную печать.
+      runAction(`/api/printers/${p.id}/cancel`, { job: p.job ?? null }, `«${esc(p.name)}»: печать отменена`, "toast-danger", `cancel:${p.id}`, el);
     },
 
     "light-on"(p, el) {

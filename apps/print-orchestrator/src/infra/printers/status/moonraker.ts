@@ -290,10 +290,15 @@ export async function sendMoonrakerStart(printer: PrinterConfig, filename: strin
     }
   );
   if (!res.ok) {
+    // A 404 is a *definitive* rejection — the file does not exist, so no print
+    // could have started and a retry is safe. Any other status (5xx, etc.) is
+    // ambiguous: the device may have begun printing, so it is not marked
+    // definitively rejected and the start guard holds the printer instead.
     throw new PrinterCommandError(
       res.status === 404
         ? `Moonraker не нашёл файл «${name}» на принтере`
-        : `Moonraker HTTP ${res.status}`
+        : `Moonraker HTTP ${res.status}`,
+      res.status === 404
     );
   }
 }

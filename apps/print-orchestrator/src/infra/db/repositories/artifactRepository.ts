@@ -87,4 +87,21 @@ export class SqliteArtifactRepository
   list(): Artifact[] {
     return this.query("SELECT * FROM artifacts ORDER BY created_at, id");
   }
+
+  count(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM artifacts").get() as { n: number };
+    return row.n;
+  }
+
+  totalStoredBytes(): number {
+    // Dedup-aware: sum the size of each DISTINCT blob (storage key) once, so a
+    // blob shared by several artifacts is not double-counted toward the quota.
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(size_bytes), 0) AS total
+           FROM (SELECT size_bytes FROM artifacts WHERE source IS NOT NULL GROUP BY source)`
+      )
+      .get() as { total: number };
+    return row.total;
+  }
 }

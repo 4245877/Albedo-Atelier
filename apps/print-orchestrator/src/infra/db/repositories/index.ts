@@ -16,6 +16,7 @@ import { SqliteProfileRevisionRepository } from "./profileRevisionRepository";
 import { SqliteProfileSetRepository } from "./profileSetRepository";
 import { SqliteQueueEntryRepository } from "./queueEntryRepository";
 import { SqliteSliceVariantRepository } from "./sliceVariantRepository";
+import { SqliteStartGuardRepository } from "./startGuardRepository";
 
 /**
  * The SQLite adapter for the {@link PrintQueueStore} port: it owns the
@@ -41,6 +42,7 @@ export class SqlitePrintQueueStore implements PrintQueueStore {
       materialOverrides: new SqliteMaterialOverrideRepository(db),
       audit: new SqliteAuditEventRepository(db),
       meta: new SqliteAppMetaRepository(db),
+      startGuards: new SqliteStartGuardRepository(db),
       profileRevisions: new SqliteProfileRevisionRepository(db),
       profileSets: new SqliteProfileSetRepository(db),
       sliceVariants: new SqliteSliceVariantRepository(db)

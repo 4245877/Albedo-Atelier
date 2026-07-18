@@ -12,8 +12,17 @@ async function apiError(res) {
   return err;
 }
 
-export async function apiGet(path) {
-  const res = await fetch(`${API_BASE}${path}`, { headers: { Accept: "application/json" } });
+export async function apiGet(path, { signal, timeoutMs = 15000 } = {}) {
+  // Own hard deadline so a stalled GET can never wedge polling; combined with the
+  // caller's single-flight abort signal so a superseded poll is cancelled too. A
+  // timeout aborts with "TimeoutError" (a real failure); a caller abort is
+  // "AbortError" (superseded — the caller ignores it).
+  const deadline = AbortSignal.timeout(timeoutMs);
+  const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: { Accept: "application/json" },
+    signal: combined
+  });
   if (!res.ok) throw await apiError(res);
   return res.json();
 }

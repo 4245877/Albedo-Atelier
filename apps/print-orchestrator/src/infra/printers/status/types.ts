@@ -90,4 +90,19 @@ export interface PrinterLiveStatus {
 
 export type PrinterCommand = "pause" | "resume" | "cancel";
 
-export class PrinterCommandError extends Error {}
+/**
+ * A device/driver refusing a command. `definitivelyRejected` marks the subset
+ * where the device provably did **not** act on the request (e.g. Moonraker 404
+ * for a missing file) — distinct from an ambiguous failure (HTTP 5xx) where a
+ * print may still have begun. The start path uses it to decide whether a retry
+ * is safe or the printer must be held for reconciliation.
+ */
+export class PrinterCommandError extends Error {
+  constructor(
+    message: string,
+    readonly definitivelyRejected = false
+  ) {
+    super(message);
+    this.name = "PrinterCommandError";
+  }
+}

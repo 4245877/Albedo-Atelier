@@ -94,6 +94,14 @@ function evaluate(job: QueueJob, ctx: NightPlanContext, windowMinutes: number | 
   const blockers: string[] = [];
   let risk = 15;
 
+  // Unattended (night) print requires an explicit operator decision. An unmarked
+  // job is never launched at night — the absence of a night flag must NOT, by
+  // fallback, make every ready job eligible for an unattended launch.
+  if (job.night !== true) {
+    blockers.push("задание не отмечено для печати без присмотра — подтвердите ночной запуск явно");
+    risk += 20;
+  }
+
   if (!printer) {
     blockers.push(`принтер «${job.printer}» не найден в конфигурации`);
     risk += 35;
@@ -117,12 +125,16 @@ function evaluate(job: QueueJob, ctx: NightPlanContext, windowMinutes: number | 
       blockers.push(`состояние «${printer.name}» не подтверждено (${status.status})`);
       risk += 25;
     }
-    if (!printer.material) risk += 12;
-
-    // A print nobody is watching must not run with the wrong filament: a
-    // concrete material contradiction blocks the launch. Unknown material on
-    // either side stays a soft risk (nothing to contradict).
-    if (materialsIncompatible(job.material, printer.material)) {
+    // Filament for an unattended print must be verifiable on BOTH sides: an
+    // unknown material — the job's or the loaded reel's — blocks the launch,
+    // because the right filament for a print nobody is watching cannot be
+    // confirmed. A known but contradicting pair is likewise blocked.
+    if (isUnknownMaterial(job.material) || isUnknownMaterial(printer.material)) {
+      blockers.push(
+        "материал не подтверждён — для ночной печати нужен известный материал с обеих сторон"
+      );
+      risk += 20;
+    } else if (materialsIncompatible(job.material, printer.material)) {
       blockers.push(
         `материал не совпадает: заданию нужен ${job.material}, в «${printer.name}» заправлен ${printer.material}`
       );

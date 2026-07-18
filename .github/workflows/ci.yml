@@ -5,9 +5,8 @@ on:
     branches: [main]
   pull_request:
 
-# The full quality gate for the only Node project in the workspace
-# (apps/print-orchestrator): typecheck (tests included), unit tests, then build.
 jobs:
+  # The Node service: typecheck (tests included), unit + integration tests, build.
   print-orchestrator:
     runs-on: ubuntu-latest
     defaults:
@@ -30,8 +29,50 @@ jobs:
       - name: Typecheck (source + tests)
         run: pnpm run typecheck
 
-      - name: Unit tests
+      - name: Unit + integration tests
         run: pnpm test
 
       - name: Build
         run: pnpm run build
+
+  # The dashboard: pure ES-module unit tests (view helpers, the polling-race
+  # guard) and the nginx go2rtc-hardening structural checks. No install needed —
+  # the suite is `node --test` with no dependencies.
+  print-dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/print-dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Dashboard tests (view helpers, polling race, nginx hardening)
+        run: node --test "tests/**/*.test.mjs"
+
+      - name: Validate the nginx go2rtc/API hardening config parses
+        run: |
+          sudo apt-get update && sudo apt-get install -y nginx
+          work="$(mktemp -d)"; mkdir -p "$work/logs" "$work/temp"
+          # Render the envsubst template (token) and stub the compose-only upstream
+          # hostnames so `nginx -t` does not attempt DNS resolution at test time.
+          sed -e 's/${ORCHESTRATOR_API_TOKEN}/ci-token/g' \
+              -e 's#http://go2rtc:1984#http://127.0.0.1:19984#g' \
+              -e 's#http://print-orchestrator:3100#http://127.0.0.1:13100#g' \
+              nginx.conf > "$work/default.conf"
+          cat > "$work/nginx.conf" <<EOF
+          worker_processes 1;
+          pid $work/nginx.pid;
+          error_log $work/logs/error.log;
+          events { worker_connections 64; }
+          http {
+            access_log off;
+            client_body_temp_path $work/temp; proxy_temp_path $work/temp;
+            fastcgi_temp_path $work/temp; uwsgi_temp_path $work/temp; scgi_temp_path $work/temp;
+            include $work/default.conf;
+          }
+          EOF
+          nginx -t -c "$work/nginx.conf"

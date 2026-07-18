@@ -178,6 +178,21 @@ export class ArtifactStorage {
     return pathExists(this.resolvePath(key));
   }
 
+  /**
+   * Bytes currently available to an unprivileged writer on the filesystem that
+   * holds the store, or `null` when it cannot be determined (statfs unsupported
+   * on the platform). Used for the pre-upload free-disk reserve check.
+   */
+  async freeBytes(): Promise<number | null> {
+    try {
+      await this.init();
+      const stat = await fsp.statfs(this.root);
+      return Number(stat.bavail) * Number(stat.bsize);
+    } catch {
+      return null;
+    }
+  }
+
   /** A read stream over a committed blob (for the analyzer). */
   createReadStream(key: string): Readable {
     return fs.createReadStream(this.resolvePath(key));

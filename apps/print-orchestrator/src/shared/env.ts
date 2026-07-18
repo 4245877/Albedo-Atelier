@@ -278,6 +278,27 @@ export const uploads = Object.freeze({
   maxFiles: readPositiveInt("MAX_UPLOAD_FILES", process.env.MAX_UPLOAD_FILES, 20),
   /** Maximum combined size of one batch (advisory; enforced client-side). */
   maxTotalBytes: readPositiveInt("MAX_UPLOAD_TOTAL_BYTES", process.env.MAX_UPLOAD_TOTAL_BYTES, 500 * MB),
+  /**
+   * Hard SERVER-side cap on the total on-disk artifact store (dedup-aware sum of
+   * distinct blob sizes). A new upload that would push past it is refused (413),
+   * so a flood of uploads cannot fill the shared data volume. Distinct from the
+   * advisory per-batch {@link maxTotalBytes} above.
+   */
+  maxStoredBytes: readPositiveInt("MAX_ARTIFACT_STORE_BYTES", process.env.MAX_ARTIFACT_STORE_BYTES, 20 * 1024 * MB),
+  /** Hard SERVER-side cap on the number of stored artifacts. */
+  maxArtifactCount: readPositiveInt("MAX_ARTIFACT_COUNT", process.env.MAX_ARTIFACT_COUNT, 5000),
+  /**
+   * Free-disk reserve (bytes): an upload is refused when the filesystem holding
+   * the store has less than this available, so the service degrades safely
+   * instead of filling the disk the JSON state + SQLite also live on.
+   */
+  minFreeDiskBytes: readPositiveInt("UPLOAD_MIN_FREE_DISK_BYTES", process.env.UPLOAD_MIN_FREE_DISK_BYTES, 512 * MB),
+  /**
+   * Cap on the number of analyses queued/running at once. Beyond it an upload is
+   * refused (503) rather than growing an unbounded backlog that would keep the
+   * event loop and disk busy — the "лимит общей очереди анализа" bound.
+   */
+  analysisMaxQueue: readPositiveInt("ANALYSIS_MAX_QUEUE", process.env.ANALYSIS_MAX_QUEUE, 200),
   /** Per-file analysis wall-clock budget (ms) before it is failed as timed out. */
   analysisTimeoutMs: readPositiveInt("ANALYSIS_TIMEOUT_MS", process.env.ANALYSIS_TIMEOUT_MS, 30000),
   /** How many files may be analysed concurrently by the in-process worker pool. */
