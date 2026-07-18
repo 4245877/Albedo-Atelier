@@ -14,7 +14,7 @@ import { ArtifactStorage } from "../../infra/storage/artifactStorage";
 import { ArtifactService } from "../artifacts/artifactService";
 import { ProfileService, type SlicerPrinterRef } from "./profileService";
 import { SliceService } from "./sliceService";
-import { FakeOrcaRunner } from "./testkit/fakeOrcaRunner";
+import { FAKE_ORCA_GCODE, FakeOrcaRunner } from "./testkit/fakeOrcaRunner";
 
 const LIMITS = {
   zipMaxEntries: 1000,
@@ -201,6 +201,45 @@ test("fake slicing succeeds: ready variant, output artifact analysed, estimates 
   assert.deepEqual(leftoverWorkDirs(), []);
 });
 
+test("a slice whose OUTPUT analysis is blocked never becomes ready", async () => {
+  const artifactId = await uploadModel();
+  const setId = await approvedSet();
+  // OrcaSlicer emits a file carrying a forbidden config-mutating command (e.g. an
+  // M502 baked into a profile's start G-code): the analyzer blocks it (verdict
+  // blocked, state ready), so the variant must be blocked — not ready.
+  runner.gcode = FAKE_ORCA_GCODE.replace("G28", "G28\nM502");
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  const done = slice.getVariant(variant.id);
+  assert.equal(done.state, "blocked");
+  assert.ok(done.blockers.some((b) => b.code === "gcode_forbidden_command"));
+  // The output stays linked so the operator can inspect exactly why.
+  assert.ok(done.outputArtifactId);
+  const outAnalysis = store.repositories.artifactAnalyses.getById(done.outputAnalysisId as string);
+  assert.equal(outAnalysis?.verdict, "blocked");
+
+  // And it is never reusable as a cache hit: a re-slice re-runs, never serves it ready.
+  const again = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+  assert.equal(slice.getVariant(again.id).state, "blocked");
+});
+
+test("a slice whose OUTPUT only reaches `review` is blocked, not ready (schedulable-only gate)", async () => {
+  const artifactId = await uploadModel();
+  const setId = await approvedSet();
+  // Drop the printer_model banner → the analyzer cannot confirm a target → `review`,
+  // which is not schedulable, so the variant must not go ready.
+  runner.gcode = FAKE_ORCA_GCODE.replace("; printer_model = Bambu Lab A1\n", "");
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  const done = slice.getVariant(variant.id);
+  assert.equal(done.state, "blocked");
+  assert.ok(done.blockers.some((b) => b.code === "output_not_schedulable"));
+  assert.ok(done.outputArtifactId);
+});
+
 test("the source analysis is NOT overwritten by the slice", async () => {
   const artifactId = await uploadModel();
   const before = store.repositories.artifactAnalyses.latestForArtifact(artifactId);
@@ -312,6 +351,37 @@ test("slicing never touches the legacy queue (no QueueEntry created)", async () 
   await slice.createSlice({ artifactId, profileSetId: setId });
   await slice.whenIdle();
   assert.deepEqual(store.repositories.queue.listOpen(), []);
+});
+
+test("createSet requires exactly one target and rejects an unknown printer id", () => {
+  const { machine, process, filament } = seedActiveTrio();
+  const base = {
+    name: "x",
+    machineRevisionId: machine.id,
+    processRevisionId: process.id,
+    filamentRevisionId: filament.id
+  };
+  // Neither target.
+  assert.throws(() => profiles.createSet({ ...base }), /ровно одну цель/i);
+  // Both targets.
+  assert.throws(
+    () => profiles.createSet({ ...base, printerId: "creality-k2", printerClass: "k2" }),
+    /ровно одну цель/i
+  );
+  // A concrete printer that is not in the farm config.
+  assert.throws(() => profiles.createSet({ ...base, printerId: "ghost-printer" }), /не найден/i);
+});
+
+test("createSlice refuses retargeting a printer-bound set to a different printer", async () => {
+  const artifactId = await uploadModel();
+  const setId = await approvedSet(); // bound to creality-k2
+  await assert.rejects(
+    slice.createSlice({ artifactId, profileSetId: setId, targetPrinterId: "ender3-v3-ke" }),
+    /привязан к принтеру/i
+  );
+  // The set's own printer is accepted and becomes the variant's target.
+  const ok = await slice.createSlice({ artifactId, profileSetId: setId, targetPrinterId: "creality-k2" });
+  assert.equal(ok.targetPrinterId, "creality-k2");
 });
 
 test("printer coverage flags the Ender 3 V3 KE as having no machine profile", () => {

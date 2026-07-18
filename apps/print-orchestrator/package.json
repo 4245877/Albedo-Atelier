@@ -9,6 +9,8 @@
     "dev": "NODE_OPTIONS=\"--experimental-sqlite --disable-warning=ExperimentalWarning\" tsx watch src/server.ts",
     "start": "node --experimental-sqlite --disable-warning=ExperimentalWarning dist/src/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "slicing:vendor:check": "node scripts/install-orca-vendor-profiles.mjs --check",
+    "slicing:vendor:install": "node scripts/install-orca-vendor-profiles.mjs",
     "test": "TZ=UTC node --experimental-sqlite --disable-warning=ExperimentalWarning --import tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {

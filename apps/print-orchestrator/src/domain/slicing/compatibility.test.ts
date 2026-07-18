@@ -166,3 +166,26 @@ test("a supported material + matching firmware produces no material/gcode compla
   assert.ok(!codes(r.warnings).includes("material_not_supported"));
   assert.ok(!codes(r.warnings).includes("gcode_flavor_mismatch"));
 });
+
+test("the machine profile's nozzle contradicting the target printer's nozzle is a blocker", () => {
+  const r = validateProfileSet(
+    activeSet({ target: { printerModel: "Bambu Lab A1", printerNozzleMm: 0.6 } })
+  );
+  assert.ok(codes(r.blockers).includes("printer_nozzle_mismatch"));
+});
+
+test("a matching target nozzle does not block", () => {
+  const r = validateProfileSet(activeSet({ target: { printerModel: "Bambu Lab A1", printerNozzleMm: 0.4 } }));
+  assert.ok(!codes(r.blockers).includes("printer_nozzle_mismatch"));
+});
+
+test("the machine profile describing a different model than the target printer is a blocker", () => {
+  const r = validateProfileSet(activeSet({ target: { printerModel: "Creality K2" } }));
+  assert.ok(codes(r.blockers).includes("printer_model_mismatch"));
+});
+
+test("a loosely-matching model (normalised) does not block", () => {
+  // machine model "Bambu Lab A1" vs a differently-spaced/cased target.
+  const r = validateProfileSet(activeSet({ target: { printerModel: "bambu-lab a1" } }));
+  assert.ok(!codes(r.blockers).includes("printer_model_mismatch"));
+});

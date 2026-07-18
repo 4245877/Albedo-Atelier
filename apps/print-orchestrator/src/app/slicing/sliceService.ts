@@ -7,9 +7,10 @@ import { JobError, NotFoundError, ValidationError } from "../../core/errors";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import { assertTransition } from "../../domain/print/states";
-import type { AnalysisFinding, AuditEntityType, Metadata } from "../../domain/print/types";
+import type { AnalysisFinding, ArtifactAnalysis, AuditEntityType, Metadata } from "../../domain/print/types";
 import { computeCacheKey } from "../../domain/slicing/cacheKey";
 import { finding } from "../../domain/slicing/findings";
+import { evaluateSliceOutput } from "../../domain/slicing/outputGate";
 import { SLICE_VARIANT_TRANSITIONS } from "../../domain/slicing/states";
 import type { ProfileRevision, SliceVariant, SliceVariantState } from "../../domain/slicing/types";
 import type { ArtifactStorage } from "../../infra/storage/artifactStorage";
@@ -113,13 +114,30 @@ export class SliceService {
       workerVersion: this.runner.workerVersion
     });
 
-    const targetPrinterId = input.targetPrinterId ?? set.printerId ?? null;
-    const targetPrinterClass = input.targetPrinterClass ?? set.printerClass ?? null;
+    // The slice's target is bound by the APPROVED set — a client cannot silently
+    // retarget it. For a printer-scoped set the target IS the set's printer; any
+    // conflicting override is refused. For a class-scoped set the client may name a
+    // concrete printer, but the class stays the set's (server-derived, never the
+    // client's) so a mismatch is caught downstream at schedule/dispatch time.
+    const targetPrinterClass = set.printerClass ?? null;
+    let targetPrinterId: string | null;
+    if (set.printerId) {
+      if (input.targetPrinterId && input.targetPrinterId !== set.printerId) {
+        throw new ValidationError(
+          `Набор профилей привязан к принтеру «${set.printerId}» — запуск на «${input.targetPrinterId}» запрещён`
+        );
+      }
+      targetPrinterId = set.printerId;
+    } else {
+      targetPrinterId = input.targetPrinterId ?? null;
+    }
 
-    // Cache hit: a finished variant with this key whose output blob still exists.
+    // Cache hit: a finished variant with this key whose output blob still exists
+    // AND whose output analysis is still clean (schedulable, no blockers) — a stale
+    // or since-invalidated result must never be re-served as ready.
     if (!input.force) {
       const cached = repos.sliceVariants.findReadyByCacheKey(cacheKey);
-      if (cached?.outputArtifactId) {
+      if (cached?.outputArtifactId && this.cachedOutputStillReady(cached)) {
         const out = repos.artifacts.getById(cached.outputArtifactId);
         if (out?.source && (await this.storage.exists(out.source))) {
           return this.createFromCache(
@@ -337,28 +355,10 @@ export class SliceService {
         metadata: { sliceVariantId: variant.id, taskId: variant.taskId, sourceArtifactId: artifact.id }
       });
 
-      const bbox = readBbox(analysis.data);
-      const warnings: AnalysisFinding[] = [];
-      if (analysis.state !== "ready") {
-        warnings.push(finding("output_analysis_incomplete", "Не удалось полностью проанализировать выходной файл"));
-      }
-
+      // The output analysis — not merely the fact a file appeared — decides the
+      // variant's terminal state.
       const current = repos.sliceVariants.getById(variant.id) ?? variant;
-      this.store.transaction(() =>
-        this.transition(current, "ready", "orca", "sliced", {
-          outputArtifactId: outArtifact.id,
-          outputAnalysisId: analysis.id,
-          orcaEtaS: analysis.estimatedDurationS,
-          filamentG: analysis.estimatedFilamentG,
-          filamentMm: numberOrNull(analysis.data.filamentUsedMm),
-          dimensions: bbox,
-          warnings,
-          blockers: [],
-          error: null,
-          endedAt: this.nowIso()
-        })
-      );
-      this.logger.info?.({ variantId: variant.id, output: outArtifact.id }, "slice completed");
+      this.store.transaction(() => this.finalizeOutput(current, outArtifact.id, analysis));
     } catch (error) {
       if (error instanceof SliceRuntimeUnavailableError) {
         this.block(variant.id, "runtime_unavailable", error.message);
@@ -405,6 +405,59 @@ export class SliceService {
       throw new JobError(`Профиль «${rev.name}» не активен (${rev.status})`);
     }
     return rev;
+  }
+
+  /**
+   * Decides a sliced variant's terminal state from the OUTPUT analysis, not just
+   * the fact a file appeared. The output is `ready` only when its analysis actually
+   * completed (`state: "ready"`), reached a `schedulable` verdict, and carries no
+   * blocker — the very bar {@link evaluateDispatchGate} enforces before a start.
+   * Anything else (analyzer failed/timed out, or a `blocked`/`review`/`needs_input`
+   * verdict — e.g. a forbidden config-mutating command like M502/SAVE_CONFIG baked
+   * into a profile's start/end G-code) makes the variant `blocked`, with the
+   * analysis's own findings copied across so the operator sees exactly why. The
+   * output artifact stays linked for inspection, but an unsafe or unverified file
+   * can never go `ready`, be dispatched, or be re-served from cache as ready.
+   */
+  private finalizeOutput(variant: SliceVariant, outputArtifactId: string, analysis: ArtifactAnalysis): void {
+    const estimates = {
+      outputArtifactId,
+      outputAnalysisId: analysis.id,
+      orcaEtaS: analysis.estimatedDurationS,
+      filamentG: analysis.estimatedFilamentG,
+      filamentMm: numberOrNull(analysis.data.filamentUsedMm),
+      dimensions: readBbox(analysis.data)
+    };
+    const gate = evaluateSliceOutput(analysis);
+    if (gate.ok) {
+      this.transition(variant, "ready", "orca", "sliced", {
+        ...estimates,
+        warnings: analysis.warnings,
+        blockers: [],
+        error: null,
+        endedAt: this.nowIso()
+      });
+      this.logger.info?.({ variantId: variant.id, output: outputArtifactId }, "slice completed");
+      return;
+    }
+    this.transition(variant, "blocked", "orca", "output_rejected", {
+      ...estimates,
+      warnings: analysis.warnings,
+      blockers: gate.blockers,
+      error: gate.reason,
+      endedAt: this.nowIso()
+    });
+    this.logger.warn?.(
+      { variantId: variant.id, output: outputArtifactId, verdict: analysis.verdict, state: analysis.state },
+      "slice output rejected — not dispatchable"
+    );
+  }
+
+  /** A cached ready variant is only reusable if its output analysis is still clean. */
+  private cachedOutputStillReady(cached: SliceVariant): boolean {
+    if (!cached.outputAnalysisId) return false;
+    const analysis = this.store.repositories.artifactAnalyses.getById(cached.outputAnalysisId);
+    return Boolean(analysis) && evaluateSliceOutput(analysis as ArtifactAnalysis).ok;
   }
 
   private block(variantId: string, code: string, message: string): void {

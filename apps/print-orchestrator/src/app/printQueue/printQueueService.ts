@@ -24,8 +24,19 @@ import type {
   PrintTask,
   QueueEntry
 } from "../../domain/print/types";
+import type { PrintTaskState } from "../../domain/print/types";
 import type { QueueJob } from "../../domain/dashboard/types";
+import { evaluateSliceOutput } from "../../domain/slicing/outputGate";
+import { normalizeStartablePath } from "../../infra/printers/files";
 import { toLegacyQueue, type QueueProjectionRow } from "./projection";
+
+/** Task states from which a finished slice may be handed off into the queue. */
+const PROMOTABLE_TASK_STATES: ReadonlySet<PrintTaskState> = new Set([
+  "DRAFT",
+  "QUEUED",
+  "PLANNED",
+  "NEEDS_REVIEW"
+]);
 
 /** Operator input for a new task; only `title` is required. */
 export interface CreateTaskInput {
@@ -485,6 +496,131 @@ export class PrintQueueService {
         actor
       });
 
+      return this.getTaskDetail(task.id);
+    });
+  }
+
+  /**
+   * The slice → print HANDOFF. Binds a `ready` slice variant's verified output onto
+   * its source task so the task becomes an executable print job, then enqueues it.
+   *
+   * The gap this closes: a finished slice lived only on `SliceVariant.output*`; its
+   * task stayed bound to the STL/3MF (analysis `needs_preparation`) with no on-device
+   * file, so dispatching it hit `NO_FILE` or was blocked as an un-prepared model.
+   * After promotion the task's executable artifact IS the sliced output (analysis
+   * `schedulable`), `metadata.file` is the on-device path, and — for a printer-scoped
+   * variant — the task is pinned to that printer. The dispatch gate then reads the
+   * OUTPUT's clean analysis, so a start uses exactly the vetted ready variant and its
+   * analysis, never the raw model.
+   *
+   * Fail-closed: the output must pass {@link evaluateSliceOutput} (completed,
+   * `schedulable`, no blocker) or promotion is refused. The file is not pushed to the
+   * printer here (no such transport exists) — its on-device identity is matched by
+   * the dispatch pre-flight (name + size), which refuses if it is absent or different.
+   */
+  promoteSliceVariant(
+    variantId: string,
+    input: { onDeviceFile?: string | null } = {},
+    actor?: string
+  ): TaskDetail {
+    return this.store.transaction(() => {
+      const repos = this.store.repositories;
+      const who = actor ?? this.defaultActor;
+      const iso = this.nowIso();
+
+      const variant = repos.sliceVariants.getById(variantId);
+      if (!variant) throw new NotFoundError(`Вариант слайсинга «${variantId}»`);
+      if (variant.state !== "ready" || !variant.outputArtifactId) {
+        throw new JobError(
+          `Вариант «${variantId}» не готов к постановке в очередь (состояние «${variant.state}») — нужен ready-вариант с готовым файлом`
+        );
+      }
+
+      const output = repos.artifacts.getById(variant.outputArtifactId);
+      if (!output) throw new NotFoundError(`Выходной артефакт «${variant.outputArtifactId}»`);
+
+      // The output must be a safe, verified, schedulable file — the same bar the
+      // slice pipeline and the dispatch gate use. Never promote anything else.
+      const analysis = variant.outputAnalysisId
+        ? repos.artifactAnalyses.getById(variant.outputAnalysisId)
+        : repos.artifactAnalyses.latestForArtifact(output.id);
+      if (!analysis) throw new JobError("У выходного файла нет анализа — постановка в очередь запрещена");
+      const gate = evaluateSliceOutput(analysis);
+      if (!gate.ok) throw new JobError(`Нельзя поставить в очередь непроверенный файл: ${gate.reason}`);
+
+      const task = repos.tasks.getById(variant.taskId);
+      if (!task) throw new NotFoundError(`Задание «${variant.taskId}»`);
+      if (!PROMOTABLE_TASK_STATES.has(task.state)) {
+        throw new JobError(
+          `Задание «${task.title}» в состоянии «${task.state}» — постановка слайса в очередь недоступна`
+        );
+      }
+
+      // The on-device path a dispatch will start: an explicit override, else the
+      // output file's own name — validated as a safe, startable path.
+      const rawFile = input.onDeviceFile?.trim() || output.name;
+      let onDeviceFile: string;
+      try {
+        onDeviceFile = normalizeStartablePath(rawFile);
+      } catch {
+        throw new ValidationError(`Недопустимый путь файла на устройстве: «${rawFile}»`);
+      }
+
+      // A printer-scoped variant pins its printer so the start goes to the exact
+      // device the file was sliced for; a class-scoped one leaves placement open.
+      const pinnedPrinterId = variant.targetPrinterId ?? task.pinnedPrinterId;
+      if (pinnedPrinterId) this.assertPrinterConfigured(pinnedPrinterId);
+
+      // ── Atomic bind: the task's executable becomes the sliced output ──────────
+      if (task.state !== "QUEUED") {
+        assertTransition("задание", PRINT_TASK_TRANSITIONS, task.state, "QUEUED");
+      }
+      const bound = repos.tasks.update({
+        ...task,
+        artifactId: output.id,
+        state: "QUEUED",
+        reason: null,
+        targetPrinter: variant.targetPrinterId ?? task.targetPrinter,
+        pinnedPrinterId,
+        metadata: {
+          ...task.metadata,
+          file: onDeviceFile,
+          sourceArtifactId: variant.sourceArtifactId,
+          sliceVariantId: variant.id,
+          outputAnalysisId: analysis.id
+        },
+        updatedAt: iso
+      });
+      this.recordAudit({
+        entityType: "print_task",
+        entityId: task.id,
+        action: "slice_promoted",
+        from: task.state,
+        to: "QUEUED",
+        actor: who,
+        detail: { variantId: variant.id, outputArtifactId: output.id, file: onDeviceFile }
+      });
+
+      // Ensure a WAITING queue entry: create one for a task that had none (an
+      // upload draft), un-hold a held one, and leave an already-waiting one be.
+      const entry = repos.queue.findByTaskId(task.id);
+      if (!entry) {
+        const created: QueueEntry = {
+          id: newId(ID_PREFIX.queueEntry),
+          taskId: task.id,
+          position: this.nextPosition(),
+          state: "WAITING",
+          enqueuedAt: iso,
+          updatedAt: iso,
+          version: 1
+        };
+        repos.queue.insert(created);
+        this.recordAudit({ entityType: "queue_entry", entityId: created.id, action: "enqueued", to: "WAITING", actor: who });
+      } else if (entry.state === "HELD") {
+        this.transitionEntry(entry, "WAITING", who);
+      }
+
+      void bound;
       return this.getTaskDetail(task.id);
     });
   }

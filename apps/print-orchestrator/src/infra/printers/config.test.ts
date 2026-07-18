@@ -77,6 +77,20 @@ test("buildVolume is accepted only when x/y/z are all finite and positive", () =
   }
 });
 
+test("printerClass is normalised from printerClass or class, defaulting to empty", () => {
+  assert.equal(
+    normalizePrinterConfig({ id: "k2", name: "X", host: "127.0.0.1", printerClass: "k2" })?.printerClass,
+    "k2"
+  );
+  // Legacy/alias key `class` is accepted too.
+  assert.equal(
+    normalizePrinterConfig({ id: "k2b", name: "X", host: "127.0.0.1", class: "k2" })?.printerClass,
+    "k2"
+  );
+  // Unset → "" (no class); a loaded config never leaves it undefined.
+  assert.equal(normalizePrinterConfig({ id: "k2c", name: "X", host: "127.0.0.1" })?.printerClass, "");
+});
+
 test("an unsafe printer id (path traversal / separators) is rejected", () => {
   for (const id of ["../evil", "a/b", "a b", "..", "a.b", "a:b", ""]) {
     assert.equal(

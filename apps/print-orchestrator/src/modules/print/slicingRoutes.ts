@@ -29,6 +29,7 @@ import type { ProfileType } from "../../domain/slicing/types";
  *   POST /slicing/profile-sets/:id/approve  approve (refused if blockers)
  *   POST /slicing/slice                 start slicing               body: { artifactId, profileSetId, targetPrinterId?, force? }
  *   POST /slicing/variants/:id/rerun    re-run a finished variant
+ *   POST /slicing/variants/:id/promote  hand off a ready variant's output → queued print task
  */
 export function registerSlicingRoutes(app: FastifyInstance): void {
   // ── Runtime & profiles ─────────────────────────────────────────────────────
@@ -92,6 +93,20 @@ export function registerSlicingRoutes(app: FastifyInstance): void {
     ok: true,
     variant: farmStore.slicing.slices.rerun(request.params.id)
   }));
+
+  // The slice → print handoff: bind a ready variant's verified output onto its task
+  // and enqueue it, so it becomes an executable print job (not a stuck STL).
+  app.post<{ Params: { id: string }; Body: unknown }>("/slicing/variants/:id/promote", async (request) => ({
+    ok: true,
+    task: farmStore.printQueue.promoteSliceVariant(request.params.id, shapePromote(request.body))
+  }));
+}
+
+/** The optional on-device file override for a slice handoff. */
+function shapePromote(body: unknown): { onDeviceFile?: string | null } {
+  const src = (body ?? {}) as Record<string, unknown>;
+  const onDeviceFile = optionalString(src.onDeviceFile ?? src.file);
+  return onDeviceFile ? { onDeviceFile } : {};
 }
 
 // ── Body shaping (narrow untrusted input) ─────────────────────────────────────

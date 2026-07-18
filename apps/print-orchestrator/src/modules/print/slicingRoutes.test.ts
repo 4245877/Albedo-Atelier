@@ -104,7 +104,10 @@ test("creating a set with a quarantined member is blocked, and approval is refus
     method: "POST",
     url: "/api/print/slicing/profile-sets",
     headers: { authorization: `Bearer ${TOKEN}` },
-    payload: { name: "blocked set", machine: machine.id, process: process.id, filament: filament.id, printer: "creality-k2" }
+    // A class target (not a concrete printerId) — this test's empty farm has no
+    // printers, and a set's block here comes from its quarantined MEMBER, not its
+    // target. (A concrete printerId is now validated to exist; see the profile tests.)
+    payload: { name: "blocked set", machine: machine.id, process: process.id, filament: filament.id, printerClass: "k2" }
   });
   assert.equal(create.statusCode, 200);
   const setId = create.json().set.id;

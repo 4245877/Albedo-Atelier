@@ -67,6 +67,28 @@ services:
       # to fulfillment's published API on the host LAN, e.g. http://192.168.0.139:3001
       # (or http://fulfillment-api:8080 if both compose projects share a network).
       FULFILLMENT_API_URL: ${FULFILLMENT_API_URL:-}
+      # ── OrcaSlicer slicing runtime (optional) ───────────────────────────────
+      # This image ships the preset CATALOG but NOT an OrcaSlicer binary (it is a
+      # desktop app). Slicing therefore stays honestly BLOCKED — never faked — until
+      # ORCA_SLICER_CMD points at a runtime. Two supported shapes, both configured
+      # in .env (see .env.example → "OrcaSlicer slicing runtime"):
+      #   1. a container runtime, network-disabled (preferred):
+      #        ORCA_SLICER_CMD=docker
+      #        ORCA_SLICER_BASE_ARGS=run --rm --network none -v {{workDir}}:{{workDir}} <image> orca-slicer
+      #      (requires giving this service access to a container runtime — mount the
+      #       Docker socket or use rootless podman; a deliberate host decision);
+      #   2. a host/mounted OrcaSlicer binary:
+      #        ORCA_SLICER_CMD=/opt/orca/orca-slicer   (mount it via a volume below)
+      # Leaving ORCA_SLICER_CMD empty runs the farm without slicing — monitoring,
+      # the queue and dispatch all work regardless. The orchestrator logs the runtime
+      # status at boot and exposes it at GET /api/print/slicing/runtime.
+      ORCA_SLICER_CMD: ${ORCA_SLICER_CMD:-}
+      ORCA_SLICER_BASE_ARGS: ${ORCA_SLICER_BASE_ARGS:-}
+      ORCA_SLICER_EXTRA_ARGS: ${ORCA_SLICER_EXTRA_ARGS:-}
+      # Pin the slicer version the vendored bundles were exported from, so resolved
+      # settings match what the CLI produces (probe warns on a mismatch).
+      ORCA_SLICER_VERSION: ${ORCA_SLICER_VERSION:-2.3.0}
+      ORCA_SLICER_NETWORK_ISOLATED: ${ORCA_SLICER_NETWORK_ISOLATED:-}
     env_file:
       - .env
     volumes:
@@ -74,6 +96,12 @@ services:
       - ./apps/print-orchestrator/config:/app/config:ro
       # Persisted runtime state — must be writable and outlive the container.
       - orchestrator-data:/app/data
+      # Slicing runtime (optional): to use a host/mounted OrcaSlicer binary, mount it
+      # read-only and set ORCA_SLICER_CMD to its in-container path (see above), e.g.:
+      # - /opt/orca-slicer:/opt/orca:ro
+      # For the container-runtime shape instead, grant a runtime rather than mounting
+      # a binary, e.g. the Docker socket (a deliberate host-security decision):
+      # - /var/run/docker.sock:/var/run/docker.sock
     # No host port: the control API (pause/resume/cancel/light) must not be
     # exposed on the LAN. The dashboard reaches it over the compose network via
     # nginx (proxy_pass http://print-orchestrator:3100). For host-side debugging

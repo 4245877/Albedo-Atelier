@@ -233,8 +233,12 @@ export interface SetTarget {
   printerMaterial?: string | null;
   /** The bound printer's transport/firmware family: moonraker | bambu | creality. */
   printerProtocol?: string | null;
-  /** The bound printer's model, for a soft filament↔printer sanity check. */
+  /** The bound printer's model — hard-checked against the machine profile's model. */
   printerModel?: string | null;
+  /** The bound printer's configured nozzle Ø (mm) — hard-checked against the profile's nozzle. */
+  printerNozzleMm?: number | null;
+  /** The bound printer's interchangeability class (config `printerClass`). */
+  printerClass?: string | null;
 }
 
 export interface ProfileSetValidationInput {
@@ -293,6 +297,34 @@ export function validateProfileSet(input: ProfileSetValidationInput): FindingSet
         finding(
           "filament_nozzle_intent",
           `Профиль филамента «${filament?.name}» рассчитан на сопло ${filamentIntended} мм, а у принтера ${m.nozzleDiameterMm} мм`
+        )
+      );
+    }
+  }
+
+  // ── Hard target checks ─────────────────────────────────────────────────────
+  // The sliced file is produced FOR this machine profile; a concrete disagreement
+  // with the bound printer's own hardware means the output would be physically
+  // wrong for the device it targets — a blocker, not a hint.
+  if (m && target) {
+    if (
+      m.nozzleDiameterMm != null &&
+      target.printerNozzleMm != null &&
+      target.printerNozzleMm > 0 &&
+      !approxEqual(m.nozzleDiameterMm, target.printerNozzleMm)
+    ) {
+      out.blockers.push(
+        finding(
+          "printer_nozzle_mismatch",
+          `Сопло профиля принтера ${m.nozzleDiameterMm} мм не совпадает с соплом целевого принтера ${target.printerNozzleMm} мм`
+        )
+      );
+    }
+    if (m.printerModel && target.printerModel && !modelsLooselyMatch(m.printerModel, target.printerModel)) {
+      out.blockers.push(
+        finding(
+          "printer_model_mismatch",
+          `Профиль принтера рассчитан на «${m.printerModel}», а целевой принтер — «${target.printerModel}»`
         )
       );
     }
@@ -429,6 +461,14 @@ function materialSupportedByPrinter(filamentType: string, printerMaterial: strin
   const have = materialTokens(printerMaterial);
   if (have.length === 0) return true; // printer material unknown → don't complain
   return have.some((t) => t === want || t.startsWith(want) || want.startsWith(t));
+}
+
+/** Loose model comparison: normalise to alphanumerics and require either to contain the other. */
+function modelsLooselyMatch(a: string, b: string): boolean {
+  const na = a.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const nb = b.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if (!na || !nb) return true; // one side unknown → don't hard-block on a comparison we can't make
+  return na.includes(nb) || nb.includes(na);
 }
 
 /** True when the filament name carries a printer-model token that clashes with the machine model. */

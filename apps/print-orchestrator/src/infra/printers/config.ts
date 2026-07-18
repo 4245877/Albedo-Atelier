@@ -42,6 +42,17 @@ export interface PrinterConfig {
   model: string;
   type: PrinterTechnology;
 
+  /**
+   * Interchangeability class — a label grouping printers a *class-scoped* profile
+   * set / slice variant may target (e.g. every "Creality K2" is class `k2`). It is
+   * how a slice made "for the K2 class" is matched to a concrete K2 at schedule
+   * time. Absent/empty when the printer belongs to no class: a class-scoped variant
+   * then matches it only if it, too, has no class — never "any printer"
+   * (fail-closed). Optional on the type (like `nozzleDiameterMm`), but the loader
+   * always populates it (""/value), so a loaded config never leaves it undefined.
+   */
+  printerClass?: string;
+
   protocol: PrinterProtocol;
   host: string;
   port?: number;
@@ -210,6 +221,7 @@ export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
     name,
     model: asString(value.model),
     type: normalizeType(value.type),
+    printerClass: asString(value.printerClass ?? value.class),
 
     protocol,
     host,

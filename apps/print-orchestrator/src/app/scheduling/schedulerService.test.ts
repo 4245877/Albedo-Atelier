@@ -181,8 +181,17 @@ function insertSlicedTask(
   db: PrintQueueStore,
   id: string,
   targetPrinterId: string,
-  over: { approved?: boolean; validation?: ProfileSet["validation"]; unattended?: boolean; etaS?: number } = {}
+  over: {
+    approved?: boolean;
+    validation?: ProfileSet["validation"];
+    unattended?: boolean;
+    etaS?: number;
+    /** When set, bind the set/variant to a CLASS (targetPrinterId null) instead of a printer id. */
+    classScoped?: string;
+  } = {}
 ): PrintTask {
+  const boundPrinterId = over.classScoped ? null : targetPrinterId;
+  const boundClass = over.classScoped ?? null;
   const repos = db.repositories;
   const source: Artifact = {
     id: `art_${id}`,
@@ -219,8 +228,8 @@ function insertSlicedTask(
     machineRevisionId: machine.id,
     processRevisionId: process.id,
     filamentRevisionId: filament.id,
-    printerId: targetPrinterId,
-    printerClass: null,
+    printerId: boundPrinterId,
+    printerClass: boundClass,
     validation: over.validation ?? "valid",
     approved: over.approved ?? true,
     approvedBy: over.approved === false ? null : "operator",
@@ -271,8 +280,8 @@ function insertSlicedTask(
     taskId: id,
     sourceArtifactId: source.id,
     profileSetId: set.id,
-    targetPrinterId,
-    targetPrinterClass: null,
+    targetPrinterId: boundPrinterId,
+    targetPrinterClass: boundClass,
     state: "ready",
     cacheKey: `ck_${id}`,
     orcaVersion: "2.0",
@@ -417,6 +426,29 @@ test("compatibility: a quarantined profile set behind a ready slice is blocked",
   const r = svc.compatibilityMatrix().rows[0].results[0];
   assert.equal(r.verdict, "blocked");
   assert.ok(r.blockers.some((b) => b.code === "profileset_quarantined"));
+});
+
+test("compatibility: a class-scoped slice matches only a same-class printer, never any printer", () => {
+  const db = store();
+  // A model task whose only ready slice is class-scoped ("k2"), not bound to a printer id.
+  insertSlicedTask(db, "c1", "unused", { classScoped: "k2" });
+  const svc = makeService(db, [
+    printer("same", { printerClass: "k2" }),
+    printer("other", { printerClass: "a1" }),
+    printer("classless") // no printerClass at all
+  ]);
+  const row = svc.compatibilityMatrix().rows.find((r) => r.taskId === "c1")!;
+
+  // Same class → the slice is found → compatible.
+  assert.equal(row.results.find((r) => r.printerId === "same")!.verdict, "compatible");
+  // Different class → the slice is NOT its slice → blocked on slice_missing.
+  const other = row.results.find((r) => r.printerId === "other")!;
+  assert.equal(other.verdict, "blocked");
+  assert.ok(other.blockers.some((b) => b.code === "slice_missing"));
+  // A class-less printer never matches a null-target variant (fail-closed).
+  const classless = row.results.find((r) => r.printerId === "classless")!;
+  assert.equal(classless.verdict, "blocked");
+  assert.ok(classless.blockers.some((b) => b.code === "slice_missing"));
 });
 
 test("compatibility: an unknown ETA yields eta.seconds null (never fabricated)", () => {

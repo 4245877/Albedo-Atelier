@@ -33,7 +33,9 @@ test("imports the real catalog: 3 active filaments, the rest quarantined on miss
     const active = result.profiles.filter((p) => p.status === "active").map((p) => p.name).sort();
     assert.deepEqual(active, ["Creality", "Creality PLA", "ENYONE PLA"]);
 
-    // All seven OrcaSlicer system parents are reported missing.
+    // All seven OrcaSlicer system parents are reported missing. The K2 machine now
+    // inherits the 0.4 nozzle base (the 0.4/0.2 contradiction was corrected in the
+    // catalog), so the missing K2 machine parent is "…0.4 nozzle".
     assert.deepEqual(result.missingParents, [
       "0.08mm SuperDetail @Creality K2 0.2 nozzle",
       "0.20mm Standard @BBL A1",
@@ -41,16 +43,18 @@ test("imports the real catalog: 3 active filaments, the rest quarantined on miss
       "Bambu Lab A1 0.4 nozzle",
       "Bambu PLA Basic @BBL A1",
       "Creality Generic PLA @K2-all",
-      "Creality K2 0.2 nozzle"
+      "Creality K2 0.4 nozzle"
     ]);
 
-    // The K2 machine is quarantined for BOTH a missing parent and the 0.4-vs-0.2 clash.
+    // The K2 machine is still quarantined — but now ONLY for its missing parent; the
+    // former 0.4-vs-0.2 nozzle contradiction is fixed (variant + inherits are 0.4).
     const k2 = result.profiles.find((p) => p.name === "Creality K2 PETG 0.4 FAST");
     assert.ok(k2);
     assert.equal(k2.status, "quarantined");
     const codes = k2.blockers.map((b) => b.code);
     assert.ok(codes.includes("missing_parent"));
-    assert.ok(codes.includes("nozzle_variant_mismatch"));
+    assert.ok(!codes.includes("nozzle_variant_mismatch"));
+    assert.ok(!codes.includes("nozzle_parent_mismatch"));
   } finally {
     store.close();
   }

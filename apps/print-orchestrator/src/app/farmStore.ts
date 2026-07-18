@@ -351,6 +351,7 @@ export class FarmStore {
         name: view.name,
         model: view.model,
         protocol: config?.protocol ?? null,
+        printerClass: config?.printerClass ?? null,
         material: view.liveMaterial ?? view.material,
         nozzleMm: view.nozzleDiameter,
         // Explicit config build volume (priority); the scheduler otherwise reads the
@@ -501,7 +502,9 @@ export class FarmStore {
       name: c.name,
       model: c.model ?? null,
       material: c.material ?? null,
-      protocol: c.protocol ?? null
+      protocol: c.protocol ?? null,
+      nozzleMm: c.nozzleDiameterMm ?? null,
+      printerClass: c.printerClass ?? null
     }));
   }
 
@@ -532,12 +535,34 @@ export class FarmStore {
     }
 
     // Probe the OrcaSlicer runtime once so the scheduler can gate un-sliced work
-    // synchronously; best-effort — a failed probe just leaves it unavailable.
+    // synchronously, AND surface its availability at boot. An unconfigured runtime
+    // is a common deployment gap — the production image ships the preset catalog but
+    // no OrcaSlicer binary — so it is logged loudly here instead of only being
+    // discovered later when a slice silently blocks.
     if (this.sliceRunner) {
       try {
-        this.sliceRuntimeAvailable = (await this.sliceRunner.probe()).available;
-      } catch {
+        const runtime = await this.sliceRunner.probe();
+        this.sliceRuntimeAvailable = runtime.available;
+        if (runtime.available) {
+          logger.info?.(
+            {
+              binary: runtime.binaryPath,
+              version: runtime.detectedVersion,
+              pinned: runtime.pinnedVersion,
+              versionMatches: runtime.versionMatches,
+              networkIsolated: runtime.networkIsolated
+            },
+            "orca slicing runtime available"
+          );
+        } else {
+          logger.warn?.(
+            { reason: runtime.error, pinned: runtime.pinnedVersion },
+            "orca slicing runtime UNAVAILABLE — slicing stays blocked until ORCA_SLICER_CMD points at an OrcaSlicer binary or container runtime (see .env.example / config/slicers/orca/README.md); monitoring and dispatch are unaffected"
+          );
+        }
+      } catch (error) {
         this.sliceRuntimeAvailable = false;
+        logger.warn?.({ err: error }, "orca slicing runtime probe failed — slicing unavailable");
       }
     }
 
@@ -550,6 +575,20 @@ export class FarmStore {
           { active: result.counts.active, quarantined: result.counts.quarantined, invalid: result.counts.invalid },
           "orca preset catalog imported"
         );
+        // Make the "catalog can't form a working set" gap loud, not silent: the
+        // shipped catalog quarantines everything that inherits an un-redistributed
+        // OrcaSlicer system parent, so slicing has no complete set until those are
+        // installed under vendor/ (scripts/install-orca-vendor-profiles.mjs).
+        if (result.missingParents.length > 0) {
+          logger.warn?.(
+            {
+              missingParents: result.missingParents,
+              active: result.counts.active,
+              quarantined: result.counts.quarantined
+            },
+            "orca catalog is missing inheritance parents — quarantined presets cannot form a working profile set until the vendor/ parents are installed (apps/print-orchestrator: pnpm slicing:vendor:install --orca-resources <dir>; see config/slicers/orca/vendor/README.md)"
+          );
+        }
       } catch (error) {
         logger.warn?.({ err: error }, "orca preset import on boot failed");
       }

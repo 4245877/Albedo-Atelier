@@ -64,6 +64,8 @@ export interface SchedulerPrinterRef {
   name: string;
   model: string | null;
   protocol: string | null;
+  /** Interchangeability class (config `printerClass`); null/empty when none. */
+  printerClass?: string | null;
   /** Loaded material (live telemetry or config fallback); null when unknown. */
   material: string | null;
   /** Nozzle diameter (live or config); null when unknown. */
@@ -475,7 +477,7 @@ export class SchedulerService {
     const artifact = task.artifactId ? repos.artifacts.getById(task.artifactId) : null;
     const needsSlicing = artifact ? artifact.kind !== "gcode" : true;
 
-    const variant = this.readyVariantFor(task.id, printer.id);
+    const variant = this.readyVariantFor(task.id, printer);
     const profileSet = variant ? repos.profileSets.getById(variant.profileSetId) : null;
     const machineFields = profileSet ? this.machineFieldsOf(profileSet) : null;
     const filamentFields = profileSet ? this.filamentFieldsOf(profileSet) : null;
@@ -577,14 +579,26 @@ export class SchedulerService {
     return sets[0] ?? null;
   }
 
-  /** A ready SliceVariant for this task targeting this printer (by id or class), or null. */
-  private readyVariantFor(taskId: string, printerId: string): SliceVariant | null {
+  /**
+   * A ready SliceVariant for this task that this printer may actually run: a
+   * printer-specific variant wins; otherwise a *class-scoped* variant matches only
+   * when its class equals this printer's class. A class-less printer never matches a
+   * null-target variant — a slice is never treated as "fits any printer"
+   * (fail-closed; the audit's "любой вариант с targetPrinterId === null подходит
+   * любому принтеру" hole).
+   */
+  private readyVariantFor(taskId: string, printer: SchedulerPrinterRef): SliceVariant | null {
     const variants = this.store.repositories.sliceVariants
       .listByTask(taskId)
       .filter((v) => v.state === "ready" && v.outputArtifactId !== null);
+    const printerClass = normalizeClass(printer.printerClass);
     return (
-      variants.find((v) => v.targetPrinterId === printerId) ??
-      variants.find((v) => v.targetPrinterId === null) ??
+      variants.find((v) => v.targetPrinterId === printer.id) ??
+      (printerClass
+        ? variants.find(
+            (v) => v.targetPrinterId === null && normalizeClass(v.targetPrinterClass) === printerClass
+          )
+        : undefined) ??
       null
     );
   }
@@ -1019,6 +1033,11 @@ function bedDimsOf(machine: ReturnType<typeof readMachine> | null): Dimensions |
 }
 
 /** True when two build volumes differ on any axis by more than a rounding tolerance. */
+/** Normalises a printer/variant class label for case/space-insensitive comparison. */
+function normalizeClass(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
 function dimsDiffer(a: Dimensions, b: Dimensions): boolean {
   const eps = 0.5; // mm — profiles/config round bed sizes; ignore sub-mm noise
   return Math.abs(a.x - b.x) > eps || Math.abs(a.y - b.y) > eps || Math.abs(a.z - b.z) > eps;

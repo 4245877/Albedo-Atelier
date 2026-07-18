@@ -198,9 +198,9 @@
       "type": "machine",
       "name": "Creality K2 PETG 0.4 Balance",
       "file": "profiles/machine/creality-k2-petg-0.4-balance.json",
-      "sha256": "1950422b9768fcfdc199bc6a76efcf92311eb853588f450d94b269a241496c02",
+      "sha256": "8146327459790834f1aac39293732d072e89efc1d35d3430c90ffc1867c2eef4",
       "sizeBytes": 6951,
-      "inherits": "Creality K2 0.2 nozzle",
+      "inherits": "Creality K2 0.4 nozzle",
       "from": "User",
       "sources": [
         "printer-presets"
@@ -211,9 +211,9 @@
       "type": "machine",
       "name": "Creality K2 PETG 0.4 FAST",
       "file": "profiles/machine/creality-k2-petg-0.4-fast.json",
-      "sha256": "7d991f2f58f351f99622671bc1f8d44b82eef5a0b54cceb1495730177222b94c",
+      "sha256": "2c935e3f2916858493361b8fefff91b8bcfa0be709706fb17e47ea411f21b70e",
       "sizeBytes": 6945,
-      "inherits": "Creality K2 0.2 nozzle",
+      "inherits": "Creality K2 0.4 nozzle",
       "from": "User",
       "sources": [
         "creality-k2-petg-0.4-fast"

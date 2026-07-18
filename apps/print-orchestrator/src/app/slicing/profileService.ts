@@ -7,6 +7,7 @@ import {
   type FindingSet,
   type SetMember
 } from "../../domain/slicing/compatibility";
+import { finding } from "../../domain/slicing/findings";
 import {
   readFilament,
   readMachine,
@@ -33,6 +34,10 @@ export interface SlicerPrinterRef {
   material: string | null;
   /** Transport/firmware family: "moonraker" | "bambu" | "creality". */
   protocol: string | null;
+  /** Configured nozzle Ø (mm) from PrinterConfig; null when unknown. */
+  nozzleMm?: number | null;
+  /** Interchangeability class from PrinterConfig; null/empty when none. */
+  printerClass?: string | null;
 }
 
 export interface CreateProfileSetInput {
@@ -112,8 +117,17 @@ export class ProfileService {
     const machine = this.requireRevision(input.machineRevisionId, "machine");
     const process = this.requireRevision(input.processRevisionId, "process");
     const filament = this.requireRevision(input.filamentRevisionId, "filament");
-    if (!input.printerId && !input.printerClass) {
-      throw new ValidationError("Укажите совместимый принтер (printerId) или класс (printerClass)");
+    // Exactly one target: a concrete printer (printerId) OR a class (printerClass),
+    // never both and never neither — an ambiguous or absent target cannot be
+    // validated against real hardware.
+    if (Boolean(input.printerId) === Boolean(input.printerClass)) {
+      throw new ValidationError(
+        "Укажите ровно одну цель: либо конкретный принтер (printerId), либо класс (printerClass)"
+      );
+    }
+    // A concrete target must exist in the farm — a slice for a phantom printer is meaningless.
+    if (input.printerId && !this.listPrinters().some((p) => p.id === input.printerId)) {
+      throw new NotFoundError(`Принтер «${input.printerId}» не найден в конфигурации фермы`);
     }
 
     const findings = this.validate(machine, process, filament, input.printerId ?? null);
@@ -280,14 +294,28 @@ export class ProfileService {
       status: filament.status,
       fields: readFilament(settingsOf(filament))
     };
-    return validateProfileSet({
+    const findings = validateProfileSet({
       machine: machineMember,
       process: processMember,
       filament: filamentMember,
       target: printer
-        ? { printerMaterial: printer.material, printerProtocol: printer.protocol, printerModel: printer.model }
+        ? {
+            printerMaterial: printer.material,
+            printerProtocol: printer.protocol,
+            printerModel: printer.model,
+            printerNozzleMm: printer.nozzleMm ?? null,
+            printerClass: printer.printerClass ?? null
+          }
         : undefined
     });
+    // A concrete target that no longer resolves to a farm printer (removed from
+    // config after the set was created) cannot be validated → block approval.
+    if (printerId && !printer) {
+      findings.blockers.push(
+        finding("target_printer_unknown", `Целевой принтер «${printerId}» не найден в конфигурации фермы`)
+      );
+    }
+    return findings;
   }
 
   private nowIso(): string {

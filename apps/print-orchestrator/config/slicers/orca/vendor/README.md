@@ -11,6 +11,32 @@ and can become `active`.
 Each vendor file must be a real OrcaSlicer profile JSON carrying `name` (and, ideally,
 `type`). The importer keys parents by their `name`.
 
+## Install (mandatory step for a working set)
+
+Until these parents are present the shipped catalog imports **3 active / 22
+quarantined** profiles — enough to see the pipeline, not enough to approve a full
+machine + process + filament set. Completing this step is required before slicing
+can produce a printable file.
+
+A helper does the copy + verification for you (pure filesystem, no network):
+
+```
+# from apps/print-orchestrator/
+# 1. see exactly which parents are missing (also a CI/release gate — exits non-zero):
+node scripts/install-orca-vendor-profiles.mjs --check
+
+# 2. install them from your OrcaSlicer install (use the SAME release the bundles
+#    were pinned to — 02.03.00.62 / 2.3.0 — so resolved values match the CLI):
+node scripts/install-orca-vendor-profiles.mjs --orca-resources ~/.config/OrcaSlicer/system
+
+# 3. re-import and confirm missingParents is now empty:
+#    POST /api/print/slicing/presets/import   then   GET /api/print/slicing/runtime
+```
+
+The script reads the catalog to learn which parent *names* are missing, finds the
+matching profile JSONs under `--orca-resources`, and copies them here. It exits
+non-zero while any parent is still unresolved, so it can gate a release.
+
 ## Parents the current catalog needs
 
 These `inherits` targets are referenced by `catalog.v1.json` but are **not present**,
@@ -19,7 +45,7 @@ so every profile depending on them is currently quarantined:
 | Missing parent | Vendor | Referenced by |
 | --- | --- | --- |
 | `Bambu Lab A1 0.4 nozzle` | BBL (Bambu) | machine `Bambu Lab A1 0.4 PETG` |
-| `Creality K2 0.2 nozzle` | Creality | machines `Creality K2 PETG 0.4 FAST`, `… Balance` |
+| `Creality K2 0.4 nozzle` | Creality | machines `Creality K2 PETG 0.4 FAST`, `… Balance` |
 | `0.20mm Standard @BBL A1` | BBL | processes `PETG 0.4mm/0.6mm/0.8mm @BBL A1` |
 | `0.20mm Strength @BBL A1` | BBL | processes `@BBL A1 0.4 PLA`, `@BBL A1 0.4 PLA тест` |
 | `0.08mm SuperDetail @Creality K2 0.2 nozzle` | Creality | processes `Creality K2 0.4*` |
