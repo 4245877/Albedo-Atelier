@@ -10,8 +10,11 @@ const HIDDEN_SECTIONS = new Set(["maintenance", "plan"]);
 
 export const isSectionVisible = (id) => !HIDDEN_SECTIONS.has(id);
 
+/* Порядок вкладок обязан совпадать с порядком секций в index.html:
+   scroll-spy (computeActiveNav) идёт по этому списку сверху вниз. */
 const NAV = [
-  ["summary", "Статус"], ["queue", "Очередь"], ["night", "Ночь"], ["uploads", "Загрузка"], ["slicing", "Слайсинг"], ["scheduler", "Планировщик"], ["printers", "Принтеры"],
+  ["summary", "Статус"], ["printers", "Принтеры"], ["queue", "Очередь"], ["night", "Ночь"],
+  ["uploads", "Загрузка"], ["slicing", "Слайсинг"], ["scheduler", "Планировщик"],
   ["critical", "События"], ["materials", "Материалы"], ["today", "Сегодня"], ["performance", "Показатели"],
   ["automations", "Автоматизации"], ["cameras", "Камеры"], ["maintenance", "Обслуживание"],
   ["actions", "Действия"], ["system", "Система"], ["feed", "Лента"], ["warnings", "Внимание"], ["plan", "План"],

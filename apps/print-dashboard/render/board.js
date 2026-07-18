@@ -20,9 +20,9 @@ import {
 /** Перерисовывает все секции доски из состояния (порядок как в исходной вёрстке). */
 export function renderBoard(state) {
   renderHero(state);
+  renderPrinters(state);
   renderQueue(state);
   renderNight(state);
-  renderPrinters(state);
   renderCritical(state);
   renderMaterials(state);
   renderToday(state);

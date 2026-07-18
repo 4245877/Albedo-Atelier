@@ -87,7 +87,7 @@
           <div class="hero-stats" id="hero-stats"></div>
           <!-- Скетч надзирательницы: портрет-медальон справа, мягко парит над залом -->
           <div class="hero-sketch" aria-hidden="true">
-            <img src="assets/hero-overseer-sketch.png" alt="" decoding="async" />
+            <img src="/assets/hero-overseer-sketch.png" alt="" decoding="async" />
           </div>
           <!-- Медленно опадающие перья -->
           <div class="hero-feathers" aria-hidden="true">
@@ -106,85 +106,7 @@
           </div>
         </section>
 
-        <!-- 2 ══ Печать и очередь ══ -->
-        <section id="queue" class="card span-7 reveal" aria-labelledby="queue-title">
-          <header class="card-head">
-            <h2 id="queue-title">
-              <span class="glyph" aria-hidden="true">
-                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M4 5.5h12" /><path d="M4 10h8.5" /><path d="M4 14.5h5" />
-                  <path d="M15.2 12.2l2.1 2.3-2.1 2.3-2.1-2.3z" />
-                </svg>
-              </span>Печать и очередь
-            </h2>
-            <span class="card-meta" id="queue-meta"></span>
-          </header>
-          <div class="card-body" id="queue-body"></div>
-        </section>
-
-        <!-- 3 ══ Ночная печать ══ -->
-        <section id="night" class="card card-night span-5 reveal" aria-labelledby="night-title">
-          <header class="card-head">
-            <h2 id="night-title">
-              <span class="glyph" aria-hidden="true">
-                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M15.8 12.4A6.6 6.6 0 1 1 8.6 4.1a5.6 5.6 0 0 0 7.2 8.3Z" />
-                </svg>
-              </span>Ночная печать
-            </h2>
-            <span class="card-meta" id="night-window"></span>
-          </header>
-          <div class="card-body" id="night-body"></div>
-        </section>
-
-        <!-- 3.5 ══ Загрузка и анализ файлов ══ -->
-        <section id="uploads" class="card span-12 reveal" aria-labelledby="uploads-title">
-          <header class="card-head">
-            <h2 id="uploads-title">
-              <span class="glyph" aria-hidden="true">
-                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M10 13.5V4.2" /><path d="M6.3 7.6 10 3.9l3.7 3.7" />
-                  <path d="M4.5 13.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2" />
-                </svg>
-              </span>Загрузка и анализ
-            </h2>
-            <span class="card-meta" id="uploads-meta">STL · 3MF · G-code</span>
-          </header>
-          <div class="card-body" id="uploads-body"></div>
-        </section>
-
-        <!-- 3.5 ══ Слайсинг и профили ══ -->
-        <section id="slicing" class="card span-12 reveal" aria-labelledby="slicing-title">
-          <header class="card-head">
-            <h2 id="slicing-title">
-              <span class="glyph" aria-hidden="true">
-                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M3 6.5 10 3l7 3.5-7 3.5z" /><path d="M3 6.5v7l7 3.5 7-3.5v-7" /><path d="M10 10v7" />
-                </svg>
-              </span>Слайсинг и профили
-            </h2>
-            <span class="card-meta" id="slicing-meta">OrcaSlicer · профили · подготовка</span>
-          </header>
-          <div class="card-body" id="slicing-body"></div>
-        </section>
-
-        <!-- 3.6 ══ Планировщик печати ══ -->
-        <section id="scheduler" class="card span-12 reveal" aria-labelledby="scheduler-title">
-          <header class="card-head">
-            <h2 id="scheduler-title">
-              <span class="glyph" aria-hidden="true">
-                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="3.5" y="4.5" width="13" height="12" rx="1.5" /><path d="M3.5 8h13" />
-                  <path d="M7 3v3M13 3v3" /><path d="M6.5 11.5h3M6.5 14h5" />
-                </svg>
-              </span>Планировщик печати
-            </h2>
-            <span class="card-meta" id="scheduler-meta">очередь · совместимость · план · ночь</span>
-          </header>
-          <div class="card-body" id="scheduler-body"></div>
-        </section>
-
-        <!-- 4 ══ Принтеры ══ -->
+        <!-- 2 ══ Принтеры ══ -->
         <section id="printers" class="card card-clear span-12 reveal" aria-labelledby="printers-title">
           <header class="card-head">
             <h2 id="printers-title">
@@ -202,7 +124,85 @@
           <div class="printer-grid" id="printer-grid"></div>
         </section>
 
-        <!-- 5 ══ Критические события ══ -->
+        <!-- 3 ══ Печать и очередь ══ -->
+        <section id="queue" class="card span-7 reveal" aria-labelledby="queue-title">
+          <header class="card-head">
+            <h2 id="queue-title">
+              <span class="glyph" aria-hidden="true">
+                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 5.5h12" /><path d="M4 10h8.5" /><path d="M4 14.5h5" />
+                  <path d="M15.2 12.2l2.1 2.3-2.1 2.3-2.1-2.3z" />
+                </svg>
+              </span>Печать и очередь
+            </h2>
+            <span class="card-meta" id="queue-meta"></span>
+          </header>
+          <div class="card-body" id="queue-body"></div>
+        </section>
+
+        <!-- 4 ══ Ночная печать ══ -->
+        <section id="night" class="card card-night span-5 reveal" aria-labelledby="night-title">
+          <header class="card-head">
+            <h2 id="night-title">
+              <span class="glyph" aria-hidden="true">
+                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M15.8 12.4A6.6 6.6 0 1 1 8.6 4.1a5.6 5.6 0 0 0 7.2 8.3Z" />
+                </svg>
+              </span>Ночная печать
+            </h2>
+            <span class="card-meta" id="night-window"></span>
+          </header>
+          <div class="card-body" id="night-body"></div>
+        </section>
+
+        <!-- 5 ══ Загрузка и анализ файлов ══ -->
+        <section id="uploads" class="card span-12 reveal" aria-labelledby="uploads-title">
+          <header class="card-head">
+            <h2 id="uploads-title">
+              <span class="glyph" aria-hidden="true">
+                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M10 13.5V4.2" /><path d="M6.3 7.6 10 3.9l3.7 3.7" />
+                  <path d="M4.5 13.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2" />
+                </svg>
+              </span>Загрузка и анализ
+            </h2>
+            <span class="card-meta" id="uploads-meta">STL · 3MF · G-code</span>
+          </header>
+          <div class="card-body" id="uploads-body"></div>
+        </section>
+
+        <!-- 6 ══ Слайсинг и профили ══ -->
+        <section id="slicing" class="card span-12 reveal" aria-labelledby="slicing-title">
+          <header class="card-head">
+            <h2 id="slicing-title">
+              <span class="glyph" aria-hidden="true">
+                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 6.5 10 3l7 3.5-7 3.5z" /><path d="M3 6.5v7l7 3.5 7-3.5v-7" /><path d="M10 10v7" />
+                </svg>
+              </span>Слайсинг и профили
+            </h2>
+            <span class="card-meta" id="slicing-meta">OrcaSlicer · профили · подготовка</span>
+          </header>
+          <div class="card-body" id="slicing-body"></div>
+        </section>
+
+        <!-- 7 ══ Планировщик печати ══ -->
+        <section id="scheduler" class="card span-12 reveal" aria-labelledby="scheduler-title">
+          <header class="card-head">
+            <h2 id="scheduler-title">
+              <span class="glyph" aria-hidden="true">
+                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3.5" y="4.5" width="13" height="12" rx="1.5" /><path d="M3.5 8h13" />
+                  <path d="M7 3v3M13 3v3" /><path d="M6.5 11.5h3M6.5 14h5" />
+                </svg>
+              </span>Планировщик печати
+            </h2>
+            <span class="card-meta" id="scheduler-meta">очередь · совместимость · план · ночь</span>
+          </header>
+          <div class="card-body" id="scheduler-body"></div>
+        </section>
+
+        <!-- 8 ══ Критические события ══ -->
         <section id="critical" class="card span-6 reveal" aria-labelledby="critical-title">
           <header class="card-head">
             <h2 id="critical-title">
@@ -219,7 +219,7 @@
           <div class="card-body" id="critical-body"></div>
         </section>
 
-        <!-- 6 ══ Материалы ══ -->
+        <!-- 9 ══ Материалы ══ -->
         <section id="materials" class="card span-6 reveal" aria-labelledby="materials-title">
           <header class="card-head">
             <h2 id="materials-title">
@@ -235,7 +235,7 @@
           <div class="card-body" id="materials-body"></div>
         </section>
 
-        <!-- 7 ══ Сегодня ══ -->
+        <!-- 10 ══ Сегодня ══ -->
         <section id="today" class="card span-6 reveal" aria-labelledby="today-title">
           <header class="card-head">
             <h2 id="today-title">
@@ -252,7 +252,7 @@
           <div class="stat-row" id="today-body"></div>
         </section>
 
-        <!-- 8 ══ Производительность ══ -->
+        <!-- 11 ══ Производительность ══ -->
         <section id="performance" class="card span-6 reveal" aria-labelledby="perf-title">
           <header class="card-head">
             <h2 id="perf-title">
@@ -269,7 +269,7 @@
           <div class="card-body" id="perf-body"></div>
         </section>
 
-        <!-- 9 ══ Автоматизации ══ -->
+        <!-- 12 ══ Автоматизации ══ -->
         <section id="automations" class="card span-6 reveal" aria-labelledby="auto-title">
           <header class="card-head">
             <h2 id="auto-title">
@@ -286,7 +286,7 @@
           <div class="card-body" id="auto-body"></div>
         </section>
 
-        <!-- 10 ══ Камеры ══ -->
+        <!-- 13 ══ Камеры ══ -->
         <section id="cameras" class="card span-6 reveal" aria-labelledby="cameras-title">
           <header class="card-head">
             <h2 id="cameras-title">
@@ -302,8 +302,8 @@
           <div class="card-body" id="cameras-body"></div>
         </section>
 
-        <!-- 11 ══ Обслуживание ══ -->
-        <section id="maintenance" class="card span-7 reveal" aria-labelledby="maint-title">
+        <!-- 14 ══ Обслуживание ══ (скрыто, см. HIDDEN_SECTIONS; широкая таблица — полный ряд) -->
+        <section id="maintenance" class="card span-12 reveal" aria-labelledby="maint-title">
           <header class="card-head">
             <h2 id="maint-title">
               <span class="glyph" aria-hidden="true">
@@ -318,8 +318,8 @@
           <div class="card-body" id="maint-body"></div>
         </section>
 
-        <!-- 12 ══ Быстрые действия ══ -->
-        <section id="actions" class="card span-5 reveal" aria-labelledby="actions-title">
+        <!-- 15 ══ Быстрые действия ══ -->
+        <section id="actions" class="card span-6 reveal" aria-labelledby="actions-title">
           <header class="card-head">
             <h2 id="actions-title">
               <span class="glyph" aria-hidden="true">
@@ -334,7 +334,7 @@
           <div class="quick-grid" id="actions-body"></div>
         </section>
 
-        <!-- 13 ══ Системное состояние ══ -->
+        <!-- 16 ══ Системное состояние ══ -->
         <section id="system" class="card span-6 reveal" aria-labelledby="system-title">
           <header class="card-head">
             <h2 id="system-title">
@@ -351,7 +351,7 @@
           <div class="card-body" id="system-body"></div>
         </section>
 
-        <!-- 14 ══ Последние события ══ -->
+        <!-- 17 ══ Последние события ══ -->
         <section id="feed" class="card span-6 reveal" aria-labelledby="feed-title">
           <header class="card-head">
             <h2 id="feed-title">
@@ -369,7 +369,7 @@
           <div class="card-body" id="feed-body"></div>
         </section>
 
-        <!-- 15 ══ Предупреждения ══ -->
+        <!-- 18 ══ Предупреждения ══ -->
         <section id="warnings" class="card span-6 reveal" aria-labelledby="warnings-title">
           <header class="card-head">
             <h2 id="warnings-title">
@@ -386,7 +386,7 @@
           <div class="card-body" id="warnings-body"></div>
         </section>
 
-        <!-- 16 ══ План на ближайшее время ══ -->
+        <!-- 19 ══ План на ближайшее время ══ -->
         <section id="plan" class="card span-6 reveal" aria-labelledby="plan-title">
           <header class="card-head">
             <h2 id="plan-title">

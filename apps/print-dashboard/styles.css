@@ -817,7 +817,7 @@ body::before {
 .progress.is-paused > i { background: linear-gradient(90deg, #6e6046, #8d7d57); }
 .progress.is-paused > i::after { animation: none; }
 
-/* ── 2 · Очередь ────────────────────────────────────────────── */
+/* ── 3 · Очередь ────────────────────────────────────────────── */
 
 .queue-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 
@@ -855,7 +855,7 @@ body::before {
 
 .next-job .row-title { color: var(--gold-bright); }
 
-/* ── 3 · Ночная печать: тронная чернота ─────────────────────── */
+/* ── 4 · Ночная печать: тронная чернота ─────────────────────── */
 
 .card-night {
   /* В ряду с более высокой «Очередью» ночная карточка иначе растягивается по
@@ -947,7 +947,7 @@ body::before {
 .card-night .btn-ghost { border-color: rgb(244 238 226 / 22%); color: var(--night-ink); background: transparent; }
 .card-night .btn-ghost:not([disabled]):hover { border-color: var(--topaz); color: #ece387; box-shadow: none; }
 
-/* ── 4 · Принтеры ───────────────────────────────────────────── */
+/* ── 2 · Принтеры ───────────────────────────────────────────── */
 
 .printer-grid {
   display: grid;
@@ -1227,7 +1227,7 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
   border-top: 1px dashed var(--card-edge);
 }
 
-/* ── 6 · Материалы ──────────────────────────────────────────── */
+/* ── 9 · Материалы ──────────────────────────────────────────── */
 
 .mat-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 
@@ -1258,7 +1258,7 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
 
 .chip-line { display: flex; flex-wrap: wrap; gap: 7px; }
 
-/* ── 7 · Сегодня / статистика ───────────────────────────────── */
+/* ── 10 · Сегодня / статистика ──────────────────────────────── */
 
 .stat-row {
   display: grid;
@@ -1266,7 +1266,7 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
   gap: 10px;
 }
 
-/* ── 8 · Производительность ─────────────────────────────────── */
+/* ── 11 · Производительность ────────────────────────────────── */
 
 .perf-load { display: flex; align-items: center; gap: 18px; }
 
@@ -1298,7 +1298,7 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
 .kv .k { display: block; font-size: 10.5px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ink-faint); }
 .kv .v { font-size: 15px; font-weight: 800; font-variant-numeric: tabular-nums; }
 
-/* ── 9 · Автоматизации ──────────────────────────────────────── */
+/* ── 12 · Автоматизации ─────────────────────────────────────── */
 
 .rule { display: flex; align-items: center; gap: 12px; padding: 9px 12px; background: var(--card-inner); border-radius: var(--radius-sm); }
 
@@ -1330,7 +1330,7 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
 .toggle.on { background: var(--gold); }
 .toggle.on::after { transform: translateX(16px); }
 
-/* ── 10 · Камеры ────────────────────────────────────────────── */
+/* ── 13 · Камеры ────────────────────────────────────────────── */
 
 .cam-grid {
   display: grid;
@@ -1367,7 +1367,7 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
   text-shadow: 0 1px 3px rgb(0 0 0 / 70%);
 }
 
-/* ── 11 · Обслуживание ──────────────────────────────────────── */
+/* ── 14 · Обслуживание ──────────────────────────────────────── */
 
 .table-wrap { overflow-x: auto; margin: 0 -6px; padding: 0 6px; }
 
@@ -1398,7 +1398,7 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
 .td-due { color: var(--warn); font-weight: 700; }
 .td-ok { color: var(--ink-soft); }
 
-/* ── 12 · Быстрые действия ──────────────────────────────────── */
+/* ── 15 · Быстрые действия ──────────────────────────────────── */
 
 .quick-grid {
   display: grid;
@@ -1443,7 +1443,7 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
   font-size: 15px;
 }
 
-/* ── 13 · Система ───────────────────────────────────────────── */
+/* ── 16 · Система ───────────────────────────────────────────── */
 
 .sys-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
 
@@ -1464,7 +1464,7 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
 .sys .s-name { font-size: 12.5px; font-weight: 700; }
 .sys .s-val { font-size: 11.5px; color: var(--ink-faint); }
 
-/* ── 14 · Лента событий ─────────────────────────────────────── */
+/* ── 17 · Лента событий ─────────────────────────────────────── */
 
 .feed-list { position: relative; margin: 0; padding: 0 0 0 22px; list-style: none; display: flex; flex-direction: column; gap: 2px; }
 
@@ -1500,7 +1500,7 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
 .feed-text b { font-weight: 800; }
 .feed-time { font-size: 11.5px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
 
-/* ── 16 · План ──────────────────────────────────────────────── */
+/* ── 19 · План ──────────────────────────────────────────────── */
 
 .plan-next {
   display: flex;
@@ -2328,6 +2328,7 @@ html.modal-open { overflow: hidden; }
   color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap; /* без nowrap ellipsis не срабатывает — длинное имя рвало строку */
   max-width: 40ch;
 }
 .upload-size {
@@ -2526,7 +2527,7 @@ html.modal-open { overflow: hidden; }
   border: 1px solid var(--card-edge);
   border-radius: 10px;
   padding: 9px 11px;
-  background: var(--card-bg, transparent);
+  background: var(--card);
 }
 .slice-item-head {
   display: flex;
@@ -2599,7 +2600,7 @@ html.modal-open { overflow: hidden; }
   padding: 7px 9px;
   border-radius: 8px;
   border: 1px solid var(--card-edge);
-  background: var(--card-bg, transparent);
+  background: var(--card);
   color: var(--ink);
   font-size: 13px;
 }
@@ -2624,6 +2625,9 @@ html.modal-open { overflow: hidden; }
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   padding-top: 12px; border-top: 1px dashed var(--card-edge);
 }
+/* Собственный display:grid перебивает UA-правило [hidden]{display:none} —
+   без этого «скрытая» форма параметров стояла бы раскрытой у каждой строки. */
+.sch-edit[hidden] { display: none; }
 .sch-edit label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-faint); }
 .sch-edit input, .sch-edit select {
   padding: 6px 8px; border-radius: 8px;
