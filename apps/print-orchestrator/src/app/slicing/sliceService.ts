@@ -252,8 +252,19 @@ export class SliceService {
     if (!variant) throw new NotFoundError(`Вариант слайсинга «${variantId}»`);
     if (variant.state === "pending" || variant.state === "running") return variant;
 
+    // Clear the *entire* result of the previous attempt — not just error/findings
+    // but the output link and every OrcaSlicer estimate — before re-queuing. Left
+    // behind, a stale outputArtifactId/ETA/filament/dimensions would be shown as if
+    // it belonged to the new attempt (and, worse, a re-run that then fails would
+    // still surface last time's "ready" output).
     const reset = this.store.transaction(() =>
       this.transition(variant, "pending", actor, "rerun", {
+        outputArtifactId: null,
+        outputAnalysisId: null,
+        orcaEtaS: null,
+        filamentG: null,
+        filamentMm: null,
+        dimensions: null,
         error: null,
         blockers: [],
         warnings: [],

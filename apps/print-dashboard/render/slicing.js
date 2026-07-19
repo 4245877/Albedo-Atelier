@@ -16,6 +16,9 @@ const POLL_MS = 4000;
 const state = { runtime: null, profiles: [], sets: [], variants: [], models: [], loaded: false, errors: [] };
 let pollTimer = null;
 let wired = false;
+/* Latest-only guard: каждый loadAll берёт номер; ответ применяется, только если он
+   всё ещё самый свежий. Запоздавший опрос не перетирает более новый state. */
+let loadSeq = 0;
 /* Клиентский in-flight lock: пока идёт мутирующий POST, повторные клики/сабмиты
    игнорируются — двойная отправка не плодит дубли слайсов/наборов. */
 let busy = false;
@@ -50,11 +53,12 @@ export function setupSlicing() {
   void loadAll();
 }
 
-async function loadAll() {
+async function loadAll({ full = false } = {}) {
   // allSettled, а не Promise.all с per-request .catch(() => пусто): падение одного
   // ресурса не должно выглядеть как «нет профилей / загрузите STL». Успешные
   // ресурсы обновляют state, упавшие — сохраняют последнее корректное значение и
   // попадают в state.errors (баннер + автоповтор через ensurePolling).
+  const seq = ++loadSeq;
   const results = await Promise.allSettled([
     apiGet("/api/print/slicing/runtime"),
     apiGet("/api/print/slicing/profiles"),
@@ -62,6 +66,9 @@ async function loadAll() {
     apiGet("/api/print/slicing/variants"),
     apiGet("/api/print/artifacts")
   ]);
+  // Более свежий запрос уже стартовал, пока этот шёл по сети — его ответ и станет
+  // истиной; устаревший результат молча отбрасываем, чтобы не откатить state.
+  if (seq !== loadSeq) return;
   const [runtime, profiles, sets, variants, artifacts] = results;
   const errors = [];
 
@@ -86,8 +93,12 @@ async function loadAll() {
   if (!state.loaded && results.every((r) => r.status === "rejected")) {
     renderConnectionError();
   } else {
+    const wantFull = full || !state.loaded;
     state.loaded = true;
-    render();
+    // Первый показ и действия оператора перерисовывают всё; фоновый опрос —
+    // только изменившиеся регионы, не трогая формы, в которых идёт ввод.
+    if (wantFull) render();
+    else updateRegions(false);
   }
   ensurePolling();
 }
@@ -114,18 +125,57 @@ function ensurePolling() {
 
 /* ── Отрисовка ──────────────────────────────────────────────── */
 
+// Каждый регион — отдельный контейнер, обновляемый независимо. Обёртки с
+// display:contents не влияют на раскладку (визуально — как раньше), но дают
+// точечно перерисовывать только изменившиеся части и не затирать формы во
+// время ввода. Порядок здесь = порядок панелей на экране.
+const REGIONS = {
+  errors: errorsHtml,
+  runtime: runtimeHtml,
+  profiles: profilesHtml,
+  sets: setsHtml,
+  createSet: createSetHtml,
+  variants: variantsHtml,
+  newSlice: newSliceHtml
+};
+// Формы: их нельзя перерисовывать, пока оператор их редактирует (иначе теряются
+// введённое имя, выбранные значения и фокус).
+const FORM_REGIONS = new Set(["createSet", "newSlice"]);
+
 function render() {
   const body = $("#slicing-body");
   if (!body) return;
-  body.innerHTML = [
-    errorsHtml(),
-    runtimeHtml(),
-    profilesHtml(),
-    setsHtml(),
-    createSetHtml(),
-    variantsHtml(),
-    newSliceHtml()
-  ].join("");
+  if (!body.querySelector("[data-region]")) {
+    body.innerHTML = Object.keys(REGIONS)
+      .map((k) => `<div data-region="${k}" style="display:contents"></div>`)
+      .join("");
+  }
+  updateRegions(true);
+}
+
+function updateRegions(full) {
+  const body = $("#slicing-body");
+  if (!body) return;
+  for (const [key, fn] of Object.entries(REGIONS)) {
+    const el = body.querySelector(`[data-region="${key}"]`);
+    if (!el) continue;
+    // Фоновый опрос не трогает форму, в которой сейчас работает оператор.
+    if (!full && FORM_REGIONS.has(key) && regionBusy(el)) continue;
+    const html = fn();
+    // Пишем innerHTML, только если разметка реально изменилась — так сохраняются
+    // фокус, раскрытые <details> и прочее состояние DOM неизменившихся панелей.
+    if (el._html !== html) {
+      el.innerHTML = html;
+      el._html = html;
+    }
+  }
+}
+
+// Регион «занят», если внутри него фокус или есть непустой текстовый ввод —
+// такую панель фоновый опрос перерисовывать не должен.
+function regionBusy(el) {
+  if (el.contains(document.activeElement)) return true;
+  return [...el.querySelectorAll('input[type="text"]')].some((i) => i.value.trim() !== "");
 }
 
 function errorsHtml() {
@@ -157,7 +207,7 @@ function runtimeHtml() {
     </div>`;
 
   const missing = (r.missingParents || []).length
-    ? `<details class="slice-details"><summary>Отсутствуют системные профили-родители (${r.missingParents.length}) — положите их в vendor/</summary>
+    ? `<details class="slice-details"><summary>Не хватает базовых системных профилей (${r.missingParents.length}) — нажмите «↻ Импорт пресетов» или обновите каталог OrcaSlicer</summary>
          <ul class="slice-findings">${r.missingParents.map((p) => `<li class="slice-warn">⚠ ${esc(p)}</li>`).join("")}</ul>
        </details>`
     : "";
@@ -209,7 +259,7 @@ function profilesHtml() {
     .join("");
   return `
     <div class="slice-panel">
-      <div class="slice-panel-head"><b>Профили</b><span class="slice-hint">immutable-ревизии; в наборе используются только active</span></div>
+      <div class="slice-panel-head"><b>Профили</b><span class="slice-hint">Профили хранятся неизменяемыми ревизиями; в набор попадают только активные</span></div>
       <div class="slice-cols">${cols}</div>
     </div>`;
 }
@@ -245,9 +295,14 @@ function setsHtml() {
 
 function setRow(s) {
   const v = VALIDATION[s.validation] || { label: s.validation, cls: "info" };
+  // Причина, по которой утвердить нельзя, доступна не только как title (мышь), но и
+  // как aria-label — скринридер прочитает её на disabled-кнопке.
+  const blockedReason = "Утвердить нельзя: есть блокеры — устраните их и обновите набор";
   const approved = s.approved
     ? chip("утверждён", "ok")
-    : `<button type="button" class="btn btn-sm" data-slice-action="approve" data-id="${esc(s.id)}"${s.validation === "blocked" ? " disabled title=\"есть блокеры\"" : ""}>Утвердить</button>`;
+    : `<button type="button" class="btn btn-sm" data-slice-action="approve" data-id="${esc(s.id)}"${
+        s.validation === "blocked" ? ` disabled title="${esc(blockedReason)}" aria-label="${esc(blockedReason)}"` : ""
+      }>Утвердить</button>`;
   const blockers = (s.blockers || []).map((b) => `<li class="slice-block-li">⛔ ${esc(b.message)}</li>`).join("");
   const warnings = (s.warnings || []).map((w) => `<li class="slice-warn">⚠ ${esc(w.message)}</li>`).join("");
   const target = s.printerId ? `принтер ${esc(s.printerId)}` : s.printerClass ? `класс ${esc(s.printerClass)}` : "—";
@@ -320,22 +375,53 @@ function createSetHtml() {
 function variantsHtml() {
   if (!state.variants.length) return "";
   const rows = state.variants.map(variantRow).join("");
+  // aria-live: смена статусов (в очереди → слайсинг… → готово/ошибка) объявляется
+  // скринридером без перефокусировки.
   return `<div class="slice-panel"><div class="slice-panel-head"><b>Варианты слайсинга</b></div>
-    <ul class="slice-list">${rows}</ul></div>`;
+    <ul class="slice-list" role="status" aria-live="polite">${rows}</ul></div>`;
 }
 
 function variantRow(v) {
   const st = VARIANT_STATE[v.state] || { label: v.state, cls: "info" };
+
+  // Прослеживаемость: что именно нарезалось, из какого набора и на какой принтер —
+  // а не только короткий ID.
+  const target = v.targetPrinterId
+    ? printerName(v.targetPrinterId)
+    : v.targetPrinterClass
+      ? `класс «${esc(v.targetPrinterClass)}»`
+      : "любой совместимый принтер";
+  const facts = `
+    <div class="slice-facts">
+      <span>Модель: ${esc(modelName(v.sourceArtifactId))}</span>
+      <span>Набор: ${esc(setName(v.profileSetId))}</span>
+      <span>Принтер: ${esc(target)}</span>
+    </div>`;
+
   const meta = [];
-  if (v.orcaEtaS != null) meta.push(`ETA OrcaSlicer: ${fmtDuration(v.orcaEtaS)}`);
-  if (v.filamentG != null) meta.push(`филамент: ${v.filamentG} г`);
-  if (v.dimensions && v.dimensions.size) meta.push(`габариты: ${fmtSize(v.dimensions.size)}`);
+  if (v.orcaEtaS != null) meta.push(`Время печати (по OrcaSlicer): ${fmtDuration(v.orcaEtaS)}`);
+  if (v.filamentG != null) meta.push(`Расход филамента: ${v.filamentG} г`);
+  if (v.dimensions && v.dimensions.size) meta.push(`Габариты: ${fmtSize(v.dimensions.size)}`);
   const metaRow = meta.length ? `<div class="slice-meta">${meta.map((m) => `<span>${esc(m)}</span>`).join("")}</div>` : "";
-  const out = v.outputArtifactId
-    ? `<div class="slice-out">Выходной артефакт: <code>${esc(v.outputArtifactId)}</code></div>`
-    : "";
+
+  // Выходной G-code показываем только у готового варианта: у заблокированного или
+  // ошибочного output относится к прошлой попытке (при повторе он сбрасывается).
+  const out =
+    v.state === "ready" && v.outputArtifactId
+      ? `<div class="slice-out">Готовый G-code: <code>${esc(v.outputArtifactId)}</code></div>`
+      : "";
+
+  // Рендерим И предупреждения (cache-hit, неполный анализ), И блокеры — раньше
+  // warnings терялись, и было не видно, что результат переиспользован из кэша.
+  const warnings = (v.warnings || []).map((w) => `<li class="slice-warn">⚠ ${esc(w.message)}</li>`).join("");
   const blockers = (v.blockers || []).map((b) => `<li class="slice-block-li">⛔ ${esc(b.message)}</li>`).join("");
+  const findings = blockers || warnings ? `<ul class="slice-findings">${blockers}${warnings}</ul>` : "";
+
   const err = v.error && v.state === "failed" ? `<div class="slice-block">⛔ ${esc(v.error)}</div>` : "";
+
+  const when = fmtWhen(v.endedAt || v.updatedAt || v.createdAt);
+  const timeRow = when ? `<div class="slice-when">Обновлено: ${esc(when)}</div>` : "";
+
   const rerun =
     v.state === "failed" || v.state === "blocked"
       ? `<button type="button" class="btn btn-sm" data-slice-action="rerun" data-id="${esc(v.id)}">↻ Повторить</button>`
@@ -343,14 +429,39 @@ function variantRow(v) {
   return `
     <li class="slice-item">
       <div class="slice-item-head">
-        <span class="slice-name">${esc(shortId(v.id))}</span>
+        <span class="slice-name" title="ID варианта: ${esc(v.id)}">${esc(modelName(v.sourceArtifactId))}</span>
         ${chip(st.label, st.cls, st.pulse)}
         <span class="slice-spacer"></span>
         ${rerun}
       </div>
-      ${metaRow}${out}${err}
-      ${blockers ? `<ul class="slice-findings">${blockers}</ul>` : ""}
+      ${facts}${metaRow}${out}${err}${findings}${timeRow}
     </li>`;
+}
+
+/* Дружелюбные имена вместо голых ID — из уже загруженного state. */
+function setName(id) {
+  const s = state.sets.find((x) => x.id === id);
+  return s ? s.name : shortId(id);
+}
+function modelName(id) {
+  const m = state.models.find((x) => x.artifact && x.artifact.id === id);
+  return m && m.artifact ? m.artifact.name : shortId(id);
+}
+function printerName(id) {
+  const cov = (state.runtime && state.runtime.coverage) || [];
+  const c = cov.find((x) => x.printerId === id);
+  return c ? c.printerName : id;
+}
+function fmtWhen(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
 }
 
 function newSliceHtml() {
@@ -373,10 +484,13 @@ function newSliceHtml() {
   const runtimeDown = state.runtime?.runtime?.available === false;
   const runtimeMsg = state.runtime?.runtime?.error;
   const runtimeBlock = runtimeDown
-    ? `<div class="slice-block">⛔ OrcaSlicer недоступен — запуск невозможен${runtimeMsg ? `: ${esc(runtimeMsg)}` : ""}.
+    ? `<div class="slice-block" id="slice-runtime-block">⛔ OrcaSlicer недоступен — запуск невозможен${runtimeMsg ? `: ${esc(runtimeMsg)}` : ""}.
          Восстановите среду (проверьте контейнер OrcaSlicer, затем ↻ Импорт пресетов) и повторите.</div>`
     : "";
-  const disabledAttr = runtimeDown ? ' disabled title="OrcaSlicer недоступен"' : "";
+  // Причина блокировки доступна скринридеру через aria-describedby, а не только title.
+  const disabledAttr = runtimeDown
+    ? ' disabled title="OrcaSlicer недоступен" aria-describedby="slice-runtime-block"'
+    : "";
 
   return `
     <form class="slice-panel slice-form" data-slice-form="slice">
@@ -398,9 +512,10 @@ function wireDelegates() {
     if (!btn || btn.disabled) return;
     e.preventDefault();
     const action = btn.dataset.sliceAction;
-    // Обновление — обычное чтение, вне in-flight lock.
+    // Обновление — обычное чтение, вне in-flight lock. Явное действие оператора →
+    // полная перерисовка.
     if (action === "reload") {
-      void loadAll();
+      void loadAll({ full: true });
       return;
     }
     if (busy) return; // мутация уже выполняется — повторный клик игнорируем
@@ -447,7 +562,8 @@ async function run(btn, fn, okMsg) {
     toast(esc(err.message || "Не удалось выполнить действие"), "toast-danger");
   } finally {
     busy = false;
-    await loadAll(); // перерисовка сбросит disabled на свежем DOM
+    // Действие завершено — полная перерисовка сбросит disabled и очистит форму.
+    await loadAll({ full: true });
   }
 }
 

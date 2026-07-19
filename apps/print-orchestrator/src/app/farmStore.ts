@@ -443,7 +443,14 @@ export class FarmStore {
       { logger }
     );
     this.profileService = new ProfileService(store, this.sliceRunner, () => this.slicerPrinters(), {
-      logger
+      logger,
+      // Every runtime report the slicing tab requests re-probes OrcaSlicer; fold that
+      // fresh result back into the shared flag the scheduler gates on, so a runtime
+      // that crashed or recovered since boot can't leave the two showing opposite
+      // decisions until the next restart.
+      onRuntimeProbed: (available) => {
+        this.sliceRuntimeAvailable = available;
+      }
     });
     this.sliceService = new SliceService(store, this.artifactStorage, this.artifactService, this.sliceRunner, {
       tmpRoot: slicing.tmpRoot,

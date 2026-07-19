@@ -210,6 +210,39 @@ test("fake slicing succeeds: ready variant, output artifact analysed, estimates 
   assert.deepEqual(leftoverWorkDirs(), []);
 });
 
+test("rerun clears the previous output and estimates before re-slicing (a failing re-run shows no stale output)", async () => {
+  const artifactId = await uploadModel();
+  const setId = await approvedSet();
+
+  // First slice succeeds → ready with output + OrcaSlicer estimates.
+  const first = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+  const ready = slice.getVariant(first.id);
+  assert.equal(ready.state, "ready");
+  assert.ok(ready.outputArtifactId);
+  assert.ok(ready.orcaEtaS);
+
+  // Re-run, but OrcaSlicer now fails: the variant must end `failed` with NO output
+  // and NO estimates left over from the previous attempt.
+  runner.behavior = "fail";
+  const reset = slice.rerun(ready.id);
+  assert.equal(reset.state, "pending");
+  // Already cleared at the pending transition — not carried from the old attempt.
+  assert.equal(reset.outputArtifactId, null);
+  assert.equal(reset.outputAnalysisId, null);
+  assert.equal(reset.orcaEtaS, null);
+  assert.equal(reset.filamentG, null);
+  assert.equal(reset.filamentMm, null);
+  assert.equal(reset.dimensions, null);
+
+  await slice.whenIdle();
+  const failed = slice.getVariant(ready.id);
+  assert.equal(failed.state, "failed");
+  assert.equal(failed.outputArtifactId, null);
+  assert.equal(failed.orcaEtaS, null);
+  assert.equal(failed.filamentG, null);
+});
+
 test("a slice whose OUTPUT analysis is blocked never becomes ready", async () => {
   const artifactId = await uploadModel();
   const setId = await approvedSet();

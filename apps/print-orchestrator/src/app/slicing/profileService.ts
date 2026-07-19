@@ -82,7 +82,17 @@ export class ProfileService {
     private readonly store: PrintQueueStore,
     private readonly runner: SliceRunner,
     private readonly listPrinters: () => SlicerPrinterRef[],
-    private readonly options: { now?: () => Date; logger?: StoreLogger } = {}
+    private readonly options: {
+      now?: () => Date;
+      logger?: StoreLogger;
+      /**
+       * Called with every fresh runtime probe result (from {@link runtimeReport}).
+       * The store uses it to keep its single cached `sliceRuntimeAvailable` — the
+       * one the manual scheduler gates on — in sync with what the slicing tab sees,
+       * so the two can't drift after OrcaSlicer crashes or recovers between boots.
+       */
+      onRuntimeProbed?: (available: boolean) => void;
+    } = {}
   ) {
     this.now = options.now ?? (() => new Date());
   }
@@ -221,6 +231,9 @@ export class ProfileService {
 
   async runtimeReport(): Promise<SlicingRuntimeReport> {
     const runtime = await this.runner.probe();
+    // Keep the store's cached availability (read synchronously by the scheduler) in
+    // step with this fresh probe, so the tab and the planner never disagree.
+    this.options.onRuntimeProbed?.(runtime.available);
     const all = this.store.repositories.profileRevisions.list();
     const profileCounts = {
       active: all.filter((r) => r.status === "active").length,
