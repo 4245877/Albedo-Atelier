@@ -2556,6 +2556,24 @@ html.modal-open { overflow: hidden; }
   color: var(--danger-ink);
   font-size: 13px;
 }
+.slice-warnbox {
+  margin-top: 8px;
+  color: var(--warn-ink);
+  font-size: 13px;
+}
+/* Баннер частичной ошибки загрузки раздела: показан вместе с последними данными. */
+.slice-errbox {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-color: color-mix(in srgb, var(--danger-ink) 45%, var(--card-edge));
+  background: color-mix(in srgb, var(--danger-ink) 8%, transparent);
+}
+.slice-errbox .slice-block {
+  margin-top: 0;
+  flex: 1 1 240px;
+}
 .slice-meta {
   display: flex;
   gap: 14px;

@@ -147,6 +147,16 @@ export class SliceService {
           );
         }
       }
+      // Dedup a double-submit: if an identical slice (same cache key AND target) is
+      // already queued or running, return it instead of launching OrcaSlicer a
+      // second time. Reaching here without a cache hit, the path down to the insert
+      // below is synchronous (no `await`), so two rapid POSTs cannot both slip past.
+      const inFlight = repos.sliceVariants
+        .listInFlightByCacheKey(cacheKey)
+        .find(
+          (v) => v.targetPrinterId === targetPrinterId && v.targetPrinterClass === targetPrinterClass
+        );
+      if (inFlight) return inFlight;
     }
 
     const iso = this.nowIso();
@@ -294,6 +304,32 @@ export class SliceService {
       );
     }
 
+    // The variant is now `running`. From here EVERY failure path — including ones
+    // outside the slice call itself (a rejected `probe()`, an unavailable tmpRoot
+    // that makes `mkdtemp` fail) — must drive it to a terminal state. Without this
+    // outer guard such an error would only be logged by the worker and the variant
+    // would stay `running` forever, with the UI polling and offering no retry.
+    try {
+      await this.runPipeline(variant);
+    } catch (error) {
+      if (error instanceof SliceRuntimeUnavailableError) {
+        this.block(variant.id, "runtime_unavailable", error.message);
+      } else {
+        this.fail(variant.id, errorMessage(error));
+      }
+    }
+  }
+
+  /**
+   * The body of a `running` slice: re-check dependencies, gate on the runtime, then
+   * slice → stage → analyse → finalize inside an isolated work dir. Recoverable
+   * precondition failures short-circuit to `blocked`; anything thrown (from the
+   * runtime probe, the temp dir, the slicer, or staging) propagates to
+   * {@link runSlice}, which turns it into a terminal `blocked`/`failed`.
+   */
+  private async runPipeline(variant: SliceVariant): Promise<void> {
+    const repos = this.store.repositories;
+
     // Re-load and re-check the dependencies (they may have changed since creation).
     const artifact = repos.artifacts.getById(variant.sourceArtifactId);
     if (!artifact?.source) {
@@ -322,12 +358,16 @@ export class SliceService {
     }
 
     // Honest runtime gate — no runtime means a blocker, never a fabricated slice.
+    // A `probe()` that *throws* (rather than reporting `available: false`) is an
+    // infrastructure error and propagates to runSlice's guard.
     const runtime = await this.runner.probe();
     if (!runtime.available) {
       this.block(variant.id, "runtime_unavailable", runtime.error ?? "OrcaSlicer недоступен");
       return;
     }
 
+    // Creating the isolated work dir can itself fail (tmpRoot removed/unwritable);
+    // that error propagates to runSlice so the variant never gets stuck `running`.
     const workDir = await fsp.mkdtemp(path.join(this.options.tmpRoot, "slice-"));
     try {
       const modelName = safeBasename(artifact.name, "model.stl");
@@ -359,12 +399,6 @@ export class SliceService {
       // variant's terminal state.
       const current = repos.sliceVariants.getById(variant.id) ?? variant;
       this.store.transaction(() => this.finalizeOutput(current, outArtifact.id, analysis));
-    } catch (error) {
-      if (error instanceof SliceRuntimeUnavailableError) {
-        this.block(variant.id, "runtime_unavailable", error.message);
-      } else {
-        this.fail(variant.id, errorMessage(error));
-      }
     } finally {
       await fsp.rm(workDir, { recursive: true, force: true }).catch((error) => {
         this.logger.error?.({ err: error, workDir }, "failed to clean up slice work dir");

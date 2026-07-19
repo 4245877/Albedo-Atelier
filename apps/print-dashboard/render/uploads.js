@@ -151,9 +151,17 @@ async function doUpload(item) {
     item.blobExisted = Boolean(res.blobExisted);
     fileStore.delete(item.key); // отданный файл больше не нужен
     item.key = res.artifact?.id || item.key;
-    item.stage = "analyzing";
-    render();
-    ensurePolling();
+    if (res.analysis && res.analysis.state === "ready") {
+      // Дубликат содержимого: анализ переиспользован и уже готов — не ждём поллинга,
+      // сразу оповещаем слайсинг (иначе загруженный STL не появится там без F5).
+      item.stage = "done";
+      render();
+      notifyAnalysisCompleted(item);
+    } else {
+      item.stage = "analyzing";
+      render();
+      ensurePolling();
+    }
   } catch (err) {
     fileStore.delete(item.key);
     if (err?.name === "AbortError") {
@@ -211,12 +219,27 @@ function applyDetail(item, detail) {
   item.artifact = detail.artifact || item.artifact;
   item.task = detail.task || item.task;
   const latest = (detail.analyses || [])[detail.analyses.length - 1] || item.analysis;
+  const wasDone = item.stage === "done";
   item.analysis = latest;
   if (latest) {
-    if (latest.state === "ready") item.stage = "done";
-    else if (latest.state === "failed") item.stage = "failed";
+    if (latest.state === "ready") {
+      item.stage = "done";
+      // Оповещаем только при первом переходе в «готово», а не на каждом тике.
+      if (!wasDone) notifyAnalysisCompleted(item);
+    } else if (latest.state === "failed") item.stage = "failed";
     else item.stage = "analyzing";
   }
+}
+
+/* Кросс-модульное событие: анализ артефакта завершён. Раздел слайсинга слушает его
+   и обновляет список моделей, чтобы загруженный STL/3MF сразу стал доступен для
+   «Запуска слайсинга» без перезагрузки страницы. */
+function notifyAnalysisCompleted(item) {
+  document.dispatchEvent(
+    new CustomEvent("artifact-analysis-completed", {
+      detail: { artifactId: item.artifact?.id, verdict: item.analysis?.verdict }
+    })
+  );
 }
 
 /* ── Существующие артефакты (при открытии страницы) ─────────── */

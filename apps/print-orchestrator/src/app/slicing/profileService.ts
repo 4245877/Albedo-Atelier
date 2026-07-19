@@ -173,47 +173,48 @@ export class ProfileService {
    * demands: "запрет утверждения ProfileSet с blockers".
    */
   approveSet(id: string, actor = "operator"): ProfileSet {
-    return this.store.transaction(() => {
+    // Re-validate and persist the *refreshed* validation atomically, deciding
+    // inside the transaction whether the set is approvable — but WITHOUT throwing
+    // in it. Throwing here would roll the write back, so a re-import that surfaced
+    // new blockers would be discarded and the operator would keep getting a
+    // reason-less refusal. Instead the write (blockers and all) always commits, and
+    // the refusal is raised as an HTTP error *after* the transaction returns.
+    const outcome = this.store.transaction(() => {
       const set = this.getSet(id);
       const machine = this.requireRevision(set.machineRevisionId, "machine");
       const process = this.requireRevision(set.processRevisionId, "process");
       const filament = this.requireRevision(set.filamentRevisionId, "filament");
       const findings = this.validate(machine, process, filament, set.printerId);
       const validation = validationStatus(findings);
-
-      if (findings.blockers.length > 0) {
-        // Persist the refreshed validation so the operator sees why, then refuse.
-        this.store.repositories.profileSets.update({
-          ...set,
-          validation,
-          warnings: findings.warnings,
-          blockers: findings.blockers,
-          updatedAt: this.nowIso()
-        });
-        throw new JobError(
-          `Нельзя утвердить набор с блокерами: ${findings.blockers.map((b) => b.message).join("; ")}`
-        );
-      }
-
+      const blocked = findings.blockers.length > 0;
       const iso = this.nowIso();
-      const approved = this.store.repositories.profileSets.update({
+
+      const saved = this.store.repositories.profileSets.update({
         ...set,
         validation,
         warnings: findings.warnings,
         blockers: findings.blockers,
-        approved: true,
-        approvedBy: actor,
-        approvedAt: iso,
+        approved: blocked ? set.approved : true,
+        approvedBy: blocked ? set.approvedBy : actor,
+        approvedAt: blocked ? set.approvedAt : iso,
         updatedAt: iso
       });
       this.recordAudit(actor, {
         entityType: "profile_set",
         entityId: set.id,
-        action: "approved",
-        to: validation
+        action: blocked ? "approval_refused" : "approved",
+        to: validation,
+        detail: blocked ? { blockers: findings.blockers.length } : undefined
       });
-      return approved;
+      return { saved, blockers: findings.blockers, blocked };
     });
+
+    if (outcome.blocked) {
+      throw new JobError(
+        `Нельзя утвердить набор с блокерами: ${outcome.blockers.map((b) => b.message).join("; ")}`
+      );
+    }
+    return outcome.saved;
   }
 
   // ── Runtime & coverage ───────────────────────────────────────────────────────

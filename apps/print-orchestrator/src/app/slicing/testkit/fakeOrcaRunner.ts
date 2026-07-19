@@ -50,6 +50,9 @@ export class FakeOrcaRunner implements SliceRunner {
   sliceCount = 0;
   lastRequest: SliceRequest | null = null;
   gcode = FAKE_ORCA_GCODE;
+  /** When set, {@link probe} *rejects* with this error — an infrastructure failure
+   *  (not a clean `available: false`), so the pipeline's outer guard is exercised. */
+  probeError: Error | null = null;
   /** Optional hook fired mid-slice, before the output is written (to assert temp state). */
   onSlice?: (req: SliceRequest) => void | Promise<void>;
 
@@ -59,6 +62,7 @@ export class FakeOrcaRunner implements SliceRunner {
   }
 
   async probe(): Promise<OrcaRuntimeStatus> {
+    if (this.probeError) throw this.probeError;
     if (this.behavior === "unavailable") {
       return {
         available: false,

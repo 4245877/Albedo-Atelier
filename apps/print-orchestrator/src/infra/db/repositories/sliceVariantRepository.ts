@@ -136,6 +136,21 @@ export class SqliteSliceVariantRepository
     );
   }
 
+  /**
+   * Still-running (`pending`/`running`) variants for this cache key — the
+   * in-flight dedup lookup. A double-submit that produced the same key finds the
+   * slice already queued instead of launching OrcaSlicer a second time. Newest
+   * first so the caller reuses the most recent one.
+   */
+  listInFlightByCacheKey(cacheKey: string): SliceVariant[] {
+    return this.query(
+      `SELECT * FROM slice_variants
+        WHERE cache_key = ? AND state IN ('pending','running')
+        ORDER BY created_at DESC, id DESC`,
+      cacheKey
+    );
+  }
+
   listByTask(taskId: string): SliceVariant[] {
     return this.query(
       "SELECT * FROM slice_variants WHERE task_id = ? ORDER BY created_at DESC, id DESC",

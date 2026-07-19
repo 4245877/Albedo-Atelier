@@ -26,6 +26,8 @@ export interface ProfileSetRepository extends WritableRepository<ProfileSet> {
 export interface SliceVariantRepository extends WritableRepository<SliceVariant> {
   /** A finished (`ready`) variant with this cache key whose output still exists — a cache hit. */
   findReadyByCacheKey(cacheKey: string): SliceVariant | null;
+  /** Still-running (`pending`/`running`) variants for this cache key — the in-flight dedup lookup. */
+  listInFlightByCacheKey(cacheKey: string): SliceVariant[];
   listByTask(taskId: string): SliceVariant[];
   /** Not-yet-finished variants (`pending`/`running`), oldest first, for startup recovery. */
   listUnfinished(): SliceVariant[];

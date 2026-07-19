@@ -13,9 +13,12 @@ import { $, esc, toast } from "../util.js";
 
 const POLL_MS = 4000;
 
-const state = { runtime: null, profiles: [], sets: [], variants: [], models: [], loaded: false };
+const state = { runtime: null, profiles: [], sets: [], variants: [], models: [], loaded: false, errors: [] };
 let pollTimer = null;
 let wired = false;
+/* Клиентский in-flight lock: пока идёт мутирующий POST, повторные клики/сабмиты
+   игнорируются — двойная отправка не плодит дубли слайсов/наборов. */
+let busy = false;
 
 const TYPE_LABEL = { machine: "Принтер", process: "Печать", filament: "Филамент" };
 const STATUS = {
@@ -48,35 +51,62 @@ export function setupSlicing() {
 }
 
 async function loadAll() {
-  try {
-    const [runtime, profiles, sets, variants, artifacts] = await Promise.all([
-      apiGet("/api/print/slicing/runtime").catch(() => null),
-      apiGet("/api/print/slicing/profiles").catch(() => ({ profiles: [] })),
-      apiGet("/api/print/slicing/profile-sets").catch(() => ({ sets: [] })),
-      apiGet("/api/print/slicing/variants").catch(() => ({ variants: [] })),
-      apiGet("/api/print/artifacts").catch(() => ({ artifacts: [] }))
-    ]);
-    state.runtime = runtime;
-    state.profiles = profiles.profiles || [];
-    state.sets = sets.sets || [];
-    state.variants = variants.variants || [];
-    state.models = (artifacts.artifacts || []).filter(
+  // allSettled, а не Promise.all с per-request .catch(() => пусто): падение одного
+  // ресурса не должно выглядеть как «нет профилей / загрузите STL». Успешные
+  // ресурсы обновляют state, упавшие — сохраняют последнее корректное значение и
+  // попадают в state.errors (баннер + автоповтор через ensurePolling).
+  const results = await Promise.allSettled([
+    apiGet("/api/print/slicing/runtime"),
+    apiGet("/api/print/slicing/profiles"),
+    apiGet("/api/print/slicing/profile-sets"),
+    apiGet("/api/print/slicing/variants"),
+    apiGet("/api/print/artifacts")
+  ]);
+  const [runtime, profiles, sets, variants, artifacts] = results;
+  const errors = [];
+
+  if (runtime.status === "fulfilled") state.runtime = runtime.value;
+  else errors.push("среда OrcaSlicer");
+  if (profiles.status === "fulfilled") state.profiles = profiles.value.profiles || [];
+  else errors.push("профили");
+  if (sets.status === "fulfilled") state.sets = sets.value.sets || [];
+  else errors.push("наборы");
+  if (variants.status === "fulfilled") state.variants = variants.value.variants || [];
+  else errors.push("варианты слайсинга");
+  if (artifacts.status === "fulfilled") {
+    state.models = (artifacts.value.artifacts || []).filter(
       (a) => a.analysis && a.analysis.verdict === "needs_preparation"
     );
+  } else errors.push("модели");
+
+  state.errors = errors;
+
+  // Данных ещё не было и всё упало — полноэкранная ошибка с кнопкой повтора.
+  // Иначе рисуем то, что есть (плюс баннер об упавших ресурсах).
+  if (!state.loaded && results.every((r) => r.status === "rejected")) {
+    renderConnectionError();
+  } else {
     state.loaded = true;
     render();
-    ensurePolling();
-  } catch {
-    const body = $("#slicing-body");
-    if (body) body.innerHTML = `<div class="slice-loading">Backend недоступен — раздел появится при восстановлении связи.</div>`;
   }
+  ensurePolling();
+}
+
+function renderConnectionError() {
+  const body = $("#slicing-body");
+  if (!body) return;
+  body.innerHTML = `<div class="slice-loading">Backend недоступен — не удалось загрузить раздел.
+    <button type="button" class="btn btn-sm" data-slice-action="reload">↻ Повторить</button></div>`;
 }
 
 function ensurePolling() {
-  const busy = state.variants.some((v) => v.state === "pending" || v.state === "running");
-  if (busy && pollTimer === null) {
+  const busyVariants = state.variants.some((v) => v.state === "pending" || v.state === "running");
+  // Опрашиваем и при ошибках загрузки — чтобы данные восстановились сами,
+  // не дожидаясь действия оператора.
+  const shouldPoll = busyVariants || state.errors.length > 0;
+  if (shouldPoll && pollTimer === null) {
     pollTimer = setInterval(() => void loadAll(), POLL_MS);
-  } else if (!busy && pollTimer !== null) {
+  } else if (!shouldPoll && pollTimer !== null) {
     clearInterval(pollTimer);
     pollTimer = null;
   }
@@ -88,6 +118,7 @@ function render() {
   const body = $("#slicing-body");
   if (!body) return;
   body.innerHTML = [
+    errorsHtml(),
     runtimeHtml(),
     profilesHtml(),
     setsHtml(),
@@ -95,6 +126,16 @@ function render() {
     variantsHtml(),
     newSliceHtml()
   ].join("");
+}
+
+function errorsHtml() {
+  if (!state.errors.length) return "";
+  return `
+    <div class="slice-panel slice-errbox">
+      <div class="slice-block">⛔ Не удалось загрузить: ${state.errors.map((e) => esc(e)).join(", ")}.
+        Показаны последние известные данные; повтор — автоматически.</div>
+      <button type="button" class="btn btn-sm" data-slice-action="reload">↻ Обновить сейчас</button>
+    </div>`;
 }
 
 function runtimeHtml() {
@@ -121,16 +162,28 @@ function runtimeHtml() {
        </details>`
     : "";
 
-  const gaps = (r.coverage || []).filter((c) => !c.hasAnyProfile);
-  const coverage = gaps.length
-    ? `<div class="slice-block">⛔ Нет профиля принтера для: ${gaps.map((c) => esc(c.printerName)).join(", ")}</div>`
-    : "";
+  // Покрытие в трёх состояниях: нет профиля вовсе (блокер) ≠ есть только
+  // неактивные — карантин/невалидные (предупреждение: активного покрытия нет) ≠
+  // активен. Проверять только hasAnyProfile нельзя: принтер с единственным
+  // карантинным профилем выглядел бы «покрытым», хотя набор для него не утвердить.
+  const missingCov = (r.coverage || []).filter((c) => !c.hasAnyProfile);
+  const inactiveCov = (r.coverage || []).filter((c) => c.hasAnyProfile && !c.hasActiveProfile);
+  const coverage = [
+    missingCov.length
+      ? `<div class="slice-block">⛔ Нет профиля принтера для: ${missingCov.map((c) => esc(c.printerName)).join(", ")}</div>`
+      : "",
+    inactiveCov.length
+      ? `<div class="slice-warnbox">⚠ Только неактивные профили (карантин/невалидные), активного покрытия нет: ${inactiveCov.map((c) => esc(c.printerName)).join(", ")}</div>`
+      : ""
+  ].join("");
 
   return `
     <div class="slice-panel slice-runtime">
       <div class="slice-panel-head">
         <b>Среда OrcaSlicer</b>
         ${badge}${net}
+        <span class="slice-spacer"></span>
+        <button type="button" class="btn btn-sm" data-slice-action="reload">↻ Обновить</button>
         <button type="button" class="btn btn-sm" data-slice-action="import">↻ Импорт пресетов</button>
       </div>
       ${countRow}
@@ -211,24 +264,56 @@ function setRow(s) {
 }
 
 function createSetHtml() {
-  const opt = (list) => list.map((p) => `<option value="${esc(p.id)}">${esc(p.name)} · ${esc(p.status)}</option>`).join("");
+  // Набор утверждается только из active-профилей (иначе валидация даёт блокер).
+  // Поэтому выбираемы лишь active; неактивные показаны, но disabled и с причиной —
+  // чтобы не делать путь с заведомо неутверждаемым набором основным.
+  const active = (list) => list.filter((p) => p.status === "active");
+  const opts = (list) => {
+    const on = active(list)
+      .map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`)
+      .join("");
+    const off = list
+      .filter((p) => p.status !== "active")
+      .map(
+        (p) => `<option value="${esc(p.id)}" disabled>${esc(p.name)} · ${esc(statusLabel(p.status))} (недоступен)</option>`
+      )
+      .join("");
+    return on + off;
+  };
+
   const machines = state.profiles.filter((p) => p.type === "machine");
   const processes = state.profiles.filter((p) => p.type === "process");
   const filaments = state.profiles.filter((p) => p.type === "filament");
-  const printers = [...new Set(state.models.map(() => null))]; // placeholder; printers via coverage
+  const missingActive = [];
+  if (!active(machines).length) missingActive.push("принтер");
+  if (!active(processes).length) missingActive.push("печать");
+  if (!active(filaments).length) missingActive.push("филамент");
+
   const coverage = (state.runtime && state.runtime.coverage) || [];
-  const printerOpts = coverage.map((c) => `<option value="${esc(c.printerId)}">${esc(c.printerName)}</option>`).join("");
+  const printerOpts = coverage
+    .map(
+      (c) =>
+        `<option value="${esc(c.printerId)}">${esc(c.printerName)}${c.hasActiveProfile ? "" : " · нет активного профиля"}</option>`
+    )
+    .join("");
+
+  const note = missingActive.length
+    ? `<div class="slice-block">⛔ Нет активных профилей: ${missingActive.join(", ")}. Набор собирается только из active-профилей — импортируйте/почините пресеты.</div>`
+    : `<div class="slice-hint">В набор попадают только active-профили; неактивные показаны, но недоступны для выбора.</div>`;
+  const disabledAttr = missingActive.length ? " disabled" : "";
+
   return `
     <form class="slice-panel slice-form" data-slice-form="create-set">
       <div class="slice-panel-head"><b>Новый набор</b></div>
       <div class="slice-grid">
         <label>Имя<input type="text" name="name" required placeholder="K2 · PETG · Balance" /></label>
-        <label>Принтер профиля<select name="machine" required>${opt(machines)}</select></label>
-        <label>Печать<select name="process" required>${opt(processes)}</select></label>
-        <label>Филамент<select name="filament" required>${opt(filaments)}</select></label>
+        <label>Принтер профиля<select name="machine" required>${opts(machines)}</select></label>
+        <label>Печать<select name="process" required>${opts(processes)}</select></label>
+        <label>Филамент<select name="filament" required>${opts(filaments)}</select></label>
         <label>Целевой принтер<select name="printer">${printerOpts || `<option value="">—</option>`}</select></label>
       </div>
-      <button type="submit" class="btn btn-primary btn-sm">Создать и проверить</button>
+      ${note}
+      <button type="submit" class="btn btn-primary btn-sm"${disabledAttr}>Создать и проверить</button>
     </form>`;
 }
 
@@ -281,6 +366,18 @@ function newSliceHtml() {
     .map((m) => `<option value="${esc(m.artifact.id)}">${esc(m.artifact.name)}</option>`)
     .join("");
   const setOpts = approvedSets.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
+
+  // Runtime заведомо недоступен — не даём запустить и не показываем ложный успех:
+  // такой слайс воркер всё равно переведёт в blocked. Блокируем кнопку и объясняем,
+  // как восстановить среду. (available === null/unknown не блокируем — решает сервер.)
+  const runtimeDown = state.runtime?.runtime?.available === false;
+  const runtimeMsg = state.runtime?.runtime?.error;
+  const runtimeBlock = runtimeDown
+    ? `<div class="slice-block">⛔ OrcaSlicer недоступен — запуск невозможен${runtimeMsg ? `: ${esc(runtimeMsg)}` : ""}.
+         Восстановите среду (проверьте контейнер OrcaSlicer, затем ↻ Импорт пресетов) и повторите.</div>`
+    : "";
+  const disabledAttr = runtimeDown ? ' disabled title="OrcaSlicer недоступен"' : "";
+
   return `
     <form class="slice-panel slice-form" data-slice-form="slice">
       <div class="slice-panel-head"><b>Запуск слайсинга</b></div>
@@ -288,7 +385,8 @@ function newSliceHtml() {
         <label>Модель<select name="artifactId" required>${modelOpts}</select></label>
         <label>Набор профилей<select name="profileSetId" required>${setOpts}</select></label>
       </div>
-      <button type="submit" class="btn btn-primary btn-sm">Нарезать</button>
+      ${runtimeBlock}
+      <button type="submit" class="btn btn-primary btn-sm"${disabledAttr}>Нарезать</button>
     </form>`;
 }
 
@@ -299,34 +397,57 @@ function wireDelegates() {
     const btn = e.target.closest("[data-slice-action]");
     if (!btn || btn.disabled) return;
     e.preventDefault();
-    const id = btn.dataset.id;
     const action = btn.dataset.sliceAction;
-    if (action === "import") void run(() => apiPost("/api/print/slicing/presets/import"), "Пресеты импортированы");
-    else if (action === "approve") void run(() => apiPost(`/api/print/slicing/profile-sets/${id}/approve`), "Набор утверждён");
-    else if (action === "rerun") void run(() => apiPost(`/api/print/slicing/variants/${id}/rerun`), "Слайсинг перезапущен");
+    // Обновление — обычное чтение, вне in-flight lock.
+    if (action === "reload") {
+      void loadAll();
+      return;
+    }
+    if (busy) return; // мутация уже выполняется — повторный клик игнорируем
+    const id = btn.dataset.id;
+    if (action === "import") void run(btn, () => apiPost("/api/print/slicing/presets/import"), "Пресеты импортированы");
+    else if (action === "approve") void run(btn, () => apiPost(`/api/print/slicing/profile-sets/${id}/approve`), "Набор утверждён");
+    else if (action === "rerun") void run(btn, () => apiPost(`/api/print/slicing/variants/${id}/rerun`), "Слайсинг перезапущен");
   });
 
   document.addEventListener("submit", (e) => {
     const form = e.target.closest("[data-slice-form]");
     if (!form) return;
     e.preventDefault();
-    const data = Object.fromEntries(new FormData(form).entries());
-    if (form.dataset.sliceForm === "create-set") {
-      void run(() => apiPost("/api/print/slicing/profile-sets", data), "Набор создан");
-    } else if (form.dataset.sliceForm === "slice") {
-      void run(() => apiPost("/api/print/slicing/slice", data), "Слайсинг запущен");
+    if (busy) return;
+    const kind = form.dataset.sliceForm;
+    // Защита на случай, если кнопка не была disabled: без runtime не запускаем.
+    if (kind === "slice" && state.runtime?.runtime?.available === false) {
+      toast("OrcaSlicer недоступен — запуск невозможен. Восстановите среду и повторите.", "toast-danger");
+      return;
     }
+    const submitBtn = form.querySelector('button[type="submit"]');
+    const data = Object.fromEntries(new FormData(form).entries());
+    if (kind === "create-set") {
+      void run(submitBtn, () => apiPost("/api/print/slicing/profile-sets", data), "Набор создан");
+    } else if (kind === "slice") {
+      void run(submitBtn, () => apiPost("/api/print/slicing/slice", data), "Слайсинг запущен");
+    }
+  });
+
+  // Модуль загрузки завершил анализ модели → подтягиваем свежий список, чтобы
+  // загруженный STL сразу появился в «Запуске слайсинга» без перезагрузки страницы.
+  document.addEventListener("artifact-analysis-completed", () => {
+    if (state.loaded) void loadAll();
   });
 }
 
-async function run(fn, okMsg) {
+async function run(btn, fn, okMsg) {
+  busy = true;
+  if (btn) btn.disabled = true; // мгновенная блокировка конкретной кнопки/формы
   try {
     await fn();
     toast(okMsg, "toast-ok");
-    await loadAll();
   } catch (err) {
     toast(esc(err.message || "Не удалось выполнить действие"), "toast-danger");
-    await loadAll();
+  } finally {
+    busy = false;
+    await loadAll(); // перерисовка сбросит disabled на свежем DOM
   }
 }
 
@@ -334,6 +455,10 @@ async function run(fn, okMsg) {
 
 function chip(label, cls, pulse = false) {
   return `<span class="upload-chip chip-${cls}"><i class="dot${pulse ? " dot-pulse" : ""}"></i>${esc(label)}</span>`;
+}
+
+function statusLabel(status) {
+  return (STATUS[status] || { label: status }).label;
 }
 
 function fmtDuration(s) {

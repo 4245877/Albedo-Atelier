@@ -170,6 +170,15 @@ function leftoverWorkDirs(): string[] {
   return fs.readdirSync(path.join(TMP, "work")).filter((n) => n.startsWith("slice-"));
 }
 
+/** Polls `cond` until true (or times out) — for observing async worker transitions. */
+async function waitFor(cond: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor: условие не выполнилось за отведённое время");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 test("fake slicing succeeds: ready variant, output artifact analysed, estimates copied, temp cleaned", async () => {
@@ -382,6 +391,93 @@ test("createSlice refuses retargeting a printer-bound set to a different printer
   // The set's own printer is accepted and becomes the variant's target.
   const ok = await slice.createSlice({ artifactId, profileSetId: setId, targetPrinterId: "creality-k2" });
   assert.equal(ok.targetPrinterId, "creality-k2");
+});
+
+test("a probe that THROWS marks the variant terminal (never stuck running)", async () => {
+  const artifactId = await uploadModel();
+  const setId = await approvedSet();
+  // An infrastructure failure inside probe() (rejection, not a clean available:false)
+  // used to escape the try/catch and leave the variant `running` forever.
+  runner.probeError = new Error("probe boom (рантайм недоступен)");
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+  const done = slice.getVariant(variant.id);
+  assert.equal(done.state, "failed");
+  assert.notEqual(done.state, "running");
+  assert.match(done.error ?? "", /probe boom/);
+  assert.equal(done.outputArtifactId, null);
+  assert.deepEqual(leftoverWorkDirs(), []);
+});
+
+test("an unavailable tmpRoot marks the variant terminal (never stuck running)", async () => {
+  const artifactId = await uploadModel();
+  const setId = await approvedSet();
+  // Remove the work root after construction: mkdtemp inside it now fails (ENOENT).
+  // That error occurs after the transition to `running` and must still terminate it.
+  fs.rmSync(path.join(TMP, "work"), { recursive: true, force: true });
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+  const done = slice.getVariant(variant.id);
+  assert.equal(done.state, "failed");
+  assert.notEqual(done.state, "running");
+  assert.equal(done.outputArtifactId, null);
+});
+
+test("a double-submit dedups to the same in-flight variant (no second Orca run)", async () => {
+  const artifactId = await uploadModel();
+  const setId = await approvedSet();
+
+  // Hold the first slice mid-flight (running) so the second submit races it.
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  runner.onSlice = () => gate;
+
+  const first = await slice.createSlice({ artifactId, profileSetId: setId });
+  await waitFor(() => slice.getVariant(first.id).state === "running");
+
+  // Same artifact + set + target while the first is still running → the identical
+  // request must return the very same variant, not create a second one.
+  const second = await slice.createSlice({ artifactId, profileSetId: setId });
+  assert.equal(second.id, first.id);
+  assert.equal(slice.listVariants().length, 1);
+
+  release();
+  await slice.whenIdle();
+  assert.equal(slice.getVariant(first.id).state, "ready");
+  assert.equal(runner.sliceCount, 1); // OrcaSlicer ran exactly once
+});
+
+test("a refused approval PERSISTS the refreshed blockers (not rolled back)", () => {
+  // Create a valid set, then a member falls out of `active` (as a re-import would do).
+  // Re-approving must refuse AND leave the fresh blockers visible — the previous
+  // implementation threw inside the transaction and rolled the update back, so the
+  // operator kept getting a reason-less refusal after re-import.
+  const { machine, process, filament } = seedActiveTrio();
+  const set = profiles.createSet({
+    name: "K2 · PETG",
+    machineRevisionId: machine.id,
+    processRevisionId: process.id,
+    filamentRevisionId: filament.id,
+    printerId: "creality-k2"
+  });
+  assert.notEqual(set.validation, "blocked");
+
+  store.repositories.profileRevisions.update({
+    ...machine,
+    status: "quarantined",
+    resolvedJson: null,
+    resolvedSha256: null,
+    blockers: [{ code: "missing_parent", message: "родитель недоступен" }]
+  });
+
+  assert.throws(() => profiles.approveSet(set.id), /блокер/i);
+
+  const after = profiles.getSet(set.id);
+  assert.equal(after.approved, false);
+  assert.equal(after.validation, "blocked");
+  assert.ok(after.blockers.some((b) => b.code === "member_not_active"));
 });
 
 test("printer coverage flags the Ender 3 V3 KE as having no machine profile", () => {
