@@ -43,7 +43,9 @@ export function installActions({ getState, refresh }) {
       if (okMsg) toast(okMsg, okKind);
       return res;
     } catch (err) {
-      toast(esc(err.message), "toast-danger");
+      // Ошибка исполнения — непростительная оплошность; Надзирательница честно
+      // докладывает причину, не пряча её за церемониалом.
+      toast(`Простите, Владыка — приказ не исполнен: ${esc(err.message)}`, "toast-danger");
       return null;
     } finally {
       if (key) inFlight.delete(key);
@@ -60,9 +62,9 @@ export function installActions({ getState, refresh }) {
     // для остальных протоколов openFilesModal честно объяснит, что не поддержано.
     files(p) { openFilesModal(p.id); },
 
-    pause(p, el) { runAction(`/api/printers/${p.id}/pause`, null, `«${esc(p.name)}»: печать поставлена на паузу`, "toast-ok", `pause:${p.id}`, el); },
+    pause(p, el) { runAction(`/api/printers/${p.id}/pause`, null, `«${esc(p.name)}» замер по вашему велению, Владыка ⏸`, "toast-ok", `pause:${p.id}`, el); },
 
-    resume(p, el) { runAction(`/api/printers/${p.id}/resume`, null, `«${esc(p.name)}»: печать продолжена`, "toast-ok", `resume:${p.id}`, el); },
+    resume(p, el) { runAction(`/api/printers/${p.id}/resume`, null, `«${esc(p.name)}» вновь трудится во славу Владыки ▶`, "toast-ok", `resume:${p.id}`, el); },
 
     cancel(p, el) {
       const jobLabel = p.job ? `«${p.job}»` : "текущего задания";
@@ -72,11 +74,11 @@ export function installActions({ getState, refresh }) {
       // ответит 409 PRINT_IDENTITY_CONFLICT и ничего не отменит.
       const expectJob = p.job ?? null;
       const expectRunId = p.activeRunId ?? null;
-      if (!window.confirm(`Отменить печать ${jobLabel} на ${p.name}?`)) return;
+      if (!window.confirm(`Владыка, вы повелеваете отменить печать ${jobLabel} на «${p.name}»? Ваше слово — закон.`)) return;
       runAction(
         `/api/printers/${p.id}/cancel`,
         { job: expectJob, runId: expectRunId },
-        `«${esc(p.name)}»: печать отменена`,
+        `«${esc(p.name)}»: печать отменена — как вы и повелели`,
         "toast-danger",
         `cancel:${p.id}`,
         el
@@ -86,12 +88,12 @@ export function installActions({ getState, refresh }) {
     "light-on"(p, el) {
       // Целевое состояние уже достигнуто — не шлём команду и не засоряем ленту.
       if (p.light === true) return;
-      runAction(`/api/printers/${p.id}/light`, { on: true }, `«${esc(p.name)}»: подсветка включена ☀`, "toast-ok", `light:${p.id}`, el);
+      runAction(`/api/printers/${p.id}/light`, { on: true }, `«${esc(p.name)}»: свет зажжён, дабы ничто не укрылось от вашего взора ☀`, "toast-ok", `light:${p.id}`, el);
     },
 
     "light-off"(p, el) {
       if (p.light === false) return;
-      runAction(`/api/printers/${p.id}/light`, { on: false }, `«${esc(p.name)}»: подсветка выключена ☾`, "toast-ok", `light:${p.id}`, el);
+      runAction(`/api/printers/${p.id}/light`, { on: false }, `«${esc(p.name)}»: свет погашен — тьма к лицу Назарику ☾`, "toast-ok", `light:${p.id}`, el);
     },
 
     snapshot(p, el) {
@@ -105,7 +107,7 @@ export function installActions({ getState, refresh }) {
           void flash.offsetWidth;
           flash.classList.add("go");
         }
-        toast(`«${esc(p.name)}»: снимок сохранён ◉`, "toast-ok");
+        toast(`«${esc(p.name)}»: снимок запечатлён в архивах Назарика ◉`, "toast-ok");
       });
     },
   };
@@ -136,7 +138,7 @@ export function installActions({ getState, refresh }) {
     if (act === "upload-file") { openInfoModal("upload-file"); return; }
     if (act === "settings") { openInfoModal("settings"); return; }
     if (act === "night-pick") {
-      runAction("/api/queue/night/pick", null, "Подобрано следующее безопасное задание на ночь ☾", "toast-ok", "night-pick", el);
+      runAction("/api/queue/night/pick", null, "Владыка, я избрала достойнейшее задание для ночного бдения ☾", "toast-ok", "night-pick", el);
       return;
     }
     if (act === "night-start") {
@@ -155,20 +157,20 @@ export function installActions({ getState, refresh }) {
         : null;
       runAction("/api/queue/night/start", preview, null, "toast-ok", "night-start", el).then((res) => {
         if (res?.candidate) {
-          toast(`Ночная печать «${esc(res.candidate.title)}» запланирована на ${esc(String(res.window).split(" ")[0])}`, "toast-ok");
+          toast(`Ночная печать «${esc(res.candidate.title)}» назначена на ${esc(String(res.window).split(" ")[0])} — я буду бдить, Владыка ☾`, "toast-ok");
         }
       });
       return;
     }
     if (act === "start-next") {
       runAction("/api/queue/start-next", null, null, "toast-ok", "start-next", el).then((res) => {
-        if (res?.job) toast(`Задание «${esc(res.job.title)}» отправлено на ${esc(res.job.printer)}`, "toast-ok");
+        if (res?.job) toast(`Задание «${esc(res.job.title)}» вверено «${esc(res.job.printer)}» — всё будет исполнено безупречно, Владыка`, "toast-ok");
       });
       return;
     }
     if (act === "rule") {
       runAction(`/api/automations/${el.dataset.id}/toggle`, null, null, "toast-ok", `rule:${el.dataset.id}`, el).then((res) => {
-        if (res?.automation) toast(`Правило «${esc(res.automation.name)}» ${res.automation.on ? "включено" : "выключено"}`);
+        if (res?.automation) toast(`Правило «${esc(res.automation.name)}» ${res.automation.on ? "приведено в действие" : "остановлено"} по вашей воле`);
       });
       return;
     }

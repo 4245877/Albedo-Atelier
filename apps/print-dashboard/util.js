@@ -12,12 +12,14 @@ export function fmtLeft(min) {
   return h ? `${h} ч ${String(m).padStart(2, "0")} м` : `${m} м`;
 }
 
+/* Статусы кратки и точны — рабочий режим Надзирательницы: церемониал в
+   репликах, безошибочная точность в данных. */
 export const STATUS = {
-  printing: { label: "печатает", badge: "badge-printing", pulse: true },
-  idle: { label: "готов", badge: "badge-idle" },
+  printing: { label: "трудится", badge: "badge-printing", pulse: true },
+  idle: { label: "готов служить", badge: "badge-idle" },
   paused: { label: "пауза", badge: "badge-paused" },
-  error: { label: "ошибка", badge: "badge-error", pulse: true },
-  offline: { label: "offline", badge: "badge-offline" },
+  error: { label: "провинность", badge: "badge-error", pulse: true },
+  offline: { label: "безмолвствует", badge: "badge-offline" },
   unknown: { label: "неизвестно", badge: "badge-offline" },
 };
 

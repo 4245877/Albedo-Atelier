@@ -106,10 +106,10 @@ function renderBackendError(err) {
   const pills = $("#hero-pills");
   if (pills) {
     pills.innerHTML = `
-      <span class="pill pill-danger"><i class="dot dot-pulse"></i>Backend недоступен</span>
-      <span class="pill pill-warn"><i class="dot"></i>Повторная попытка каждые 6 с…</span>`;
+      <span class="pill pill-danger"><i class="dot dot-pulse"></i>Backend безмолвствует</span>
+      <span class="pill pill-warn"><i class="dot"></i>Взываю вновь каждые 6 с…</span>`;
   }
-  toast(`Не удалось загрузить данные фермы: ${esc(err.message)}`, "toast-danger");
+  toast(`Владыка, ферма не отвечает на мой зов: ${esc(err.message)}. Я не покину пост, пока связь не вернётся`, "toast-danger");
 }
 
 /* Опрос доски проходит через createLatestOnly: параллельные/подвисшие запросы
@@ -124,7 +124,7 @@ const pollDashboard = createLatestOnly({
     // auto-тема следует ему. Старый payload без этих полей оставляет fallback.
     setNightWindow(data.night?.windowStart, data.night?.windowEnd);
     renderAll();
-    if (everLoaded && !wasReachable) toast("Соединение с backend восстановлено", "toast-ok");
+    if (everLoaded && !wasReachable) toast("Связь восстановлена — зал вновь под моим неусыпным надзором, Владыка ❖", "toast-ok");
     everLoaded = true;
   },
   onError: (err, { silent }) => {

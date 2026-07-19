@@ -82,7 +82,7 @@ async function loadAll(options = {}) {
     ensurePolling();
   } catch {
     const body = $("#scheduler-body");
-    if (body) body.innerHTML = `<div class="slice-loading">Backend недоступен — раздел появится при восстановлении связи.</div>`;
+    if (body) body.innerHTML = `<div class="slice-loading">Backend безмолвствует, Владыка — раздел вернётся, едва связь будет восстановлена.</div>`;
   }
 }
 
@@ -124,7 +124,7 @@ function render() {
 
 function queueHtml() {
   if (!state.queue.length) {
-    return panel("Очередь заданий", `<div class="slice-empty">Очередь пуста. Добавьте задание ниже.</div>`);
+    return panel("Очередь заданий", `<div class="slice-empty">Очередь пуста, Владыка — Назарик ожидает вашего слова. Соблаговолите добавить задание ниже.</div>`);
   }
   const rows = state.queue.map((row, i) => queueRow(row, i)).join("");
   return panel("Очередь заданий", `<ul class="slice-list sch-queue">${rows}</ul>`,
@@ -192,10 +192,10 @@ function addTaskHtml() {
 function compatibilityHtml() {
   const { printers, rows } = state.matrix;
   if (!printers.length) {
-    return panel("Матрица совместимости", `<div class="slice-empty">Нет принтеров в конфигурации фермы.</div>`);
+    return panel("Матрица совместимости", `<div class="slice-empty">В конфигурации фермы нет ни одного принтера — мне некого выстраивать, Владыка.</div>`);
   }
   if (!rows.length) {
-    return panel("Матрица совместимости", `<div class="slice-empty">Нет заданий для проверки.</div>`);
+    return panel("Матрица совместимости", `<div class="slice-empty">Нет заданий, которые надлежало бы проверить.</div>`);
   }
   const head = `<tr><th>Задание</th>${printers.map((p) => `<th>${esc(p.name)}</th>`).join("")}</tr>`;
   const body = rows.map((r) => {
@@ -221,7 +221,7 @@ function planHtml() {
     ${state.plan && state.plan.plan.state === "DRAFT" ? `<button type="button" class="btn btn-ok btn-sm" data-sch-action="confirm" data-id="${esc(state.plan.plan.id)}">✓ Подтвердить</button>` : ""}`;
 
   if (!state.plan) {
-    return panel("План печати", `<div class="slice-empty">Плана ещё нет. Постройте черновик из текущей очереди.</div>`, controls);
+    return panel("План печати", `<div class="slice-empty">Плана ещё нет, Владыка. Повелите — и я выстрою черновик из текущей очереди.</div>`, controls);
   }
 
   const plan = state.plan.plan;
@@ -246,7 +246,7 @@ function planHtml() {
   // The state chip is HTML — it belongs in the (unescaped) panel body, not the
   // title (panel() esc()-escapes the title, which would show raw <span> markup).
   return panel("План печати",
-    `<div class="sch-plan-status">${stateChip}${confirmed}</div><div class="sch-lanes">${timeline || `<div class="slice-empty">Ни одно задание не размещено.</div>`}</div>${unplaced}`,
+    `<div class="sch-plan-status">${stateChip}${confirmed}</div><div class="sch-lanes">${timeline || `<div class="slice-empty">Ни одно задание не нашло себе места — я доложила причины ниже.</div>`}</div>${unplaced}`,
     controls);
 }
 
@@ -302,7 +302,7 @@ function nightHtml() {
             ${c.bufferedEtaSeconds != null ? chip(`≈ ${fmtDuration(c.bufferedEtaSeconds)}${c.preliminary ? " предв." : ""}`, "info") : ""}
           </div>
         </li>`).join("")}</ul>`
-    : `<div class="slice-empty">Нет кандидатов на ночь: нужны готовый слайс, утверждённый набор, известная ETA, достаточно материала, свежая телеметрия, чистый стол, разрешение на печать без присмотра.</div>`;
+    : `<div class="slice-empty">Достойных ночи кандидатов нет, Владыка. Я требую от них: готовый слайс, утверждённый набор, известную ETA, достаток материала, свежую телеметрию, чистый стол и дозволение печатать без присмотра.</div>`;
   const rejected = (n.rejected || []).length
     ? `<details class="slice-details"><summary>Отклонённые кандидаты (${n.rejected.length})</summary>
         <ul class="slice-findings">${n.rejected.map((r) => `<li class="slice-warn">⚠ ${esc(r.title)} → ${esc(r.printerId)}: ${esc((r.reasons || []).join("; "))}</li>`).join("")}</ul>
@@ -343,13 +343,13 @@ function wireDelegates() {
     } else if (action === "up" || action === "down") {
       void moveTask(taskId, action);
     } else if (action === "unpin") {
-      void run(() => apiPost(`/api/print/scheduler/tasks/${taskId}/unpin`), "Закрепление снято");
+      void run(() => apiPost(`/api/print/scheduler/tasks/${taskId}/unpin`), "Закрепление снято, Владыка");
     } else if (action === "build-plan") {
-      void run(() => apiPost("/api/print/scheduler/plans", {}), "Черновик плана построен");
+      void run(() => apiPost("/api/print/scheduler/plans", {}), "Черновик плана выстроен и ожидает вашего суда");
     } else if (action === "recompute") {
-      void run(() => apiPost(`/api/print/scheduler/plans/${id}/recompute`), "План пересчитан (новая ревизия)");
+      void run(() => apiPost(`/api/print/scheduler/plans/${id}/recompute`), "План пересчитан заново (новая ревизия)");
     } else if (action === "confirm") {
-      void run(() => apiPost(`/api/print/scheduler/plans/${id}/confirm`), "План подтверждён");
+      void run(() => apiPost(`/api/print/scheduler/plans/${id}/confirm`), "План подтверждён — да исполнится ваша воля");
     }
   });
 
@@ -364,7 +364,7 @@ function wireDelegates() {
       if (d.material) payload.material = d.material;
       if (d.priority) payload.priority = Number(d.priority);
       if (d.deadline) payload.deadline = inputToIso(d.deadline);
-      void run(() => apiPost("/api/print/scheduler/queue", payload), "Задание добавлено");
+      void run(() => apiPost("/api/print/scheduler/queue", payload), "Задание принято в очередь — я позабочусь о нём, Владыка");
     } else if (kind === "params") {
       const rowEl = form.closest("[data-task]");
       const taskId = rowEl?.dataset.task;
@@ -392,14 +392,14 @@ async function saveParams(taskId, form, d) {
     const pin = d.pin;
     if (pin) await apiPost(`/api/print/scheduler/tasks/${taskId}/pin`, { printer: pin });
     editSnapshots.delete(taskId);
-    toast("Параметры сохранены", "toast-ok");
+    toast("Параметры сохранены в точности, как вы повелели", "toast-ok");
     await loadAll();
   } catch (err) {
     const conflict = /409|конфликт|version/i.test(String(err.message || ""));
     toast(
       esc(conflict
-        ? "Задание изменено в другом окне — форма перечитана, проверьте и сохраните заново"
-        : err.message || "Не удалось сохранить"),
+        ? "Владыка, задание изменили в другом окне — я перечитала форму; соблаговолите проверить и сохранить заново"
+        : `Простите, Владыка — сохранить не удалось: ${err.message || "причина неизвестна"}`),
       "toast-danger"
     );
     editSnapshots.delete(taskId);
@@ -427,7 +427,7 @@ function markStaleForms() {
       banner = document.createElement("div");
       banner.className = "sch-stale slice-warn";
       banner.innerHTML =
-        `⚠ Задание изменено в другом окне — форма устарела, сохранение вернёт конфликт. ` +
+        `⚠ Владыка, задание изменили в другом окне — эта форма устарела, и сохранение честно вернёт конфликт. ` +
         `<button type="button" class="btn btn-sm" data-sch-action="reload-form">Перечитать</button>`;
       form.prepend(banner);
     } else if (!stale && banner) {
@@ -450,7 +450,7 @@ async function moveTask(taskId, dir) {
       position,
       expectedVersion: row.entry.version
     }),
-    "Порядок обновлён"
+    "Порядок в очереди перестроен, Владыка"
   );
 }
 
@@ -460,7 +460,7 @@ async function run(fn, okMsg) {
     toast(okMsg, "toast-ok");
     await loadAll();
   } catch (err) {
-    toast(esc(err.message || "Не удалось выполнить действие"), "toast-danger");
+    toast(`Простите, Владыка — приказ не исполнен: ${esc(err.message || "причина неизвестна")}`, "toast-danger");
     await loadAll();
   }
 }

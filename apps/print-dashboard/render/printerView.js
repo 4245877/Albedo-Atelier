@@ -28,7 +28,7 @@ export function jobLine(p) {
     case "offline":
       return esc(p.error ? `Нет связи: ${p.error}` : "Нет связи с принтером");
     case "idle":
-      return "Свободен — ожидает распоряжений";
+      return "Свободен — смиренно ожидает вашего повеления";
     case "unknown":
     default:
       return esc(p.error || "Состояние неизвестно — принтер ещё не ответил");

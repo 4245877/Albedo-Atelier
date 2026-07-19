@@ -13,12 +13,12 @@ export function renderTopbar(state, backendReachable) {
     pillBackend.innerHTML = `<i class="dot"></i>Backend подключён`;
     const ok = state.service.status === "ok";
     pillService.className = `pill ${ok ? "pill-ok" : "pill-warn"}`;
-    pillService.innerHTML = `<i class="dot dot-pulse"></i>${ok ? "Сервис работает" : "Сервис: внимание"}`;
+    pillService.innerHTML = `<i class="dot dot-pulse"></i>${ok ? "Служба безупречна" : "Сервис: требует внимания"}`;
   } else {
     pillBackend.className = "pill pill-danger";
-    pillBackend.innerHTML = `<i class="dot"></i>Backend недоступен`;
+    pillBackend.innerHTML = `<i class="dot"></i>Backend безмолвствует`;
     pillService.className = "pill pill-warn";
-    pillService.innerHTML = `<i class="dot"></i>Нет данных`;
+    pillService.innerHTML = `<i class="dot"></i>Нет вестей`;
   }
 }
 
@@ -44,7 +44,7 @@ export function renderHero(state) {
   // renderBackendError по результату запроса, а не по полю из ответа).
   const svcOk = state.service.status === "ok";
   $("#hero-pills").innerHTML = `
-    <span class="pill ${svcOk ? "pill-ok" : "pill-danger"}"><i class="dot dot-pulse"></i>${svcOk ? "Порядок безупречен" : "Обнаружены отклонения"}</span>
+    <span class="pill ${svcOk ? "pill-ok" : "pill-danger"}"><i class="dot dot-pulse"></i>${svcOk ? "Порядок безупречен" : "Замечены отклонения — я уже занимаюсь ими"}</span>
     <span class="pill pill-gold"><i class="dot"></i>${esc(state.service.version)}</span>`;
 }
 
@@ -81,24 +81,24 @@ export function renderQueue(state) {
           ${active.map((p) => `
             <li class="row">
               <div class="grow">
-                <div class="row-title">${esc(p.job || "задание не определено")}</div>
+                <div class="row-title">${esc(p.job || "задание не названо")}</div>
                 <div class="row-sub">${esc(p.name)} · осталось ${fmtLeft(p.minutesLeft)}</div>
                 ${progressBarHtml(p.progress, { paused: p.status === "paused", style: "margin-top:7px" })}
               </div>
               <span class="row-time">${progressPercentText(p.progress)}</span>
-            </li>`).join("") || emptyRow("Нет активных печатей")}
+            </li>`).join("") || emptyRow("Ни один принтер не трудится — все смиренно ожидают вашей воли")}
         </ul>
       </div>
       <div>
         <p class="sub-head">Очередь <span class="count">${state.queue.length}</span></p>
-        <ul class="row-list">${state.queue.map(queueRow).join("") || emptyRow("Очередь пуста")}</ul>
+        <ul class="row-list">${state.queue.map(queueRow).join("") || emptyRow("Очередь пуста — Назарик ожидает ваших повелений")}</ul>
       </div>
     </div>
     ${next ? `
       <div class="next-job">
         <span class="star">❖</span>
         <div class="grow">
-          <div class="row-title">Следующее задание: ${esc(next.title)}</div>
+          <div class="row-title">Следующим я подготовила: ${esc(next.title)}</div>
           <div class="row-sub">${esc(next.printer)} · старт в ${esc(next.at)} · ${esc(next.eta)}</div>
         </div>
         <button class="btn btn-sm btn-primary" data-act="start-next">Запустить</button>
@@ -120,12 +120,12 @@ export function renderNight(state) {
 
   const blockersBlock = c && !startable ? `
       <div class="night-part-sub" style="margin-top:6px;color:var(--danger-ink)">
-        ⚠ Не запустится: ${blockers.map((b) => esc(b)).join("; ")}
+        ⚠ Я не позволю этому запуску состояться: ${blockers.map((b) => esc(b)).join("; ")}
       </div>` : "";
 
   const reco = c ? `
     <div class="night-reco">
-      <span class="night-lbl">Рекомендуемая деталь на ночь</span>
+      <span class="night-lbl">Деталь, избранная мною на ночь</span>
       <div class="night-part">${esc(c.title)}</div>
       <div class="night-part-sub">${esc(c.printer)} · ${esc(c.eta)}${startable ? " · впишется в окно печати" : ""}</div>
       ${blockersBlock}
@@ -138,8 +138,8 @@ export function renderNight(state) {
       </div>
     </div>` : `
     <div class="night-reco">
-      <span class="night-lbl">Рекомендуемая деталь на ночь</span>
-      <div class="night-part-sub" style="margin-top:6px">Кандидатов нет — добавьте в очередь готовые задания (с принтером и файлом) или включите «Подсказки ночной печати» в разделе автоматизаций.</div>
+      <span class="night-lbl">Деталь, избранная мною на ночь</span>
+      <div class="night-part-sub" style="margin-top:6px">Достойных кандидатов нет, Владыка — добавьте в очередь готовые задания (с принтером и файлом) или включите «Подсказки ночной печати» в разделе автоматизаций, и я изберу лучшее.</div>
     </div>`;
 
   $("#night-body").innerHTML = `
@@ -156,7 +156,7 @@ export function renderNight(state) {
 /* ── 5 · Критические события ───────────────────────────────── */
 
 export function renderCritical(state) {
-  $("#critical-meta").textContent = state.critical.length ? `${state.critical.length} сейчас` : "нарушений нет";
+  $("#critical-meta").textContent = state.critical.length ? `${state.critical.length} сейчас` : "нарушений не допущено";
   $("#critical-body").innerHTML = `
     <ul class="row-list">
       ${state.critical.map((e) => `
@@ -164,7 +164,7 @@ export function renderCritical(state) {
           <span class="row-icon">${esc(e.icon)}</span>
           <div class="grow"><div class="row-title" style="font-weight:600">${esc(e.text)}</div></div>
           <span class="row-time">${esc(e.time)}</span>
-        </li>`).join("") || emptyRow("Критических событий нет — порядок соблюдён")}
+        </li>`).join("") || emptyRow("Критических событий нет — в зале царит безупречный порядок, как и подобает")}
     </ul>`;
 }
 
@@ -201,7 +201,7 @@ export function renderMaterials(state) {
       <div><p class="sub-head">Филамент</p>${mats.filament.map(matItem).join("")}</div>
       <div><p class="sub-head">Смола</p>${mats.resin.map(matItem).join("")}</div>
     </div>` : `
-    <ul class="row-list">${emptyRow("Остатки материалов неизвестны — учёт склада пока не подключён к backend")}</ul>`;
+    <ul class="row-list">${emptyRow("Остатки материалов мне пока неведомы — учёт склада ещё не подключён к backend")}</ul>`;
 
   const needsBlock = (mats.queueNeeds || []).length ? `
     <div>
@@ -222,8 +222,8 @@ export function renderMaterials(state) {
       <div class="row row-danger">
         <span class="row-icon">◈</span>
         <div class="grow">
-          <div class="row-title">Несоответствие материала</div>
-          <div class="row-sub">«${esc(m.job)}» требует ${esc(m.needs)}, в ${esc(m.printer)} заправлен ${esc(m.loaded)}</div>
+          <div class="row-title">Несоответствие материала — недопустимо</div>
+          <div class="row-sub">«${esc(m.job)}» требует ${esc(m.needs)}, но в ${esc(m.printer)} заправлен ${esc(m.loaded)}</div>
         </div>
       </div>`).join("")}`;
 }
@@ -288,7 +288,7 @@ export function renderAutomations(state) {
           <div class="row-title">${esc(a.name)}</div>
           <div class="row-sub">${esc(a.desc)}</div>
         </div>
-      </div>`).join("") || `<ul class="row-list">${emptyRow("Правила автоматизации не настроены — движок автоматизаций ещё не подключён")}</ul>`}
+      </div>`).join("") || `<ul class="row-list">${emptyRow("Правила автоматизации ещё не установлены — движок автоматизаций пока не подключён, Владыка")}</ul>`}
     <div class="row">
       <span class="row-icon">✠</span>
       <div class="grow"><div class="row-sub">Последний запуск: <b>${esc(state.automationLastRun || "нет данных")}</b></div></div>
@@ -301,11 +301,11 @@ export function renderMaintenance(state) {
   const rows = state.maintenance;
   if (!rows.length) {
     $("#maint-meta").textContent = "нет данных";
-    $("#maint-body").innerHTML = `<ul class="row-list">${emptyRow("История обслуживания не ведётся — реальный учёт пока не подключён")}</ul>`;
+    $("#maint-body").innerHTML = `<ul class="row-list">${emptyRow("Летопись обслуживания ещё не ведётся — реальный учёт пока не подключён")}</ul>`;
     return;
   }
   const due = rows.filter((m) => m.due);
-  $("#maint-meta").textContent = due.length ? `${due.length} требуют внимания` : "всё в порядке";
+  $("#maint-meta").textContent = due.length ? `${due.length} требуют внимания` : "всё содержится безупречно";
   $("#maint-body").innerHTML = `
     ${due.length ? `<div class="chip-line">${due.map((m) => `<span class="badge badge-paused">⚙ ${esc(m.p)}: пора обслужить</span>`).join("")}</div>` : ""}
     <div class="table-wrap">
@@ -358,7 +358,7 @@ export function renderQuick() {
 
 export function renderSystem(state) {
   const warn = state.system.filter((s) => s.ok !== "ok").length;
-  $("#system-meta").textContent = warn ? `${warn} предупреждения` : "все компоненты в норме";
+  $("#system-meta").textContent = warn ? `${warn} предупреждения` : "все компоненты несут службу исправно";
   $("#system-body").innerHTML = `
     <div class="sys-grid">
       ${state.system.map((s) => `
@@ -383,7 +383,7 @@ export function renderFeed(state) {
         <li class="feed-item f-${e.kind}">
           <div class="feed-text">${esc(e.icon)} ${feedText(e.text)}</div>
           <div class="feed-time">${esc(e.time)}</div>
-        </li>`).join("") || `<li class="feed-item f-info"><div class="feed-text">Событий пока нет — лента заполняется реальными переходами статусов принтеров</div></li>`}
+        </li>`).join("") || `<li class="feed-item f-info"><div class="feed-text">Хроника пока чиста — я заношу сюда каждый реальный переход статусов принтеров</div></li>`}
     </ul>`;
 }
 
@@ -392,7 +392,7 @@ export function renderFeed(state) {
 export function renderWarnings(state) {
   $("#warnings-meta").textContent = state.warnings.length
     ? `${state.warnings.length} требуют внимания`
-    : "всё под контролем";
+    : "всё под моим контролем";
   $("#warnings-body").innerHTML = `
     <ul class="row-list">
       ${state.warnings.map((w) => `
@@ -402,7 +402,7 @@ export function renderWarnings(state) {
             <div class="row-title" style="font-weight:600">${esc(w.text)}</div>
             <div class="row-sub">${esc(w.hint)}</div>
           </div>
-        </li>`).join("") || emptyRow("Предупреждений нет")}
+        </li>`).join("") || emptyRow("Предупреждений нет — ничто не смеет тревожить ваш покой, Владыка")}
     </ul>`;
 }
 
@@ -416,11 +416,11 @@ export function renderPlan(state) {
     <div class="plan-next">
       <span class="when">${esc(pl.next.at)}</span>
       <div class="grow">
-        <div class="row-title">Следующая печать: ${esc(pl.next.title)}</div>
+        <div class="row-title">Следующей печатью станет: ${esc(pl.next.title)}</div>
         <div class="row-sub">${esc(pl.next.printer)}</div>
       </div>
     </div>` : `
-    <ul class="row-list">${emptyRow("Следующая печать не запланирована — планировщик пока не подключён, задания запускаются вручную")}</ul>`;
+    <ul class="row-list">${emptyRow("Следующая печать не назначена — планировщик пока не подключён, задания запускаются вашей рукой")}</ul>`;
 
   const upcomingBlock = pl.upcoming.length ? `
     <div>

@@ -106,8 +106,8 @@ async function loadAll({ full = false } = {}) {
 function renderConnectionError() {
   const body = $("#slicing-body");
   if (!body) return;
-  body.innerHTML = `<div class="slice-loading">Backend недоступен — не удалось загрузить раздел.
-    <button type="button" class="btn btn-sm" data-slice-action="reload">↻ Повторить</button></div>`;
+  body.innerHTML = `<div class="slice-loading">Backend безмолвствует, Владыка — раздел не покорился мне с первой попытки.
+    <button type="button" class="btn btn-sm" data-slice-action="reload">↻ Воззвать снова</button></div>`;
 }
 
 function ensurePolling() {
@@ -182,8 +182,8 @@ function errorsHtml() {
   if (!state.errors.length) return "";
   return `
     <div class="slice-panel slice-errbox">
-      <div class="slice-block">⛔ Не удалось загрузить: ${state.errors.map((e) => esc(e)).join(", ")}.
-        Показаны последние известные данные; повтор — автоматически.</div>
+      <div class="slice-block">⛔ Мне не покорились: ${state.errors.map((e) => esc(e)).join(", ")}.
+        Показываю последние достоверные данные; я буду взывать к ним снова сама.</div>
       <button type="button" class="btn btn-sm" data-slice-action="reload">↻ Обновить сейчас</button>
     </div>`;
 }
@@ -286,7 +286,7 @@ function profileRow(p) {
 function setsHtml() {
   if (!state.sets.length) {
     return `<div class="slice-panel"><div class="slice-panel-head"><b>Наборы профилей</b></div>
-      <div class="slice-empty">Пока нет наборов. Создайте набор ниже.</div></div>`;
+      <div class="slice-empty">Наборов пока нет, Владыка. Соблаговолите создать первый ниже.</div></div>`;
   }
   const rows = state.sets.map(setRow).join("");
   return `<div class="slice-panel"><div class="slice-panel-head"><b>Наборы профилей</b></div>
@@ -520,9 +520,9 @@ function wireDelegates() {
     }
     if (busy) return; // мутация уже выполняется — повторный клик игнорируем
     const id = btn.dataset.id;
-    if (action === "import") void run(btn, () => apiPost("/api/print/slicing/presets/import"), "Пресеты импортированы");
-    else if (action === "approve") void run(btn, () => apiPost(`/api/print/slicing/profile-sets/${id}/approve`), "Набор утверждён");
-    else if (action === "rerun") void run(btn, () => apiPost(`/api/print/slicing/variants/${id}/rerun`), "Слайсинг перезапущен");
+    if (action === "import") void run(btn, () => apiPost("/api/print/slicing/presets/import"), "Пресеты импортированы, Владыка");
+    else if (action === "approve") void run(btn, () => apiPost(`/api/print/slicing/profile-sets/${id}/approve`), "Набор утверждён — воля ваша исполнена");
+    else if (action === "rerun") void run(btn, () => apiPost(`/api/print/slicing/variants/${id}/rerun`), "Слайсинг перезапущен — на этот раз всё будет безупречно");
   });
 
   document.addEventListener("submit", (e) => {
@@ -533,15 +533,15 @@ function wireDelegates() {
     const kind = form.dataset.sliceForm;
     // Защита на случай, если кнопка не была disabled: без runtime не запускаем.
     if (kind === "slice" && state.runtime?.runtime?.available === false) {
-      toast("OrcaSlicer недоступен — запуск невозможен. Восстановите среду и повторите.", "toast-danger");
+      toast("Владыка, OrcaSlicer безмолвствует — запуск невозможен. Восстановите среду, и я тотчас продолжу.", "toast-danger");
       return;
     }
     const submitBtn = form.querySelector('button[type="submit"]');
     const data = Object.fromEntries(new FormData(form).entries());
     if (kind === "create-set") {
-      void run(submitBtn, () => apiPost("/api/print/slicing/profile-sets", data), "Набор создан");
+      void run(submitBtn, () => apiPost("/api/print/slicing/profile-sets", data), "Набор создан и представлен на проверку, Владыка");
     } else if (kind === "slice") {
-      void run(submitBtn, () => apiPost("/api/print/slicing/slice", data), "Слайсинг запущен");
+      void run(submitBtn, () => apiPost("/api/print/slicing/slice", data), "Слайсинг начат — я лично прослежу за каждым слоем");
     }
   });
 
@@ -559,7 +559,7 @@ async function run(btn, fn, okMsg) {
     await fn();
     toast(okMsg, "toast-ok");
   } catch (err) {
-    toast(esc(err.message || "Не удалось выполнить действие"), "toast-danger");
+    toast(`Простите, Владыка — приказ не исполнен: ${esc(err.message || "причина неизвестна")}`, "toast-danger");
   } finally {
     busy = false;
     // Действие завершено — полная перерисовка сбросит disabled и очистит форму.

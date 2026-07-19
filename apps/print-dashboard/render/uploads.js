@@ -47,8 +47,8 @@ export function setupUploads() {
          aria-label="Загрузить файлы: перетащите сюда или выберите">
       <div class="upload-drop-icon" aria-hidden="true">⇪</div>
       <div class="upload-drop-text">
-        <b>Перетащите файлы сюда</b>
-        <span>или <button type="button" class="upload-pick" id="upload-pick">выберите на диске</button></span>
+        <b>Вверьте мне ваши файлы, Владыка</b>
+        <span>перетащите сюда или <button type="button" class="upload-pick" id="upload-pick">выберите на диске</button></span>
       </div>
       <div class="upload-drop-hint">STL, 3MF, G-code · до нескольких файлов сразу</div>
       <input type="file" id="upload-input" accept="${ACCEPT}" multiple hidden />
@@ -171,7 +171,7 @@ async function doUpload(item) {
     item.stage = "error";
     item.error = err?.message || "Не удалось загрузить файл";
     render();
-    toast(`«${esc(item.name)}»: ${esc(item.error)}`, "toast-danger");
+    toast(`Простите, Владыка — файл «${esc(item.name)}» не принят: ${esc(item.error)}`, "toast-danger");
   }
 }
 
@@ -296,7 +296,7 @@ async function reanalyze(artifactId) {
     ensurePolling();
   } catch (err) {
     item.stage = "failed";
-    toast(`Не удалось перезапустить анализ: ${esc(err.message)}`, "toast-danger");
+    toast(`Простите, Владыка — анализ не перезапустился: ${esc(err.message)}`, "toast-danger");
   }
 }
 
@@ -376,7 +376,7 @@ function analysisHtml(item, a) {
   if (a.state === "failed") {
     return `
       <div class="upload-analysis">
-        <div class="upload-error">Анализ не удался: ${esc(a.error || "неизвестная ошибка")}</div>
+        <div class="upload-error">Анализ не удался — досадная оплошность: ${esc(a.error || "неизвестная ошибка")}</div>
         <div class="upload-actions">
           <button type="button" class="btn btn-sm" data-reanalyze="${esc(item.artifact.id)}">↻ Повторить анализ</button>
         </div>

@@ -51,7 +51,7 @@ test("jobLine: согласованные тексты всех реальных
     jobLine(printer({ status: "printing" })),
     "Печатает — название задания не определено"
   );
-  assert.equal(jobLine(printer({ status: "idle" })), "Свободен — ожидает распоряжений");
+  assert.equal(jobLine(printer({ status: "idle" })), "Свободен — смиренно ожидает вашего повеления");
   assert.equal(jobLine(printer({ status: "offline" })), "Нет связи с принтером");
   assert.equal(jobLine(printer({ status: "offline", error: "timeout" })), "Нет связи: timeout");
   assert.equal(jobLine(printer({ status: "error" })), '<b class="job-error">Ошибка</b>');

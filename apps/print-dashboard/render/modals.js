@@ -160,7 +160,7 @@ function printerModalHtml(p, light) {
 export function openPrinterModal(id) {
   const p = findPrinter(id);
   if (!p) {
-    toast("Принтер не найден в текущем состоянии фермы", "toast-danger");
+    toast("Владыка, этот принтер ускользнул из моего поля зрения — в текущем состоянии фермы его нет", "toast-danger");
     return;
   }
   const light = findLight(id);
@@ -254,11 +254,11 @@ function filesListHtml(p, entries) {
   const dead = p.status === "offline";
   const startBlocked = !p.remoteStartSupported || busy || dead;
   const blockedNote = !p.remoteStartSupported
-    ? "Удалённый запуск для этого принтера не поддерживается — запустите файл на самом принтере."
+    ? "Удалённый запуск этому принтеру не дозволен его протоколом — запустите файл на самом принтере, Владыка."
     : dead
-      ? "Принтер не в сети — запуск недоступен."
+      ? "Принтер безмолвствует — запуск сейчас невозможен."
       : busy
-        ? "Принтер занят печатью — запуск станет доступен после завершения."
+        ? "Принтер уже трудится — запуск станет возможен, едва он завершит начатое."
         : "";
 
   if (entries.length === 0) {
@@ -276,7 +276,7 @@ function filesListHtml(p, entries) {
     }
     const disabled = startBlocked || !e.printable;
     const title = !e.printable
-      ? "Не файл G-code — запустить нельзя"
+      ? "Это не файл G-code — запускать его я не позволю"
       : blockedNote || `Запустить «${e.name}» на печать`;
     return `
       <div class="file-row">
@@ -301,7 +301,7 @@ function isCurrentFiles(printerId, path) {
 export async function openFilesModal(printerId, path = "") {
   const p = findPrinter(printerId);
   if (!p) {
-    toast("Принтер не найден в текущем состоянии фермы", "toast-danger");
+    toast("Владыка, этот принтер ускользнул из моего поля зрения — в текущем состоянии фермы его нет", "toast-danger");
     return;
   }
   if (!p.filesSupported) {
@@ -325,7 +325,7 @@ export async function openFilesModal(printerId, path = "") {
     $("#modal-content").innerHTML = filesShellHtml(
       p,
       path,
-      `<div class="files-note files-error">${esc(err.message || "Не удалось получить список файлов")}</div>`
+      `<div class="files-note files-error">Простите, Владыка — список файлов мне не покорился: ${esc(err.message || "причина неизвестна")}</div>`
     );
   }
 }
@@ -334,17 +334,17 @@ async function startFileFromBrowser(printerId, filePath, btn) {
   const p = findPrinter(printerId);
   if (!p || !filePath) return;
   // Подтверждение обязательно: запуск занимает принтер и греет столы-сопла.
-  if (!window.confirm(`Запустить печать «${filePath}» на «${p.name}»?`)) return;
+  if (!window.confirm(`Владыка, повелеваете начать печать «${filePath}» на «${p.name}»?`)) return;
 
   btn.disabled = true;
   try {
     await apiPost(`/api/printers/${encodeURIComponent(printerId)}/print`, { file: filePath });
     await deps.refresh();
-    toast(`«${esc(p.name)}»: печать «${esc(filePath)}» запущена ▶`, "toast-ok");
+    toast(`«${esc(p.name)}»: печать «${esc(filePath)}» начата по вашему велению ▶`, "toast-ok");
     // Возвращаемся к деталям принтера — там прогресс и камера.
     openPrinterModal(printerId);
   } catch (err) {
-    toast(esc(err.message || "Не удалось запустить печать"), "toast-danger");
+    toast(`Простите, Владыка — печать не началась: ${esc(err.message || "причина неизвестна")}`, "toast-danger");
     if (btn.isConnected) btn.disabled = false;
   }
 }
@@ -412,7 +412,7 @@ async function onJobSubmit(e) {
   const data = new FormData(form);
   const title = String(data.get("title") || "").trim();
   if (!title) {
-    errBox.textContent = "Укажите название задания";
+    errBox.textContent = "Владыка, задание должно носить имя — укажите название";
     errBox.hidden = false;
     return;
   }
@@ -431,9 +431,9 @@ async function onJobSubmit(e) {
     await deps.refresh();
     closeModal();
     const label = res?.job?.title ? `«${esc(res.job.title)}»` : "Задание";
-    toast(`${label} добавлено в очередь`, "toast-ok");
+    toast(`${label} принято в очередь — я прослежу за ним лично, Владыка`, "toast-ok");
   } catch (err) {
-    errBox.textContent = err.message || "Не удалось добавить задание";
+    errBox.textContent = `Простите, Владыка — задание не принято: ${err.message || "причина неизвестна"}`;
     errBox.hidden = false;
     submitBtn.disabled = false;
   }
@@ -443,46 +443,48 @@ async function onJobSubmit(e) {
 
 const INFO = {
   "add-printer": {
-    title: "Добавление принтера",
+    title: "Принятие принтера в Назарик",
     body: `
-      <p>Принтеры описываются в конфигурации backend, а не создаются из панели —
-      так их настройки (протокол, адрес, ключи) остаются под контролем и переживают
-      перезапуск.</p>
+      <p>Владыка, новые принтеры принимаются через конфигурацию backend, а не из
+      панели — так их настройки (протокол, адрес, ключи) остаются под строгим
+      контролем и переживают любой перезапуск. Порядок превыше поспешности.</p>
       <p>Добавьте запись в <code>config/printers.json</code> сервиса
       <b>print-orchestrator</b> (или переменную <code>PRINTERS_CONFIG_JSON</code>) с полями
       <code>id</code>, <code>name</code>, <code>host</code>, <code>protocol</code>
       (<code>moonraker</code> · <code>bambu</code> · <code>creality</code>). После перезапуска
-      сервиса принтер появится в зале.</p>`
+      сервиса я немедля приму новобранца под свой надзор.</p>`
   },
   "upload-file": {
-    title: "Загрузка файла печати",
+    title: "Вручение файла печати",
     body: `
-      <p>Удалённая загрузка файлов на принтеры пока не подключена — панель не хранит
-      слайсы и не толкает их на устройства.</p>
+      <p>Удалённая доставка файлов на принтеры пока не подключена, Владыка — панель
+      не хранит слайсы и не передаёт их на устройства. Я не стану обещать то, чего
+      не могу исполнить безупречно.</p>
       <p>Положите нарезанный файл на принтер привычным путём (веб-интерфейс Moonraker/
       Bambu, SD-карта или USB), затем создайте задание кнопкой
       <b>«Добавить задание»</b> и укажите имя этого файла в поле
-      <b>«Файл на принтере»</b> — тогда его можно будет запустить удалённо из очереди.</p>
-      <p>Файлы, уже лежащие на Moonraker-принтере (Creality K2), можно посмотреть и
-      запустить напрямую: откройте принтер и нажмите <b>«🗂 Файлы»</b>.</p>`
+      <b>«Файл на принтере»</b> — тогда я смогу запустить его удалённо из очереди.</p>
+      <p>Файлы, уже покоящиеся на Moonraker-принтере (Creality K2), доступны сразу:
+      откройте принтер и нажмите <b>«🗂 Файлы»</b>.</p>`
   },
   "files-unsupported": {
     title: "Файлы принтера",
     body: `
-      <p>Просмотр файлов и удалённый запуск пока поддерживаются только для
-      Moonraker-принтеров.</p>
+      <p>Просмотр файлов и удалённый запуск пока подвластны мне лишь для
+      Moonraker-принтеров, Владыка.</p>
       <p>Для Bambu Lab и Creality (WebSocket) запускайте печать с самого принтера
-      или из фирменного приложения; задание при этом можно вести в очереди панели.</p>`
+      или из фирменного приложения; задание я всё равно буду вести в очереди панели —
+      ни одно не останется без присмотра.</p>`
   },
   settings: {
     title: "Настройки",
     body: `
-      <p>Тема зала (тьма / свет / авто по времени) переключается кнопкой в правом
+      <p>Облик зала (тьма / свет / авто по времени) переключается кнопкой в правом
       верхнем углу и запоминается в браузере.</p>
       <p>Параметры backend — интервал опроса принтеров, ночное окно, путь к файлу
       состояния, токен управления — задаются переменными окружения сервиса
-      <b>print-orchestrator</b>. Текущее состояние сервиса, опроса и хранилища видно
-      в разделе <b>«Системное состояние»</b>.</p>`
+      <b>print-orchestrator</b>. Текущее состояние сервиса, опроса и хранилища я
+      честно показываю в разделе <b>«Системное состояние»</b>.</p>`
   }
 };
 
@@ -495,6 +497,6 @@ export function openInfoModal(kind) {
     <div class="modal-head"><h2 id="modal-title">${esc(info.title)}</h2></div>
     <div class="modal-info">${info.body}</div>
     <div class="modal-actions">
-      <button type="button" class="btn btn-sm btn-primary" data-modal-close>Понятно</button>
+      <button type="button" class="btn btn-sm btn-primary" data-modal-close>Да будет так</button>
     </div>`;
 }

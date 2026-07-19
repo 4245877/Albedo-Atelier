@@ -148,7 +148,7 @@ export function renderPrinters(state) {
   $("#printers-meta").textContent =
     `${p.filter((x) => x.status === "printing").length} печатают · ${p.filter((x) => x.status === "idle").length} свободны · ${p.length} всего`;
   $("#printer-grid").innerHTML = p.map((x) => printerCard(x, lightsById.get(x.id))).join("") ||
-    `<div class="row"><div class="grow row-sub">Принтеры не настроены — добавьте их в config/printers.json на backend</div></div>`;
+    `<div class="row"><div class="grow row-sub">В зале ещё нет ни одного принтера, Владыка — впишите их в config/printers.json на backend, и я приму каждого под надзор</div></div>`;
 }
 
 export function renderCameras(state) {
@@ -163,6 +163,6 @@ export function renderCameras(state) {
         <div class="cam-thumb" data-act="open" data-id="${p.id}" title="Открыть ${esc(p.name)}">
           <span class="cam-thumb-name">${esc(p.name)}</span>
           ${camBlock(p, "thumb")}
-        </div>`).join("") || `<ul class="row-list" style="grid-column:1/-1">${emptyRow("Ни у одного принтера не настроена камера (snapshotUrl в конфигурации)")}</ul>`}
+        </div>`).join("") || `<ul class="row-list" style="grid-column:1/-1">${emptyRow("Ни один принтер не открыт моему взору — камеры не настроены (snapshotUrl в конфигурации)")}</ul>`}
     </div>`;
 }
