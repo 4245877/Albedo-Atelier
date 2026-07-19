@@ -11,9 +11,13 @@ docker compose down
 docker compose up -d --build
 ```
 
-Dashboard (the entry point, published on the LAN):
+Dashboard (the entry point):
 
 - `http://localhost:8090`
+
+It binds to `127.0.0.1` by default. For intentional LAN access, set
+`DASHBOARD_BIND=0.0.0.0` in `.env`; then use the host address, for example
+`http://192.168.0.139:8090/`.
 
 The dashboard calls the orchestrator same-origin through its nginx proxy, so the
 API is reached at `http://localhost:8090/api/print-orchestrator/...`, e.g.:
@@ -36,9 +40,10 @@ service README for details and `STATE_FILE_PATH`.
 ### Ports & security
 
 The **orchestrator control API is not published to the host** — it is reachable
-only over the compose network. Only the dashboard (`8090`) and the go2rtc WebRTC
-media port (`8555`, required for live K2 video) are exposed on `0.0.0.0`; the
-go2rtc API (`1985`) is bound to localhost.
+only over the compose network. The dashboard (`8090`) is bound to localhost
+unless `DASHBOARD_BIND=0.0.0.0` is explicitly set. The go2rtc WebRTC media port
+(`8555`, required for live K2 video) is exposed on `0.0.0.0`; the go2rtc API
+(`1985`) is bound to localhost.
 
 > ⚠️ **Trust assumption:** the dashboard on `8090` is served on the LAN without
 > its own login and proxies the control API same-origin
@@ -62,7 +67,8 @@ go2rtc API (`1985`) is bound to localhost.
 >   the same variable to both containers), so the buttons keep working while
 >   direct access to the control API (compose network / `print-farm`) is gated.
 >   Mirror the value in fulfillment's `PRINTER_ORCHESTRATOR_API_TOKEN`. When the
->   token is unset the guard is disabled and a warning is logged on startup.
+>   token is unset, mutations are refused with 503 unless the deployment makes
+>   the explicit isolated-network opt-in `ALLOW_UNAUTHENTICATED_MUTATIONS=1`.
 > - **go2rtc:** only the signaling WebSocket (`/go2rtc/api/ws`) is proxied; the
 >   rest of the go2rtc HTTP API (config editing, restart) is not reachable
 >   through the dashboard, and go2rtc's own API port stays bound to localhost.
@@ -122,4 +128,3 @@ metric. Prefer deploying while no print is mid-run when that matters.
 
 Package manager: **pnpm** (`corepack enable`). The dashboard is static assets;
 `apps/print-orchestrator` is the only Node project.
-

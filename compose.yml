@@ -36,6 +36,11 @@ services:
       HOST: 0.0.0.0
       PORT: 3100
       LOG_LEVEL: info
+      # Fastify's default 10 s plugin/onReady budget is shorter than a valid
+      # first device poll (status -> light policy -> camera). Keep this below
+      # the healthcheck start_period so slow/offline printers do not create a
+      # restart loop and a transient unhealthy dependency.
+      STARTUP_TIMEOUT_MS: ${STARTUP_TIMEOUT_MS:-45000}
       PRINTERS_CONFIG_PATH: /app/config/printers.json
       PRINTER_POLL_INTERVAL_MS: 10000
       # Durable state (operator queue, event feed, today counters). Lives on the
@@ -120,7 +125,7 @@ services:
       # the poll loop goes stale, so the container is only "healthy" when it is
       # actually serving live data. /health always returns ok and would mask a
       # dead poll loop. A merely degraded farm still returns 200. start_period
-      # covers the first poll so startup is not flagged unhealthy.
+      # covers the full startup-hook budget so startup is not flagged unhealthy.
       test:
         [
           "CMD",
@@ -131,7 +136,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-      start_period: 20s
+      start_period: 60s
     restart: unless-stopped
 
   print-dashboard:
@@ -154,7 +159,13 @@ services:
       # see SECURITY.md for the firewall/VLAN checklist).
       - "${DASHBOARD_BIND:-127.0.0.1}:8090:8080"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080 >/dev/null 2>&1 || exit 1"]
+      # Check both nginx and its real upstream path. A static-only probe would
+      # report healthy while every dashboard API call returned 502/503.
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 && wget -qO- http://127.0.0.1:8080/api/print-orchestrator/ready >/dev/null 2>&1 || exit 1"
+        ]
       interval: 10s
       timeout: 3s
       retries: 5

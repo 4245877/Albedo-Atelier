@@ -361,6 +361,16 @@ export const env = Object.freeze({
   host: process.env.HOST ?? "0.0.0.0",
   port: readInteger(process.env.PORT, 3100),
   logLevel: process.env.LOG_LEVEL ?? "info",
+  /**
+   * Maximum time Fastify may spend loading plugins and running startup hooks.
+   * The onReady hook includes the first real device poll, whose bounded network
+   * phases can legitimately take longer than Fastify's 10 s default.
+   */
+  startupTimeoutMs: readPositiveInt(
+    "STARTUP_TIMEOUT_MS",
+    process.env.STARTUP_TIMEOUT_MS,
+    45_000
+  ),
   /** How often the farm polls real printers for live status. */
   printerPollIntervalMs: readInteger(process.env.PRINTER_POLL_INTERVAL_MS, 10000),
   /**

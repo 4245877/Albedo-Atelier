@@ -16,6 +16,7 @@ import { registerMonitoringRoutes } from "./modules/monitoring/routes";
 import { registerPrintQueueRoutes } from "./modules/print/routes";
 import { registerPrinterRoutes } from "./modules/printers/routes";
 import { registerQueueRoutes } from "./modules/queue/routes";
+import { env } from "./shared/env";
 import { loggerConfig } from "./shared/logger";
 
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -23,6 +24,11 @@ const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
   const app = Fastify({
     logger: loggerConfig,
+    // onReady waits for the first real-printer poll. Its status, light and
+    // camera phases each have bounded network timeouts, so Fastify's 10 s
+    // default is too short for a valid degraded startup. Callers/tests can
+    // still override this through `options`.
+    pluginTimeout: env.startupTimeoutMs,
     ...options
   });
 
