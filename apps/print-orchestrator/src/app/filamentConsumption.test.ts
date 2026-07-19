@@ -386,6 +386,296 @@ function feed(events: EventFeed): string {
     .join("\n");
 }
 
+// ── Sub-gram carry (micro-consumption) ──────────────────────────────────────
+
+test("a sub-gram Bambu consumption is carried, not sent — no movement, no key used", async () => {
+  const inventory = recordingInventory();
+  let persisted = 0;
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed(), () => {
+    persisted += 1;
+  });
+
+  // 0.05 % of 1000 g = 0.5 g — below the 1 g minimum unit.
+  consumption.consumeForPrint(
+    printer(),
+    status(),
+    status({ amsTrays: [tray(0, 49.95)] }),
+    { printId: "run-1", amsStart: [tray(0, 50)] },
+    "tiny.3mf"
+  );
+  await flush();
+
+  assert.equal(inventory.calls.length, 0, "nothing below the minimum unit is sent");
+  assert.deepEqual(consumption.serializeCarry(), { "a1:t0": { grams: 0.5 } });
+  assert.ok(persisted >= 1, "the carry survives via persistence");
+});
+
+test("the carry is folded into the next print's deduction exactly once", async () => {
+  const inventory = recordingInventory();
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed(), () => {}, [], {
+    initialCarry: { "a1:t0": { grams: 0.5 } }
+  });
+
+  // Another 0.5 g print: 0.5 carried + 0.5 new = 1 g → sent.
+  consumption.consumeForPrint(
+    printer(),
+    status(),
+    status({ amsTrays: [tray(0, 49.95)] }),
+    { printId: "run-2", amsStart: [tray(0, 50)] },
+    "tiny.3mf"
+  );
+  await flush();
+
+  assert.equal(inventory.calls.length, 1);
+  assert.equal(inventory.calls[0].grams, 1);
+  assert.equal(inventory.calls[0].idempotencyKey, "a1:run-2:t0", "the key belongs to the real deduction");
+  assert.deepEqual(consumption.serializeCarry(), {}, "the carry is zeroed once it rides in a payload");
+});
+
+test("a queued redelivery does not re-add the carried remainder", async () => {
+  const inventory = flakyInventory(1, () => new FulfillmentError("склад недоступен", "unreachable"));
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed(), () => {}, [], {
+    initialCarry: { "a1:t0": { grams: 0.7 } }
+  });
+
+  consumption.consumeForPrint(
+    printer(),
+    status(),
+    status({ amsTrays: [tray(0, 49.94)] }), // 0.6 g + 0.7 carried = 1.3 g
+    { printId: "run-3", amsStart: [tray(0, 50)] },
+    null
+  );
+  await flush();
+
+  assert.equal(consumption.pendingCount, 1, "the combined payload is queued");
+  assert.deepEqual(consumption.serializeCarry(), {}, "carry is spent before delivery, not after");
+
+  consumption.serialize()[0].nextAttemptAtMs = 0;
+  await consumption.retryPending();
+
+  assert.equal(inventory.calls.length, 2);
+  assert.equal(inventory.calls[1].grams, inventory.calls[0].grams, "redelivery retries the same amount");
+  assert.ok(
+    Math.abs((inventory.calls[1].grams as number) - 1.3) < 1e-9,
+    "the carry rode along exactly once"
+  );
+});
+
+test("a short Moonraker length is carried per printer until it reaches the unit", async () => {
+  const inventory = recordingInventory();
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed());
+  const k2 = printer({ id: "k2", protocol: "moonraker" });
+
+  consumption.consumeForPrint(k2, status(), status({ filamentUsedMm: 200 }), { printId: "r1", amsStart: null }, null);
+  await flush();
+  assert.equal(inventory.calls.length, 0, "200 mm is below the minimum length");
+  assert.deepEqual(consumption.serializeCarry(), { "k2:main": { lengthMm: 200 } });
+
+  consumption.consumeForPrint(k2, status(), status({ filamentUsedMm: 200 }), { printId: "r2", amsStart: null }, null);
+  await flush();
+  assert.equal(inventory.calls.length, 1);
+  assert.equal(inventory.calls[0].lengthMm, 400, "carried mm folded into the next real deduction");
+  assert.deepEqual(consumption.serializeCarry(), {});
+});
+
+// ── Auth failures (401/403 — configuration, not network) ───────────────────
+
+test("an auth refusal queues the deduction and notifies the operator ONCE", async () => {
+  const inventory = flakyInventory(
+    99,
+    () => new FulfillmentError("склад отклонил сервисную авторизацию (HTTP 401)", "auth")
+  );
+  const events = new EventFeed();
+  const consumption = new FilamentConsumption(inventory.client, events);
+  const k2 = printer({ id: "k2", protocol: "moonraker" });
+
+  consumption.consumeForPrint(k2, status(), status({ filamentUsedMm: 500 }), { printId: "r1", amsStart: null }, "a.gcode");
+  await flush();
+  consumption.consumeForPrint(k2, status(), status({ filamentUsedMm: 600 }), { printId: "r2", amsStart: null }, "b.gcode");
+  await flush();
+
+  assert.equal(consumption.pendingCount, 2, "auth failures are queued (not processed server-side)");
+  assert.equal(
+    events.list().filter((event) => event.text.includes("авторизаци")).length,
+    1,
+    "one config-error event per outage — no duplicate spam"
+  );
+
+  // Redelivery keeps failing on auth: entries stay owed, still no extra event.
+  for (const entry of consumption.serialize()) entry.nextAttemptAtMs = 0;
+  await consumption.retryPending();
+  assert.equal(consumption.pendingCount, 2);
+  assert.equal(events.list().filter((event) => event.text.includes("авторизаци")).length, 1);
+});
+
+test("the serialized queue contains no tokens or HTTP headers", async () => {
+  const inventory = flakyInventory(99, () => new FulfillmentError("склад недоступен", "unreachable"));
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed());
+  const k2 = printer({ id: "k2", protocol: "moonraker" });
+
+  consumption.consumeForPrint(k2, status(), status({ filamentUsedMm: 500 }), { printId: "r1", amsStart: null }, null);
+  await flush();
+
+  const serialized = JSON.stringify(consumption.serialize()).toLowerCase();
+  assert.doesNotMatch(serialized, /token/, "no token-like fields are persisted");
+  assert.doesNotMatch(serialized, /header/, "no header state is persisted");
+  // `note` may be present (undefined) on the in-memory payload; JSON drops it.
+  const keys = Object.keys(JSON.parse(JSON.stringify(consumption.serialize()[0].input)));
+  assert.deepEqual(
+    keys.sort(),
+    ["idempotencyKey", "lengthMm", "printJobId", "printerId"].sort(),
+    "the queue stores only the business payload"
+  );
+});
+
+// ── Queue bounds: overflow + expiry are loud and counted ────────────────────
+
+test("queue overflow drops the OLDEST entry with an operator event and a metric", async () => {
+  const inventory = flakyInventory(99, () => new FulfillmentError("склад недоступен", "unreachable"));
+  const events = new EventFeed();
+  const consumption = new FilamentConsumption(inventory.client, events, () => {}, [], { maxPending: 1 });
+  const k2 = printer({ id: "k2", protocol: "moonraker" });
+
+  consumption.consumeForPrint(k2, status(), status({ filamentUsedMm: 500 }), { printId: "r1", amsStart: null }, "old.gcode");
+  await flush();
+  consumption.consumeForPrint(k2, status(), status({ filamentUsedMm: 600 }), { printId: "r2", amsStart: null }, "new.gcode");
+  await flush();
+
+  assert.equal(consumption.pendingCount, 1, "the cap holds");
+  assert.equal(consumption.serialize()[0].input.printJobId, "r2", "the newest entry survives");
+  assert.equal(consumption.metrics().dropped.overflow, 1, "the drop is counted with its reason");
+  assert.match(feed(events), /переполнена/);
+  assert.match(feed(events), /old\.gcode/, "the dropped deduction is named for manual recovery");
+});
+
+test("expiry records the reason in the metric and the feed", async () => {
+  const inventory = flakyInventory(99, () => new FulfillmentError("таймаут", "unreachable"));
+  const events = new EventFeed();
+  const pending: PendingConsume[] = [
+    {
+      input: { printerId: "k2", lengthMm: 500, printJobId: "run-7", idempotencyKey: "k2:run-7" },
+      printerName: "Creality K2",
+      attempts: 50,
+      nextAttemptAtMs: 0,
+      firstFailedAtMs: Date.now() - 8 * 24 * 60 * 60 * 1000
+    }
+  ];
+  const consumption = new FilamentConsumption(inventory.client, events, () => {}, pending);
+
+  await consumption.retryPending();
+
+  assert.equal(consumption.pendingCount, 0);
+  assert.equal(consumption.metrics().dropped.expired, 1);
+  assert.match(feed(events), /отброшено/);
+});
+
+test("a rejected retry is counted under its own drop reason", async () => {
+  const inventory = flakyInventory(99, () => new FulfillmentError("недостаточно остатка", "rejected"));
+  const pending: PendingConsume[] = [
+    {
+      input: { printerId: "k2", lengthMm: 500, printJobId: "run-8", idempotencyKey: "k2:run-8" },
+      printerName: "Creality K2",
+      attempts: 1,
+      nextAttemptAtMs: 0,
+      firstFailedAtMs: Date.now()
+    }
+  ];
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed(), () => {}, pending);
+
+  await consumption.retryPending();
+
+  assert.equal(consumption.metrics().dropped.rejected, 1);
+});
+
+// ── Offline-completion recovery (consumeAfterReconnect) ─────────────────────
+
+test("Bambu offline completion: the remain drop is recovered with the normal keys", async () => {
+  const inventory = recordingInventory();
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed());
+
+  const result = consumption.consumeAfterReconnect(
+    printer(),
+    status({ amsTrays: [tray(0, 80)] }),
+    { printId: "run-off", amsStart: [tray(0, 100)] },
+    "model.3mf"
+  );
+  await flush();
+
+  assert.equal(result, "deducted");
+  assert.equal(inventory.calls.length, 1);
+  assert.equal(inventory.calls[0].grams, 200);
+  assert.equal(inventory.calls[0].idempotencyKey, "a1:run-off:t0", "the run's original key — dedupable");
+});
+
+test("Bambu offline completion with unmeasurable trays is honestly unknown", async () => {
+  const inventory = recordingInventory();
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed());
+
+  const result = consumption.consumeAfterReconnect(
+    printer(),
+    status({ amsTrays: [tray(0, null)] }),
+    { printId: "run-off", amsStart: [tray(0, null)] },
+    null
+  );
+  await flush();
+
+  assert.equal(result, "unknown");
+  assert.equal(inventory.calls.length, 0, "nothing is invented");
+});
+
+test("Moonraker offline completion: a confirmed end state trusts the length counter", async () => {
+  const inventory = recordingInventory();
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed());
+  const k2 = printer({ id: "k2", protocol: "moonraker" });
+
+  const result = consumption.consumeAfterReconnect(
+    k2,
+    status({ stateText: "complete", progressPct: 100, filamentUsedMm: 1234 }),
+    { printId: "run-off", amsStart: null },
+    "vase.gcode"
+  );
+  await flush();
+
+  assert.equal(result, "deducted");
+  assert.equal(inventory.calls[0].lengthMm, 1234);
+  assert.equal(inventory.calls[0].idempotencyKey, "k2:run-off");
+});
+
+test("Moonraker offline cancellation with real usage still deducts", async () => {
+  const inventory = recordingInventory();
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed());
+  const k2 = printer({ id: "k2", protocol: "moonraker" });
+
+  const result = consumption.consumeAfterReconnect(
+    k2,
+    status({ stateText: "cancelled", filamentUsedMm: 900 }),
+    { printId: "run-off", amsStart: null },
+    null
+  );
+  await flush();
+
+  assert.equal(result, "deducted", "a cancelled print's measured usage is still material spent");
+  assert.equal(inventory.calls[0].lengthMm, 900);
+});
+
+test("Moonraker offline end without a confirmed state is unknown (rebooted counter)", async () => {
+  const inventory = recordingInventory();
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed());
+  const k2 = printer({ id: "k2", protocol: "moonraker" });
+
+  // Klipper restarted while offline: idle/standby, counter reset — nothing trustworthy.
+  const result = consumption.consumeAfterReconnect(
+    k2,
+    status({ stateText: "standby", filamentUsedMm: 0 }),
+    { printId: "run-off", amsStart: null },
+    null
+  );
+  await flush();
+
+  assert.equal(result, "unknown");
+  assert.equal(inventory.calls.length, 0);
+});
+
 test("Bambu completion with unmeasurable trays warns once that deduction was skipped", () => {
   const inventory = recordingInventory();
   const events = new EventFeed();

@@ -14,7 +14,10 @@ export interface MonitoringRoutesOptions {
  *
  *   POST /lease — create or extend the farm-wide "operator is watching" lease.
  *
- * The dashboard calls it every ~30 s while its tab is visible; the lease
+ *   GET /filament-queue — filament-deduction retry-queue metrics: backlog size
+ *   and the per-reason counters of finally-dropped deductions.
+ *
+ * The dashboard calls the lease every ~30 s while its tab is visible; the lease
  * expires by itself (no release endpoint), so a closed tab or a backend
  * restart safely returns the lights to the schedule. A POST, deliberately not
  * a side effect of any camera/image read (the nginx proxy keeps blocking
@@ -28,4 +31,6 @@ export async function registerMonitoringRoutes(
   const farmStore = opts.store ?? defaultFarmStore;
 
   app.post("/lease", async () => farmStore.renewMonitoringLease());
+
+  app.get("/filament-queue", async () => farmStore.filamentQueueStats());
 }

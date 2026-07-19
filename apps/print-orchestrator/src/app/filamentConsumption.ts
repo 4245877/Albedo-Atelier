@@ -3,8 +3,10 @@ import type { PrinterLiveStatus } from "../infra/printers/status";
 import { bambuMeasurableTrayCount, bambuTrayUsage } from "../infra/printers/status/bambuUsage";
 import type { AmsTraySnapshot } from "../infra/printers/status/types";
 import { FulfillmentError } from "../infra/fulfillment/inventoryClient";
+import { env } from "../shared/env";
 import type { StoreLogger } from "../shared/logger";
 import type { EventFeed } from "./eventFeed";
+import { classifyPrintOutcome } from "./printOutcome";
 
 /**
  * The slice of the fulfillment inventory client the farm needs: deduct filament
@@ -29,10 +31,12 @@ export type ConsumePayload = {
 };
 
 /**
- * One deduction that could not be delivered to fulfillment (unreachable/5xx)
+ * One deduction that could not be delivered to fulfillment (unreachable/5xx/auth)
  * and is awaiting redelivery. The payload is retried verbatim: its
  * `idempotencyKey` makes redelivery safe even if the original request did land.
  * Persisted with the farm state so a restart cannot lose an owed deduction.
+ * Deliberately payload-only — no HTTP headers, no tokens: authorization is
+ * attached by the client at send time, never stored here.
  */
 export type PendingConsume = {
   input: ConsumePayload;
@@ -46,13 +50,32 @@ export type PendingConsume = {
   firstFailedAtMs: number;
 };
 
+/**
+ * Sub-gram consumption carried per printer×slot until it reaches the minimum
+ * deductible unit (see MIN_CONSUME_*). Persisted with the farm state so tiny
+ * prints do not systematically evaporate across restarts. Keyed
+ * `printerId:main` / `printerId:t<slot>`.
+ */
+export type FilamentCarry = Record<string, { grams?: number; lengthMm?: number }>;
+
+/** Why a queued deduction was finally dropped (metric + operator event reason). */
+export type PendingDropReason = "overflow" | "expired" | "rejected";
+
 /** First retry delay; doubles per failed attempt up to {@link RETRY_MAX_DELAY_MS}. */
 const RETRY_BASE_DELAY_MS = 60 * 1000;
 const RETRY_MAX_DELAY_MS = 30 * 60 * 1000;
-/** After this long without a successful delivery the deduction is dropped (loudly). */
-const RETRY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-/** Hard cap on the queue; beyond it the oldest entry is dropped (logged). */
-const MAX_PENDING = 200;
+
+/**
+ * Minimum deductible quantities. Fulfillment tracks stock in whole grams and
+ * refuses a movement that would round to 0 g, so anything smaller is carried
+ * (per printer×slot) until the sum crosses the unit:
+ *  - grams (Bambu AMS remain-delta): 1 g;
+ *  - length (Moonraker `filament_used`): 350 mm ≈ 0.9–1.1 g across the density
+ *    table — the smallest length guaranteed to round to ≥ 1 g for every
+ *    supported material.
+ */
+export const MIN_CONSUME_GRAMS = 1;
+export const MIN_CONSUME_LENGTH_MM = 350;
 
 function retryDelayMs(attempts: number): number {
   const exponent = Math.min(attempts - 1, 30); // avoid 2^huge overflow
@@ -105,23 +128,48 @@ export function buildConsumeItems(
  * Posts a completed print's filament consumption to fulfillment. Separated from
  * the pure {@link buildConsumeItems}: this class owns only the side effects —
  * the network dispatch, the retry queue for deliveries fulfillment never
- * received, the soft-warning feed entries and the logging.
+ * received, the sub-gram carry accumulator, the soft-warning feed entries and
+ * the logging.
  *
  * Failure handling follows the {@link FulfillmentError} taxonomy:
  *  - `rejected` (fulfillment processed and refused — no loaded reel, not enough
- *    stock): warned and dropped. Auto-retrying would re-fail identically, and
- *    once an operator corrects the stock by hand a late auto-retry could
- *    double-deduct.
+ *    stock): warned and dropped (metric reason `rejected`). Auto-retrying would
+ *    re-fail identically, and once an operator corrects the stock by hand a
+ *    late auto-retry could double-deduct.
+ *  - `auth` (401/403 — the service token is missing/rotated): a CONFIGURATION
+ *    error, not a transient one. The deduction was provably NOT processed, so
+ *    it is queued and retried with the same backoff; the operator gets ONE
+ *    prominent feed event per outage (no duplicate spam), reset by the first
+ *    successful delivery.
  *  - `unreachable` (network/timeout/5xx — delivery unknown): queued in
  *    {@link PendingConsume} and redelivered with exponential backoff. The
  *    payload's `idempotencyKey` makes redelivery safe if the original did land.
  *    The queue is persisted via the injected `persist` callback, so restarts
  *    cannot lose an owed deduction.
+ *
+ * Queue bounds are configurable (env `FILAMENT_RETRY_QUEUE_MAX`, default 200;
+ * `FILAMENT_RETRY_MAX_AGE_DAYS`, default 7). Every final drop — overflow,
+ * expiry, rejection — is logged with its reason, surfaced as an operator event
+ * and counted in {@link metrics}. The queue file itself is written by the
+ * StateStore (temp file + atomic rename; a corrupt file is backed up, never
+ * silently reset).
  */
 export class FilamentConsumption {
   private logger: StoreLogger = {};
   private pending: PendingConsume[];
   private retrying = false;
+  private carry: Map<string, { grams: number; lengthMm: number }>;
+  private dropped: Record<PendingDropReason, number> = {
+    overflow: 0,
+    expired: 0,
+    rejected: 0
+  };
+  /** One auth-misconfiguration event per outage; reset by any successful delivery. */
+  private authNotified = false;
+
+  private readonly maxPending: number;
+  private readonly maxAgeMs: number;
+  private readonly now: () => number;
 
   constructor(
     /** Fulfillment stock client; when absent/disabled, completion deduction is skipped. */
@@ -129,9 +177,30 @@ export class FilamentConsumption {
     private readonly events: EventFeed,
     /** Schedules a state save; wired to the farm's StateStore. */
     private readonly persist: () => void = () => {},
-    initialPending: PendingConsume[] = []
+    initialPending: PendingConsume[] = [],
+    options: {
+      initialCarry?: FilamentCarry;
+      /** Queue cap; defaults to env FILAMENT_RETRY_QUEUE_MAX. */
+      maxPending?: number;
+      /** Give-up age; defaults to env FILAMENT_RETRY_MAX_AGE_DAYS. */
+      maxAgeMs?: number;
+      /** Clock, injectable for tests. */
+      now?: () => number;
+    } = {}
   ) {
     this.pending = [...initialPending];
+    this.carry = new Map(
+      Object.entries(options.initialCarry ?? {}).map(([key, value]) => [
+        key,
+        {
+          grams: typeof value.grams === "number" && value.grams > 0 ? value.grams : 0,
+          lengthMm: typeof value.lengthMm === "number" && value.lengthMm > 0 ? value.lengthMm : 0
+        }
+      ])
+    );
+    this.maxPending = options.maxPending ?? env.filamentRetryQueueMax;
+    this.maxAgeMs = options.maxAgeMs ?? env.filamentRetryMaxAgeDays * 24 * 60 * 60 * 1000;
+    this.now = options.now ?? Date.now;
   }
 
   /** Wires the store logger in once it is available (after config load). */
@@ -139,14 +208,36 @@ export class FilamentConsumption {
     this.logger = logger;
   }
 
+  /** Whether the fulfillment client is configured (deduction can happen at all). */
+  get enabled(): boolean {
+    return Boolean(this.inventory?.enabled);
+  }
+
   /** The retry queue for persistence (a fresh array; entries are not copied). */
   serialize(): PendingConsume[] {
     return [...this.pending];
   }
 
+  /** The sub-gram carry for persistence (only non-zero amounts are written). */
+  serializeCarry(): FilamentCarry {
+    const out: FilamentCarry = {};
+    for (const [key, value] of this.carry) {
+      const entry: { grams?: number; lengthMm?: number } = {};
+      if (value.grams > 0) entry.grams = value.grams;
+      if (value.lengthMm > 0) entry.lengthMm = value.lengthMm;
+      if (entry.grams !== undefined || entry.lengthMm !== undefined) out[key] = entry;
+    }
+    return out;
+  }
+
   /** Deductions still awaiting delivery (for tests/observability). */
   get pendingCount(): number {
     return this.pending.length;
+  }
+
+  /** Delivery-queue observability: backlog size + final drops by reason. */
+  metrics(): { pending: number; dropped: Record<PendingDropReason, number> } {
+    return { pending: this.pending.length, dropped: { ...this.dropped } };
   }
 
   /**
@@ -206,21 +297,94 @@ export class FilamentConsumption {
       return;
     }
 
-    const printJobId = run.printId;
+    this.dispatchItems(printer, items, run.printId, job);
+  }
+
+  /**
+   * Deduction attempt for a print that ENDED while the connection was down (the
+   * printer reconnected already idle). Returns how it went so the poller can
+   * surface the right operator event:
+   *  - `"deducted"` — real consumption data survived the gap and was posted
+   *    with the run's normal idempotency keys (so a duplicate observation can
+   *    never double-deduct);
+   *  - `"nothing"`  — the data reliably says ~0 was consumed (measured trays,
+   *    no drop) — nothing owed;
+   *  - `"unknown"`  — consumption cannot be recovered honestly (uncalibrated
+   *    trays, a reset length counter, an ambiguous end state) — the caller must
+   *    tell the operator to check and deduct by hand.
+   *
+   * Reliability rules per source:
+   *  - Bambu: tray `remain` is absolute, so the start snapshot vs the CURRENT
+   *    trays measures the whole print regardless of the offline gap.
+   *  - Moonraker: `filament_used` survives until the next job starts, so the
+   *    reported length is trusted only when the device's own end state confirms
+   *    the job ended (complete/cancelled) — a rebooted Klipper reports a fresh
+   *    counter and an idle state, which classifies as unknown.
+   */
+  consumeAfterReconnect(
+    printer: PrinterConfig,
+    next: PrinterLiveStatus,
+    run: CompletedRun,
+    job: string | null
+  ): "deducted" | "nothing" | "unknown" {
+    if (!this.inventory?.enabled) return "nothing";
+
+    if (printer.protocol === "bambu") {
+      if (bambuMeasurableTrayCount(run.amsStart, next.amsTrays) === 0) return "unknown";
+      const items: ConsumeItem[] = bambuTrayUsage(run.amsStart, next.amsTrays).map((usage) => ({
+        kind: "grams",
+        grams: usage.grams,
+        amsTray: usage.tray,
+        material: usage.material,
+        color: usage.color
+      }));
+      if (items.length === 0) return "nothing";
+      this.dispatchItems(printer, items, run.printId, job);
+      return "deducted";
+    }
+
+    const outcome = classifyPrintOutcome(next);
+    const usedMm = next.filamentUsedMm;
+    if (
+      (outcome === "completed" || outcome === "cancelled") &&
+      usedMm !== null &&
+      usedMm > 0
+    ) {
+      this.dispatchItems(printer, [{ kind: "length", lengthMm: usedMm }], run.printId, job);
+      return "deducted";
+    }
+    return "unknown";
+  }
+
+  /**
+   * Builds the payloads for a run's consume items — applying the sub-gram carry
+   * — and fires the deliveries. The idempotency key is only ever attached to a
+   * payload that is actually sent; a below-threshold amount is carried without
+   * touching the key, so the key stays free for the real deduction.
+   */
+  private dispatchItems(
+    printer: PrinterConfig,
+    items: ConsumeItem[],
+    printJobId: string,
+    job: string | null
+  ): void {
     const note = job ? `Печать «${job}»` : undefined;
     for (const item of items) {
+      const quantity = this.applyCarry(printer, item);
+      if (!quantity) continue; // carried — below the minimum unit, nothing sent
+
       const input: ConsumePayload =
         item.kind === "length"
           ? {
               printerId: printer.id,
-              lengthMm: item.lengthMm,
+              lengthMm: quantity.lengthMm as number,
               printJobId,
               idempotencyKey: `${printer.id}:${printJobId}`,
               note
             }
           : {
               printerId: printer.id,
-              grams: item.grams,
+              grams: quantity.grams as number,
               amsTray: item.amsTray,
               material: item.material ?? undefined,
               color: item.color ?? undefined,
@@ -230,6 +394,61 @@ export class FilamentConsumption {
             };
       void this.deliver(input, printer.name);
     }
+  }
+
+  /** Carry key: one accumulator per printer×slot (`main` = the single reel). */
+  private carryKey(printerId: string, item: ConsumeItem): string {
+    return item.kind === "grams" ? `${printerId}:t${item.amsTray}` : `${printerId}:main`;
+  }
+
+  /**
+   * Folds the slot's carried remainder into this item and gates it on the
+   * minimum unit. Below the threshold the total is stored back into the carry
+   * (persisted) and nothing is sent; at/above it the carry is zeroed BEFORE the
+   * delivery is attempted, so the carried amount rides inside the payload
+   * exactly once — a queued redelivery retries the same payload and can never
+   * re-add the carry.
+   */
+  private applyCarry(
+    printer: PrinterConfig,
+    item: ConsumeItem
+  ): { grams?: number; lengthMm?: number } | null {
+    const key = this.carryKey(printer.id, item);
+    const carried = this.carry.get(key) ?? { grams: 0, lengthMm: 0 };
+
+    if (item.kind === "grams") {
+      const total = item.grams + carried.grams;
+      if (total < MIN_CONSUME_GRAMS) {
+        this.carry.set(key, { ...carried, grams: total });
+        this.persist();
+        this.logger.info?.(
+          { printer: printer.id, slot: key, carriedG: total },
+          "consumption below 1 g — carried until it reaches the minimum unit"
+        );
+        return null;
+      }
+      if (carried.grams > 0) {
+        this.carry.set(key, { ...carried, grams: 0 });
+        this.persist();
+      }
+      return { grams: total };
+    }
+
+    const total = item.lengthMm + carried.lengthMm;
+    if (total < MIN_CONSUME_LENGTH_MM) {
+      this.carry.set(key, { ...carried, lengthMm: total });
+      this.persist();
+      this.logger.info?.(
+        { printer: printer.id, slot: key, carriedMm: total },
+        "consumption below the minimum length — carried until it reaches the unit"
+      );
+      return null;
+    }
+    if (carried.lengthMm > 0) {
+      this.carry.set(key, { ...carried, lengthMm: 0 });
+      this.persist();
+    }
+    return { lengthMm: total };
   }
 
   /**
@@ -243,7 +462,7 @@ export class FilamentConsumption {
     if (this.retrying || this.pending.length === 0 || !this.inventory?.enabled) return;
     this.retrying = true;
     try {
-      const now = Date.now();
+      const now = this.now();
       const due = this.pending.filter((entry) => entry.nextAttemptAtMs <= now);
       for (const entry of due) {
         await this.retryOne(entry);
@@ -257,6 +476,7 @@ export class FilamentConsumption {
     const label = entry.input.note ?? entry.input.printJobId;
     try {
       await this.inventory!.consume(entry.input);
+      this.authNotified = false;
       this.remove(entry);
       this.events.push(
         "✔",
@@ -267,19 +487,21 @@ export class FilamentConsumption {
       if (error instanceof FulfillmentError && error.kind === "rejected") {
         // Fulfillment finally processed it and said no — same terminal outcome
         // as an immediate rejection: tell the operator, stop retrying.
-        this.remove(entry);
-        this.events.push("⚠", `<b>${entry.printerName}</b>: склад — ${error.message}`, "err");
+        this.drop(entry, "rejected", `склад — ${error.message}`);
         return;
+      }
+      if (error instanceof FulfillmentError && error.kind === "auth") {
+        this.notifyAuthOnce(error.message);
       }
 
       entry.attempts += 1;
-      entry.nextAttemptAtMs = Date.now() + retryDelayMs(entry.attempts);
-      if (Date.now() - entry.firstFailedAtMs > RETRY_MAX_AGE_MS) {
-        this.remove(entry);
-        this.events.push(
-          "⚠",
-          `<b>${entry.printerName}</b>: склад — не удалось списать за 7 дней, отложенное списание отброшено (${label})`,
-          "err"
+      entry.nextAttemptAtMs = this.now() + retryDelayMs(entry.attempts);
+      if (this.now() - entry.firstFailedAtMs > this.maxAgeMs) {
+        const days = Math.round(this.maxAgeMs / (24 * 60 * 60 * 1000));
+        this.drop(
+          entry,
+          "expired",
+          `склад — не удалось списать за ${days} дн., отложенное списание отброшено (${label})`
         );
         return;
       }
@@ -296,31 +518,79 @@ export class FilamentConsumption {
     this.persist();
   }
 
+  /**
+   * Final removal of a queue entry with its reason: counted in the dropped
+   * metric, logged with the idempotency key (so the deduction can be traced and
+   * re-done by hand), and surfaced to the operator — a queued deduction never
+   * disappears silently.
+   */
+  private drop(entry: PendingConsume, reason: PendingDropReason, message: string): void {
+    this.dropped[reason] += 1;
+    this.remove(entry);
+    this.logger.warn?.(
+      {
+        printer: entry.input.printerId,
+        idempotencyKey: entry.input.idempotencyKey,
+        attempts: entry.attempts,
+        reason
+      },
+      "pending consume dropped"
+    );
+    this.events.push("⚠", `<b>${entry.printerName}</b>: ${message}`, "err");
+  }
+
+  /** One prominent auth-misconfiguration event per outage (never per print). */
+  private notifyAuthOnce(message: string): void {
+    if (this.authNotified) return;
+    this.authNotified = true;
+    this.events.push(
+      "⚠",
+      `склад — ${message}; списания поставлены в очередь и будут повторены после исправления`,
+      "err"
+    );
+  }
+
   /** First delivery of one deduction; failures route to the queue or the feed. */
   private async deliver(input: ConsumePayload, printerName: string): Promise<void> {
     try {
       await this.inventory!.consume(input);
+      this.authNotified = false;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn?.({ err: error, printer: input.printerId }, "filament consume failed");
 
+      if (error instanceof FulfillmentError && error.kind === "auth") {
+        // Config error: the request was provably not processed — queue it for
+        // after the operator fixes the token, and notify once (not per print).
+        this.enqueue(input, printerName, message, { announce: false });
+        this.notifyAuthOnce(message);
+        return;
+      }
       if (error instanceof FulfillmentError && error.kind === "unreachable") {
-        this.enqueue(input, printerName, message);
+        this.enqueue(input, printerName, message, { announce: true });
         return;
       }
       this.events.push("⚠", `<b>${printerName}</b>: склад — ${message}`, "err");
     }
   }
 
-  private enqueue(input: ConsumePayload, printerName: string, reason: string): void {
-    if (this.pending.length >= MAX_PENDING) {
-      const dropped = this.pending.shift();
-      this.logger.warn?.(
-        { droppedKey: dropped?.input.idempotencyKey },
-        "pending consume queue full — dropped the oldest entry"
+  private enqueue(
+    input: ConsumePayload,
+    printerName: string,
+    reason: string,
+    options: { announce: boolean }
+  ): void {
+    if (this.pending.length >= this.maxPending) {
+      // Overflow never silently deletes work: the OLDEST entry is dropped with
+      // its reason counted, logged (with the idempotency key) and announced.
+      const oldest = this.pending[0];
+      this.drop(
+        oldest,
+        "overflow",
+        `склад — очередь повторных списаний переполнена (${this.maxPending}), самое старое списание отброшено (${oldest.input.note ?? oldest.input.printJobId})`
       );
     }
-    const now = Date.now();
+    const now = this.now();
     this.pending.push({
       input,
       printerName,
@@ -329,10 +599,12 @@ export class FilamentConsumption {
       firstFailedAtMs: now
     });
     this.persist();
-    this.events.push(
-      "⚠",
-      `<b>${printerName}</b>: склад — ${reason}; списание будет повторено автоматически`,
-      "err"
-    );
+    if (options.announce) {
+      this.events.push(
+        "⚠",
+        `<b>${printerName}</b>: склад — ${reason}; списание будет повторено автоматически`,
+        "err"
+      );
+    }
   }
 }

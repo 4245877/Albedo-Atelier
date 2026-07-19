@@ -212,20 +212,45 @@ test("Bambu: a multi-colour print deducts each used slot separately", async () =
   assert.notEqual(byTray.get(0)!.idempotencyKey, byTray.get(1)!.idempotencyKey);
 });
 
-test("Bambu: a cancelled print deducts nothing", async () => {
+test("Bambu: a cancelled print with measured usage still deducts (but never counts as done)", async () => {
+  // Cancellation decides the OUTCOME, not the deduction: the AMS remain drop
+  // measures what was physically extruded before the cancel, so that material
+  // is deducted — while the print is not counted as completed.
   const inventory = recordingInventory();
   const sequence = [
     baseStatus({ status: "idle" }),
     baseStatus({ status: "printing", stateText: "RUNNING", amsTrays: [tray(0, 100)] }),
-    baseStatus({ status: "idle", stateText: "cancelled", amsTrays: [tray(0, 90)] }) // remain dropped, but cancelled
+    baseStatus({ status: "idle", stateText: "cancelled", amsTrays: [tray(0, 90)] }) // 10 % of 1000 g used
   ];
   const { poller, events } = makePoller(bambuConfig(), sequence, inventory.client);
 
   await pollTimes(poller, 3);
 
-  assert.equal(inventory.calls.length, 0, "no deduction on cancel even though remain fell");
+  assert.equal(inventory.calls.length, 1, "the measured consumption of a cancelled print is deducted");
+  assert.equal(inventory.calls[0].grams, 100);
   assert.match(feedText(events), /отменена/);
-  assert.equal(poller.today.getDone(), 0);
+  assert.equal(poller.today.getDone(), 0, "a cancelled print never counts as completed");
+});
+
+test("explicit cancellation wins over progressPct >= 99", async () => {
+  // A print cancelled at 99–100 % must classify as cancelled, not completed —
+  // the progress heuristic is only a fallback for devices without an explicit
+  // end state.
+  const inventory = recordingInventory();
+  const sequence = [
+    baseStatus({ status: "idle" }),
+    baseStatus({ status: "printing", stateText: "RUNNING", amsTrays: [tray(0, 100)] }),
+    baseStatus({ status: "idle", stateText: "cancelled", progressPct: 100, amsTrays: [tray(0, 99)] })
+  ];
+  const { poller, events } = makePoller(bambuConfig(), sequence, inventory.client);
+
+  await pollTimes(poller, 3);
+
+  assert.match(feedText(events), /отменена/);
+  assert.doesNotMatch(feedText(events), /завершил печать/);
+  assert.equal(poller.today.getDone(), 0, "cancel at 100 % is still a cancel");
+  assert.equal(inventory.calls.length, 1, "the measured usage is still deducted");
+  assert.equal(inventory.calls[0].grams, 10);
 });
 
 test("Bambu: a failed print (FAILED/error) deducts nothing", async () => {

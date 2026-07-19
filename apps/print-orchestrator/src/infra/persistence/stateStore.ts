@@ -3,7 +3,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 
 import type { FeedEvent, QueueJob } from "../../domain/dashboard/types";
-import type { ConsumePayload, PendingConsume } from "../../app/filamentConsumption";
+import type { ConsumePayload, FilamentCarry, PendingConsume } from "../../app/filamentConsumption";
 import { isObject } from "../../shared/isObject";
 import { MAX_FEED } from "../../app/eventFeed";
 import type { StoreLogger } from "../../shared/logger";
@@ -64,6 +64,12 @@ export interface PersistedState {
    * completion time), owed across restarts. See FilamentConsumption.
    */
   pendingConsumes: PendingConsume[];
+  /**
+   * Sub-gram consumption carried per printer×slot until it reaches the minimum
+   * deductible unit, so micro-prints do not systematically evaporate across
+   * restarts. See FilamentConsumption. Missing in older files → empty.
+   */
+  filamentCarry: FilamentCarry;
 }
 
 const CURRENT_VERSION = 1 as const;
@@ -76,7 +82,8 @@ export function emptyState(): PersistedState {
     today: { key: "", done: 0, failed: 0, printingMs: 0, avgDurationMsTotal: 0, avgDurationCount: 0 },
     automations: { states: {}, lastRun: null },
     snapshots: [],
-    pendingConsumes: []
+    pendingConsumes: [],
+    filamentCarry: {}
   };
 }
 
@@ -154,6 +161,19 @@ function normalize(raw: unknown): PersistedState {
     base.pendingConsumes = raw.pendingConsumes
       .map(normalizePendingConsume)
       .filter((entry): entry is PendingConsume => entry !== null);
+  }
+
+  if (isObject(raw.filamentCarry)) {
+    for (const [key, value] of Object.entries(raw.filamentCarry)) {
+      if (!key || !isObject(value)) continue;
+      const grams = toPositiveFinite(value.grams);
+      const lengthMm = toPositiveFinite(value.lengthMm);
+      if (grams === undefined && lengthMm === undefined) continue;
+      const entry: { grams?: number; lengthMm?: number } = {};
+      if (grams !== undefined) entry.grams = grams;
+      if (lengthMm !== undefined) entry.lengthMm = lengthMm;
+      base.filamentCarry[key] = entry;
+    }
   }
 
   return base;

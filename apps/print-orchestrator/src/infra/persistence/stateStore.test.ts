@@ -93,7 +93,11 @@ function sampleState(): PersistedState {
         nextAttemptAtMs: 1_720_000_120_000,
         firstFailedAtMs: 1_720_000_000_000
       }
-    ]
+    ],
+    filamentCarry: {
+      "creality-k2:main": { lengthMm: 120.5 },
+      "bambu-a1-combo:t0": { grams: 0.6 }
+    }
   };
 }
 
@@ -222,6 +226,33 @@ test("a pending consume without a first-failure stamp restarts its age clock", (
     entry.firstFailedAtMs >= before,
     "missing age anchor restarts now — never 0, which would expire it instantly"
   );
+});
+
+test("normalizes the filament carry and drops junk entries", () => {
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      filamentCarry: {
+        "k2:main": { lengthMm: 120.5 },
+        "a1:t0": { grams: 0.6, lengthMm: -3 }, // negative part dropped, grams kept
+        "a1:t1": { grams: 0 }, // nothing positive → dropped
+        "junk": "not-an-object",
+        "": { grams: 1 } // empty key → dropped
+      }
+    }),
+    "utf8"
+  );
+
+  const loaded = new StateStore(file).load();
+  assert.deepEqual(loaded.filamentCarry, {
+    "k2:main": { lengthMm: 120.5 },
+    "a1:t0": { grams: 0.6 }
+  });
+});
+
+test("a file without filamentCarry loads an empty carry (pre-carry files)", () => {
+  fs.writeFileSync(file, JSON.stringify({ version: 1 }), "utf8");
+  assert.deepEqual(new StateStore(file).load().filamentCarry, {});
 });
 
 test("a legacy queue status \"error\" is normalized to review and survives a re-save", async () => {

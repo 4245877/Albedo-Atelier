@@ -444,6 +444,46 @@ export const env = Object.freeze({
    * Empty disables auto-consume — the farm keeps running standalone.
    */
   fulfillmentApiUrl: process.env.FULFILLMENT_API_URL ?? "",
+  /**
+   * Inter-service token for the fulfillment inventory endpoints (consume/sync),
+   * sent as the `x-service-token` header. Must equal fulfillment's own
+   * `ATELIER_FULFILLMENT_TOKEN`. Never logged, never persisted. Empty with
+   * `FULFILLMENT_API_URL` set is a misconfiguration: fulfillment answers 401
+   * unless its temporary `ATELIER_FULFILLMENT_AUTH_OPTIONAL` mode is on — a
+   * loud warning is logged at startup and every auth refusal surfaces as an
+   * operator event (see FilamentConsumption/FilamentSync).
+   */
+  fulfillmentServiceToken: process.env.ATELIER_FULFILLMENT_TOKEN ?? "",
+  /**
+   * How long to wait before re-posting a loaded-reel sync that fulfillment
+   * answered `resolved: false` (no matching stock yet). Long enough not to
+   * hammer fulfillment every poll, short enough that stock added by the
+   * operator is picked up before the print usually finishes.
+   */
+  filamentSyncRetryMs: readPositiveInt(
+    "FILAMENT_SYNC_RETRY_MS",
+    process.env.FILAMENT_SYNC_RETRY_MS,
+    5 * 60 * 1000
+  ),
+  /**
+   * Hard cap on the persistent filament-deduction retry queue. Beyond it the
+   * OLDEST entry is dropped with an operator event and a dropped-counter bump
+   * (never silently). Documented default: 200.
+   */
+  filamentRetryQueueMax: readPositiveInt(
+    "FILAMENT_RETRY_QUEUE_MAX",
+    process.env.FILAMENT_RETRY_QUEUE_MAX,
+    200
+  ),
+  /**
+   * How long a queued deduction is retried before it is dropped (loudly, with
+   * an operator event + dropped counter). Documented default: 7 days.
+   */
+  filamentRetryMaxAgeDays: readPositiveInt(
+    "FILAMENT_RETRY_MAX_AGE_DAYS",
+    process.env.FILAMENT_RETRY_MAX_AGE_DAYS,
+    7
+  ),
   /** Cross-origin origins allowed to call the API; empty = same-origin only. */
   corsAllowOrigins: (process.env.CORS_ALLOW_ORIGINS ?? "")
     .split(",")

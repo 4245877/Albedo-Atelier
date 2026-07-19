@@ -1,7 +1,10 @@
 import type { PrinterConfig } from "../infra/printers/config";
 import type { PrinterLiveStatus } from "../infra/printers/status";
 import { FulfillmentError } from "../infra/fulfillment/inventoryClient";
+import type { SyncLoadedFilamentResult } from "../infra/fulfillment/inventoryClient";
+import { env } from "../shared/env";
 import type { StoreLogger } from "../shared/logger";
+import type { EventFeed } from "./eventFeed";
 
 /**
  * The slice of the fulfillment inventory client the sync needs: report the reel
@@ -10,7 +13,7 @@ import type { StoreLogger } from "../shared/logger";
  */
 export interface InventorySyncClient {
   readonly enabled: boolean;
-  syncLoadedFilament(input: SyncPayload): Promise<{ resolved: boolean } | null>;
+  syncLoadedFilament(input: SyncPayload): Promise<SyncLoadedFilamentResult | null>;
 }
 
 /** One loaded-reel sync request as posted to fulfillment (see inventoryClient). */
@@ -65,6 +68,20 @@ function signature(item: SyncItem): string {
   return `${item.material}|${item.color ?? ""}`;
 }
 
+/** Operator-facing label of one stock position from the sync response. */
+function stockLabel(
+  stock: { material?: string; color?: string; colorName?: string } | null | undefined
+): string {
+  if (!stock) return "—";
+  const color = stock.colorName || stock.color || "";
+  return [stock.material, color].filter(Boolean).join(" ") || "—";
+}
+
+/** Operator-facing label of the slot a reel sits in. */
+function slotLabel(amsTray: number | undefined): string {
+  return amsTray === undefined ? "катушка" : `AMS-слот ${amsTray}`;
+}
+
 /**
  * Keeps fulfillment's per-printer loaded-reel bindings in step with what the
  * devices report, so filament auto-deduction on completion always has a target
@@ -73,14 +90,35 @@ function signature(item: SyncItem): string {
  *
  * Called once per printer per poll. To avoid hammering fulfillment every tick it
  * posts a slot only when its loaded filament *changes* (by {@link signature});
- * the mark is set only on a completed call, so a failed sync (fulfillment
- * down) is naturally retried on the next poll. Never throws into the poll loop:
- * a disabled client is a no-op and every failure is swallowed after a log.
+ * the mark is set only on a `resolved: true` answer, so a failed sync
+ * (fulfillment down) retries on the next poll and an UNMATCHED hint
+ * (`resolved: false` — the reel is not on the shelf yet) retries after
+ * {@link retryUnresolvedMs}: stock added later by the operator is picked up
+ * without a new reel load, but fulfillment is not re-posted every cycle. A
+ * reel/slot change resets both states via the signature. Re-posting the same
+ * hint is idempotent on the fulfillment side (an upsert), so retries are safe.
+ * Never throws into the poll loop: a disabled client is a no-op and every
+ * failure is swallowed after a log.
+ *
+ * Operator-facing side effects (all deduplicated, all optional — they need the
+ * event feed to be wired in):
+ *  - a binding that actually CHANGED stock (fulfillment reports `changed`)
+ *    lands in the event feed once — the reel-change operational event;
+ *  - a material-only match with a provably different colour
+ *    (`colorMismatch: true`) lands as one warning per reel×stock combination;
+ *  - a 401/403 (auth misconfiguration) lands as one warning per outage.
  */
 export class FilamentSync {
   private logger: StoreLogger = {};
-  /** Last signature successfully synced per slot key; the de-dup anchor. */
+  /** Last signature successfully synced (resolved) per slot key; the de-dup anchor. */
   private synced = new Map<string, string>();
+  /**
+   * Slots whose last sync answered `resolved: false` (or was refused as an auth
+   * error): the signature it happened for plus the earliest wall-clock for the
+   * next retry. Kept SEPARATE from {@link synced} — an unresolved sync is not a
+   * success and must retry once the delay passes or the reel changes.
+   */
+  private unresolved = new Map<string, { sig: string; nextRetryAtMs: number }>();
   /** Slot keys with an in-flight call, so overlapping polls don't double-send. */
   private inFlight = new Set<string>();
   /**
@@ -90,11 +128,31 @@ export class FilamentSync {
    * moment the device names a reel again, so a later dry spell is flagged afresh.
    */
   private noData = new Set<string>();
+  /** Per-slot warn signature of the last colour-mismatch warning (dedup anchor). */
+  private colorWarned = new Map<string, string>();
+  /** One auth-misconfiguration event per outage; reset by any successful call. */
+  private authNotified = false;
+
+  private readonly events: EventFeed | undefined;
+  private readonly retryUnresolvedMs: number;
+  private readonly now: () => number;
 
   constructor(
     /** Fulfillment stock client; when absent/disabled, sync is a no-op. */
-    private readonly inventory: InventorySyncClient | undefined
-  ) {}
+    private readonly inventory: InventorySyncClient | undefined,
+    options: {
+      /** Operator event feed for reel-change / mismatch / auth notices. */
+      events?: EventFeed;
+      /** Delay before re-posting an unresolved hint; defaults to the env setting. */
+      retryUnresolvedMs?: number;
+      /** Clock, injectable for tests. */
+      now?: () => number;
+    } = {}
+  ) {
+    this.events = options.events;
+    this.retryUnresolvedMs = options.retryUnresolvedMs ?? env.filamentSyncRetryMs;
+    this.now = options.now ?? Date.now;
+  }
 
   /** Wires the store logger in once it is available (after config load). */
   useLogger(logger: StoreLogger): void {
@@ -105,7 +163,8 @@ export class FilamentSync {
    * Fire-and-forget reconciliation of one printer's loaded reels with
    * fulfillment. A no-op when the client is disabled or the device reports no
    * loaded filament; otherwise it posts each slot whose filament changed since
-   * the last successful sync.
+   * the last successful sync — or whose earlier sync stayed unresolved and is
+   * due for a retry.
    */
   syncPrinter(printer: PrinterConfig, status: PrinterLiveStatus): void {
     if (!this.inventory?.enabled) return;
@@ -125,7 +184,12 @@ export class FilamentSync {
       const key = slotKey(printer.id, item.amsTray);
       const sig = signature(item);
       if (this.synced.get(key) === sig || this.inFlight.has(key)) continue;
-      void this.deliver(printer.id, key, sig, item);
+
+      const pending = this.unresolved.get(key);
+      if (pending && pending.sig === sig && this.now() < pending.nextRetryAtMs) {
+        continue; // unresolved, but the retry delay has not passed yet
+      }
+      void this.deliver(printer, key, sig, item);
     }
   }
 
@@ -147,7 +211,7 @@ export class FilamentSync {
   }
 
   private async deliver(
-    printerId: string,
+    printer: PrinterConfig,
     key: string,
     sig: string,
     item: SyncItem
@@ -155,29 +219,101 @@ export class FilamentSync {
     this.inFlight.add(key);
     try {
       const result = await this.inventory!.syncLoadedFilament({
-        printerId,
+        printerId: printer.id,
         amsTray: item.amsTray,
         material: item.material,
         color: item.color,
       });
-      // Mark synced whatever the resolution: an unmatched hint (resolved:false)
-      // is a stable state — re-posting it every poll would only add noise. A new
-      // reel changes the signature and syncs again; stock added later is picked
-      // up by the completion consume, which resolves against live stock.
-      this.synced.set(key, sig);
-      if (result && result.resolved === false) {
+      this.authNotified = false;
+
+      if (!result || result.resolved) {
+        // Bound (or the feature answered nothing to bind against — disabled).
+        this.synced.set(key, sig);
+        this.unresolved.delete(key);
+        if (result) this.announceResolved(printer, key, sig, item, result);
+        return;
+      }
+
+      // resolved:false is NOT a success: the reel matched no stock yet. Keep it
+      // out of `synced` and schedule a delayed retry — stock the operator adds
+      // later is then bound without waiting for a reel change. Logged once per
+      // signature, not on every retry.
+      const firstMiss = !this.unresolved.get(key) || this.unresolved.get(key)!.sig !== sig;
+      this.unresolved.set(key, { sig, nextRetryAtMs: this.now() + this.retryUnresolvedMs });
+      if (firstMiss) {
         this.logger.warn?.(
-          { printer: printerId, material: item.material, amsTray: item.amsTray },
-          "loaded filament matched no fulfillment stock (bind skipped)"
+          {
+            printer: printer.id,
+            material: item.material,
+            amsTray: item.amsTray,
+            retryInMs: this.retryUnresolvedMs,
+          },
+          "loaded filament matched no fulfillment stock — bind pending, will retry"
         );
       }
     } catch (error) {
+      if (error instanceof FulfillmentError && error.kind === "auth") {
+        // Configuration error, not a transient one: retry on the slow cadence
+        // (a poll-rate retry would hammer a misconfigured endpoint) and tell
+        // the operator once per outage.
+        this.unresolved.set(key, { sig, nextRetryAtMs: this.now() + this.retryUnresolvedMs });
+        this.logger.warn?.({ printer: printer.id, reason: error.message }, "filament sync auth failed");
+        if (!this.authNotified) {
+          this.authNotified = true;
+          this.events?.push("⚠", `склад — ${error.message}`, "err");
+        }
+        return;
+      }
       // Leave the signature unmarked so the next poll retries. Rejected vs
       // unreachable does not matter here — both simply retry on the next tick.
       const message = error instanceof FulfillmentError ? error.message : String(error);
-      this.logger.warn?.({ printer: printerId, reason: message }, "filament sync failed");
+      this.logger.warn?.({ printer: printer.id, reason: message }, "filament sync failed");
     } finally {
       this.inFlight.delete(key);
+    }
+  }
+
+  /**
+   * Operator-facing notices for a successful bind, driven by the additive
+   * diagnostics newer fulfillment builds return (older builds return none —
+   * everything here degrades to a no-op):
+   *  - `changed` → the reel-change operational event, exactly once per actual
+   *    binding change (an idempotent re-sync reports `changed: false`);
+   *  - `colorMismatch` → one warning per reel×stock combination that the match
+   *    was material-only and the colours provably differ.
+   */
+  private announceResolved(
+    printer: PrinterConfig,
+    key: string,
+    sig: string,
+    item: SyncItem,
+    result: SyncLoadedFilamentResult
+  ): void {
+    const slot = slotLabel(item.amsTray);
+
+    if (result.changed === true) {
+      this.events?.push(
+        "⟳",
+        `<b>${printer.name}</b>: ${slot} — привязана позиция ${stockLabel(result.stock)}` +
+          (result.previousStock ? ` (была ${stockLabel(result.previousStock)})` : ""),
+        "info"
+      );
+    }
+
+    if (result.colorMismatch === true) {
+      const warnSig = `${sig}|${result.stock?.id ?? ""}`;
+      if (this.colorWarned.get(key) !== warnSig) {
+        this.colorWarned.set(key, warnSig);
+        this.events?.push(
+          "⚠",
+          `<b>${printer.name}</b>: ${slot} — цвет катушки (${item.material} ${item.color ?? "?"}) ` +
+            `не совпадает с позицией склада ${stockLabel(result.stock)}; ` +
+            `сопоставлено только по материалу — проверьте привязку`,
+          "err"
+        );
+      }
+    } else {
+      this.colorWarned.delete(key);
     }
   }
 }

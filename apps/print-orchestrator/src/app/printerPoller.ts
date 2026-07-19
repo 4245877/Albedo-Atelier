@@ -12,6 +12,7 @@ import type { EventFeed } from "./eventFeed";
 import { FilamentConsumption } from "./filamentConsumption";
 import { FilamentSync } from "./filamentSync";
 import { LightScheduler, type LightSchedulerDeps } from "./lightScheduler";
+import { classifyPrintOutcome } from "./printOutcome";
 import { TodayCounters } from "./todayCounters";
 
 /** Per-printer identity of the in-flight print, for stable idempotent deduction. */
@@ -31,8 +32,6 @@ type PrintRun = {
   amsStart: AmsTraySnapshot[] | null;
 };
 
-const COMPLETE_RE = /complete|finish|done/i;
-const CANCEL_RE = /cancel|abort|stop/i;
 /**
  * How often accrued printing-hours are checkpointed to disk mid-print. The
  * `done`/`failed` counters persist on every transition, but a long print emits
@@ -40,16 +39,6 @@ const CANCEL_RE = /cancel|abort|stop/i;
  * (instead of every poll) to bound both write churn and the loss on a crash.
  */
 const HOURS_PERSIST_INTERVAL_MS = 60 * 1000;
-
-function looksComplete(status: PrinterLiveStatus): boolean {
-  if (status.stateText && CANCEL_RE.test(status.stateText)) return false;
-  if (status.stateText && COMPLETE_RE.test(status.stateText)) return true;
-  return status.progressPct !== null && status.progressPct >= 99;
-}
-
-function looksCancelled(status: PrinterLiveStatus): boolean {
-  return Boolean(status.stateText && CANCEL_RE.test(status.stateText));
-}
 
 /**
  * Background poll loop: fetches live telemetry per enabled printer, records the
@@ -322,6 +311,11 @@ export class PrinterPoller {
       // re-minted run id mid-print. The next poll compares two online states and
       // reports the real transitions.
       this.events.push("↺", `${name} снова на связи`, "ok");
+      // BUT: if a print run was live when the connection dropped and the device
+      // came back NOT printing, the print ended unobserved. Waiting for the
+      // "next real transition" would never come — the run would dangle forever
+      // and its deduction would silently vanish. Reconcile it now.
+      this.recoverRunAfterReconnect(printer, next);
       return;
     }
 
@@ -358,11 +352,17 @@ export class PrinterPoller {
       const run = this.printRuns.get(printer.id);
       this.printRuns.delete(printer.id);
 
-      if (looksCancelled(next)) {
+      const outcome = classifyPrintOutcome(next);
+      if (outcome === "cancelled") {
+        // Explicit cancellation wins over the ≥99 % progress heuristic — but a
+        // cancelled print still consumed real filament, and the device data
+        // (AMS remain drop / extruded length) measures exactly what was used,
+        // so the deduction is posted the same as for a completion.
+        this.filament.consumeForPrint(printer, prev, next, run, job);
         this.events.push("✕", `Печать${job ? ` «${job}»` : ""} на ${name} отменена`, "info");
         return;
       }
-      if (looksComplete(next)) {
+      if (outcome === "completed") {
         // Fold this run into today's counters — the duration only when we saw
         // it start (run present with a startedAtMs). Pauses are intentionally
         // included: startedAtMs..now spans the whole job, matching "how long
@@ -375,5 +375,62 @@ export class PrinterPoller {
       }
       this.events.push("◌", `${name} перешёл в режим ожидания`, "info");
     }
+  }
+
+  /**
+   * Reconciliation of a print run whose ending was NOT observed: the connection
+   * dropped mid-print and the device came back already out of the job. The run
+   * must not dangle (it would never complete) and its consumption must not
+   * silently vanish, so:
+   *
+   *  - device still printing/paused → the same job survived the gap; the run is
+   *    kept and the next polls observe the real ending as usual;
+   *  - consumption recoverable (see FilamentConsumption.consumeAfterReconnect)
+   *    → deduct with the run's ORIGINAL printId-based idempotency keys — a
+   *    later duplicate observation can never double-deduct — and tell the
+   *    operator what happened. The ending itself stays honest: an unobserved
+   *    end is NEVER counted as a completed print in today's counters;
+   *  - not recoverable → one prominent operator event naming the printer and
+   *    job: auto-deduction skipped, check and deduct by hand.
+   *
+   * Either way the run is closed here — no infinitely-active PrintRun. The
+   * canonical SQLite run is flagged UNKNOWN for the operator independently by
+   * RunLifecycleService (its reconnect-idle rule).
+   */
+  private recoverRunAfterReconnect(printer: PrinterConfig, next: PrinterLiveStatus): void {
+    const run = this.printRuns.get(printer.id);
+    if (!run) return;
+    if (next.status === "printing" || next.status === "paused") return;
+
+    this.printRuns.delete(printer.id);
+    const name = `<b>${printer.name}</b>`;
+    const job = run.file ?? next.currentFile;
+    const jobLabel = job ? ` «${job}»` : "";
+
+    if (!this.filament.enabled) {
+      this.events.push(
+        "⚠",
+        `${name}: печать${jobLabel} завершилась во время потери связи — проверьте результат`,
+        "err"
+      );
+      return;
+    }
+
+    const recovered = this.filament.consumeAfterReconnect(printer, next, run, job);
+    if (recovered === "unknown") {
+      this.events.push(
+        "⚠",
+        `${name}: печать${jobLabel} завершилась во время потери связи — расход неизвестен, автосписание пропущено, проверьте и спишите вручную`,
+        "err"
+      );
+      return;
+    }
+    this.events.push(
+      recovered === "deducted" ? "✔" : "◌",
+      recovered === "deducted"
+        ? `${name}: печать${jobLabel} завершилась во время потери связи — расход восстановлен и списан`
+        : `${name}: печать${jobLabel} завершилась во время потери связи — измеримый расход нулевой, списывать нечего`,
+      recovered === "deducted" ? "ok" : "info"
+    );
   }
 }

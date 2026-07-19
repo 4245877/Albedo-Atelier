@@ -245,6 +245,197 @@ test("an unresolved reel (resolved:false) is not retried every poll", async () =
   assert.equal(calls.length, 1, "a stable no-match state is posted once, not on every tick");
 });
 
+// ── resolved:false retry-after-delay (stock added later must still bind) ────
+
+test("an unresolved reel IS retried after the delay, and success stops the retries", async () => {
+  let resolved = false;
+  const calls: SyncPayload[] = [];
+  const client: InventorySyncClient = {
+    enabled: true,
+    syncLoadedFilament: async (input) => {
+      calls.push(input);
+      return { resolved };
+    },
+  };
+  let clock = 1_000_000;
+  const sync = new FilamentSync(client, { retryUnresolvedMs: 60_000, now: () => clock });
+  const status = baseStatus({ activeFilament: { material: "PLA", color: "#333", tray: null, remainPct: null } });
+
+  // 1–2. The reel is not on the shelf yet: one post, resolved:false.
+  sync.syncPrinter(config(), status);
+  await settle();
+  assert.equal(calls.length, 1);
+
+  // 3. Before the delay elapses no retry happens, however many polls run.
+  clock += 30_000;
+  for (let i = 0; i < 3; i += 1) {
+    sync.syncPrinter(config(), status);
+    await settle();
+  }
+  assert.equal(calls.length, 1, "no retry before the configured delay");
+
+  // 4–6. The operator stocked the material; after the delay the retry binds.
+  resolved = true;
+  clock += 31_000;
+  sync.syncPrinter(config(), status);
+  await settle();
+  assert.equal(calls.length, 2, "one retry once the delay passed");
+
+  // 7. A resolved binding stops the retries entirely.
+  clock += 600_000;
+  for (let i = 0; i < 3; i += 1) {
+    sync.syncPrinter(config(), status);
+    await settle();
+  }
+  assert.equal(calls.length, 2, "success ends the retry cycle");
+});
+
+test("a reel change resets the unresolved state (no waiting out the old delay)", async () => {
+  const { calls, client } = recordingSync({ resolved: false });
+  let clock = 1_000_000;
+  const sync = new FilamentSync(client, { retryUnresolvedMs: 60_000, now: () => clock });
+
+  sync.syncPrinter(
+    config(),
+    baseStatus({ activeFilament: { material: "PLA", color: "#111", tray: null, remainPct: null } })
+  );
+  await settle();
+  assert.equal(calls.length, 1);
+
+  // A different reel appears immediately — it must sync now, not after the delay.
+  sync.syncPrinter(
+    config(),
+    baseStatus({ activeFilament: { material: "PETG", color: "#222", tray: null, remainPct: null } })
+  );
+  await settle();
+  assert.equal(calls.length, 2, "the new reel is posted without waiting out the old delay");
+  assert.equal(calls[1].material, "PETG");
+});
+
+// ── Operator events: reel change, colour mismatch, auth misconfiguration ────
+
+import { EventFeed } from "./eventFeed";
+import type { SyncLoadedFilamentResult } from "../infra/fulfillment/inventoryClient";
+
+function scriptedSync(results: SyncLoadedFilamentResult[]) {
+  const calls: SyncPayload[] = [];
+  let index = 0;
+  const client: InventorySyncClient = {
+    enabled: true,
+    syncLoadedFilament: async (input) => {
+      calls.push(input);
+      const result = results[Math.min(index, results.length - 1)];
+      index += 1;
+      return result;
+    },
+  };
+  return { calls, client };
+}
+
+function feedText(events: EventFeed): string {
+  return events
+    .list()
+    .map((event) => event.text)
+    .join("\n");
+}
+
+test("a changed binding lands in the feed once; an idempotent re-sync stays silent", async () => {
+  const { client } = scriptedSync([
+    {
+      resolved: true,
+      changed: true,
+      matchedBy: "material-color",
+      colorMismatch: false,
+      stock: { id: "s1", material: "PLA", colorName: "Чорний" },
+      previousStock: { material: "PLA", colorName: "Червоний" },
+    },
+    { resolved: true, changed: false, matchedBy: "material-color", colorMismatch: false },
+  ]);
+  const events = new EventFeed();
+  const sync = new FilamentSync(client, { events });
+
+  sync.syncPrinter(
+    config(),
+    baseStatus({ activeFilament: { material: "PLA", color: "#000000", tray: null, remainPct: null } })
+  );
+  await settle();
+
+  const text = feedText(events);
+  assert.match(text, /привязана позиция PLA Чорний/);
+  assert.match(text, /была PLA Червоний/);
+  assert.equal(events.list().length, 1, "exactly one reel-change event");
+});
+
+test("a colour mismatch warns once per reel×stock, not per sync", async () => {
+  const mismatch: SyncLoadedFilamentResult = {
+    resolved: true,
+    changed: false,
+    matchedBy: "material-only",
+    colorMismatch: true,
+    stock: { id: "s1", material: "PLA", colorName: "Чорний" },
+  };
+  const { calls, client } = scriptedSync([mismatch]);
+  const events = new EventFeed();
+  let clock = 1_000_000;
+  const sync = new FilamentSync(client, { events, retryUnresolvedMs: 1, now: () => clock });
+  const red = baseStatus({ activeFilament: { material: "PLA", color: "#FF0000", tray: null, remainPct: null } });
+  const blue = baseStatus({ activeFilament: { material: "PLA", color: "#0000FF", tray: null, remainPct: null } });
+
+  sync.syncPrinter(config(), red);
+  await settle();
+  sync.syncPrinter(config(), red); // deduped — same signature, already synced
+  await settle();
+  assert.equal(calls.length, 1);
+  assert.equal(
+    events.list().filter((event) => event.text.includes("не совпадает")).length,
+    1,
+    "one warning for the red reel"
+  );
+  assert.match(feedText(events), /только по материалу/);
+
+  // A DIFFERENT reel that also mismatches warns afresh (new combination).
+  clock += 10;
+  sync.syncPrinter(config(), blue);
+  await settle();
+  assert.equal(
+    events.list().filter((event) => event.text.includes("не совпадает")).length,
+    2,
+    "a new reel×stock combination warns again"
+  );
+});
+
+test("an auth refusal produces ONE operator event and retries on the slow cadence", async () => {
+  let calls = 0;
+  const client: InventorySyncClient = {
+    enabled: true,
+    syncLoadedFilament: async () => {
+      calls += 1;
+      throw new FulfillmentError("склад отклонил сервисную авторизацию (HTTP 401)", "auth");
+    },
+  };
+  const events = new EventFeed();
+  let clock = 1_000_000;
+  const sync = new FilamentSync(client, { events, retryUnresolvedMs: 60_000, now: () => clock });
+  const status = baseStatus({ activeFilament: { material: "PLA", color: "#333", tray: null, remainPct: null } });
+
+  for (let i = 0; i < 4; i += 1) {
+    sync.syncPrinter(config(), status);
+    await settle();
+  }
+
+  assert.equal(calls, 1, "an auth refusal is not retried at poll rate");
+  assert.equal(
+    events.list().filter((event) => event.text.includes("авторизаци")).length,
+    1,
+    "one config-error event, not one per poll"
+  );
+
+  clock += 61_000;
+  sync.syncPrinter(config(), status);
+  await settle();
+  assert.equal(calls, 2, "retried after the slow delay (token may have been fixed)");
+});
+
 // ── No-data logging ─────────────────────────────────────────────────────────
 
 test("an online printer that reports no loaded filament is logged once per dry spell", async () => {

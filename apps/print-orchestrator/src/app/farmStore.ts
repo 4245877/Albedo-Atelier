@@ -197,16 +197,20 @@ export class FarmStore {
     this.queue = new QueueStore(this.events, persisted.queue, persist);
     this.automations = new AutomationStore(persisted.automations, this.events, persist);
     // Deductions fulfillment never confirmed are reloaded into the retry queue,
-    // so a restart cannot lose them (delivery stays deduped by idempotencyKey).
+    // so a restart cannot lose them (delivery stays deduped by idempotencyKey);
+    // the sub-gram carry survives restarts the same way.
     this.filament = new FilamentConsumption(
       this.inventory,
       this.events,
       persist,
-      persisted.pendingConsumes
+      persisted.pendingConsumes,
+      { initialCarry: persisted.filamentCarry }
     );
     // Same client as the deduction path: it pushes the live loaded reel so
     // fulfillment binds it to a stock position automatically (no manual entry).
-    this.filamentSync = new FilamentSync(this.inventory);
+    // The event feed lets it surface reel changes / colour mismatches / auth
+    // misconfiguration to the operator.
+    this.filamentSync = new FilamentSync(this.inventory, { events: this.events });
     this.poller = new PrinterPoller(
       () => this.enabledConfigs(),
       this.cameras,
@@ -272,7 +276,8 @@ export class FarmStore {
       today: this.poller.today.serialize(),
       automations: this.automations.serialize(),
       snapshots: this.snapshots.serialize(),
-      pendingConsumes: this.filament.serialize()
+      pendingConsumes: this.filament.serialize(),
+      filamentCarry: this.filament.serializeCarry()
     }));
   }
 
@@ -622,6 +627,16 @@ export class FarmStore {
         ? "fulfillment filament auto-consume enabled"
         : "fulfillment filament auto-consume disabled (set FULFILLMENT_API_URL to enable)"
     );
+    // Misconfiguration is loud at startup, not discovered print-by-print: an
+    // enabled client with NO inter-service token will be refused (401) by
+    // fulfillment once its temporary AUTH_OPTIONAL mode is off. The token value
+    // itself is never logged.
+    if (this.inventory.enabled && !this.inventory.hasServiceToken) {
+      logger.warn?.(
+        {},
+        "ATELIER_FULFILLMENT_TOKEN is not set — fulfillment will refuse filament consume/sync with 401 unless its ATELIER_FULFILLMENT_AUTH_OPTIONAL compatibility mode is enabled"
+      );
+    }
 
     this.commands.useLogger(logger);
     await this.poller.start(logger);
@@ -806,6 +821,17 @@ export class FarmStore {
    * forward. While the lease is live the light policy keeps supported printers
    * lit; there is no explicit release — the lease expires on its own.
    */
+  /**
+   * Observability for the filament-deduction retry queue: backlog size and the
+   * per-reason counters of finally-dropped deductions (overflow/expired/rejected).
+   */
+  filamentQueueStats(): {
+    pending: number;
+    dropped: Record<"overflow" | "expired" | "rejected", number>;
+  } {
+    return this.filament.metrics();
+  }
+
   renewMonitoringLease(): { ok: true; ttlSeconds: number; expiresAt: string } {
     const lease = this.monitoring.renew();
     return {

@@ -13,9 +13,7 @@ import {
 import type { AuditEntityType, Metadata, PrintRun } from "../../domain/print/types";
 import type { PrinterLiveStatus } from "../../infra/printers/status";
 import type { StoreLogger } from "../../shared/logger";
-
-const COMPLETE_RE = /complete|finish|done/i;
-const CANCEL_RE = /cancel|abort|stop/i;
+import { classifyPrintOutcome } from "../printOutcome";
 
 /** Loose filename match — devices may report a path while the run holds a basename. */
 function sameFile(a: string | null, b: string | null): boolean {
@@ -24,16 +22,6 @@ function sameFile(a: string | null, b: string | null): boolean {
   const baseA = a.split(/[\\/]/).pop() ?? a;
   const baseB = b.split(/[\\/]/).pop() ?? b;
   return baseA === baseB;
-}
-
-function looksComplete(status: PrinterLiveStatus): boolean {
-  if (status.stateText && CANCEL_RE.test(status.stateText)) return false;
-  if (status.stateText && COMPLETE_RE.test(status.stateText)) return true;
-  return status.progressPct !== null && status.progressPct >= 99;
-}
-
-function looksCancelled(status: PrinterLiveStatus): boolean {
-  return Boolean(status.stateText && CANCEL_RE.test(status.stateText));
 }
 
 /**
@@ -139,9 +127,10 @@ export class RunLifecycleService {
     if (run.state === "RUNNING" || run.state === "PAUSED") {
       const watchedEnd = prev && prev.online && (prev.status === "printing" || prev.status === "paused");
       if (watchedEnd) {
-        if (looksCancelled(next)) {
+        const outcome = classifyPrintOutcome(next);
+        if (outcome === "cancelled") {
           this.completeRun(run.id, "CANCELLED", {});
-        } else if (looksComplete(next)) {
+        } else if (outcome === "completed") {
           this.completeRun(run.id, "SUCCEEDED", {});
         } else {
           this.transitionRun(
