@@ -139,13 +139,17 @@ function checkMachineSelf(input: SelfCheckInput, m: MachineFields, out: FindingS
       );
     }
   }
-  // nozzle_diameter vs the "… X nozzle" the parent name implies.
+  // nozzle_diameter vs the "… X nozzle" the parent name *implies*. This is a
+  // name-based inference, not a real setting, so it can misfire on a profile that
+  // deliberately overrides its parent's nozzle — it must WARN, never quarantine.
+  // Only the setting-backed `nozzle_variant_mismatch` above is trustworthy enough
+  // to block. (See `intendedNozzleFromName`, which already ignores ambiguous sizes.)
   const inheritedNozzle = intendedNozzleFromName(input.inherits);
   if (m.nozzleDiameterMm !== null && inheritedNozzle !== null && !approxEqual(inheritedNozzle, m.nozzleDiameterMm)) {
-    out.blockers.push(
+    out.warnings.push(
       finding(
         "nozzle_parent_mismatch",
-        `Сопло ${m.nozzleDiameterMm} мм, но профиль наследует «${input.inherits}» (сопло ${inheritedNozzle} мм)`
+        `Сопло ${m.nozzleDiameterMm} мм, но имя родителя «${input.inherits}» подразумевает сопло ${inheritedNozzle} мм — проверьте, что переопределение сопла намеренное`
       )
     );
   }
@@ -237,15 +241,29 @@ export interface SetTarget {
   printerModel?: string | null;
   /** The bound printer's configured nozzle Ø (mm) — hard-checked against the profile's nozzle. */
   printerNozzleMm?: number | null;
-  /** The bound printer's interchangeability class (config `printerClass`). */
-  printerClass?: string | null;
+}
+
+/**
+ * A class of interchangeable printers as a slice target. `printers` is the hardware
+ * of every farm printer carrying that class; an empty list means the class does not
+ * exist (a blocker). The set is safe when it is compatible with *at least one*
+ * member — a heterogeneous class where only some members fit is a warning, not a
+ * block (the slice is then only valid on the compatible ones, re-checked per printer
+ * at slice time).
+ */
+export interface SetClassTarget {
+  className: string;
+  printers: SetTarget[];
 }
 
 export interface ProfileSetValidationInput {
   machine: SetMember<MachineFields> | null;
   process: SetMember<ProcessFields> | null;
   filament: SetMember<FilamentFields> | null;
+  /** A concrete bound printer. Mutually exclusive with {@link classTargets}. */
   target?: SetTarget;
+  /** A class of interchangeable printers. Mutually exclusive with {@link target}. */
+  classTargets?: SetClassTarget;
 }
 
 /**
@@ -256,7 +274,7 @@ export interface ProfileSetValidationInput {
  */
 export function validateProfileSet(input: ProfileSetValidationInput): FindingSet {
   const out = empty();
-  const { machine, process, filament, target } = input;
+  const { machine, process, filament, target, classTargets } = input;
 
   // Every member must be present and active.
   for (const [member, label] of [
@@ -302,34 +320,6 @@ export function validateProfileSet(input: ProfileSetValidationInput): FindingSet
     }
   }
 
-  // ── Hard target checks ─────────────────────────────────────────────────────
-  // The sliced file is produced FOR this machine profile; a concrete disagreement
-  // with the bound printer's own hardware means the output would be physically
-  // wrong for the device it targets — a blocker, not a hint.
-  if (m && target) {
-    if (
-      m.nozzleDiameterMm != null &&
-      target.printerNozzleMm != null &&
-      target.printerNozzleMm > 0 &&
-      !approxEqual(m.nozzleDiameterMm, target.printerNozzleMm)
-    ) {
-      out.blockers.push(
-        finding(
-          "printer_nozzle_mismatch",
-          `Сопло профиля принтера ${m.nozzleDiameterMm} мм не совпадает с соплом целевого принтера ${target.printerNozzleMm} мм`
-        )
-      );
-    }
-    if (m.printerModel && target.printerModel && !modelsLooselyMatch(m.printerModel, target.printerModel)) {
-      out.blockers.push(
-        finding(
-          "printer_model_mismatch",
-          `Профиль принтера рассчитан на «${m.printerModel}», а целевой принтер — «${target.printerModel}»`
-        )
-      );
-    }
-  }
-
   // Layer height vs machine limits and nozzle.
   if (p && m) {
     checkLayerAgainstMachine(p.layerHeightMm, "Высота слоя", m, out);
@@ -357,19 +347,8 @@ export function validateProfileSet(input: ProfileSetValidationInput): FindingSet
     }
   }
 
-  // Material vs the loaded printer.
-  if (f?.filamentType && target?.printerMaterial) {
-    if (!materialSupportedByPrinter(f.filamentType, target.printerMaterial)) {
-      out.warnings.push(
-        finding(
-          "material_not_supported",
-          `Филамент ${f.filamentType} не входит в список материалов принтера («${target.printerMaterial}») — проверьте, что он заправлен`
-        )
-      );
-    }
-  }
-
-  // Filament ↔ printer model soft check ("@K2" filament on an A1, etc.).
+  // Filament ↔ printer model soft check ("@K2" filament on an A1, etc.) — this uses
+  // the machine profile's own model, so it is target-independent.
   if (filament && m?.printerModel) {
     const modelToken = modelTokenMismatch(filament.name, m.printerModel);
     if (modelToken) {
@@ -382,25 +361,131 @@ export function validateProfileSet(input: ProfileSetValidationInput): FindingSet
     }
   }
 
-  // G-code flavor / firmware.
-  if (m) {
-    if (!m.gcodeFlavor) {
-      out.warnings.push(finding("gcode_flavor_missing", "У профиля принтера не задан gcode_flavor"));
-    } else if (target?.printerProtocol) {
-      if (!gcodeFlavorFitsProtocol(m.gcodeFlavor, target.printerProtocol)) {
-        out.warnings.push(
-          finding(
-            "gcode_flavor_mismatch",
-            `G-code flavor «${m.gcodeFlavor}» не типичен для принтера с протоколом «${target.printerProtocol}»`
-          )
-        );
-      }
-    }
+  // G-code flavor present at all? (Whether it *fits the target's firmware* is a
+  // target-dependent check, applied below.)
+  if (m && !m.gcodeFlavor) {
+    out.warnings.push(finding("gcode_flavor_missing", "У профиля принтера не задан gcode_flavor"));
+  }
+
+  // ── Target checks ───────────────────────────────────────────────────────────
+  // The sliced file is produced FOR the machine profile; a concrete disagreement
+  // with the bound printer's own hardware means the output would be physically
+  // wrong for the device it targets. A concrete printer runs these once; a class
+  // runs them per member and blocks only when NO member can safely run the set.
+  if (target) {
+    appendTargetChecks(out, m, f, target);
+  } else if (classTargets) {
+    appendClassChecks(out, m, f, classTargets);
   }
 
   out.warnings = dedupeFindings(out.warnings);
   out.blockers = dedupeFindings(out.blockers);
   return out;
+}
+
+/**
+ * The target-dependent hardware checks for one concrete printer: nozzle Ø and model
+ * are hard blockers (the output would be physically wrong); material fit and G-code
+ * flavor vs firmware are soft warnings. Kept as a standalone helper so a single
+ * concrete target and each member of a class run the exact same rules.
+ */
+function appendTargetChecks(
+  out: FindingSet,
+  m: MachineFields | undefined,
+  f: FilamentFields | undefined,
+  target: SetTarget
+): void {
+  if (m) {
+    if (
+      m.nozzleDiameterMm != null &&
+      target.printerNozzleMm != null &&
+      target.printerNozzleMm > 0 &&
+      !approxEqual(m.nozzleDiameterMm, target.printerNozzleMm)
+    ) {
+      out.blockers.push(
+        finding(
+          "printer_nozzle_mismatch",
+          `Сопло профиля принтера ${m.nozzleDiameterMm} мм не совпадает с соплом целевого принтера ${target.printerNozzleMm} мм`
+        )
+      );
+    }
+    if (m.printerModel && target.printerModel && !modelsLooselyMatch(m.printerModel, target.printerModel)) {
+      out.blockers.push(
+        finding(
+          "printer_model_mismatch",
+          `Профиль принтера рассчитан на «${m.printerModel}», а целевой принтер — «${target.printerModel}»`
+        )
+      );
+    }
+    if (m.gcodeFlavor && target.printerProtocol && !gcodeFlavorFitsProtocol(m.gcodeFlavor, target.printerProtocol)) {
+      out.warnings.push(
+        finding(
+          "gcode_flavor_mismatch",
+          `G-code flavor «${m.gcodeFlavor}» не типичен для принтера с протоколом «${target.printerProtocol}»`
+        )
+      );
+    }
+  }
+  if (f?.filamentType && target.printerMaterial && !materialSupportedByPrinter(f.filamentType, target.printerMaterial)) {
+    out.warnings.push(
+      finding(
+        "material_not_supported",
+        `Филамент ${f.filamentType} не входит в список материалов принтера («${target.printerMaterial}») — проверьте, что он заправлен`
+      )
+    );
+  }
+}
+
+/**
+ * Validates the set against a *class* of interchangeable printers. An empty class
+ * is a blocker (the target does not exist). Otherwise every member is checked with
+ * {@link appendTargetChecks}: the set is blocked only when NOT ONE member is
+ * compatible; when only some fit, that is a warning (slice on the compatible ones).
+ */
+function appendClassChecks(
+  out: FindingSet,
+  m: MachineFields | undefined,
+  f: FilamentFields | undefined,
+  ct: SetClassTarget
+): void {
+  if (ct.printers.length === 0) {
+    out.blockers.push(
+      finding(
+        "printer_class_unknown",
+        `Класс принтеров «${ct.className}» не найден среди принтеров фермы — укажите существующий класс или конкретный принтер`
+      )
+    );
+    return;
+  }
+  const perPrinter = ct.printers.map((t) => {
+    const s = empty();
+    appendTargetChecks(s, m, f, t);
+    return s;
+  });
+  const compatible = perPrinter.filter((s) => s.blockers.length === 0);
+  if (compatible.length === 0) {
+    out.blockers.push(
+      finding(
+        "printer_class_incompatible",
+        `Набор нельзя безопасно использовать ни на одном принтере класса «${ct.className}»`
+      )
+    );
+    // Surface the concrete reasons (deduped by the caller) so the operator sees why.
+    for (const s of perPrinter) out.blockers.push(...s.blockers);
+    return;
+  }
+  // At least one printer of the class works: keep the compatible printers' soft
+  // warnings, and — if the class is heterogeneous — flag that the slice is only
+  // valid on some of its members (the concrete printer is re-checked at slice time).
+  for (const s of compatible) out.warnings.push(...s.warnings);
+  if (compatible.length < perPrinter.length) {
+    out.warnings.push(
+      finding(
+        "printer_class_partial",
+        `Набор совместим не со всеми принтерами класса «${ct.className}» (${compatible.length} из ${perPrinter.length}) — слайсинг допустим только на совместимых`
+      )
+    );
+  }
 }
 
 function checkLayerAgainstMachine(
@@ -460,7 +545,11 @@ function materialSupportedByPrinter(filamentType: string, printerMaterial: strin
   const want = filamentType.toUpperCase().split(/[\s-]+/)[0];
   const have = materialTokens(printerMaterial);
   if (have.length === 0) return true; // printer material unknown → don't complain
-  return have.some((t) => t === want || t.startsWith(want) || want.startsWith(t));
+  // Exact family-token match only. A two-sided `startsWith` used to treat PET and
+  // PETG (or PA and PAHT) as interchangeable because one name is a prefix of the
+  // other — but those are different materials with different temps, so require the
+  // family tokens to be equal. ("PETG-CF" already reduces to "PETG" via `want`.)
+  return have.some((t) => t === want);
 }
 
 /** Loose model comparison: normalise to alphanumerics and require either to contain the other. */

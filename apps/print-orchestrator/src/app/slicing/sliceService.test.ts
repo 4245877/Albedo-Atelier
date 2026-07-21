@@ -25,7 +25,12 @@ const LIMITS = {
 };
 
 const PRINTERS: SlicerPrinterRef[] = [
-  { id: "creality-k2", name: "Creality K2", model: "Creality K2", material: "PETG", protocol: "moonraker" },
+  // "k2-farm": two interchangeable, identical K2s (0.4) — a homogeneous class.
+  { id: "creality-k2", name: "Creality K2", model: "Creality K2", material: "PETG", protocol: "moonraker", nozzleMm: 0.4, printerClass: "k2-farm" },
+  { id: "creality-k2-b", name: "Creality K2 #2", model: "Creality K2", material: "PETG", protocol: "moonraker", nozzleMm: 0.4, printerClass: "k2-farm" },
+  // "k2-mixed": same model but different nozzles — a HETEROGENEOUS class.
+  { id: "k2-mixed-ok", name: "Creality K2 (0.4)", model: "Creality K2", material: "PETG", protocol: "moonraker", nozzleMm: 0.4, printerClass: "k2-mixed" },
+  { id: "k2-big-nozzle", name: "Creality K2 (0.6)", model: "Creality K2", material: "PETG", protocol: "moonraker", nozzleMm: 0.6, printerClass: "k2-mixed" },
   { id: "ender3-v3-ke", name: "Creality Ender 3 V3 KE", model: "Creality Ender 3 V3 KE", material: "PLA / PETG / TPU", protocol: "creality" }
 ];
 
@@ -53,7 +58,8 @@ beforeEach(async () => {
   slice = new SliceService(store, storage, artifacts, runner, {
     tmpRoot: path.join(TMP, "work"),
     timeoutMs: 5000,
-    concurrency: 1
+    concurrency: 1,
+    listPrinters: () => PRINTERS
   });
   profiles = new ProfileService(store, runner, () => PRINTERS);
 });
@@ -159,6 +165,22 @@ async function approvedSet(): Promise<string> {
     processRevisionId: process.id,
     filamentRevisionId: filament.id,
     printerId: "creality-k2"
+  });
+  assert.notEqual(set.validation, "blocked", JSON.stringify(set.blockers));
+  const approved = profiles.approveSet(set.id);
+  assert.equal(approved.approved, true);
+  return set.id;
+}
+
+/** An approved *class-scoped* set (targets an interchangeable printer class). */
+function approvedClassSet(printerClass = "k2-farm"): string {
+  const { machine, process, filament } = seedActiveTrio();
+  const set = profiles.createSet({
+    name: `class ${printerClass}`,
+    machineRevisionId: machine.id,
+    processRevisionId: process.id,
+    filamentRevisionId: filament.id,
+    printerClass
   });
   assert.notEqual(set.validation, "blocked", JSON.stringify(set.blockers));
   const approved = profiles.approveSet(set.id);
@@ -522,4 +544,213 @@ test("printer coverage flags the Ender 3 V3 KE as having no machine profile", ()
   assert.equal(ke.hasActiveProfile, false);
   const k2 = coverage.find((c) => c.printerId === "creality-k2");
   assert.equal(k2?.hasActiveProfile, true);
+  // Coverage now carries the interchangeability class the "Новый набор" form needs.
+  assert.equal(k2?.printerClass, "k2-farm");
+  assert.equal(ke.printerClass, null);
+});
+
+// ── #1 Re-validation of an approved set after a re-import ─────────────────────
+
+test("a re-import that quarantines a member revokes a previously-approved set (never a stale approved/valid)", () => {
+  const { machine, process, filament } = seedActiveTrio();
+  const set = profiles.createSet({
+    name: "K2 · PETG",
+    machineRevisionId: machine.id,
+    processRevisionId: process.id,
+    filamentRevisionId: filament.id,
+    printerId: "creality-k2"
+  });
+  assert.equal(profiles.approveSet(set.id).approved, true);
+
+  // A re-import that broke the machine profile's inheritance (a vendor parent went
+  // missing) flips the SAME revision id active → quarantined — exactly what the
+  // importer's upsert does in place.
+  store.repositories.profileRevisions.update({
+    ...machine,
+    status: "quarantined",
+    resolvedJson: null,
+    resolvedSha256: null,
+    blockers: [{ code: "missing_parent", message: "родитель недоступен" }]
+  });
+
+  // A plain read must already reflect reality — recomputed, not the stale row.
+  const shown = profiles.getSet(set.id);
+  assert.equal(shown.approved, false);
+  assert.equal(shown.validation, "blocked");
+  assert.ok(shown.blockers.some((b) => b.code === "member_not_active"));
+  assert.ok(shown.blockers.some((b) => b.code === "set_needs_revalidation"));
+
+  // revalidateSets (run after every import) PERSISTS the revocation authoritatively.
+  const changed = profiles.revalidateSets("operator");
+  assert.ok(changed >= 1);
+  const raw = store.repositories.profileSets.getById(set.id);
+  assert.equal(raw?.approved, false);
+  assert.equal(raw?.validation, "blocked");
+});
+
+test("re-import that leaves an approved set valid does NOT revoke it or churn (idempotent)", () => {
+  const { machine, process, filament } = seedActiveTrio();
+  const set = profiles.createSet({
+    name: "stable",
+    machineRevisionId: machine.id,
+    processRevisionId: process.id,
+    filamentRevisionId: filament.id,
+    printerId: "creality-k2"
+  });
+  const approved = profiles.approveSet(set.id);
+  const versionAfterApprove = store.repositories.profileSets.getById(set.id)?.version;
+
+  assert.equal(profiles.revalidateSets("operator"), 0); // nothing changed
+  const after = profiles.getSet(set.id);
+  assert.equal(after.approved, true);
+  assert.equal(after.approvedBy, approved.approvedBy);
+  // Untouched: no version bump when the verdict is unchanged.
+  assert.equal(store.repositories.profileSets.getById(set.id)?.version, versionAfterApprove);
+});
+
+// ── #2 Class-scoped set validation ───────────────────────────────────────────
+
+test("class-scoped set: an existing compatible class validates; a nonexistent class is blocked and unapprovable", () => {
+  const { machine, process, filament } = seedActiveTrio();
+  const base = {
+    machineRevisionId: machine.id,
+    processRevisionId: process.id,
+    filamentRevisionId: filament.id
+  };
+  const ok = profiles.createSet({ ...base, name: "existing", printerClass: "k2-farm" });
+  assert.notEqual(ok.validation, "blocked", JSON.stringify(ok.blockers));
+  assert.equal(profiles.approveSet(ok.id).approved, true);
+
+  const ghost = profiles.createSet({ ...base, name: "ghost", printerClass: "no-such-class" });
+  assert.equal(ghost.validation, "blocked");
+  assert.ok(ghost.blockers.some((b) => b.code === "printer_class_unknown"));
+  assert.throws(() => profiles.approveSet(ghost.id), /блокер/i);
+});
+
+test("class-scoped set: a heterogeneous class (only some printers fit) warns but is approvable", () => {
+  const { machine, process, filament } = seedActiveTrio();
+  const set = profiles.createSet({
+    name: "mixed",
+    machineRevisionId: machine.id,
+    processRevisionId: process.id,
+    filamentRevisionId: filament.id,
+    printerClass: "k2-mixed"
+  });
+  assert.notEqual(set.validation, "blocked", JSON.stringify(set.blockers));
+  assert.ok(set.warnings.some((w) => w.code === "printer_class_partial"));
+  assert.equal(profiles.approveSet(set.id).approved, true);
+});
+
+test("class matching is case/space-insensitive", () => {
+  const { machine, process, filament } = seedActiveTrio();
+  const set = profiles.createSet({
+    name: "cased",
+    machineRevisionId: machine.id,
+    processRevisionId: process.id,
+    filamentRevisionId: filament.id,
+    printerClass: "  K2-Farm  "
+  });
+  assert.notEqual(set.validation, "blocked", JSON.stringify(set.blockers));
+});
+
+// ── #5 A concrete target for a class-scoped set is validated before slicing ───
+
+test("class-scoped slice: a concrete target must exist, be in the class, and be compatible", async () => {
+  const artifactId = await uploadModel();
+  const setId = approvedClassSet("k2-farm");
+
+  // Nonexistent printer.
+  await assert.rejects(
+    slice.createSlice({ artifactId, profileSetId: setId, targetPrinterId: "ghost" }),
+    /не найден/i
+  );
+  // A printer of a DIFFERENT class.
+  await assert.rejects(
+    slice.createSlice({ artifactId, profileSetId: setId, targetPrinterId: "ender3-v3-ke" }),
+    /класс/i
+  );
+  assert.equal(runner.sliceCount, 0); // nothing sliced for the rejected targets
+
+  // A compatible printer of the class → proceeds, carrying that target + the class.
+  const ok = await slice.createSlice({ artifactId, profileSetId: setId, targetPrinterId: "creality-k2" });
+  assert.equal(ok.targetPrinterId, "creality-k2");
+  assert.equal(ok.targetPrinterClass, "k2-farm");
+  await slice.whenIdle();
+  assert.equal(slice.getVariant(ok.id).state, "ready");
+});
+
+test("class-scoped slice: an in-class but INCOMPATIBLE concrete target never slices or reaches ready", async () => {
+  const artifactId = await uploadModel();
+  const setId = approvedClassSet("k2-mixed"); // set machine is 0.4; class has a 0.6 too
+
+  await assert.rejects(
+    slice.createSlice({ artifactId, profileSetId: setId, targetPrinterId: "k2-big-nozzle" }),
+    /несовместим|сопло/i
+  );
+  assert.equal(runner.sliceCount, 0);
+  assert.equal(slice.listVariants().length, 0); // no variant was ever created
+
+  // The compatible 0.4 member of the same class is accepted.
+  const ok = await slice.createSlice({ artifactId, profileSetId: setId, targetPrinterId: "k2-mixed-ok" });
+  assert.equal(ok.targetPrinterId, "k2-mixed-ok");
+});
+
+// ── #7 Unpinned deployments fold the detected version into the cache key ──────
+
+test("unpinned deployment: the detected OrcaSlicer version is part of the cache key (an upgrade invalidates it)", async () => {
+  const unpinned = new FakeOrcaRunner({ pinnedVersion: null, detectedVersion: "2.3.0" });
+  const svc = new SliceService(store, storage, artifacts, unpinned, {
+    tmpRoot: path.join(TMP, "work"),
+    timeoutMs: 5000,
+    concurrency: 1,
+    listPrinters: () => PRINTERS
+  });
+  const profs = new ProfileService(store, unpinned, () => PRINTERS);
+  try {
+    const artifactId = await uploadModel();
+    const { machine, process, filament } = seedActiveTrio();
+    const set = profs.createSet({
+      name: "unpinned",
+      machineRevisionId: machine.id,
+      processRevisionId: process.id,
+      filamentRevisionId: filament.id,
+      printerId: "creality-k2"
+    });
+    profs.approveSet(set.id);
+
+    const first = await svc.createSlice({ artifactId, profileSetId: set.id });
+    await svc.whenIdle();
+    assert.equal(svc.getVariant(first.id).state, "ready");
+    assert.equal(unpinned.sliceCount, 1);
+
+    // Same inputs + same detected version → cache hit, no second slice.
+    const cached = await svc.createSlice({ artifactId, profileSetId: set.id });
+    assert.ok(cached.warnings.some((w) => w.code === "cache_hit"));
+    assert.equal(unpinned.sliceCount, 1);
+
+    // Simulate an OrcaSlicer upgrade: the detected version changes → different key →
+    // NOT a cache hit → a genuine re-slice.
+    unpinned.detectedVersion = "2.4.0";
+    const afterUpgrade = await svc.createSlice({ artifactId, profileSetId: set.id });
+    await svc.whenIdle();
+    assert.ok(!afterUpgrade.warnings.some((w) => w.code === "cache_hit"));
+    assert.equal(svc.getVariant(afterUpgrade.id).state, "ready");
+    assert.equal(unpinned.sliceCount, 2);
+  } finally {
+    svc.close();
+  }
+});
+
+// ── #4 The runtime is probed once per slice (result handed to the runner) ─────
+
+test("the slice hands the runner the probe result it already took (single gate per op)", async () => {
+  const artifactId = await uploadModel();
+  const setId = await approvedSet();
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+  assert.equal(slice.getVariant(variant.id).state, "ready");
+  // runPipeline probed and passed the fresh status into slice() — the runner never
+  // needs to re-probe (the real runner asserts the no-second-`--version` in its own test).
+  assert.ok(runner.lastProbed);
+  assert.equal(runner.lastProbed?.available, true);
 });

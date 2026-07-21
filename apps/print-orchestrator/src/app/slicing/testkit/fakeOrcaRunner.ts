@@ -7,6 +7,7 @@ import {
   type OrcaRuntimeStatus,
   type SliceRequest,
   type SliceRunner,
+  type SliceRunOptions,
   type SliceRunOutput
 } from "../../../infra/slicing/sliceRunner";
 
@@ -46,9 +47,14 @@ export type FakeBehavior = "ok" | "timeout" | "unavailable" | "fail";
 export class FakeOrcaRunner implements SliceRunner {
   readonly workerVersion: string;
   readonly pinnedVersion: string | null;
+  /** The version {@link probe} reports as detected — mutable so a test can simulate
+   *  an OrcaSlicer upgrade (relevant to the cache key when the deployment is unpinned). */
+  detectedVersion: string | null;
   behavior: FakeBehavior = "ok";
   sliceCount = 0;
   lastRequest: SliceRequest | null = null;
+  /** The probe status the last {@link slice} call received (to assert the caller passed it). */
+  lastProbed: OrcaRuntimeStatus | null | undefined;
   gcode = FAKE_ORCA_GCODE;
   /** When set, {@link probe} *rejects* with this error — an infrastructure failure
    *  (not a clean `available: false`), so the pipeline's outer guard is exercised. */
@@ -56,9 +62,14 @@ export class FakeOrcaRunner implements SliceRunner {
   /** Optional hook fired mid-slice, before the output is written (to assert temp state). */
   onSlice?: (req: SliceRequest) => void | Promise<void>;
 
-  constructor(options: { pinnedVersion?: string | null; workerVersion?: string } = {}) {
-    this.pinnedVersion = options.pinnedVersion ?? "2.3.0";
+  constructor(options: { pinnedVersion?: string | null; workerVersion?: string; detectedVersion?: string | null } = {}) {
+    // Distinguish "not given" (default to pinned 2.3.0) from an explicit `null`
+    // (genuinely UNPINNED) — `?? "2.3.0"` would wrongly re-pin an unpinned runner.
+    this.pinnedVersion = options.pinnedVersion === undefined ? "2.3.0" : options.pinnedVersion;
     this.workerVersion = options.workerVersion ?? "orca-worker-1";
+    // Default the detected version to the pin, so a pinned runner reports itself as
+    // matching; an unpinned runner can be pointed at any version to test the cache.
+    this.detectedVersion = options.detectedVersion ?? this.pinnedVersion;
   }
 
   async probe(): Promise<OrcaRuntimeStatus> {
@@ -78,16 +89,17 @@ export class FakeOrcaRunner implements SliceRunner {
     return {
       available: true,
       binaryPath: "/fake/orca-slicer",
-      detectedVersion: this.pinnedVersion,
+      detectedVersion: this.detectedVersion,
       pinnedVersion: this.pinnedVersion,
-      versionMatches: true,
+      versionMatches: this.pinnedVersion ? true : null,
       networkIsolated: true,
       error: null,
       workerVersion: this.workerVersion
     };
   }
 
-  async slice(req: SliceRequest, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<SliceRunOutput> {
+  async slice(req: SliceRequest, options: SliceRunOptions = {}): Promise<SliceRunOutput> {
+    this.lastProbed = options.probed;
     this.lastRequest = req;
     if (this.behavior === "unavailable") {
       throw new SliceRuntimeUnavailableError("OrcaSlicer недоступен (тестовый режим)");

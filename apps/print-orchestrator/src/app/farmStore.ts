@@ -461,7 +461,10 @@ export class FarmStore {
       tmpRoot: slicing.tmpRoot,
       timeoutMs: slicing.timeoutMs,
       concurrency: slicing.concurrency,
-      logger
+      logger,
+      // For validating a concrete targetPrinterId against a class-scoped set before
+      // slicing (a known-undispatchable target must never reach `ready`).
+      listPrinters: () => this.slicerPrinters()
     });
     // Recover slice variants left `pending`/`running` by a crash. The one-time
     // catalog import is driven from start() (awaited there) so the profiles are
@@ -583,6 +586,10 @@ export class FarmStore {
     if (slicing.autoImport && this.presetImportService) {
       try {
         const result = await this.presetImportService.import("system");
+        // Re-validate any sets carried over from a previous run against the freshly
+        // imported revisions, so a set the new catalog invalidated can't linger as
+        // approved/valid (mirrors the operator-triggered import path).
+        this.profileService?.revalidateSets("system");
         logger.info?.(
           { active: result.counts.active, quarantined: result.counts.quarantined, invalid: result.counts.invalid },
           "orca preset catalog imported"

@@ -40,7 +40,7 @@ function filamentFields(over: Partial<FilamentFields> = {}): FilamentFields {
 
 // ── Per-profile self checks ──────────────────────────────────────────────────
 
-test("machine self: nozzle_diameter contradicting printer_variant is a blocker", () => {
+test("machine self: nozzle_diameter contradicting printer_variant is a blocker; the parent-name hint only warns", () => {
   // The real Creality K2 case: 0.4 nozzle declared, but variant/parent say 0.2.
   const result = checkProfileSelf({
     type: "machine",
@@ -49,8 +49,26 @@ test("machine self: nozzle_diameter contradicting printer_variant is a blocker",
     raw: {},
     resolved: { nozzle_diameter: ["0.4"], printer_variant: "0.2", printable_area: ["0x0", "260x0", "260x260", "0x260"] }
   });
+  // printer_variant is a real setting → reliable → still a blocker.
   assert.ok(codes(result.blockers).includes("nozzle_variant_mismatch"));
-  assert.ok(codes(result.blockers).includes("nozzle_parent_mismatch"));
+  // The parent NAME ("… 0.2 nozzle") is only an inference — a deliberate override
+  // must not quarantine, so this is a warning, never a blocker.
+  assert.ok(codes(result.warnings).includes("nozzle_parent_mismatch"));
+  assert.ok(!codes(result.blockers).includes("nozzle_parent_mismatch"));
+});
+
+test("machine self: a parent-name nozzle hint alone (no printer_variant conflict) does NOT quarantine", () => {
+  // nozzle_diameter 0.4 but parent name says "0.8 nozzle", and NO printer_variant to
+  // corroborate. Name-based inference must not block — active with a warning only.
+  const result = checkProfileSelf({
+    type: "machine",
+    name: "Creality K2 0.4",
+    inherits: "Creality K2 0.8 nozzle",
+    raw: {},
+    resolved: { nozzle_diameter: ["0.4"], printable_area: ["0x0", "260x0", "260x260", "0x260"] }
+  });
+  assert.ok(codes(result.warnings).includes("nozzle_parent_mismatch"));
+  assert.equal(result.blockers.length, 0, JSON.stringify(result.blockers));
 });
 
 test("process self: an absurd layer height is a blocker; a merely large one warns", () => {
@@ -188,4 +206,89 @@ test("a loosely-matching model (normalised) does not block", () => {
   // machine model "Bambu Lab A1" vs a differently-spaced/cased target.
   const r = validateProfileSet(activeSet({ target: { printerModel: "bambu-lab a1" } }));
   assert.ok(!codes(r.blockers).includes("printer_model_mismatch"));
+});
+
+test("PET and PETG are NOT treated as the same material (no two-sided prefix match)", () => {
+  // A printer loaded with PET must not silently 'support' a PETG filament (and the
+  // reverse), which the old two-sided startsWith allowed.
+  const petgOnPet = validateProfileSet(
+    activeSet({
+      filament: { name: "PETG", status: "active", fields: filamentFields({ filamentType: "PETG" }) },
+      target: { printerMaterial: "PET", printerModel: "Bambu Lab A1" }
+    })
+  );
+  assert.ok(codes(petgOnPet.warnings).includes("material_not_supported"));
+
+  const petOnPetg = validateProfileSet(
+    activeSet({
+      filament: { name: "PET", status: "active", fields: filamentFields({ filamentType: "PET" }) },
+      target: { printerMaterial: "PETG", printerModel: "Bambu Lab A1" }
+    })
+  );
+  assert.ok(codes(petOnPetg.warnings).includes("material_not_supported"));
+
+  // Exact family still matches (PETG-CF reduces to PETG).
+  const petgCfOnPetg = validateProfileSet(
+    activeSet({
+      filament: { name: "PETG-CF", status: "active", fields: filamentFields({ filamentType: "PETG-CF" }) },
+      target: { printerMaterial: "PETG", printerModel: "Bambu Lab A1" }
+    })
+  );
+  assert.ok(!codes(petgCfOnPetg.warnings).includes("material_not_supported"));
+});
+
+// ── Class targets (interchangeable printers) ─────────────────────────────────
+
+test("class target: an unknown/empty class is a blocker", () => {
+  const r = validateProfileSet(activeSet({ classTargets: { className: "ghost", printers: [] } }));
+  assert.ok(codes(r.blockers).includes("printer_class_unknown"));
+});
+
+test("class target: a homogeneous compatible class has no blockers", () => {
+  const r = validateProfileSet(
+    activeSet({
+      classTargets: {
+        className: "a1",
+        printers: [
+          { printerModel: "Bambu Lab A1", printerNozzleMm: 0.4 },
+          { printerModel: "Bambu Lab A1", printerNozzleMm: 0.4 }
+        ]
+      }
+    })
+  );
+  assert.equal(r.blockers.length, 0, JSON.stringify(r.blockers));
+  assert.ok(!codes(r.warnings).includes("printer_class_partial"));
+});
+
+test("class target: a heterogeneous class (only some fit) warns but does not block", () => {
+  const r = validateProfileSet(
+    activeSet({
+      classTargets: {
+        className: "mixed",
+        printers: [
+          { printerModel: "Bambu Lab A1", printerNozzleMm: 0.4 }, // compatible
+          { printerModel: "Bambu Lab A1", printerNozzleMm: 0.6 } // nozzle mismatch → not compatible
+        ]
+      }
+    })
+  );
+  assert.equal(r.blockers.length, 0, JSON.stringify(r.blockers));
+  assert.ok(codes(r.warnings).includes("printer_class_partial"));
+});
+
+test("class target: a class where NO member fits is a blocker", () => {
+  const r = validateProfileSet(
+    activeSet({
+      classTargets: {
+        className: "wrong",
+        printers: [
+          { printerModel: "Bambu Lab A1", printerNozzleMm: 0.6 },
+          { printerModel: "Bambu Lab A1", printerNozzleMm: 0.8 }
+        ]
+      }
+    })
+  );
+  assert.ok(codes(r.blockers).includes("printer_class_incompatible"));
+  // The concrete reason (nozzle mismatch) is surfaced too.
+  assert.ok(codes(r.blockers).includes("printer_nozzle_mismatch"));
 });

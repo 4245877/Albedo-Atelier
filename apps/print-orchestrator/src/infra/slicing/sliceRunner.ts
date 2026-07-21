@@ -51,6 +51,15 @@ export interface SliceRunOutput {
   durationMs: number;
 }
 
+/** Per-call slice options. `probed` lets the caller supply an availability check it
+ *  already ran, so the runner need not re-probe (spawn a second `--version`) for the
+ *  same operation; when omitted the runner probes itself, keeping its guarantee. */
+export interface SliceRunOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  probed?: OrcaRuntimeStatus;
+}
+
 export interface SliceRunner {
   /** The worker version, mixed into a variant's cache key. */
   readonly workerVersion: string;
@@ -59,7 +68,7 @@ export interface SliceRunner {
   /** Detects a usable runtime without slicing anything. */
   probe(): Promise<OrcaRuntimeStatus>;
   /** Slices one model, or throws one of the errors below. */
-  slice(req: SliceRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<SliceRunOutput>;
+  slice(req: SliceRequest, options?: SliceRunOptions): Promise<SliceRunOutput>;
 }
 
 /** No usable OrcaSlicer runtime — the honest "cannot slice" signal (→ `blocked`). */

@@ -64,10 +64,15 @@ export function registerSlicingRoutes(app: FastifyInstance): void {
 
   // ── Presets import ─────────────────────────────────────────────────────────
 
-  app.post("/slicing/presets/import", async () => ({
-    ok: true,
-    result: await farmStore.slicing.presets.import("operator")
-  }));
+  app.post("/slicing/presets/import", async () => {
+    const result = await farmStore.slicing.presets.import("operator");
+    // A re-import can flip a revision `active → quarantined` (e.g. a vendor parent
+    // went missing) on the very ids an approved set pins — so re-validate every set
+    // now and revoke any approval a changed member invalidated, instead of leaving
+    // it showing a stale `approved/valid` until someone happens to open it.
+    farmStore.slicing.profiles.revalidateSets("operator");
+    return { ok: true, result };
+  });
 
   // ── Slice variants ──────────────────────────────────────────────────────────
 

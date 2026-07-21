@@ -7,8 +7,9 @@ import { JobError, NotFoundError, ValidationError } from "../../core/errors";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import { assertTransition } from "../../domain/print/states";
-import type { AnalysisFinding, ArtifactAnalysis, AuditEntityType, Metadata } from "../../domain/print/types";
+import type { ArtifactAnalysis, AuditEntityType, Metadata } from "../../domain/print/types";
 import { computeCacheKey } from "../../domain/slicing/cacheKey";
+import { validateProfileSet } from "../../domain/slicing/compatibility";
 import { finding } from "../../domain/slicing/findings";
 import { evaluateSliceOutput } from "../../domain/slicing/outputGate";
 import { SLICE_VARIANT_TRANSITIONS } from "../../domain/slicing/states";
@@ -17,6 +18,7 @@ import type { ArtifactStorage } from "../../infra/storage/artifactStorage";
 import { SliceRuntimeUnavailableError, type SliceRunner } from "../../infra/slicing/sliceRunner";
 import type { StoreLogger } from "../../shared/logger";
 import type { ArtifactService } from "../artifacts/artifactService";
+import { normalizeClass, setMembersOf, targetOf, type SlicerPrinterRef } from "./profileService";
 import { SliceWorker } from "./sliceWorker";
 
 export interface CreateSliceInput {
@@ -37,6 +39,12 @@ export interface SliceServiceOptions {
   now?: () => Date;
   actor?: string;
   logger?: StoreLogger;
+  /**
+   * The farm printers, for validating a concrete `targetPrinterId` against a
+   * class-scoped set before slicing. When omitted, that pre-flight check is skipped
+   * (dispatch still gates downstream); farmStore always wires it.
+   */
+  listPrinters?: () => SlicerPrinterRef[];
 }
 
 /**
@@ -104,7 +112,19 @@ export class SliceService {
     const task = repos.tasks.findByArtifactId(artifact.id);
     if (!task) throw new ValidationError("У артефакта нет связанного задания");
 
-    const orcaVersion = this.runner.pinnedVersion ?? machine.orcaVersion ?? "unknown";
+    // The OrcaSlicer version that will produce this output, folded into the cache
+    // key so a result is never re-served across a slicer change. When the deployment
+    // pins a version, that pin IS the key. When UNPINNED, the pin can't stand in —
+    // probe the runtime so an OrcaSlicer upgrade actually invalidates the cache
+    // (falling back to the profile's declared version, then "unknown", if the probe
+    // can't tell). A pinned deployment (production) skips this probe entirely.
+    let orcaVersion: string;
+    if (this.runner.pinnedVersion) {
+      orcaVersion = this.runner.pinnedVersion;
+    } else {
+      const probed = await this.runner.probe();
+      orcaVersion = probed.detectedVersion ?? machine.orcaVersion ?? "unknown";
+    }
     const cacheKey = computeCacheKey({
       sourceSha256: artifact.sha256 ?? artifact.id,
       machineResolvedSha256: machine.resolvedSha256 ?? machine.rawSha256,
@@ -118,7 +138,9 @@ export class SliceService {
     // retarget it. For a printer-scoped set the target IS the set's printer; any
     // conflicting override is refused. For a class-scoped set the client may name a
     // concrete printer, but the class stays the set's (server-derived, never the
-    // client's) so a mismatch is caught downstream at schedule/dispatch time.
+    // client's) and — crucially — that printer is verified NOW to exist, to belong
+    // to the class, and to be compatible with the profiles, so a known-undispatchable
+    // variant can never slice and reach `ready`.
     const targetPrinterClass = set.printerClass ?? null;
     let targetPrinterId: string | null;
     if (set.printerId) {
@@ -130,6 +152,9 @@ export class SliceService {
       targetPrinterId = set.printerId;
     } else {
       targetPrinterId = input.targetPrinterId ?? null;
+      if (targetPrinterId) {
+        this.assertClassTargetDispatchable(set.printerClass, targetPrinterId, machine, process, filament);
+      }
     }
 
     // Cache hit: a finished variant with this key whose output blob still exists
@@ -393,9 +418,11 @@ export class SliceService {
       await fsp.writeFile(filamentJsonPath, filament.resolvedJson, "utf8");
 
       const outputPath = path.join(workDir, "output.gcode");
+      // Hand the runner the runtime status we just probed so it does not spawn a
+      // second `--version` for the same slice (the gate still runs — once).
       await this.runner.slice(
         { modelPath, machineJsonPath, processJsonPath, filamentJsonPath, outputPath, workDir },
-        { timeoutMs: this.options.timeoutMs }
+        { timeoutMs: this.options.timeoutMs, probed: runtime }
       );
 
       // Stage + register + analyse the output with the EXISTING artifact pipeline.
@@ -450,6 +477,40 @@ export class SliceService {
       throw new JobError(`Профиль «${rev.name}» не активен (${rev.status})`);
     }
     return rev;
+  }
+
+  /**
+   * For a class-scoped set sliced against a *concrete* printer: refuse before any
+   * OrcaSlicer work unless that printer exists, actually belongs to the set's class,
+   * and is compatible with the chosen profiles. Reuses the one compatibility
+   * mechanism ({@link validateProfileSet}) so a slice cannot pass a check the set's
+   * own approval would fail. No-ops when the farm view isn't wired.
+   */
+  private assertClassTargetDispatchable(
+    setClass: string | null,
+    printerId: string,
+    machine: ProfileRevision,
+    process: ProfileRevision,
+    filament: ProfileRevision
+  ): void {
+    const printers = this.options.listPrinters?.();
+    if (!printers) return;
+    const printer = printers.find((p) => p.id === printerId) ?? null;
+    if (!printer) {
+      throw new ValidationError(`Принтер «${printerId}» не найден в конфигурации фермы`);
+    }
+    if (setClass) {
+      const printerClass = printer.printerClass ? normalizeClass(printer.printerClass) : null;
+      if (printerClass !== normalizeClass(setClass)) {
+        throw new ValidationError(`Принтер «${printerId}» не относится к классу «${setClass}» набора`);
+      }
+    }
+    const findings = validateProfileSet({ ...setMembersOf(machine, process, filament), target: targetOf(printer) });
+    if (findings.blockers.length > 0) {
+      throw new ValidationError(
+        `Принтер «${printerId}» несовместим с набором: ${findings.blockers.map((b) => b.message).join("; ")}`
+      );
+    }
   }
 
   /**

@@ -11,6 +11,7 @@ import {
   type OrcaRuntimeStatus,
   type SliceRequest,
   type SliceRunner,
+  type SliceRunOptions,
   type SliceRunOutput
 } from "./sliceRunner";
 
@@ -114,15 +115,16 @@ export class OrcaCliRunner implements SliceRunner {
     };
   }
 
-  async slice(
-    req: SliceRequest,
-    options: { timeoutMs?: number; signal?: AbortSignal } = {}
-  ): Promise<SliceRunOutput> {
-    const status = await this.probe();
+  async slice(req: SliceRequest, options: SliceRunOptions = {}): Promise<SliceRunOutput> {
+    // The availability + version-pin gate runs ONCE per slice operation. The caller
+    // (SliceService) probes before every slice and hands the result in via `probed`,
+    // so we don't spawn a redundant second `--version`; a direct caller that omits it
+    // still gets probed here, so the "never slice against a missing/mismatched
+    // runtime" guarantee is never weakened.
+    const status = options.probed ?? (await this.probe());
     if (!status.available) {
       throw new SliceRuntimeUnavailableError(status.error ?? "OrcaSlicer недоступен");
     }
-    const command = this.config.command as string;
 
     const args = [
       ...(this.config.baseArgs ?? []),

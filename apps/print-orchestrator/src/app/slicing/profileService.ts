@@ -1,11 +1,12 @@
 import { JobError, NotFoundError, ValidationError } from "../../core/errors";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
 import type { PrintQueueStore } from "../../domain/print/repositories";
-import type { AnalysisFinding, AuditEntityType, Metadata } from "../../domain/print/types";
+import type { AuditEntityType, Metadata } from "../../domain/print/types";
 import {
   validateProfileSet,
   type FindingSet,
-  type SetMember
+  type SetMember,
+  type SetTarget
 } from "../../domain/slicing/compatibility";
 import { finding } from "../../domain/slicing/findings";
 import {
@@ -55,6 +56,8 @@ export interface PrinterCoverage {
   printerId: string;
   printerName: string;
   model: string | null;
+  /** Interchangeability class (config `printerClass`); null when the printer has none. */
+  printerClass: string | null;
   hasAnyProfile: boolean;
   hasActiveProfile: boolean;
   activeProfileName: string | null;
@@ -112,13 +115,47 @@ export class ProfileService {
   // ── Profile sets ─────────────────────────────────────────────────────────────
 
   listSets(): ProfileSet[] {
-    return this.store.repositories.profileSets.list();
+    return this.store.repositories.profileSets.list().map((s) => this.refreshedForDisplay(s));
   }
 
   getSet(id: string): ProfileSet {
     const set = this.store.repositories.profileSets.getById(id);
     if (!set) throw new NotFoundError(`Набор профилей «${id}»`);
+    return this.refreshedForDisplay(set);
+  }
+
+  /** The raw stored set (no live re-validation) — for internal write paths. */
+  private requireSet(id: string): ProfileSet {
+    const set = this.store.repositories.profileSets.getById(id);
+    if (!set) throw new NotFoundError(`Набор профилей «${id}»`);
     return set;
+  }
+
+  /**
+   * A display copy of a set whose validation is recomputed from the *current*
+   * revision + printer state, so the UI can never show a stale `approved/valid`:
+   * if a member fell out of `active` (a re-import quarantined it, say) or the target
+   * printer/class changed, the copy is `blocked` and its approval is withdrawn with
+   * an explicit "re-validate" note. Pure — it never writes (see {@link revalidateSets}
+   * for the persisted, audited counterpart run after an import).
+   */
+  private refreshedForDisplay(set: ProfileSet): ProfileSet {
+    const findings = this.validateStoredSet(set);
+    const validation = validationStatus(findings);
+    const blockers = [...findings.blockers];
+    let approved = set.approved;
+    if (validation === "blocked") {
+      if (set.approved) {
+        blockers.unshift(
+          finding(
+            "set_needs_revalidation",
+            "Набор был утверждён, но состав профилей изменился после повторного импорта — проверьте и утвердите заново"
+          )
+        );
+      }
+      approved = false;
+    }
+    return { ...set, validation, warnings: findings.warnings, blockers, approved };
   }
 
   /** Creates a profile set (unapproved), running compatibility validation up front. */
@@ -140,7 +177,10 @@ export class ProfileService {
       throw new NotFoundError(`Принтер «${input.printerId}» не найден в конфигурации фермы`);
     }
 
-    const findings = this.validate(machine, process, filament, input.printerId ?? null);
+    const findings = this.validate(machine, process, filament, {
+      printerId: input.printerId ?? null,
+      printerClass: input.printerClass ?? null
+    });
     const validation = validationStatus(findings);
     const iso = this.nowIso();
     const actor = input.actor ?? "operator";
@@ -190,11 +230,14 @@ export class ProfileService {
     // reason-less refusal. Instead the write (blockers and all) always commits, and
     // the refusal is raised as an HTTP error *after* the transaction returns.
     const outcome = this.store.transaction(() => {
-      const set = this.getSet(id);
+      const set = this.requireSet(id);
       const machine = this.requireRevision(set.machineRevisionId, "machine");
       const process = this.requireRevision(set.processRevisionId, "process");
       const filament = this.requireRevision(set.filamentRevisionId, "filament");
-      const findings = this.validate(machine, process, filament, set.printerId);
+      const findings = this.validate(machine, process, filament, {
+        printerId: set.printerId,
+        printerClass: set.printerClass
+      });
       const validation = validationStatus(findings);
       const blocked = findings.blockers.length > 0;
       const iso = this.nowIso();
@@ -225,6 +268,54 @@ export class ProfileService {
       );
     }
     return outcome.saved;
+  }
+
+  /**
+   * Re-validates every profile set against the *current* revision/printer state and
+   * persists the result — the authoritative counterpart to {@link refreshedForDisplay}.
+   * Called after a preset (re)import, which can flip a revision `active → quarantined`
+   * (e.g. a vendor parent went missing) on the very ids an approved set pins. A set
+   * that a changed member made unusable has its approval **revoked** (never left
+   * showing a stale `approved/valid`), so the durable state and what the pipeline
+   * would actually accept can't drift. Returns the number of sets it changed.
+   */
+  revalidateSets(actor = "system"): number {
+    let changed = 0;
+    for (const set of this.store.repositories.profileSets.list()) {
+      const machine = this.store.repositories.profileRevisions.getById(set.machineRevisionId);
+      const process = this.store.repositories.profileRevisions.getById(set.processRevisionId);
+      const filament = this.store.repositories.profileRevisions.getById(set.filamentRevisionId);
+      const findings = this.validate(machine, process, filament, {
+        printerId: set.printerId,
+        printerClass: set.printerClass
+      });
+      const validation = validationStatus(findings);
+      const revoke = set.approved && findings.blockers.length > 0;
+      // Write only when the operator-visible verdict changed (or approval must be
+      // revoked) — a no-op re-import must not bump versions or spam the audit log.
+      if (validation === set.validation && !revoke) continue;
+      this.store.transaction(() => {
+        const current = this.store.repositories.profileSets.getById(set.id);
+        if (!current) return;
+        this.store.repositories.profileSets.update({
+          ...current,
+          validation,
+          warnings: findings.warnings,
+          blockers: findings.blockers,
+          approved: revoke ? false : current.approved,
+          updatedAt: this.nowIso()
+        });
+        this.recordAudit(actor, {
+          entityType: "profile_set",
+          entityId: set.id,
+          action: revoke ? "approval_revoked" : "revalidated",
+          to: validation,
+          detail: revoke ? { reason: "member_no_longer_usable" } : undefined
+        });
+      });
+      changed += 1;
+    }
+    return changed;
   }
 
   // ── Runtime & coverage ───────────────────────────────────────────────────────
@@ -268,6 +359,7 @@ export class ProfileService {
         printerId: printer.id,
         printerName: printer.name,
         model: printer.model,
+        printerClass: printer.printerClass ?? null,
         hasAnyProfile: matches.length > 0,
         hasActiveProfile: active !== null,
         activeProfileName: active?.name ?? null
@@ -286,50 +378,61 @@ export class ProfileService {
     return rev;
   }
 
+  /**
+   * The single compatibility mechanism used by create, approve, display and
+   * (post-import) re-validation. Revisions may be null (deleted/never-loaded), which
+   * validateProfileSet reports as a missing member. The target is exactly one of a
+   * concrete printer OR a printer class:
+   *   - printer: hard-checked against that device's hardware; a target that no longer
+   *     resolves to a farm printer is a blocker;
+   *   - class: hard-checked against EVERY printer of the class — unknown class or a
+   *     class with no compatible member is a blocker (a partial fit is a warning).
+   */
   private validate(
-    machine: ProfileRevision,
-    process: ProfileRevision,
-    filament: ProfileRevision,
-    printerId: string | null
+    machine: ProfileRevision | null,
+    process: ProfileRevision | null,
+    filament: ProfileRevision | null,
+    target: { printerId: string | null; printerClass: string | null }
   ): FindingSet {
-    const printer = printerId ? this.listPrinters().find((p) => p.id === printerId) ?? null : null;
-    const machineMember: SetMember<MachineFields> = {
-      name: machine.name,
-      status: machine.status,
-      fields: readMachine(settingsOf(machine))
-    };
-    const processMember: SetMember<ProcessFields> = {
-      name: process.name,
-      status: process.status,
-      fields: readProcess(settingsOf(process))
-    };
-    const filamentMember: SetMember<FilamentFields> = {
-      name: filament.name,
-      status: filament.status,
-      fields: readFilament(settingsOf(filament))
-    };
-    const findings = validateProfileSet({
-      machine: machineMember,
-      process: processMember,
-      filament: filamentMember,
-      target: printer
-        ? {
-            printerMaterial: printer.material,
-            printerProtocol: printer.protocol,
-            printerModel: printer.model,
-            printerNozzleMm: printer.nozzleMm ?? null,
-            printerClass: printer.printerClass ?? null
-          }
-        : undefined
-    });
-    // A concrete target that no longer resolves to a farm printer (removed from
-    // config after the set was created) cannot be validated → block approval.
-    if (printerId && !printer) {
-      findings.blockers.push(
-        finding("target_printer_unknown", `Целевой принтер «${printerId}» не найден в конфигурации фермы`)
-      );
+    const members = setMembersOf(machine, process, filament);
+    if (target.printerId) {
+      const printer = this.listPrinters().find((p) => p.id === target.printerId) ?? null;
+      const findings = validateProfileSet({ ...members, target: printer ? targetOf(printer) : undefined });
+      // A concrete target that no longer resolves to a farm printer (removed from
+      // config after the set was created) cannot be validated → block approval.
+      if (!printer) {
+        findings.blockers.push(
+          finding("target_printer_unknown", `Целевой принтер «${target.printerId}» не найден в конфигурации фермы`)
+        );
+      }
+      return findings;
     }
-    return findings;
+    if (target.printerClass) {
+      const printers = this.printersOfClass(target.printerClass);
+      return validateProfileSet({
+        ...members,
+        classTargets: { className: target.printerClass, printers: printers.map(targetOf) }
+      });
+    }
+    // No target bound (createSet forbids this; kept defensive for display).
+    return validateProfileSet(members);
+  }
+
+  /** Re-validates a stored set against the current revision/printer state (tolerant of deleted revisions). */
+  private validateStoredSet(set: ProfileSet): FindingSet {
+    const repos = this.store.repositories;
+    return this.validate(
+      repos.profileRevisions.getById(set.machineRevisionId),
+      repos.profileRevisions.getById(set.processRevisionId),
+      repos.profileRevisions.getById(set.filamentRevisionId),
+      { printerId: set.printerId, printerClass: set.printerClass }
+    );
+  }
+
+  /** Farm printers whose interchangeability class matches `className` (case/space-insensitive). */
+  private printersOfClass(className: string): SlicerPrinterRef[] {
+    const want = normalizeClass(className);
+    return this.listPrinters().filter((p) => p.printerClass && normalizeClass(p.printerClass) === want);
   }
 
   private nowIso(): string {
@@ -352,6 +455,45 @@ export class ProfileService {
       detail: input.detail ?? {}
     });
   }
+}
+
+/**
+ * Builds the compatibility {@link SetMember}s from three (possibly-null) revisions.
+ * Shared by the profile service and the slice service so a set is always read into
+ * the validator the exact same way (единый механизм). A null revision becomes a
+ * null member — validateProfileSet reports that as a missing member.
+ */
+export function setMembersOf(
+  machine: ProfileRevision | null,
+  process: ProfileRevision | null,
+  filament: ProfileRevision | null
+): {
+  machine: SetMember<MachineFields> | null;
+  process: SetMember<ProcessFields> | null;
+  filament: SetMember<FilamentFields> | null;
+} {
+  return {
+    machine: machine ? { name: machine.name, status: machine.status, fields: readMachine(settingsOf(machine)) } : null,
+    process: process ? { name: process.name, status: process.status, fields: readProcess(settingsOf(process)) } : null,
+    filament: filament
+      ? { name: filament.name, status: filament.status, fields: readFilament(settingsOf(filament)) }
+      : null
+  };
+}
+
+/** The compatibility {@link SetTarget} view of one farm printer's hardware. */
+export function targetOf(printer: SlicerPrinterRef): SetTarget {
+  return {
+    printerMaterial: printer.material,
+    printerProtocol: printer.protocol,
+    printerModel: printer.model,
+    printerNozzleMm: printer.nozzleMm ?? null
+  };
+}
+
+/** Canonical form of a printer-class label for matching (trimmed, case-insensitive). */
+export function normalizeClass(value: string): string {
+  return value.trim().toLowerCase();
 }
 
 /** A revision's effective settings: the resolved merge when available, else its raw JSON. */

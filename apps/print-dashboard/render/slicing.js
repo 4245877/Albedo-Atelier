@@ -10,8 +10,12 @@
 
 import { apiGet, apiPost } from "../api.js";
 import { $, esc, toast } from "../util.js";
+import { buildCreateSetPayload, createSetBlockReason, nextPollMs, targetOptions } from "./slicingForm.js";
 
 const POLL_MS = 4000;
+// Даже когда работы нет, опрашиваем реже, но постоянно — чтобы правки другого
+// оператора или фонового процесса не оставались невидимыми до следующего клика.
+const IDLE_POLL_MS = 20000;
 
 const state = { runtime: null, profiles: [], sets: [], variants: [], models: [], loaded: false, errors: [] };
 let pollTimer = null;
@@ -110,17 +114,21 @@ function renderConnectionError() {
     <button type="button" class="btn btn-sm" data-slice-action="reload">↻ Воззвать снова</button></div>`;
 }
 
+let pollMs = null;
 function ensurePolling() {
   const busyVariants = state.variants.some((v) => v.state === "pending" || v.state === "running");
-  // Опрашиваем и при ошибках загрузки — чтобы данные восстановились сами,
-  // не дожидаясь действия оператора.
-  const shouldPoll = busyVariants || state.errors.length > 0;
-  if (shouldPoll && pollTimer === null) {
-    pollTimer = setInterval(() => void loadAll(), POLL_MS);
-  } else if (!shouldPoll && pollTimer !== null) {
-    clearInterval(pollTimer);
-    pollTimer = null;
-  }
+  // Быстрый опрос при активной работе или ошибках; иначе — редкий фоновый, но
+  // всегда: изменения, сделанные другим оператором или фоновым процессом, не
+  // должны оставаться незаметными сколь угодно долго. Пересоздаём таймер, только
+  // если интервал сменился.
+  const want = nextPollMs(
+    { busyVariants, hasErrors: state.errors.length > 0 },
+    { fast: POLL_MS, idle: IDLE_POLL_MS }
+  );
+  if (pollTimer !== null && pollMs === want) return;
+  if (pollTimer !== null) clearInterval(pollTimer);
+  pollMs = want;
+  pollTimer = setInterval(() => void loadAll(), want);
 }
 
 /* ── Отрисовка ──────────────────────────────────────────────── */
@@ -345,17 +353,24 @@ function createSetHtml() {
   if (!active(filaments).length) missingActive.push("филамент");
 
   const coverage = (state.runtime && state.runtime.coverage) || [];
-  const printerOpts = coverage
+  const { printers, classes } = targetOptions(coverage);
+  const printerOpts = printers
     .map(
       (c) =>
         `<option value="${esc(c.printerId)}">${esc(c.printerName)}${c.hasActiveProfile ? "" : " · нет активного профиля"}</option>`
     )
     .join("");
+  const classOpts = classes.map((cls) => `<option value="${esc(cls)}">${esc(cls)}</option>`).join("");
+  const hasClasses = classes.length > 0;
 
-  const note = missingActive.length
-    ? `<div class="slice-block">⛔ Нет активных профилей: ${missingActive.join(", ")}. Набор собирается только из active-профилей — импортируйте/почините пресеты.</div>`
-    : `<div class="slice-hint">В набор попадают только active-профили; неактивные показаны, но недоступны для выбора.</div>`;
-  const disabledAttr = missingActive.length ? " disabled" : "";
+  // Причина, по которой набор создать нельзя (пустой список принтеров/coverage или
+  // нет active-профилей), — единый источник и текста, и блокировки кнопки. Молча
+  // отдавать пустую форму с невыбираемой целью нельзя.
+  const blockReason = createSetBlockReason(coverage, missingActive);
+  const note = blockReason
+    ? `<div class="slice-block">⛔ ${esc(blockReason)}</div>`
+    : `<div class="slice-hint">В набор попадают только active-профили; неактивные показаны, но недоступны для выбора. Цель — ровно одна: конкретный принтер или класс взаимозаменяемых принтеров.</div>`;
+  const disabledAttr = blockReason ? " disabled" : "";
 
   return `
     <form class="slice-panel slice-form" data-slice-form="create-set">
@@ -365,8 +380,14 @@ function createSetHtml() {
         <label>Принтер профиля<select name="machine" required>${opts(machines)}</select></label>
         <label>Печать<select name="process" required>${opts(processes)}</select></label>
         <label>Филамент<select name="filament" required>${opts(filaments)}</select></label>
-        <label>Целевой принтер<select name="printer">${printerOpts || `<option value="">—</option>`}</select></label>
       </div>
+      <fieldset class="slice-target">
+        <legend>Цель набора</legend>
+        <label class="slice-target-opt"><input type="radio" name="targetType" value="printer" data-slice-target-type checked /> Конкретный принтер</label>
+        <label class="slice-target-opt"><input type="radio" name="targetType" value="class" data-slice-target-type${hasClasses ? "" : " disabled"} /> Класс взаимозаменяемых принтеров${hasClasses ? "" : " · классы не заданы"}</label>
+        <label data-target-input="printer">Принтер<select name="printer">${printerOpts || `<option value="">—</option>`}</select></label>
+        <label data-target-input="class" hidden>Класс<select name="printerClass" disabled>${classOpts || `<option value="">—</option>`}</select></label>
+      </fieldset>
       ${note}
       <button type="submit" class="btn btn-primary btn-sm"${disabledAttr}>Создать и проверить</button>
     </form>`;
@@ -518,18 +539,33 @@ function wireDelegates() {
       void loadAll({ full: true });
       return;
     }
-    if (busy) return; // мутация уже выполняется — повторный клик игнорируем
+    // Мутация уже выполняется — не молчим: объясняем, почему клик проигнорирован.
+    if (busy) {
+      toast("Дождитесь завершения текущей операции, Владыка.");
+      return;
+    }
     const id = btn.dataset.id;
     if (action === "import") void run(btn, () => apiPost("/api/print/slicing/presets/import"), "Пресеты импортированы, Владыка");
     else if (action === "approve") void run(btn, () => apiPost(`/api/print/slicing/profile-sets/${id}/approve`), "Набор утверждён — воля ваша исполнена");
     else if (action === "rerun") void run(btn, () => apiPost(`/api/print/slicing/variants/${id}/rerun`), "Слайсинг перезапущен — на этот раз всё будет безупречно");
   });
 
+  // Переключатель типа цели в «Новом наборе»: показываем ровно один список
+  // (принтер или класс) и выключаем скрытый, чтобы он не попадал в отправку.
+  document.addEventListener("change", (e) => {
+    const radio = e.target.closest("[data-slice-target-type]");
+    if (!radio || !radio.form) return;
+    applyTargetType(radio.form, radio.value);
+  });
+
   document.addEventListener("submit", (e) => {
     const form = e.target.closest("[data-slice-form]");
     if (!form) return;
     e.preventDefault();
-    if (busy) return;
+    if (busy) {
+      toast("Дождитесь завершения текущей операции, Владыка.");
+      return;
+    }
     const kind = form.dataset.sliceForm;
     // Защита на случай, если кнопка не была disabled: без runtime не запускаем.
     if (kind === "slice" && state.runtime?.runtime?.available === false) {
@@ -539,7 +575,13 @@ function wireDelegates() {
     const submitBtn = form.querySelector('button[type="submit"]');
     const data = Object.fromEntries(new FormData(form).entries());
     if (kind === "create-set") {
-      void run(submitBtn, () => apiPost("/api/print/slicing/profile-sets", data), "Набор создан и представлен на проверку, Владыка");
+      // Ровно одна цель (принтер ИЛИ класс) по выбранному типу; без цели — тост, не сабмит.
+      const built = buildCreateSetPayload(data, data.targetType);
+      if (!built.ok) {
+        toast(built.error, "toast-danger");
+        return;
+      }
+      void run(submitBtn, () => apiPost("/api/print/slicing/profile-sets", built.payload), "Набор создан и представлен на проверку, Владыка");
     } else if (kind === "slice") {
       void run(submitBtn, () => apiPost("/api/print/slicing/slice", data), "Слайсинг начат — я лично прослежу за каждым слоем");
     }
@@ -550,6 +592,22 @@ function wireDelegates() {
   document.addEventListener("artifact-analysis-completed", () => {
     if (state.loaded) void loadAll();
   });
+}
+
+// Показывает выбранный список цели и прячет+выключает другой (disabled select не
+// попадает в FormData и не мешает нативной валидации).
+function applyTargetType(form, type) {
+  const isClass = type === "class";
+  for (const [kind, wrapper] of [
+    ["printer", form.querySelector('[data-target-input="printer"]')],
+    ["class", form.querySelector('[data-target-input="class"]')]
+  ]) {
+    if (!wrapper) continue;
+    const active = (kind === "class") === isClass;
+    wrapper.hidden = !active;
+    const sel = wrapper.querySelector("select");
+    if (sel) sel.disabled = !active;
+  }
 }
 
 async function run(btn, fn, okMsg) {
