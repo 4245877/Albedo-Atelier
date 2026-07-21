@@ -2,12 +2,16 @@
  * `fetch` with a hard deadline, for the short-lived JSON/snapshot requests the
  * orchestrator makes (Moonraker, go2rtc, fulfillment, camera frames). Replaces
  * the repeated `AbortController` + `setTimeout` + `clearTimeout` boilerplate
- * with `AbortSignal.timeout()` (Node ≥ 17.3; this project runs Node 22).
+ * with `AbortSignal.timeout()` (Node ≥ 17.3; this project runs Node ≥ 22).
  *
- * On expiry the promise rejects with the signal's own `TimeoutError`
- * DOMException — the original cause is surfaced, never swallowed or rewrapped,
- * so callers keep mapping/reporting errors exactly as before (see
- * {@link isTimeoutError} for the name check).
+ * A caller MAY still pass its own `RequestInit.signal` (e.g. a shutdown/cancel
+ * controller): it is combined with the deadline via `AbortSignal.any` (Node ≥
+ * 20.3) rather than being silently dropped, so BOTH can abort the request.
+ * Whichever fires first supplies the rejection reason — the deadline rejects
+ * with a `TimeoutError` DOMException, a manual abort with an `AbortError` — so
+ * callers can tell the two apart (see {@link isTimeoutError} /
+ * {@link isAbortError}). The original cause is surfaced, never swallowed or
+ * rewrapped.
  *
  * The deadline covers the whole exchange, including reading the body. That is
  * what every short request here wants. Deliberately NOT for long-lived live
@@ -19,18 +23,30 @@ export function fetchWithTimeout(
   input: string | URL | Request,
   init: RequestInit & { timeoutMs: number }
 ): Promise<Response> {
-  const { timeoutMs, ...rest } = init;
-  return fetch(input, { ...rest, signal: AbortSignal.timeout(timeoutMs) });
+  const { timeoutMs, signal, ...rest } = init;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  // With no caller signal, pass the deadline alone (no needless wrapper). With
+  // one, merge them so an external cancel and the deadline both stay effective.
+  const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+  return fetch(input, { ...rest, signal: combined });
 }
 
 /**
- * Whether an error is the deadline firing. `TimeoutError` is what
- * `AbortSignal.timeout()` reports; `AbortError` is kept for any signal aborted
- * by hand, so callers distinguishing "timed out" from "refused/reset" keep
- * doing so faithfully.
+ * Whether an error is the DEADLINE firing — the `TimeoutError` DOMException
+ * `AbortSignal.timeout()` reports. Deliberately narrow: a manual `AbortError`
+ * (an external signal aborted by hand) is a different cause and is NOT reported
+ * as a timeout — use {@link isAbortError} for that. Callers that must fail
+ * closed on "the response was lost" should treat both as inconclusive.
  */
 export function isTimeoutError(error: unknown): boolean {
-  return (
-    error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")
-  );
+  return error instanceof Error && error.name === "TimeoutError";
+}
+
+/**
+ * Whether an error is a manual cancellation — the `AbortError` DOMException a
+ * caller-supplied {@link AbortSignal} raises when aborted by hand (shutdown,
+ * an operator cancel). Distinct from the deadline (see {@link isTimeoutError}).
+ */
+export function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }

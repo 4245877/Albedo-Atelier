@@ -45,10 +45,20 @@ export function parseLocalTimeWindow(value: string): LocalTimeWindow | null {
   return { startMinutes, endMinutes };
 }
 
-/** Canonical zero-padded `"HH:MM"` from minutes since midnight (e.g. 450 → `"07:30"`). */
+/**
+ * Canonical zero-padded `"HH:MM"` from minutes since midnight (e.g. 450 →
+ * `"07:30"`). Callers pass minutes-since-midnight (0…1439); a value outside that
+ * range is normalized into a single day rather than producing `"24:00"` or a
+ * negative string — `1440 → "00:00"`, `-1 → "23:59"`. A non-finite input is a
+ * programming error and is rejected loudly.
+ */
 export function minutesToHhmm(minutes: number): string {
-  const h = String(Math.floor(minutes / 60)).padStart(2, "0");
-  const m = String(minutes % 60).padStart(2, "0");
+  if (!Number.isFinite(minutes)) {
+    throw new RangeError(`minutesToHhmm expects a finite number of minutes, got ${minutes}`);
+  }
+  const dayMinutes = ((Math.trunc(minutes) % 1440) + 1440) % 1440;
+  const h = String(Math.floor(dayMinutes / 60)).padStart(2, "0");
+  const m = String(dayMinutes % 60).padStart(2, "0");
   return `${h}:${m}`;
 }
 
@@ -65,6 +75,10 @@ export function isWithinLocalTimeWindow(
 
   const current = minutesSinceLocalMidnight(date);
   const { startMinutes, endMinutes } = parsed;
+  // Equal start and end is a zero-length window read as "the whole day" — always
+  // within. Intentional (a light fallback of "08:00-08:00" stays on around the
+  // clock); it is NOT "never on". Start is inclusive, end exclusive; a window
+  // whose end is before its start (e.g. 21:30–07:30) wraps across midnight.
   if (startMinutes === endMinutes) return true;
   if (startMinutes < endMinutes) {
     return current >= startMinutes && current < endMinutes;

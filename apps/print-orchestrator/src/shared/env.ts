@@ -2,69 +2,151 @@ import path from "node:path";
 
 import { parseLocalTimeWindow } from "./time";
 
-function readInteger(value: string | undefined, fallback: number): number {
-  if (!value) {
-    return fallback;
-  }
+// ── Env value parsing ───────────────────────────────────────────────────────
+// One consistent rule for every scalar env value: surrounding whitespace is
+// trimmed, an unset or blank value uses the documented default, and a
+// present-but-malformed value FAILS startup with a message naming the variable
+// rather than silently degrading to a wrong limit, interval or flag. Numbers are
+// parsed strictly (never `parseInt`/`parseFloat`, which quietly keep the leading
+// digits of "200MB" or "1.5x"). The LIGHT_* block is the one deliberate
+// exception — it is lenient and records issues so the farm keeps running (see
+// {@link parseLightScheduleEnv}).
 
-  const parsed = Number.parseInt(value, 10);
-  if (Number.isNaN(parsed)) {
-    throw new Error(`Invalid integer environment value: ${value}`);
-  }
+/** Accepted tokens for a boolean flag, kept in one place for the strict and lenient readers. */
+const TRUE_TOKENS = new Set(["true", "1", "yes", "on"]);
+const FALSE_TOKENS = new Set(["false", "0", "no", "off"]);
+const BOOLEAN_TOKENS = [...TRUE_TOKENS, ...FALSE_TOKENS].join("/");
 
-  return parsed;
+/** Log levels Pino accepts (Fastify passes `logLevel` straight through to Pino). */
+const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace", "silent"] as const;
+
+/** `undefined`/blank → null (caller uses its default); otherwise the trimmed token. */
+function normalizeEnv(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
 }
 
-function readFloat(value: string | undefined, fallback: number): number {
-  if (!value) {
-    return fallback;
-  }
-
-  const parsed = Number.parseFloat(value);
-  if (Number.isNaN(parsed)) {
-    throw new Error(`Invalid number environment value: ${value}`);
-  }
-
-  return parsed;
+interface NumericBounds {
+  /** The value must be an integer. */
+  integer?: boolean;
+  /** Inclusive lower bound. */
+  min?: number;
+  /** Inclusive upper bound. */
+  max?: number;
+  /** Exclusive lower bound (strictly-positive → `exclusiveMin: 0`). */
+  exclusiveMin?: number;
 }
 
 /**
- * A strictly-positive integer setting (upload/analysis limits). Unset → the
- * documented default; present-but-invalid → a clear startup error rather than a
- * silently-wrong limit, matching {@link readInteger}'s fail-fast style.
+ * Strictly parses a numeric env value, failing fast on anything that is not a
+ * complete, finite number within `bounds`. `Number()` (unlike parseInt/
+ * parseFloat) rejects a trailing suffix — "200MB", "10abc", "1.5x" all become
+ * NaN — while still accepting decimals, signs and scientific notation. Unset or
+ * blank → the default.
  */
-function readPositiveInt(name: string, value: string | undefined, fallback: number): number {
-  if (value === undefined || value.trim() === "") return fallback;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`Invalid ${name}: «${value}» (expected a positive integer)`);
+function readNumber(
+  name: string,
+  value: string | undefined,
+  fallback: number,
+  bounds: NumericBounds = {}
+): number {
+  const token = normalizeEnv(value);
+  if (token === null) return fallback;
+
+  const parsed = Number(token);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid ${name}: «${token}» (expected a finite number)`);
+  }
+  if (bounds.integer && !Number.isInteger(parsed)) {
+    throw new Error(`Invalid ${name}: «${token}» (expected an integer)`);
+  }
+  if (bounds.exclusiveMin !== undefined && !(parsed > bounds.exclusiveMin)) {
+    throw new Error(`Invalid ${name}: «${token}» (must be greater than ${bounds.exclusiveMin})`);
+  }
+  if (bounds.min !== undefined && parsed < bounds.min) {
+    throw new Error(`Invalid ${name}: «${token}» (must be ≥ ${bounds.min})`);
+  }
+  if (bounds.max !== undefined && parsed > bounds.max) {
+    throw new Error(`Invalid ${name}: «${token}» (must be ≤ ${bounds.max})`);
   }
   return parsed;
 }
 
-/** A strictly-positive number setting (e.g. a compression ratio); same rules as {@link readPositiveInt}. */
-function readPositiveNumber(name: string, value: string | undefined, fallback: number): number {
-  if (value === undefined || value.trim() === "") return fallback;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`Invalid ${name}: «${value}» (expected a positive number)`);
-  }
-  return parsed;
+/** Any integer (may be negative); fails fast on garbage or a non-integer. */
+export function readInteger(name: string, value: string | undefined, fallback: number): number {
+  return readNumber(name, value, fallback, { integer: true });
 }
 
-/** A boolean env flag (`true/1/yes/on` → true); unset → the default. */
-function readBoolean(value: string | undefined, fallback: boolean): boolean {
-  if (value === undefined || value.trim() === "") return fallback;
-  const normalized = value.trim().toLowerCase();
-  if (["true", "1", "yes", "on"].includes(normalized)) return true;
-  if (["false", "0", "no", "off"].includes(normalized)) return false;
-  return fallback;
+/** A strictly-positive integer (upload/analysis limits, retention, the poll interval). */
+export function readPositiveInt(name: string, value: string | undefined, fallback: number): number {
+  return readNumber(name, value, fallback, { integer: true, min: 1 });
+}
+
+/** A non-negative integer (a delay/settle where 0 = "no wait" is legitimate). */
+export function readNonNegativeInt(
+  name: string,
+  value: string | undefined,
+  fallback: number
+): number {
+  return readNumber(name, value, fallback, { integer: true, min: 0 });
+}
+
+/** A TCP port (1…65535). */
+export function readPort(name: string, value: string | undefined, fallback: number): number {
+  return readNumber(name, value, fallback, { integer: true, min: 1, max: 65535 });
+}
+
+/** A strictly-positive number (e.g. a compression ratio). */
+export function readPositiveNumber(
+  name: string,
+  value: string | undefined,
+  fallback: number
+): number {
+  return readNumber(name, value, fallback, { exclusiveMin: 0 });
+}
+
+/** A non-negative number (e.g. a safety-buffer fraction; 0 = "no buffer"). */
+export function readNonNegativeNumber(
+  name: string,
+  value: string | undefined,
+  fallback: number
+): number {
+  return readNumber(name, value, fallback, { min: 0 });
+}
+
+/**
+ * A boolean env flag. Accepts true/1/yes/on and false/0/no/off (any case,
+ * trimmed); unset/blank → the default. A present-but-unrecognized value (a typo
+ * like `ture`) FAILS startup rather than silently taking the default — a
+ * security flag such as `ORCA_SLICER_NETWORK_ISOLATED` must never be quietly
+ * disabled by a typo. The lenient LIGHT_* variant records an issue instead of
+ * throwing, by design.
+ */
+export function readBoolean(name: string, value: string | undefined, fallback: boolean): boolean {
+  const token = normalizeEnv(value);
+  if (token === null) return fallback;
+  const normalized = token.toLowerCase();
+  if (TRUE_TOKENS.has(normalized)) return true;
+  if (FALSE_TOKENS.has(normalized)) return false;
+  throw new Error(`Invalid ${name}: «${token}» (expected a boolean: ${BOOLEAN_TOKENS})`);
+}
+
+/** The log level Fastify/Pino will use; an unknown level fails fast here, not later inside Pino. */
+export function readLogLevel(value: string | undefined, fallback: string): string {
+  const token = normalizeEnv(value);
+  if (token === null) return fallback;
+  const level = token.toLowerCase();
+  if (!(LOG_LEVELS as readonly string[]).includes(level)) {
+    throw new Error(`Invalid LOG_LEVEL: «${token}» (expected one of ${LOG_LEVELS.join(", ")})`);
+  }
+  return level;
 }
 
 /** Splits a shell-ish args string on whitespace (container-mode base args); empty → []. */
 function readArgs(value: string | undefined): string[] {
-  if (!value || value.trim() === "") return [];
-  return value.trim().split(/\s+/);
+  const token = normalizeEnv(value);
+  return token === null ? [] : token.split(/\s+/);
 }
 
 const MB = 1024 * 1024;
@@ -137,8 +219,8 @@ function readLightBoolean(
 ): boolean {
   if (value === undefined || value.trim() === "") return fallback;
   const normalized = value.trim().toLowerCase();
-  if (["true", "1", "yes", "on"].includes(normalized)) return true;
-  if (["false", "0", "no", "off"].includes(normalized)) return false;
+  if (TRUE_TOKENS.has(normalized)) return true;
+  if (FALSE_TOKENS.has(normalized)) return false;
   issues.push(`${name}=«${value}» не является boolean — используется значение по умолчанию`);
   return fallback;
 }
@@ -343,7 +425,11 @@ export const slicing = Object.freeze({
   /** The slice worker's own version — bump when the slice logic changes (cache key input). */
   workerVersion: "orca-slice-1",
   /** True when the slicer runs with the network disabled (container mode). */
-  networkIsolated: readBoolean(process.env.ORCA_SLICER_NETWORK_ISOLATED, false),
+  networkIsolated: readBoolean(
+    "ORCA_SLICER_NETWORK_ISOLATED",
+    process.env.ORCA_SLICER_NETWORK_ISOLATED,
+    false
+  ),
   /** Per-slice wall-clock budget (ms) before the process is killed. */
   timeoutMs: readPositiveInt("ORCA_SLICE_TIMEOUT_MS", process.env.ORCA_SLICE_TIMEOUT_MS, 600000),
   /** How many slices may run at once (slicing is heavy — default 1). */
@@ -351,7 +437,7 @@ export const slicing = Object.freeze({
   /** Base directory each slice gets an isolated work dir under (on the data volume). */
   tmpRoot: process.env.ORCA_SLICE_TMP_DIR || path.resolve(path.dirname(stateFilePath), "slice-tmp"),
   /** Import the catalog into the DB on first boot (idempotent). */
-  autoImport: readBoolean(process.env.ORCA_AUTO_IMPORT, true)
+  autoImport: readBoolean("ORCA_AUTO_IMPORT", process.env.ORCA_AUTO_IMPORT, true)
 });
 
 export const env = Object.freeze({
@@ -359,8 +445,8 @@ export const env = Object.freeze({
   serviceName: process.env.SERVICE_NAME ?? "print-orchestrator",
   serviceVersion: process.env.SERVICE_VERSION ?? "v0.1.0",
   host: process.env.HOST ?? "0.0.0.0",
-  port: readInteger(process.env.PORT, 3100),
-  logLevel: process.env.LOG_LEVEL ?? "info",
+  port: readPort("PORT", process.env.PORT, 3100),
+  logLevel: readLogLevel(process.env.LOG_LEVEL, "info"),
   /**
    * Maximum time Fastify may spend loading plugins and running startup hooks.
    * The onReady hook includes the first real device poll, whose bounded network
@@ -371,16 +457,32 @@ export const env = Object.freeze({
     process.env.STARTUP_TIMEOUT_MS,
     45_000
   ),
-  /** How often the farm polls real printers for live status. */
-  printerPollIntervalMs: readInteger(process.env.PRINTER_POLL_INTERVAL_MS, 10000),
+  /**
+   * How often the farm polls real printers for live status. Must be strictly
+   * positive: a `0`/negative interval would turn the poll loop into a near-
+   * continuous, self-DoS-ing spin, so it fails startup rather than being accepted.
+   */
+  printerPollIntervalMs: readPositiveInt(
+    "PRINTER_POLL_INTERVAL_MS",
+    process.env.PRINTER_POLL_INTERVAL_MS,
+    10000
+  ),
   /**
    * How long shutdown waits for in-flight analysis/slice jobs to settle before
    * closing SQLite anyway. Whatever is still unfinished at the deadline is
    * reported explicitly and recovered as `pending` on the next boot.
    */
-  shutdownDrainTimeoutMs: readInteger(process.env.SHUTDOWN_DRAIN_TIMEOUT_MS, 15_000),
+  shutdownDrainTimeoutMs: readNonNegativeInt(
+    "SHUTDOWN_DRAIN_TIMEOUT_MS",
+    process.env.SHUTDOWN_DRAIN_TIMEOUT_MS,
+    15_000
+  ),
   /** Hard cap on the whole graceful shutdown; past it the process force-exits. */
-  shutdownTimeoutMs: readInteger(process.env.SHUTDOWN_TIMEOUT_MS, 25_000),
+  shutdownTimeoutMs: readNonNegativeInt(
+    "SHUTDOWN_TIMEOUT_MS",
+    process.env.SHUTDOWN_TIMEOUT_MS,
+    25_000
+  ),
   /**
    * Night-print window shown on the dashboard (config, not telemetry). Also
    * drives the dashboard's automatic dark theme and the night-plan duration
@@ -393,9 +495,17 @@ export const env = Object.freeze({
    * to the source ETA for unattended-night recommendations while the farm has no
    * historical P90; the result stays flagged provisional. Configurable per the brief.
    */
-  nightEtaSafetyBuffer: readFloat(process.env.NIGHT_ETA_SAFETY_BUFFER, 0.2),
+  nightEtaSafetyBuffer: readNonNegativeNumber(
+    "NIGHT_ETA_SAFETY_BUFFER",
+    process.env.NIGHT_ETA_SAFETY_BUFFER,
+    0.2
+  ),
   /** Telemetry older than this (ms) is treated as stale by the scheduler → review. */
-  schedulerTelemetryStaleMs: readInteger(process.env.SCHEDULER_TELEMETRY_STALE_MS, 120_000),
+  schedulerTelemetryStaleMs: readNonNegativeInt(
+    "SCHEDULER_TELEMETRY_STALE_MS",
+    process.env.SCHEDULER_TELEMETRY_STALE_MS,
+    120_000
+  ),
   /** Chamber-light schedule (`LIGHT_*`); invalid values degrade, never throw. */
   lightSchedule: parseLightScheduleEnv(
     process.env,
@@ -407,7 +517,11 @@ export const env = Object.freeze({
    * dark one. Only applies when a light-ensured capture actually flipped the
    * light (see FarmStore.getCameraFrame / ensureLight).
    */
-  snapshotLightSettleMs: readInteger(process.env.SNAPSHOT_LIGHT_SETTLE_MS, 1200),
+  snapshotLightSettleMs: readNonNegativeInt(
+    "SNAPSHOT_LIGHT_SETTLE_MS",
+    process.env.SNAPSHOT_LIGHT_SETTLE_MS,
+    1200
+  ),
   /**
    * JSON file the operator queue, event feed and today counters are persisted
    * to, so they survive a restart. Defaults to `<cwd>/data/state.json`; in the
@@ -431,7 +545,7 @@ export const env = Object.freeze({
    */
   snapshotRetainPerPrinter: Math.max(
     1,
-    readInteger(process.env.SNAPSHOT_RETAIN_PER_PRINTER, 30)
+    readInteger("SNAPSHOT_RETAIN_PER_PRINTER", process.env.SNAPSHOT_RETAIN_PER_PRINTER, 30)
   ),
   /**
    * Shared secret required on state-changing requests (pause/resume/cancel/…).
@@ -484,11 +598,18 @@ export const env = Object.freeze({
     process.env.FILAMENT_RETRY_MAX_AGE_DAYS,
     7
   ),
-  /** Cross-origin origins allowed to call the API; empty = same-origin only. */
-  corsAllowOrigins: (process.env.CORS_ALLOW_ORIGINS ?? "")
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean),
+  /**
+   * Cross-origin origins allowed to call the API; empty = same-origin only.
+   * Frozen: these gate a security decision (CORS/CSRF) and are only ever read
+   * (`.includes`), so a shallow `Object.freeze(env)` alone would still leave the
+   * list itself mutable — freeze it too.
+   */
+  corsAllowOrigins: Object.freeze(
+    (process.env.CORS_ALLOW_ORIGINS ?? "")
+      .split(",")
+      .map((origin) => origin.trim())
+      .filter(Boolean)
+  ),
   /**
    * Explicit opt-in that lets MUTATIONS through with NO API token configured.
    * The default is fail-closed: without a token (and without this flag) every
@@ -502,8 +623,10 @@ export const env = Object.freeze({
    * name must be allowlisted here — a DNS-rebinding attack needs a name the
    * attacker controls, which will not be on this list.
    */
-  allowedHosts: (process.env.ALLOWED_HOSTS ?? "")
-    .split(",")
-    .map((host) => host.trim().toLowerCase())
-    .filter(Boolean)
+  allowedHosts: Object.freeze(
+    (process.env.ALLOWED_HOSTS ?? "")
+      .split(",")
+      .map((host) => host.trim().toLowerCase())
+      .filter(Boolean)
+  )
 });

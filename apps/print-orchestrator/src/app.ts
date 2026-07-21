@@ -4,7 +4,7 @@ import Fastify, {
   type FastifyServerOptions
 } from "fastify";
 
-import { AppError } from "./core/errors";
+import { AppError, toClientError } from "./core/errors";
 import { registerSecurity } from "./http/security";
 import { getHealth } from "./infra/observability/health";
 import { collectMetrics, METRICS_CONTENT_TYPE } from "./infra/observability/metrics";
@@ -54,15 +54,12 @@ export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
   registerSecurity(app);
 
   // Map the domain error taxonomy to structured JSON: { error: { code, message, details } }.
+  // toClientError is the single client-safe projection — it emits only
+  // code/message/details (details guarded to a plain object) and never the
+  // original `error.cause`.
   app.setErrorHandler((error: FastifyError, request, reply) => {
     if (error instanceof AppError) {
-      reply.code(error.statusCode).send({
-        error: {
-          code: error.code,
-          message: error.message,
-          details: error.details ?? null
-        }
-      });
+      reply.code(error.statusCode).send({ error: toClientError(error) });
       return;
     }
 

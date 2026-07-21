@@ -13,9 +13,12 @@ import { PrinterCommandError } from "../infra/printers/status";
 export function toDriverError(printerId: string, error: unknown): Error {
   if (error instanceof AppError) return error;
   if (error instanceof PrinterCommandError) return new JobError(error.message);
+  // The short driver message goes to the client; keep the whole original error
+  // as `cause` for server-side diagnostics (never serialized to the client).
   return new PrinterConnectionError(
     printerId,
-    error instanceof Error ? error.message : String(error)
+    error instanceof Error ? error.message : String(error),
+    { cause: error }
   );
 }
 

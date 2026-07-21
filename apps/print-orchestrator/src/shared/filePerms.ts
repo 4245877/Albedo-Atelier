@@ -12,6 +12,13 @@ import type { StoreLogger } from "./logger";
  * permissions never breaks the runtime — a loose file is merely flagged so an
  * operator can fix it. A missing/unreadable path is silently ignored (it is not
  * this check's job to report that).
+ *
+ * Uses `statSync` (follows symlinks) on purpose: the risk is that the actual
+ * secret BYTES are readable by others, which is the target's mode — a symlink's
+ * own `0777` mode protects nothing. Only the low 9 permission bits are read and
+ * logged (as octal); the file's contents are never touched, so nothing secret
+ * can leak through the warning. POSIX-oriented — on a system without group/
+ * world bits the mask is simply always zero (no warning).
  */
 export function warnIfPermsTooOpen(filePath: string, logger: StoreLogger): void {
   if (!filePath) return;

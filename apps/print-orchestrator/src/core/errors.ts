@@ -1,13 +1,64 @@
+/**
+ * The client-safe shape of {@link AppError.details}: a record of STRUCTURED
+ * domain fields the dashboard branches on (`printerId`, `expected`/`actual`,
+ * `entity`, `from`/`to`, `limitBytes`, …). It is serialized verbatim into the
+ * JSON error body (see the app's error handler), so by contract it must carry
+ * only such domain values — never raw transport/driver text, secrets, tokens,
+ * file-system paths or an `Error`/stack. Anything diagnostic goes in
+ * {@link AppErrorOptions.cause} instead, which stays server-side.
+ */
+export type AppErrorDetails = Record<string, unknown>;
+
+export interface AppErrorOptions {
+  /**
+   * The original error, preserved for server-side diagnostics/logging. NEVER
+   * serialized to the client — the error handler emits only code/message/details.
+   */
+  cause?: unknown;
+}
+
 export class AppError extends Error {
+  readonly code: string;
+  readonly statusCode: number;
+  readonly details?: AppErrorDetails;
+
   constructor(
     message: string,
-    public readonly code: string,
-    public readonly statusCode = 500,
-    public readonly details?: unknown
+    code: string,
+    statusCode = 500,
+    details?: AppErrorDetails,
+    options?: AppErrorOptions
   ) {
-    super(message);
+    // Error's native `{ cause }` (ES2022, our target) keeps the original error
+    // reachable as `error.cause` without ever putting it on the wire.
+    super(message, options);
     this.name = "AppError";
+    this.code = code;
+    this.statusCode = statusCode;
+    this.details = details;
   }
+}
+
+/** The client-safe JSON error body an {@link AppError} is serialized to. */
+export interface ClientErrorBody {
+  code: string;
+  message: string;
+  details: AppErrorDetails | null;
+}
+
+/**
+ * Projects an {@link AppError} onto the client-safe body — the single place that
+ * decides what leaves the service. Emits the stable `code`, the human `message`,
+ * and `details` guarded to a plain object (so only the structured domain
+ * contract can reach the client, never an array or stray primitive); by
+ * omission it never serializes `cause`, the stack, or any other internal field.
+ * Kept here beside the taxonomy, self-contained, so `core` stays a leaf module.
+ */
+export function toClientError(error: AppError): ClientErrorBody {
+  const { details } = error;
+  const safeDetails =
+    details !== null && typeof details === "object" && !Array.isArray(details) ? details : null;
+  return { code: error.code, message: error.message, details: safeDetails };
 }
 
 export class AuthorizationError extends AppError {
@@ -33,7 +84,7 @@ export class NotFoundError extends AppError {
 }
 
 export class ValidationError extends AppError {
-  constructor(message: string, details?: unknown) {
+  constructor(message: string, details?: AppErrorDetails) {
     super(message, "VALIDATION", 400, details);
     this.name = "ValidationError";
   }
@@ -45,7 +96,7 @@ export class ValidationError extends AppError {
  * failing the rest of a multi-file batch.
  */
 export class PayloadTooLargeError extends AppError {
-  constructor(message: string, details?: unknown) {
+  constructor(message: string, details?: AppErrorDetails) {
     super(message, "PAYLOAD_TOO_LARGE", 413, details);
     this.name = "PayloadTooLargeError";
   }
@@ -57,7 +108,7 @@ export class PayloadTooLargeError extends AppError {
  * can tell the operator to free space / prune, distinct from a per-file 413.
  */
 export class InsufficientStorageError extends AppError {
-  constructor(message: string, details?: unknown) {
+  constructor(message: string, details?: AppErrorDetails) {
     super(message, "INSUFFICIENT_STORAGE", 507, details);
     this.name = "InsufficientStorageError";
   }
@@ -69,7 +120,7 @@ export class InsufficientStorageError extends AppError {
  * queue drains.
  */
 export class ServiceBusyError extends AppError {
-  constructor(message: string, details?: unknown) {
+  constructor(message: string, details?: AppErrorDetails) {
     super(message, "SERVICE_BUSY", 503, details);
     this.name = "ServiceBusyError";
   }
@@ -90,14 +141,20 @@ export class PrinterOfflineError extends AppError {
   }
 }
 
-/** The printer is configured but the driver/transport failed to reach it. */
+/**
+ * The printer is configured but the driver/transport failed to reach it.
+ * `reason` is the short human-facing summary that goes to the client; the full
+ * original transport error is preserved out-of-band as {@link AppError.cause}
+ * for server-side diagnostics, never serialized.
+ */
 export class PrinterConnectionError extends AppError {
-  constructor(printerId: string, reason?: string) {
+  constructor(printerId: string, reason?: string, options?: AppErrorOptions) {
     super(
       `Не удалось связаться с принтером «${printerId}»${reason ? `: ${reason}` : ""}`,
       "PRINTER_CONNECTION",
       502,
-      { printerId, reason }
+      { printerId, reason },
+      options
     );
     this.name = "PrinterConnectionError";
   }
@@ -105,18 +162,21 @@ export class PrinterConnectionError extends AppError {
 
 /** The camera/stream is unavailable, so no snapshot can be taken. */
 export class CameraError extends AppError {
-  constructor(printerId: string, reason: string) {
-    super(`Camera error on "${printerId}": ${reason}`, "CAMERA_ERROR", 502, {
-      printerId,
-      reason
-    });
+  constructor(printerId: string, reason: string, options?: AppErrorOptions) {
+    super(
+      `Camera error on "${printerId}": ${reason}`,
+      "CAMERA_ERROR",
+      502,
+      { printerId, reason },
+      options
+    );
     this.name = "CameraError";
   }
 }
 
 /** The loaded material does not match what the job needs, etc. */
 export class MaterialError extends AppError {
-  constructor(message: string, details?: unknown) {
+  constructor(message: string, details?: AppErrorDetails) {
     super(message, "MATERIAL_ERROR", 409, details);
     this.name = "MaterialError";
   }
@@ -143,7 +203,7 @@ export class PrintIdentityConflictError extends AppError {
 
 /** The requested job/print action is not valid for the current state. */
 export class JobError extends AppError {
-  constructor(message: string, details?: unknown) {
+  constructor(message: string, details?: AppErrorDetails) {
     super(message, "JOB_ERROR", 409, details);
     this.name = "JobError";
   }
@@ -192,7 +252,7 @@ export class UniqueConstraintError extends AppError {
  * must refresh the preview and confirm again.
  */
 export class PreviewConflictError extends AppError {
-  constructor(message: string, details?: unknown) {
+  constructor(message: string, details?: AppErrorDetails) {
     super(message, "PREVIEW_CONFLICT", 409, details);
     this.name = "PreviewConflictError";
   }
