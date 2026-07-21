@@ -253,7 +253,11 @@ test("explicit cancellation wins over progressPct >= 99", async () => {
   assert.equal(inventory.calls[0].grams, 10);
 });
 
-test("Bambu: a failed print (FAILED/error) deducts nothing", async () => {
+test("Bambu: a failed print (FAILED/error) deducts the MEASURED usage", async () => {
+  // A real Bambu reports both a manual stop and a technical failure as
+  // gcode_state FAILED. The filament extruded before the failure is physically
+  // gone, so the measured AMS remain drop is deducted — never the job's planned
+  // total — while the print still counts as failed, not done.
   const inventory = recordingInventory();
   const sequence = [
     baseStatus({ status: "idle" }),
@@ -264,9 +268,64 @@ test("Bambu: a failed print (FAILED/error) deducts nothing", async () => {
 
   await pollTimes(poller, 3);
 
-  assert.equal(inventory.calls.length, 0, "an error print never deducts");
+  assert.equal(inventory.calls.length, 1, "the measured usage of a failed print is deducted");
+  assert.equal(inventory.calls[0].grams, 100); // 10 % of 1000 g actually extruded
+  assert.match(String(inventory.calls[0].idempotencyKey), /^a1:[0-9a-f-]{36}:t0$/);
   assert.equal(poller.today.getFailed(), 1);
-  assert.equal(poller.today.getDone(), 0);
+  assert.equal(poller.today.getDone(), 0, "a failed print never counts as completed");
+});
+
+test("Bambu: a repeated FAILED report does not deduct twice", async () => {
+  const inventory = recordingInventory();
+  const sequence = [
+    baseStatus({ status: "idle" }),
+    baseStatus({ status: "printing", stateText: "RUNNING", amsTrays: [tray(0, 100)] }),
+    baseStatus({ status: "error", stateText: "FAILED", error: "Bambu error", amsTrays: [tray(0, 90)] }),
+    // The device keeps reporting FAILED on later polls.
+    baseStatus({ status: "error", stateText: "FAILED", error: "Bambu error", amsTrays: [tray(0, 90)] }),
+    baseStatus({ status: "error", stateText: "FAILED", error: "Bambu error", amsTrays: [tray(0, 90)] })
+  ];
+  const { poller } = makePoller(bambuConfig(), sequence, inventory.client);
+
+  await pollTimes(poller, 5);
+
+  assert.equal(inventory.calls.length, 1, "the printing→error edge deducts exactly once");
+  assert.equal(poller.today.getFailed(), 1, "repeated FAILED is not a second failure");
+});
+
+test("Bambu: error→idle after a handled FAILED does not deduct a second time", async () => {
+  const inventory = recordingInventory();
+  const sequence = [
+    baseStatus({ status: "idle" }),
+    baseStatus({ status: "printing", stateText: "RUNNING", amsTrays: [tray(0, 100)] }),
+    baseStatus({ status: "error", stateText: "FAILED", error: "Bambu error", amsTrays: [tray(0, 90)] }),
+    // The operator clears the error; the printer settles back to idle.
+    baseStatus({ status: "idle", stateText: "IDLE", amsTrays: [tray(0, 90)] }),
+    baseStatus({ status: "idle", stateText: "IDLE", amsTrays: [tray(0, 90)] })
+  ];
+  const { poller } = makePoller(bambuConfig(), sequence, inventory.client);
+
+  await pollTimes(poller, 5);
+
+  assert.equal(inventory.calls.length, 1, "the run is closed at the error edge — idle adds nothing");
+  assert.equal(inventory.calls[0].grams, 100);
+});
+
+test("Bambu: a FAILED print without measurable AMS data deducts nothing and says why", async () => {
+  const inventory = recordingInventory();
+  const sequence = [
+    baseStatus({ status: "idle" }),
+    // Uncalibrated trays: remain unknown at both ends — no honest measurement.
+    baseStatus({ status: "printing", stateText: "RUNNING", amsTrays: [tray(0, null)] }),
+    baseStatus({ status: "error", stateText: "FAILED", error: "Bambu error", amsTrays: [tray(0, null)] })
+  ];
+  const { poller, events } = makePoller(bambuConfig(), sequence, inventory.client);
+
+  await pollTimes(poller, 3);
+
+  assert.equal(inventory.calls.length, 0, "stock is never touched without a measurement");
+  assert.match(feedText(events), /нет данных о расходе филамента/, "the skip reason is surfaced");
+  assert.equal(poller.today.getFailed(), 1);
 });
 
 test("Bambu: completion with no usable consumption data skips and warns softly", async () => {
@@ -320,6 +379,61 @@ test("Bambu: a re-observed completion does not deduct twice (idempotent)", async
 
   assert.equal(inventory.calls.length, 1, "the completion transition fires — and deducts — exactly once");
   assert.equal(inventory.calls[0].grams, 200); // 20 % of 1000 g
+});
+
+test("Bambu: a start report without the AMS block falls back to the previous poll's trays", async () => {
+  // Bambu MQTT sends partial deltas; the message that flips to RUNNING often
+  // carries no `ams` (and the raw cache resets on a new subtask_id). The start
+  // snapshot must then come from the last valid pre-print state — remain is
+  // printer-level hardware state that does not change between jobs.
+  const inventory = recordingInventory();
+  const sequence = [
+    baseStatus({ status: "idle", amsTrays: [tray(0, 100)] }), // last full pre-print state
+    baseStatus({ status: "printing", stateText: "RUNNING", amsTrays: null }), // partial start report
+    baseStatus({ status: "idle", stateText: "FINISH", progressPct: 100, amsTrays: [tray(0, 90)] })
+  ];
+  const { poller } = makePoller(bambuConfig(), sequence, inventory.client);
+
+  await pollTimes(poller, 3);
+
+  assert.equal(inventory.calls.length, 1, "the pre-print trays anchor the measurement");
+  assert.equal(inventory.calls[0].grams, 100);
+});
+
+test("Bambu: a missing start snapshot is backfilled from the first full report while printing", async () => {
+  const inventory = recordingInventory();
+  const sequence = [
+    baseStatus({ status: "idle", amsTrays: null }), // no AMS data before the start either
+    baseStatus({ status: "printing", stateText: "RUNNING", amsTrays: null }), // start with no snapshot
+    baseStatus({ status: "printing", stateText: "RUNNING", amsTrays: [tray(0, 95)] }), // first full report
+    baseStatus({ status: "idle", stateText: "FINISH", progressPct: 100, amsTrays: [tray(0, 90)] })
+  ];
+  const { poller } = makePoller(bambuConfig(), sequence, inventory.client);
+
+  await pollTimes(poller, 4);
+
+  assert.equal(inventory.calls.length, 1, "the backfilled baseline still yields a measurement");
+  assert.equal(inventory.calls[0].grams, 50, "measured from the backfill point — under-, never over-counted");
+});
+
+test("Bambu: the backfilled snapshot belongs to the run — a new print never inherits it", async () => {
+  const inventory = recordingInventory();
+  const sequence = [
+    baseStatus({ status: "idle", amsTrays: null }),
+    baseStatus({ status: "printing", stateText: "RUNNING", amsTrays: null }),
+    // The print ends before any full AMS report arrived: nothing measurable.
+    baseStatus({ status: "idle", stateText: "FINISH", progressPct: 100, amsTrays: null }),
+    // A second print starts and finishes with full AMS data.
+    baseStatus({ status: "printing", stateText: "RUNNING", amsTrays: [tray(0, 80)] }),
+    baseStatus({ status: "idle", stateText: "FINISH", progressPct: 100, amsTrays: [tray(0, 70)] })
+  ];
+  const { poller, events } = makePoller(bambuConfig(), sequence, inventory.client);
+
+  await pollTimes(poller, 5);
+
+  assert.equal(inventory.calls.length, 1, "only the second, measurable print deducts");
+  assert.equal(inventory.calls[0].grams, 100, "measured strictly within the second run");
+  assert.match(feedText(events), /нет данных о расходе филамента/, "the first print's skip is explained");
 });
 
 test("Bambu: no start snapshot (started before boot) skips deduction", async () => {

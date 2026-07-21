@@ -441,24 +441,81 @@ test("a queued redelivery does not re-add the carried remainder", async () => {
   consumption.consumeForPrint(
     printer(),
     status(),
-    status({ amsTrays: [tray(0, 49.94)] }), // 0.6 g + 0.7 carried = 1.3 g
+    status({ amsTrays: [tray(0, 49.94)] }), // 0.6 g + 0.7 carried = 1.3 g → send 1 g, carry 0.3 g
     { printId: "run-3", amsStart: [tray(0, 50)] },
     null
   );
   await flush();
 
   assert.equal(consumption.pendingCount, 1, "the combined payload is queued");
-  assert.deepEqual(consumption.serializeCarry(), {}, "carry is spent before delivery, not after");
+  const carryAfter = consumption.serializeCarry()["a1:t0"]?.grams ?? 0;
+  assert.ok(Math.abs(carryAfter - 0.3) < 1e-6, "only the sub-gram remainder stays carried");
 
   consumption.serialize()[0].nextAttemptAtMs = 0;
   await consumption.retryPending();
 
   assert.equal(inventory.calls.length, 2);
   assert.equal(inventory.calls[1].grams, inventory.calls[0].grams, "redelivery retries the same amount");
-  assert.ok(
-    Math.abs((inventory.calls[1].grams as number) - 1.3) < 1e-9,
-    "the carry rode along exactly once"
+  assert.equal(inventory.calls[1].grams, 1, "the integer part rode along exactly once");
+});
+
+test("grams are sent as WHOLE units; the fraction stays in the carry (no rounding drift)", async () => {
+  // Contract with fulfillment: stock moves in whole grams, so the payload is
+  // pre-normalized here — what is sent is exactly what fulfillment applies,
+  // and the sub-gram tail keeps accumulating instead of being rounded away.
+  const inventory = recordingInventory();
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed());
+
+  // 0.26 % of 1000 g = 2.6 g → send 2 g, carry 0.6 g.
+  consumption.consumeForPrint(
+    printer(),
+    status(),
+    status({ amsTrays: [tray(0, 49.74)] }),
+    { printId: "run-a", amsStart: [tray(0, 50)] },
+    null
   );
+  await flush();
+
+  assert.equal(inventory.calls.length, 1);
+  assert.equal(inventory.calls[0].grams, 2, "integer grams on the wire");
+  const carried = consumption.serializeCarry()["a1:t0"]?.grams ?? 0;
+  assert.ok(Math.abs(carried - 0.6) < 1e-6, "the 0.6 g tail is carried, not lost");
+
+  // Next print: 0.5 g measured + 0.6 carried = 1.1 g → send 1 g, carry 0.1 g.
+  consumption.consumeForPrint(
+    printer(),
+    status(),
+    status({ amsTrays: [tray(0, 49.95)] }),
+    { printId: "run-b", amsStart: [tray(0, 50)] },
+    null
+  );
+  await flush();
+
+  assert.equal(inventory.calls.length, 2);
+  assert.equal(inventory.calls[1].grams, 1);
+  const carried2 = consumption.serializeCarry()["a1:t0"]?.grams ?? 0;
+  assert.ok(Math.abs(carried2 - 0.1) < 1e-6, "the remainder keeps accumulating across prints");
+});
+
+test("an exact whole-gram total leaves no phantom carry (float noise absorbed)", async () => {
+  const inventory = recordingInventory();
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed(), () => {}, [], {
+    initialCarry: { "a1:t0": { grams: 0.4 } }
+  });
+
+  // 2.6 g measured + 0.4 carried = 3.0 g exactly → send 3 g, carry 0.
+  consumption.consumeForPrint(
+    printer(),
+    status(),
+    status({ amsTrays: [tray(0, 49.74)] }),
+    { printId: "run-c", amsStart: [tray(0, 50)] },
+    null
+  );
+  await flush();
+
+  assert.equal(inventory.calls.length, 1);
+  assert.equal(inventory.calls[0].grams, 3, "float noise must not shave a whole gram off");
+  assert.deepEqual(consumption.serializeCarry(), {}, "no residual carry on an exact total");
 });
 
 test("a short Moonraker length is carried per printer until it reaches the unit", async () => {

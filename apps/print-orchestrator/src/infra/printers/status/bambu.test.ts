@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildBambuStatus, mergeBambuStatus } from "./bambu";
+import { buildBambuStatus, mergeBambuRawPrint, mergeBambuStatus } from "./bambu";
 import type { PrinterConfig } from "../config";
 import type { PrinterLiveStatus } from "./types";
 
@@ -92,4 +92,50 @@ test("mergeBambuStatus does not carry stale live data across an offline blip", (
   })!;
   const offline: PrinterLiveStatus = { ...online, online: false, nozzleDiameterMm: null };
   assert.equal(mergeBambuStatus(online, offline).nozzleDiameterMm, null);
+});
+
+// ── Raw-payload merge: partial deltas vs the AMS block ──────────────────────
+
+function amsPayload(remain: number) {
+  return {
+    ams: [
+      {
+        id: 0,
+        tray: [
+          { id: 0, tray_type: "PLA", tray_color: "FF0000FF", remain, tray_weight: "1000" }
+        ]
+      }
+    ],
+    tray_now: "255"
+  };
+}
+
+test("a partial MQTT delta without `ams` does not clobber the valid AMS state", () => {
+  const id = "raw-merge-partial";
+  mergeBambuRawPrint(id, { gcode_state: "IDLE", subtask_id: "1", ams: amsPayload(80) });
+  // A later delta carries only a temperature — no ams block at all.
+  const merged = mergeBambuRawPrint(id, { nozzle_temper: 210 });
+
+  const status = buildBambuStatus(printer(), { print: merged })!;
+  assert.ok(status.amsTrays, "the AMS block survives the partial delta");
+  assert.equal(status.amsTrays![0].remainPct, 80);
+});
+
+test("a new subtask_id resets job fields but keeps the printer-level AMS state", () => {
+  const id = "raw-merge-new-print";
+  mergeBambuRawPrint(id, {
+    gcode_state: "FINISH",
+    subtask_id: "job-1",
+    mc_percent: 100,
+    ams: amsPayload(80),
+  });
+  // The delta announcing the NEW print carries no ams — the loaded reels did
+  // not change, only the job did.
+  const merged = mergeBambuRawPrint(id, { gcode_state: "RUNNING", subtask_id: "job-2" });
+
+  assert.equal(merged.mc_percent, undefined, "the previous job's progress must not leak");
+  const status = buildBambuStatus(printer(), { print: merged })!;
+  assert.ok(status.amsTrays, "the AMS baseline survives the job change");
+  assert.equal(status.amsTrays![0].remainPct, 80, "remain is printer state, not job state");
+  assert.equal(status.status, "printing");
 });

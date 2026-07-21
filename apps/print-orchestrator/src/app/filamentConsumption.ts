@@ -427,11 +427,18 @@ export class FilamentConsumption {
         );
         return null;
       }
-      if (carried.grams > 0) {
-        this.carry.set(key, { ...carried, grams: 0 });
-        this.persist();
-      }
-      return { grams: total };
+      // Quantity contract: fulfillment tracks stock in WHOLE grams and rounds
+      // any fraction it receives, so sending a fractional total would make the
+      // applied amount differ from what the carry assumed was sent (systematic
+      // drift). Send the integer part and keep the sub-gram remainder here —
+      // what is sent is then exactly what fulfillment applies. The epsilon
+      // absorbs float noise so e.g. 99.999999999 counts as the 100 g it is.
+      const grams = Math.floor(total + 1e-9);
+      const remainder = total - grams;
+      // Sub-microgram remainders are float noise from the sum, not consumption.
+      this.carry.set(key, { ...carried, grams: remainder < 1e-6 ? 0 : remainder });
+      this.persist();
+      return { grams };
     }
 
     const total = item.lengthMm + carried.lengthMm;

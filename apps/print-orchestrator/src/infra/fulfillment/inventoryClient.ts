@@ -57,6 +57,13 @@ export type ConsumeFilamentInput = {
 
 export type ConsumeFilamentResult = {
   duplicate: boolean;
+  /**
+   * Whole grams fulfillment ACTUALLY deducted for this request (0 on a
+   * duplicate). Additive contract field: this side already sends pre-normalized
+   * integer grams (see FilamentConsumption.applyCarry), so `appliedG` equals
+   * the sent quantity; older fulfillment builds leave it undefined.
+   */
+  appliedG?: number;
   stock: { material: string; color: string; stockG: number } | null;
   movement: { id: string; quantityG: number } | null;
 };

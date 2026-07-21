@@ -175,6 +175,9 @@ export class PrinterPoller {
           const status = await this.statusProvider(printer);
           const prev = this.statuses.get(printer.id);
           this.recordTransition(printer, prev, status);
+          // A run that started without an AMS snapshot (partial start report)
+          // adopts the first full report that arrives while it is still active.
+          this.backfillAmsStart(printer, status);
           // Credit the interval since the last poll to the PREVIOUS status —
           // only time we watched the printer actually printing counts.
           this.accruePrintingTime(printer.id, prev);
@@ -283,6 +286,28 @@ export class PrinterPoller {
     this.lights.prune(live);
   }
 
+  /**
+   * Fills a live run's missing AMS start snapshot from the first full report
+   * that arrives while the print is still running. The pushall cycle re-sends
+   * the complete state within ~30 s, so the adopted baseline sits at most one
+   * push behind the true start; any material extruded before it is UNDER-
+   * counted (never over-) — the safe direction. Set at most once per run and
+   * only while the run is active, so a report from a later state can never be
+   * mistaken for this print's start.
+   */
+  private backfillAmsStart(printer: PrinterConfig, status: PrinterLiveStatus): void {
+    if (printer.protocol !== "bambu" || !status.amsTrays) return;
+    if (status.status !== "printing" && status.status !== "paused") return;
+    const run = this.printRuns.get(printer.id);
+    if (!run || run.amsStart) return;
+
+    run.amsStart = status.amsTrays;
+    this.logger.info?.(
+      { printer: printer.id, job: run.file, trays: status.amsTrays.length },
+      "AMS start snapshot backfilled from the first full report after start"
+    );
+  }
+
   // ── Transition tracking (real events only) ──────────────────────────────
 
   private recordTransition(
@@ -320,9 +345,25 @@ export class PrinterPoller {
     }
 
     if (next.status === "error" && prev.status !== "error") {
+      // A real Bambu reports BOTH a manual stop and a technical failure as
+      // `gcode_state: FAILED` (→ status "error"), so this edge — not only the
+      // idle branch below — ends a print run. The material extruded before the
+      // failure is physically gone: deduct the MEASURED usage (AMS remain drop /
+      // extruded length), never the job's planned total. The run is closed here,
+      // so the later error→idle edge and any repeated FAILED report cannot
+      // deduct a second time; the per-run idempotency keys guard the rest.
+      const wasActive = prev.status === "printing" || prev.status === "paused";
+      const run = wasActive ? this.printRuns.get(printer.id) : undefined;
+      if (wasActive) this.printRuns.delete(printer.id);
+
       this.today.recordFailed();
       this.persist();
       this.events.push("⚠", `${name}: ${next.error ?? "ошибка печати"}`, "err");
+      if (wasActive) {
+        // consumeForPrint deducts only what the telemetry measured; with no
+        // measurable AMS data it deducts nothing and logs a clear skip reason.
+        this.filament.consumeForPrint(printer, prev, next, run, job);
+      }
       return;
     }
     if (next.status === "printing" && prev.status !== "printing" && prev.status !== "paused") {
@@ -330,12 +371,27 @@ export class PrinterPoller {
       // finish, and snapshot the AMS trays so Bambu can diff `remain` at
       // completion. A print already running before the orchestrator started has
       // no snapshot (in-memory only), so its Bambu consumption is skipped.
+      //
+      // The status that flips to "printing" can lack the AMS block: Bambu MQTT
+      // sends partial deltas and the raw cache resets on a new subtask_id, so
+      // the start report may carry no `ams`. Fall back to the PREVIOUS poll's
+      // trays — `remain` is printer-level hardware state that does not change
+      // between jobs, so the last full pre-print snapshot is the honest
+      // baseline. Never a snapshot minted for another run: amsStart lives on
+      // this run object only and a new run always replaces it whole.
+      const amsStart = next.amsTrays ?? prev.amsTrays;
       this.printRuns.set(printer.id, {
         printId: randomUUID(),
         file: job,
         startedAtMs: Date.now(),
-        amsStart: next.amsTrays
+        amsStart
       });
+      if (printer.protocol === "bambu" && !amsStart) {
+        this.logger.warn?.(
+          { printer: printer.id, job },
+          "print started with no AMS snapshot — waiting to backfill from the next full report"
+        );
+      }
       this.events.push("▶", `${name} начал печать${job ? ` «${job}»` : ""}`, "ok");
       return;
     }

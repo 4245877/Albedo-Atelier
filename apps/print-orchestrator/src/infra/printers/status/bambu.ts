@@ -79,8 +79,13 @@ function readBambuLightState(
 
 // Bambu MQTT reports are partial deltas; merge them into the last full state so
 // the status is always built from a complete snapshot. Reset when a different
-// print starts so a previous job's fields can't leak into the next one.
-function mergeBambuRawPrint(
+// print starts so a previous job's fields can't leak into the next one — except
+// the AMS/external-spool blocks: those describe the PRINTER's loaded filament,
+// not the job, and the delta that announces a new subtask usually carries no
+// `ams`. Dropping them would leave the start-of-print status without trays and
+// break the consumption baseline; the next report with a real `ams` overwrites
+// them as usual.
+export function mergeBambuRawPrint(
   printerId: string,
   print: Record<string, unknown>
 ): Record<string, unknown> {
@@ -93,7 +98,13 @@ function mergeBambuRawPrint(
     bambuCache.delete(printerId);
   }
 
-  const merged = { ...(startedNewPrint ? {} : previous ?? {}), ...print };
+  const base: Record<string, unknown> = startedNewPrint ? {} : { ...(previous ?? {}) };
+  if (startedNewPrint && previous) {
+    if ("ams" in previous) base.ams = previous.ams;
+    if ("vt_tray" in previous) base.vt_tray = previous.vt_tray;
+  }
+
+  const merged = { ...base, ...print };
   bambuRawPrint.set(printerId, merged);
   return merged;
 }
