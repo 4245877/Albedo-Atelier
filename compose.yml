@@ -110,9 +110,12 @@ services:
       - ./apps/print-orchestrator/config:/app/config:ro
       # Persisted runtime state — must be writable and outlive the container.
       - orchestrator-data:/app/data
-      # Slicing runtime (optional): to use a host/mounted OrcaSlicer binary, mount it
-      # read-only and set ORCA_SLICER_CMD to its in-container path (see above), e.g.:
-      # - /opt/orca-slicer:/opt/orca:ro
+      # OrcaSlicer 2.3.0 slicing runtime: the host-extracted AppImage, mounted
+      # READ-ONLY. ORCA_SLICER_CMD=/opt/orca/AppRun is set in .env. The image now
+      # runs on a glibc (Debian) base and ships the AppImage's system runtime
+      # libs, so this binary can actually execute in-container. To relocate it,
+      # re-extract the AppImage elsewhere and update this host path.
+      - /home/miha/opt/orca-2.3.0/squashfs-root:/opt/orca:ro
       # For the container-runtime shape instead, grant a runtime rather than mounting
       # a binary, e.g. the Docker socket (a deliberate host-security decision):
       # - /var/run/docker.sock:/var/run/docker.sock
