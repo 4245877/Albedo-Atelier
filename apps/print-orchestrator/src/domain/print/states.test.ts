@@ -13,6 +13,8 @@ import {
   PRINT_TASK_TRANSITIONS,
   QUEUE_ENTRY_TRANSITIONS
 } from "./states";
+import { ACTIVE_RUN_STATES } from "./types";
+import type { PrintRunState } from "./types";
 
 test("a self-transition is always allowed (idempotent setters never throw)", () => {
   assert.ok(canTransition(PRINT_TASK_TRANSITIONS, "PRINTING", "PRINTING"));
@@ -85,6 +87,21 @@ test("Assignment / DispatchAttempt / PrintRun terminals are dead-ends", () => {
   }
   for (const s of ["SUCCEEDED", "FAILED", "CANCELLED"] as const) {
     assert.ok(isTerminal(PRINT_RUN_TRANSITIONS, s));
+  }
+});
+
+test("PrintRun: ACTIVE_RUN_STATES is exactly the non-terminal run states (single source of truth for the printer-holding set)", () => {
+  // The infra layer derives its `state IN (…)` SQL from this constant, so the
+  // set of "active/printer-holding" runs and the set of non-terminal runs must
+  // stay identical: a run holds a printer iff it has not reached a terminal.
+  const allStates = Object.keys(PRINT_RUN_TRANSITIONS) as PrintRunState[];
+  const nonTerminal = allStates.filter((s) => !isTerminal(PRINT_RUN_TRANSITIONS, s)).sort();
+  assert.deepEqual([...ACTIVE_RUN_STATES].sort(), nonTerminal);
+
+  // And, defensively, no terminal state may ever leak into the active set —
+  // a completed/failed/cancelled run must never be seen as still holding a bed.
+  for (const s of ACTIVE_RUN_STATES) {
+    assert.ok(!isTerminal(PRINT_RUN_TRANSITIONS, s), `${s} must be non-terminal`);
   }
 });
 

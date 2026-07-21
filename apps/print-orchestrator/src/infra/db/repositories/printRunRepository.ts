@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 import type { PrintRunRepository } from "../../../domain/print/repositories";
-import type { PrintRun, PrintRunState } from "../../../domain/print/types";
+import { ACTIVE_RUN_STATES, type PrintRun, type PrintRunState } from "../../../domain/print/types";
 import {
   asNumberOrNull,
   asString,
@@ -24,8 +24,15 @@ const RUN_STATES: readonly PrintRunState[] = [
   "UNKNOWN"
 ];
 
-/** SQL fragment listing the states that hold a printer (see uq_* indexes in 008). */
-const ACTIVE_STATES_SQL = "('PENDING','RUNNING','PAUSED','UNKNOWN')";
+/**
+ * SQL fragment listing the states that hold a printer (see uq_* indexes in 008),
+ * derived from the domain's authoritative {@link ACTIVE_RUN_STATES} so the live
+ * `findActive*`/`listActive` queries can never drift from the domain rule. The
+ * values are compile-time domain literals, so quoting them here is injection-safe.
+ * (The 008 migration keeps its own frozen copy — a migration is a historical
+ * snapshot and must not follow later changes to the constant.)
+ */
+const ACTIVE_STATES_SQL = `(${ACTIVE_RUN_STATES.map((s) => `'${s}'`).join(",")})`;
 
 function toState(value: unknown): PrintRunState {
   return RUN_STATES.includes(value as PrintRunState) ? (value as PrintRunState) : "UNKNOWN";
