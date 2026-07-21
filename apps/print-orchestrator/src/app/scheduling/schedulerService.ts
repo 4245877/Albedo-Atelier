@@ -6,6 +6,7 @@ import {
   assertTransition,
   PLAN_TRANSITIONS
 } from "../../domain/print/states";
+import { ACTIVE_RUN_STATES, type PrintRunState } from "../../domain/print/types";
 import type {
   Assignment,
   AuditEntityType,
@@ -25,7 +26,7 @@ import {
   type CompatibilityTaskInput,
   type Dimensions
 } from "../../domain/scheduling/compatibility";
-import { applySafetyBuffer, type EtaSource } from "../../domain/scheduling/eta";
+import { applySafetyBuffer, resolveEta, type EtaSource } from "../../domain/scheduling/eta";
 import {
   buildPlan,
   type PlannerPrinterInput,
@@ -87,6 +88,18 @@ export interface SchedulerPrinterRef {
    * so a plan never promises a start on a printer that is still busy.
    */
   printingTimeLeftMs: number | null;
+  /**
+   * The state of the canonical {@link PrintRun} currently holding this printer, if
+   * any — one of {@link ACTIVE_RUN_STATES} (PENDING/RUNNING/PAUSED/UNKNOWN); null/
+   * absent when no run holds it. This is *distinct from* live telemetry `status`: a
+   * run can hold a printer (a PENDING dispatch reservation, or a fail-closed UNKNOWN
+   * outcome) while telemetry still reads idle. The scheduler treats a held printer as
+   * busy — never free-now, never a clear bed — so a plan cannot promise a start the
+   * dispatch gate would then refuse. Populated from the same authoritative active-run
+   * query (`findActiveByPrinter`) the dispatch path uses, so the availability rule is
+   * identical across domain, app and infra.
+   */
+  activeRunState?: PrintRunState | null;
 }
 
 export interface SchedulerConfig {
@@ -557,6 +570,13 @@ export class SchedulerService {
   private bedStateFor(printer: SchedulerPrinterRef, trackedState: BedCycleState | null): BedCycleState {
     if (trackedState !== null) return trackedState;
     if (printer.status === "printing" || printer.status === "paused") return "RUNNING";
+    // A canonical run holding the printer means the bed is not free even when
+    // telemetry isn't reporting a print: a fail-closed UNKNOWN run is an UNKNOWN bed
+    // (a human reconciles it), a PENDING/RUNNING/PAUSED run is a busy (RUNNING) bed —
+    // either way never silently inferred CLEAR below.
+    if (heldByActiveRun(printer.activeRunState)) {
+      return printer.activeRunState === "UNKNOWN" ? "UNKNOWN" : "RUNNING";
+    }
     const staleMs = this.compatibilityConfig.telemetryStaleMs;
     const fresh = printer.telemetryAgeMs !== null && printer.telemetryAgeMs <= staleMs;
     if (printer.online && fresh && printer.status === "idle") return "CLEAR";
@@ -633,7 +653,11 @@ export class SchedulerService {
     const staleMs = this.compatibilityConfig.telemetryStaleMs;
     const telemetryFresh =
       evidence.telemetryAgeMs !== null && evidence.telemetryAgeMs <= staleMs;
-    const etaSeconds = evidence.sliceEtaS ?? evidence.gcodeEtaS ?? null;
+    // Resolve the ETA through the same canonical resolver the compatibility matrix
+    // uses, so a non-positive slice/gcode duration (bad data) is treated as *unknown*
+    // here too — never a "known" night ETA that would fail the gate silently or, via
+    // the safety buffer, surface a negative duration.
+    const etaSeconds = resolveEta({ sliceEtaS: evidence.sliceEtaS, gcodeEtaS: evidence.gcodeEtaS }).seconds;
     const bufferedEtaSeconds =
       etaSeconds !== null ? applySafetyBuffer(etaSeconds, this.config.nightSafetyBufferRatio) : null;
     return {
@@ -872,6 +896,14 @@ export class SchedulerService {
         freeAtMs = Math.max(freeAtMs, nowMs + this.config.unknownEtaAssumptionS * 1000);
         estimated = true;
       }
+    } else if (heldByActiveRun(printer.activeRunState)) {
+      // Live telemetry does not (yet) show a print, but a canonical run still holds
+      // the printer — a PENDING dispatch reservation, or a fail-closed UNKNOWN outcome
+      // that must never be released without device evidence. We have no remaining-time
+      // estimate for it, so advance by the disclosed assumption and mark it estimated:
+      // the printer is never treated as free-now while a run holds it.
+      freeAtMs = Math.max(freeAtMs, nowMs + this.config.unknownEtaAssumptionS * 1000);
+      estimated = true;
     }
 
     for (const assignment of this.activeAssignmentsForPrinter(printer.id)) {
@@ -1010,6 +1042,16 @@ export class SchedulerService {
 }
 
 // ── Free helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Whether a canonical run in this state holds the printer — i.e. it is one of the
+ * domain's authoritative {@link ACTIVE_RUN_STATES}. Uses the constant (not a local
+ * literal list) so the scheduler's "is this printer free?" rule can never drift from
+ * the infra `findActive*` queries or the migration-008 unique index.
+ */
+function heldByActiveRun(state: PrintRunState | null | undefined): boolean {
+  return state != null && ACTIVE_RUN_STATES.includes(state);
+}
 
 /** A finite, strictly-positive number, else a 400 — for operator-supplied hours. */
 function requirePositive(value: number, field: string): number {

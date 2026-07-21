@@ -164,3 +164,42 @@ test("a printer whose free-time is only estimated warns the waiting task", () =>
     "an estimated free-time is disclosed as a warning"
   );
 });
+
+test("a non-finite notBeforeMs never poisons start/score (NaN-resistant, like deadline/createdAt)", () => {
+  // `?? now` only substitutes for null, not NaN — a NaN notBefore must not leak
+  // into Math.max and turn startMs/endMs/score into NaN (the same class of bug the
+  // deadline/createdAt guards already prevent). Unreachable via the API (it
+  // canonicalises timestamps) but this is a public domain function.
+  const result = buildPlan(
+    [task({ notBeforeMs: NaN, etaSeconds: 3600 })],
+    [printer("p1"), printer("p2")],
+    config
+  );
+  assert.equal(result.unplaced.length, 0);
+  const a = result.assignments[0];
+  assert.ok(Number.isFinite(a.startMs), "startMs stays finite despite a NaN notBefore");
+  assert.ok(a.endMs !== null && Number.isFinite(a.endMs), "endMs stays finite");
+  assert.ok(Number.isFinite(a.score), "score stays finite");
+});
+
+test("determinism: identical tasks plan the same regardless of input array order (taskId tiebreak)", () => {
+  // Two tasks equal on every ordering factor (priority, age, no queueRank) sharing
+  // one printer: the one that runs first must not depend on array order.
+  const a = task({ taskId: "aaa", compatiblePrinterIds: ["p1"], createdAtMs: NOW, priority: 0 });
+  const b = task({ taskId: "bbb", compatiblePrinterIds: ["p1"], createdAtMs: NOW, priority: 0 });
+  const runnerOf = (order: PlannerTaskInput[]): string =>
+    [...buildPlan(order, [printer("p1")], config).assignments].sort((x, y) => x.startMs - y.startMs)[0]
+      .taskId;
+  assert.equal(runnerOf([a, b]), runnerOf([b, a]), "the first-scheduled task is input-order-independent");
+});
+
+test("determinism: an equal-score printer choice is stable under compatiblePrinterIds order (printerId tiebreak)", () => {
+  // Both printers score identically (same material/nozzle, both free now); the pick
+  // must not flip when the compatible-ids list is reordered (as the app layer builds
+  // it from the printer array, whose order must not decide the plan).
+  const forward = buildPlan([task({ compatiblePrinterIds: ["p1", "p2"] })], [printer("p1"), printer("p2")], config)
+    .assignments[0].printerId;
+  const reverse = buildPlan([task({ compatiblePrinterIds: ["p2", "p1"] })], [printer("p1"), printer("p2")], config)
+    .assignments[0].printerId;
+  assert.equal(forward, reverse, "equal-score candidate choice is deterministic");
+});

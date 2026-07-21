@@ -370,7 +370,12 @@ export class FarmStore {
         // Remaining-material telemetry does not exist; the scheduler resolves
         // sufficiency from operator material overrides instead.
         materialRemainingSufficient: null,
-        printingTimeLeftMs
+        printingTimeLeftMs,
+        // The canonical run holding this printer (if any), from the same authoritative
+        // query the dispatch path uses. Telemetry `status` alone is not enough: a
+        // PENDING reservation or a fail-closed UNKNOWN run holds the printer while the
+        // device may still read idle, and the scheduler must not plan onto it.
+        activeRunState: this.activeRunForPrinter(view.id)?.state ?? null
       };
     });
   }

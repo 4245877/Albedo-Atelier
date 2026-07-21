@@ -140,6 +140,18 @@ function materialsDiffer(a: string | null, b: string | null): boolean {
   return materialFamily(a) !== materialFamily(b);
 }
 
+/**
+ * The task's effective earliest-start (ms): its `notBeforeMs` when finite, else
+ * `now`. `?? now` only substitutes for null — a NaN would slip through into the
+ * `Math.max(...)` and turn the whole start/score arithmetic into NaN, poisoning
+ * placement and (via NaN comparisons) the candidate ordering. This is the same
+ * defensive finite-guard the createdAt/deadline terms already apply, kept in one
+ * place so scoring and placement compute an identical start.
+ */
+function effectiveNotBefore(notBeforeMs: number | null, now: number): number {
+  return notBeforeMs !== null && Number.isFinite(notBeforeMs) ? notBeforeMs : now;
+}
+
 /** Urgency used only to order tasks before greedy placement (higher = earlier). */
 export function urgencyScore(
   task: PlannerTaskInput,
@@ -199,14 +211,23 @@ export function buildPlan(
     });
   }
 
-  const ordered = [...tasks].sort((a, b) => {
-    const ua = urgencyScore(a, weights, now);
-    const ub = urgencyScore(b, weights, now);
-    if (ub !== ua) return ub - ua;
-    // `|| 0` keeps the tiebreak total even if a createdAtMs is non-finite (a real
-    // epoch is a large positive number, so it is unaffected) — older first on ties.
-    return (a.createdAtMs || 0) - (b.createdAtMs || 0);
-  });
+  // Precompute each task's urgency once (not twice per comparison) and sort on a
+  // *total*, input-order-independent order: urgency desc, then older first, then
+  // taskId. Without the final taskId tiebreak a stable sort would leave exact ties
+  // in input-array order, so the same tasks in a different order could plan onto
+  // different printers — the planner must be deterministic regardless of input order.
+  const ordered = tasks
+    .map((task) => ({ task, urgency: urgencyScore(task, weights, now) }))
+    .sort((a, b) => {
+      if (b.urgency !== a.urgency) return b.urgency - a.urgency;
+      // `createdAtMs` may be non-finite here (a public domain input); a real epoch is
+      // a large positive number, so guarding to 0 leaves normal ordering untouched.
+      const ca = Number.isFinite(a.task.createdAtMs) ? a.task.createdAtMs : 0;
+      const cb = Number.isFinite(b.task.createdAtMs) ? b.task.createdAtMs : 0;
+      if (ca !== cb) return ca - cb;
+      return a.task.taskId < b.task.taskId ? -1 : a.task.taskId > b.task.taskId ? 1 : 0;
+    })
+    .map((entry) => entry.task);
 
   const assignments: PlannerAssignment[] = [];
   const unplaced: { taskId: string; reason: string }[] = [];
@@ -230,11 +251,21 @@ export function buildPlan(
 
     const scored = candidateIds
       .map((id) => scoreCandidate(task, state.get(id)!, weights, now))
-      .sort((a, b) => b.score - a.score);
+      // Best score first; ties broken by printerId so the choice among equally-good
+      // printers never depends on the order the candidate ids arrive in.
+      .sort((a, b) =>
+        b.score !== a.score
+          ? b.score - a.score
+          : a.printerId < b.printerId
+            ? -1
+            : a.printerId > b.printerId
+              ? 1
+              : 0
+      );
     const best = scored[0];
     const chosen = state.get(best.printerId)!;
 
-    const start = Math.max(chosen.freeAtMs, task.notBeforeMs ?? now, now);
+    const start = Math.max(chosen.freeAtMs, effectiveNotBefore(task.notBeforeMs, now), now);
     const durationS =
       task.etaSeconds !== null ? task.etaSeconds : config.unknownEtaAssumptionS;
     const end = task.etaSeconds !== null ? start + task.etaSeconds * 1000 : null;
@@ -308,7 +339,7 @@ function scoreCandidate(
     if (value !== 0) breakdown.push({ label, value: round(value) });
   };
 
-  const start = Math.max(printer.freeAtMs, task.notBeforeMs ?? now, now);
+  const start = Math.max(printer.freeAtMs, effectiveNotBefore(task.notBeforeMs, now), now);
   const waitHours = Math.max(0, (start - now) / HOUR_MS);
   add("ожидание освобождения", -waitHours * weights.waitPerHour);
 

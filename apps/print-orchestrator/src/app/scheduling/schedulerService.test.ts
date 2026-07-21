@@ -662,6 +662,43 @@ test("night gate: a printer physically printing with no bed cycle is not a clear
   assert.ok(report.rejected.some((r) => r.reasons.some((x) => /стол не свободен/.test(x))));
 });
 
+// ── active/UNKNOWN run holds the printer even when telemetry reads idle ──────────
+
+test("a printer held by an UNKNOWN canonical run is never a night candidate (fail-closed on UNKNOWN)", () => {
+  const db = store();
+  insertGcodeTask(db, "n1", { unattended: true });
+  // Telemetry reads idle+fresh, but a canonical UNKNOWN run holds the printer — the
+  // run must win: an UNKNOWN outcome holds the printer and is never treated as free.
+  const svc = makeService(db, [printer("p1", { status: "idle", activeRunState: "UNKNOWN" })]);
+  svc.setMaterialOverride("p1", { coverageHours: 10 });
+  const report = svc.nightCandidates();
+  assert.equal(report.candidates.length, 0);
+  assert.ok(report.rejected.some((r) => r.reasons.some((x) => /стол не свободен/.test(x))));
+});
+
+test("a printer held by a PENDING run is not planned as free-now (start pushed out + estimated)", () => {
+  const db = store();
+  insertGcodeTask(db, "t1", { durationS: 3600 });
+  // Telemetry idle, but a canonical PENDING run (a dispatch reservation) holds it.
+  const svc = makeService(db, [printer("p1", { status: "idle", activeRunState: "PENDING" })]);
+  const ex = svc.buildDraftPlan().assignments[0].explanation!;
+  assert.ok(ex.startMs > NOW.getTime() + 60_000, "start is pushed past now, not free-now");
+  assert.ok(ex.warnings.some((w) => /оценено приблизительно/.test(w)));
+});
+
+// ── night gate ETA goes through the same resolver as the compatibility matrix ────
+
+test("night gate: a non-positive slice/gcode ETA is unknown, never a known/negative night ETA", () => {
+  const db = store();
+  // Bad analysis data: a non-positive duration must resolve to unknown (like the
+  // compatibility matrix), not sneak through as a known ETA with a negative buffer.
+  insertGcodeTask(db, "n1", { unattended: true, durationS: -1 });
+  const svc = makeService(db, [printer("p1", { materialRemainingSufficient: true })]);
+  const report = svc.nightCandidates();
+  assert.equal(report.candidates.length, 0);
+  assert.ok(report.rejected.some((r) => r.reasons.some((x) => /ETA неизвестна/.test(x))));
+});
+
 // ── #13 / #14 planning hygiene ──────────────────────────────────────────────────
 
 test("an ASSIGNED task is excluded from planning and the compatibility matrix", () => {
