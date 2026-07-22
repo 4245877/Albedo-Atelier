@@ -3,18 +3,22 @@ import { test } from "node:test";
 
 import type { QueueJob } from "../domain/dashboard/types";
 import type { PrinterConfig } from "../infra/printers/config";
-import type { PrinterLiveStatus } from "../infra/printers/status";
 import {
   buildNightPlan,
   materialsIncompatible,
   parseEtaMinutes,
   windowLengthMinutes,
+  type NightGateDecision,
   type NightPlanContext
 } from "./nightPlanner";
 
 /*
- * The night planner ranks ready queue jobs into safe-first candidates and, for
- * each, lists the hard reasons it cannot actually launch tonight.
+ * The night planner is a *projection*: it pools the ready queue into night
+ * candidates, ranks them safest-first, and lists — verbatim — the blockers the
+ * canonical night gate (`NightPlanContext.nightGate`) reports. It owns no night
+ * rules of its own, so the dashboard shows exactly what the dispatch gate will
+ * enforce. These tests pin the projection + ranking, and the pure parsing
+ * helpers the canonical gate shares with it.
  */
 
 function moonraker(id: string, name: string, material = "PLA"): PrinterConfig {
@@ -47,32 +51,6 @@ function moonraker(id: string, name: string, material = "PLA"): PrinterConfig {
   };
 }
 
-function idleStatus(id: string): PrinterLiveStatus {
-  return {
-    id,
-    online: true,
-    status: "idle",
-    currentFile: null,
-    progressPct: null,
-    remainingMinutes: null,
-    filamentUsedMm: null,
-    amsTrays: null,
-    nozzleDiameterMm: null,
-    nozzleType: null,
-    activeFilament: null,
-    nozzleTemp: null,
-    nozzleTarget: null,
-    bedTemp: null,
-    bedTarget: null,
-    chamberTemp: null,
-    light: null,
-    stateText: null,
-    stateMessage: null,
-    error: null,
-    updatedAt: new Date().toISOString()
-  };
-}
-
 function job(over: Partial<QueueJob>): QueueJob {
   return {
     id: "q1",
@@ -83,6 +61,20 @@ function job(over: Partial<QueueJob>): QueueJob {
     status: "ready",
     ...over
   };
+}
+
+/**
+ * A canonical-gate stub: returns the blockers keyed by job id, plus the identity
+ * a real gate carries. This stands in for `FarmStore.nightGateInfo`
+ * (`evaluateDispatchGate`) so the planner can be tested as a pure projection.
+ */
+function gateWith(blockersById: Record<string, string[]>): NightPlanContext["nightGate"] {
+  return (j: QueueJob): NightGateDecision => ({
+    blockers: blockersById[j.id] ?? [],
+    taskId: j.id,
+    taskVersion: 1,
+    artifactSha256: null
+  });
 }
 
 test("parseEtaMinutes reads hours, minutes and combinations", () => {
@@ -104,7 +96,7 @@ test("only ready jobs are candidates; night-flagged jobs win when present", () =
   const ctx: NightPlanContext = {
     window: "21:30 – 07:30",
     resolvePrinter: () => moonraker("k2", "K2"),
-    getStatus: (id) => idleStatus(id)
+    nightGate: gateWith({})
   };
   const plan = buildNightPlan(
     [
@@ -116,116 +108,79 @@ test("only ready jobs are candidates; night-flagged jobs win when present", () =
   );
   assert.equal(plan.length, 1, "only the night-flagged ready job is considered");
   assert.equal(plan[0].job.title, "Night");
-  assert.deepEqual(plan[0].blockers, [], "an online idle moonraker with a file has no blockers");
+  assert.deepEqual(plan[0].blockers, [], "the canonical gate reported no blockers → startable");
 });
 
-test("candidates are ranked safest first", () => {
+test("blockers are the canonical gate's, verbatim, and the candidate carries them for the UI", () => {
   const ctx: NightPlanContext = {
     window: "21:30 – 07:30",
-    resolvePrinter: (j) => (j.printer === "OFF" ? undefined : moonraker("k2", "K2")),
-    getStatus: (id) => idleStatus(id)
+    resolvePrinter: () => moonraker("k2", "K2"),
+    nightGate: gateWith({ q1: ["«K2» не в сети", "нет завершённого анализа файла"] })
+  };
+  const [entry] = buildNightPlan([job({ file: "a.gcode", night: true })], ctx);
+  assert.deepEqual(entry.blockers, ["«K2» не в сети", "нет завершённого анализа файла"]);
+  assert.deepEqual(
+    entry.candidate.blockers,
+    entry.blockers,
+    "the candidate mirrors the entry's blockers"
+  );
+});
+
+test("the planner adds NO blockers of its own — a clean gate means a startable candidate", () => {
+  // A job that the OLD heuristic would have blocked (unmarked night, unknown
+  // material, no file): with the canonical gate clean, the projection reports it
+  // startable. There is no second rule set second-guessing the gate.
+  const ctx: NightPlanContext = {
+    window: "21:30 – 07:30",
+    resolvePrinter: () => moonraker("k2", "K2", "PETG"),
+    nightGate: gateWith({})
+  };
+  const [entry] = buildNightPlan([job({ material: "PLA", file: "", night: false })], ctx);
+  assert.deepEqual(entry.blockers, [], "only the gate decides — and it said startable");
+});
+
+test("candidates are ranked safest first (fewer gate blockers → lower risk)", () => {
+  const ctx: NightPlanContext = {
+    window: "21:30 – 07:30",
+    resolvePrinter: () => moonraker("k2", "K2"),
+    nightGate: gateWith({
+      q1: ["материал не подтверждён с обеих сторон — ночной запуск запрещён", "ETA неизвестна"],
+      q2: []
+    })
   };
   const plan = buildNightPlan(
     [
-      job({ id: "q1", title: "Unresolved", printer: "OFF", eta: "3ч" }),
-      job({ id: "q2", title: "Clean", printer: "K2", eta: "2ч", file: "b.gcode" })
+      job({ id: "q1", title: "Blocked", night: true, eta: "3ч" }),
+      job({ id: "q2", title: "Clean", night: true, eta: "2ч", file: "b.gcode" })
     ],
     ctx
   );
   assert.equal(plan[0].job.title, "Clean", "the startable job ranks first");
-  assert.ok(plan[0].candidate.risk < plan[1].candidate.risk);
+  assert.ok(plan[0].candidate.risk < plan[1].candidate.risk, "more blockers → higher risk");
+  assert.ok(plan[0].candidate.risk < 35, "a blocker-free candidate reads low risk");
 });
 
-test("blockers list concrete reasons a job cannot launch tonight", () => {
+test("the gate's preview identity is projected onto the candidate", () => {
   const ctx: NightPlanContext = {
     window: "21:30 – 07:30",
     resolvePrinter: () => moonraker("k2", "K2"),
-    getStatus: (id) => ({ ...idleStatus(id), online: false, status: "offline" })
+    nightGate: (j) => ({ blockers: [], taskId: j.id, taskVersion: 7, artifactSha256: "abc123" })
   };
-  const [entry] = buildNightPlan([job({ file: "" , eta: "20ч" })], ctx);
-  assert.ok(entry.blockers.some((b) => b.includes("не в сети")));
-  assert.ok(entry.blockers.some((b) => b.includes("файл")));
-  assert.ok(entry.blockers.some((b) => b.includes("окно")), "an over-long print does not fit the window");
+  const [entry] = buildNightPlan([job({ id: "task-x", night: true, file: "a.gcode" })], ctx);
+  assert.equal(entry.candidate.taskId, "task-x");
+  assert.equal(entry.candidate.taskVersion, 7);
+  assert.equal(entry.candidate.artifactSha256, "abc123");
 });
 
-test("an unknown ETA is a hard blocker, not a discount (unattended print)", () => {
+test("a null gate is un-verifiable, never silently startable", () => {
   const ctx: NightPlanContext = {
     window: "21:30 – 07:30",
     resolvePrinter: () => moonraker("k2", "K2"),
-    getStatus: (id) => idleStatus(id)
+    nightGate: () => null
   };
-  const [entry] = buildNightPlan([job({ eta: "—", file: "a.gcode" })], ctx);
-  assert.ok(
-    entry.blockers.some((b) => b.includes("длительность")),
-    "no ETA → cannot verify the window → blocked"
-  );
-  assert.deepEqual(entry.candidate.blockers, entry.blockers, "the candidate carries the blockers for the UI");
-});
-
-test("an unconfirmed printer state (unknown) is a hard blocker", () => {
-  const ctx: NightPlanContext = {
-    window: "21:30 – 07:30",
-    resolvePrinter: () => moonraker("k2", "K2"),
-    getStatus: (id) => ({ ...idleStatus(id), status: "unknown" })
-  };
-  const [entry] = buildNightPlan([job({ file: "a.gcode" })], ctx);
-  assert.ok(entry.blockers.some((b) => b.includes("не подтверждено")));
-});
-
-test("a material contradiction is a hard blocker; a matching token in a list is not", () => {
-  const ctx: NightPlanContext = {
-    window: "21:30 – 07:30",
-    resolvePrinter: () => moonraker("k2", "K2", "PETG"),
-    getStatus: (id) => idleStatus(id)
-  };
-  const [entry] = buildNightPlan([job({ material: "PLA", file: "a.gcode", night: true })], ctx);
-  assert.ok(entry.blockers.some((b) => b.includes("материал")));
-
-  const multi: NightPlanContext = {
-    ...ctx,
-    resolvePrinter: () => moonraker("k2", "K2", "PLA / PETG / TPU")
-  };
-  // A night-flagged job with a known, matching material has no blockers.
-  const [ok] = buildNightPlan([job({ material: "PLA", file: "a.gcode", night: true })], multi);
-  assert.deepEqual(ok.blockers, [], "PLA is among the loaded alternatives");
-});
-
-test("an unmarked ready job is NOT an unattended candidate (no all-ready fallback)", () => {
-  const ctx: NightPlanContext = {
-    window: "21:30 – 07:30",
-    resolvePrinter: () => moonraker("k2", "K2", "PLA"),
-    getStatus: (id) => idleStatus(id)
-  };
-  // Perfectly startable otherwise, but never marked night → blocked for unattended.
-  const [entry] = buildNightPlan([job({ material: "PLA", file: "a.gcode" })], ctx);
-  assert.ok(
-    entry.blockers.some((b) => b.includes("без присмотра")),
-    "an unmarked job can never be launched unattended"
-  );
-});
-
-test("unknown material on either side blocks an unattended launch", () => {
-  const ctx: NightPlanContext = {
-    window: "21:30 – 07:30",
-    resolvePrinter: () => moonraker("k2", "K2", ""), // loaded reel unknown
-    getStatus: (id) => idleStatus(id)
-  };
-  const [loaded] = buildNightPlan([job({ material: "PLA", file: "a.gcode", night: true })], ctx);
-  assert.ok(loaded.blockers.some((b) => b.includes("материал не подтверждён")));
-
-  const jobUnknown: NightPlanContext = { ...ctx, resolvePrinter: () => moonraker("k2", "K2", "PLA") };
-  const [needed] = buildNightPlan([job({ material: "—", file: "a.gcode", night: true })], jobUnknown);
-  assert.ok(needed.blockers.some((b) => b.includes("материал не подтверждён")));
-});
-
-test("an unsafe job file path is a blocker", () => {
-  const ctx: NightPlanContext = {
-    window: "21:30 – 07:30",
-    resolvePrinter: () => moonraker("k2", "K2"),
-    getStatus: (id) => idleStatus(id)
-  };
-  const [entry] = buildNightPlan([job({ file: "../evil.gcode" })], ctx);
-  assert.ok(entry.blockers.some((b) => b.includes("проверку пути")));
+  const [entry] = buildNightPlan([job({ night: true, file: "a.gcode" })], ctx);
+  assert.equal(entry.blockers.length, 1, "a missing decision yields one honest blocker");
+  assert.ok(entry.blockers[0].includes("не удалось проверить"));
 });
 
 test("materialsIncompatible only reports a concrete contradiction", () => {

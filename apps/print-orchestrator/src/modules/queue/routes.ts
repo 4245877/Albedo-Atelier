@@ -1,13 +1,27 @@
 import type { FastifyInstance } from "fastify";
 
-import { farmStore } from "../../app/farmStore";
-import type { NewQueueJobInput } from "../../app/queueStore";
+import { farmStore, type NewQueueJobInput } from "../../app/farmStore";
 
 /**
- * Print queue endpoints under `/api/queue`.
+ * Print queue endpoints under `/api/queue` — a thin **compatibility adapter**,
+ * NOT a second queue. Every handler is a one-line delegate to a `farmStore`
+ * method that operates on the canonical SQLite model (`PrintQueueService` /
+ * `DispatchService`) exactly as the scheduler API (`/api/print/scheduler`) does:
+ * same tasks, same order, same lifecycle. The reads it serves are legacy-shape
+ * *projections* of that model (`projectLegacyQueue` for the queue,
+ * `nightPlanner` projecting the canonical `evaluateDispatchGate` for the night
+ * section) — there is no independent queue state, DTO source or rule set here.
+ *
+ * Kept because the main dashboard's simplified queue/night section still drives
+ * these paths (add job, start-next, night start/pick) and external clients may
+ * too. Removal condition: retire once the dashboard's quick actions move to
+ * `/api/print/scheduler` (+ a dispatch endpoint there) and no external caller
+ * depends on `/api/queue`; the reads (`GET /`, `GET /night`) are already served
+ * to the dashboard via `/api/dashboard`, and `DELETE /:id` + `/:id/review` are
+ * operator escape hatches with no scheduler equivalent yet.
  *
  * Reads:
- *   GET  /               the queue
+ *   GET  /               the queue (projection of the SQLite model)
  *   GET  /night          night-print window + candidates + current pick
  *
  * Actions:

@@ -106,10 +106,11 @@ test("setTaskScheduling updates params but refuses on a terminal task", () => {
 
 test("the manual scheduler services never touch the legacy queue store or state.json", () => {
   // Structural guard for "не развивай legacy /api/queue и state.json": the
-  // durable-model services must not import or write the legacy JSON queue.
-  // The distinctive markers are imports of the legacy JSON modules — the
-  // `QueueStore` (app/queueStore) and `StateStore` (infra/persistence/stateStore).
-  // `PrintQueueStore` (the SQLite domain store) is deliberately *not* matched.
+  // durable-model services must not import or write the legacy JSON state. The
+  // `QueueStore` module is gone (the queue moved fully to SQLite); the remaining
+  // legacy-JSON markers are `StateStore`/`SnapshotStore`
+  // (infra/persistence/stateStore, snapshotStore). `PrintQueueStore` (the SQLite
+  // domain store) is deliberately *not* matched.
   const legacyImport = /from\s+["'][^"']*(queueStore|stateStore|snapshotStore)["']/;
   // Resolved from the package root (tests run with cwd = the package dir).
   const base = path.resolve("src/app/printQueue");

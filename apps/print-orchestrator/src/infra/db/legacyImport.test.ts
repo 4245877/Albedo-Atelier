@@ -104,3 +104,69 @@ test("an empty legacy queue still marks the import done", () => {
   assert.ok(s.repositories.meta.get(LEGACY_IMPORT_MARKER));
   s.close();
 });
+
+test("a single-job legacy queue imports that one job", () => {
+  const s = store();
+  const result = importLegacyQueue(s, [
+    { id: "q1", title: "Only", printer: "K2", material: "PLA", eta: "1ч", status: "ready" }
+  ]);
+  assert.deepEqual(result, { skipped: false, imported: 1 });
+  assert.equal(s.repositories.tasks.list().length, 1);
+  assert.equal(s.repositories.tasks.findByLegacyRef("q1")?.title, "Only");
+  s.close();
+});
+
+test("multiple jobs are imported in their legacy order", () => {
+  const s = store();
+  const jobs: QueueJob[] = [
+    { id: "q1", title: "First", printer: "K2", material: "PLA", eta: "1ч", status: "ready" },
+    { id: "q2", title: "Second", printer: "K2", material: "PLA", eta: "2ч", status: "ready" },
+    { id: "q3", title: "Third", printer: "K2", material: "PLA", eta: "3ч", status: "ready" }
+  ];
+  const result = importLegacyQueue(s, jobs);
+  assert.equal(result.imported, 3);
+
+  // The open-queue order (by position) mirrors the legacy array order.
+  const order = s.repositories.queue
+    .listOpen()
+    .map((entry) => s.repositories.tasks.getById(entry.taskId)?.title);
+  assert.deepEqual(order, ["First", "Second", "Third"]);
+  s.close();
+});
+
+test("a failure mid-import rolls back completely and writes NO marker", () => {
+  const s = store();
+  const jobs: QueueJob[] = [
+    { id: "q1", title: "First", printer: "K2", material: "PLA", eta: "1ч", status: "ready" },
+    { id: "q2", title: "Second", printer: "K2", material: "PLA", eta: "2ч", status: "ready" },
+    { id: "q3", title: "Third", printer: "K2", material: "PLA", eta: "3ч", status: "ready" }
+  ];
+
+  // Make the SECOND job's audit insert throw, so the transaction fails partway.
+  const audit = s.repositories.audit;
+  const realInsert = audit.insert.bind(audit);
+  let calls = 0;
+  audit.insert = (event) => {
+    calls += 1;
+    if (calls === 2) throw new Error("disk full");
+    return realInsert(event);
+  };
+
+  assert.throws(() => importLegacyQueue(s, jobs), /disk full/);
+
+  // The whole import is one transaction: nothing landed, and — crucially — the
+  // marker was NOT written, so the migration is safe to retry.
+  assert.equal(s.repositories.meta.get(LEGACY_IMPORT_MARKER), null, "no marker after a failed import");
+  assert.equal(s.repositories.tasks.list().length, 0, "every write rolled back");
+
+  // Repair the fault and retry: the import now completes and marks done.
+  audit.insert = realInsert;
+  const retry = importLegacyQueue(s, jobs);
+  assert.deepEqual(retry, { skipped: false, imported: 3 });
+  assert.ok(s.repositories.meta.get(LEGACY_IMPORT_MARKER), "marker set after the successful retry");
+  const order = s.repositories.queue
+    .listOpen()
+    .map((entry) => s.repositories.tasks.getById(entry.taskId)?.title);
+  assert.deepEqual(order, ["First", "Second", "Third"], "order preserved on retry");
+  s.close();
+});

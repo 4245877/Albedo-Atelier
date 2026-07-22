@@ -10,7 +10,7 @@ import {
 import type { Automation, NightCandidate, NightPrint, QueueJob } from "../domain/dashboard/types";
 import type { PrintQueueStore } from "../domain/print/repositories";
 import { env, slicing, uploads } from "../shared/env";
-import { importLegacyQueue } from "../infra/db/legacyImport";
+import { importLegacyQueue, LEGACY_IMPORT_MARKER } from "../infra/db/legacyImport";
 import { openPrintQueueStore } from "../infra/db/store";
 import { ArtifactStorage } from "../infra/storage/artifactStorage";
 import { OrcaCatalogSource } from "../infra/slicing/catalogSource";
@@ -54,9 +54,24 @@ import { MonitoringLease } from "./monitoringLease";
 import { PrinterPoller } from "./printerPoller";
 import type { StoreLogger } from "../shared/logger";
 import { warnIfPermsTooOpen } from "../shared/filePerms";
-import { QueueStore, type NewQueueJobInput } from "./queueStore";
 import { SnapshotStore } from "../infra/persistence/snapshotStore";
-import { StateStore } from "../infra/persistence/stateStore";
+import { StateStore, type PersistedQueue } from "../infra/persistence/stateStore";
+
+/**
+ * The body accepted by `POST /api/queue` (the operator "add job" form). Fields
+ * are `unknown` and validated in {@link FarmStore.addQueueJob} before they reach
+ * the SQLite model, so a malformed body fails honestly instead of persisting
+ * garbage.
+ */
+export type NewQueueJobInput = {
+  title?: unknown;
+  printer?: unknown;
+  material?: unknown;
+  eta?: unknown;
+  at?: unknown;
+  night?: unknown;
+  file?: unknown;
+};
 
 /**
  * The farm, assembled from real sources: printer configs come from
@@ -65,16 +80,20 @@ import { StateStore } from "../infra/persistence/stateStore";
  * frames are real snapshots; the event feed records transitions the poller saw.
  *
  * This class owns the printer config and wires the collaborators together — the
- * background {@link PrinterPoller}, {@link CameraService}, {@link QueueStore},
- * {@link EventFeed}, {@link PrinterCommandService} and the read-only
- * {@link DashboardReadModel} — then exposes the *actions* as its own API for
- * the HTTP routes. Pure reads are served by the read model directly via
- * {@link FarmStore.reads}; only operations that coordinate several
- * collaborators (commands, queue starts, files, snapshots) live here.
- * The durable slice of the state (queue, event feed, today counters) is loaded
- * from and persisted to a JSON file via {@link StateStore}, so it survives a
- * restart. There is no seed data: anything the farm does not know is returned
- * empty/null and the dashboard shows it as unavailable.
+ * background {@link PrinterPoller}, {@link CameraService}, {@link EventFeed},
+ * {@link PrinterCommandService} and the read-only {@link DashboardReadModel} —
+ * then exposes the *actions* as its own API for the HTTP routes. Pure reads are
+ * served by the read model directly via {@link FarmStore.reads}; only operations
+ * that coordinate several collaborators (commands, queue starts, files,
+ * snapshots) live here.
+ *
+ * The print queue itself is owned by the SQLite {@link PrintQueueService} — the
+ * single source of truth. The remaining durable-but-non-queue state (event feed,
+ * today counters, snapshots, pending filament deductions) is loaded from and
+ * persisted to a JSON file via {@link StateStore}; the queue is no longer written
+ * there (see {@link FarmStore.queueJsonSnapshot}). There is no seed data:
+ * anything the farm does not know is returned empty/null and the dashboard shows
+ * it as unavailable.
  */
 export class FarmStore {
   private configs: PrinterConfig[] = [];
@@ -123,8 +142,14 @@ export class FarmStore {
    * un-sliced work (no runtime → honest blocker, never a faked slice).
    */
   private sliceRuntimeAvailable = false;
-  /** Legacy queue snapshot captured at load, fed once into the SQLite import. */
-  private readonly legacyQueueJobs: QueueJob[];
+  /**
+   * The legacy JSON operator queue captured at load. It feeds the one-time
+   * SQLite import; until that import commits (marker set) it is also written
+   * back to JSON verbatim by {@link queueJsonSnapshot}, so an interrupted
+   * migration can be retried without losing jobs. Once the marker is set SQLite
+   * is canonical and the queue is no longer serialized to JSON.
+   */
+  private readonly legacyQueueState: PersistedQueue;
 
   private readonly events: EventFeed;
   private readonly cameras = new CameraService();
@@ -132,7 +157,6 @@ export class FarmStore {
   private readonly inventory = new FulfillmentInventoryClient();
   private readonly filament: FilamentConsumption;
   private readonly filamentSync: FilamentSync;
-  private readonly queue: QueueStore;
   private readonly automations: AutomationStore;
   /** "Operator is watching" lease renewed by the dashboard; in-memory only. */
   private readonly monitoring = new MonitoringLease();
@@ -187,14 +211,13 @@ export class FarmStore {
       : path.resolve(this.storageRoot, ".tmp");
     this.state = new StateStore(stateFilePath);
     const persisted = this.state.load();
-    this.legacyQueueJobs = persisted.queue.jobs;
+    this.legacyQueueState = persisted.queue;
     const persist = (): void => this.state.save();
 
     this.events = new EventFeed(persisted.feed, persist);
     this.snapshots = new SnapshotStore(snapshotsDir, persisted.snapshots, persist, {
       retainPerPrinter: env.snapshotRetainPerPrinter
     });
-    this.queue = new QueueStore(this.events, persisted.queue, persist);
     this.automations = new AutomationStore(persisted.automations, this.events, persist);
     // Deductions fulfillment never confirmed are reloaded into the retry queue,
     // so a restart cannot lose them (delivery stays deduped by idempotencyKey);
@@ -255,7 +278,7 @@ export class FarmStore {
       this.poller,
       this.cameras,
       // The queue the dashboard sees IS the SQLite projection — the legacy
-      // JSON QueueStore no longer feeds any read (or dispatch) path.
+      // JSON queue no longer feeds any read (or dispatch) path.
       {
         list: () => this.printQueue.projectLegacyQueue(),
         size: () => this.printQueue.projectLegacyQueue().length
@@ -268,10 +291,11 @@ export class FarmStore {
       (printerId) => this.activeRunForPrinter(printerId)?.id ?? null
     );
 
-    // Snapshot the whole durable state on every save.
+    // Snapshot the whole durable state on every save. The queue section is no
+    // longer a live projection — SQLite owns it; see queueJsonSnapshot.
     this.state.bind(() => ({
       version: 1,
-      queue: this.queue.serialize(),
+      queue: this.queueJsonSnapshot(),
       feed: this.events.list(),
       today: this.poller.today.serialize(),
       automations: this.automations.serialize(),
@@ -279,6 +303,26 @@ export class FarmStore {
       pendingConsumes: this.filament.serialize(),
       filamentCarry: this.filament.serializeCarry()
     }));
+  }
+
+  /**
+   * The `queue` section written to the JSON state file. SQLite is the single
+   * source of truth for the queue, so once the one-time legacy import has
+   * committed (its `app_meta` marker is set — which the store only exposes after
+   * a successful transaction) the queue is no longer serialized: an empty
+   * section is written and new jobs live only in SQLite.
+   *
+   * Before that marker exists — the very first boot with a legacy `state.json`,
+   * or a boot whose import failed/was interrupted — the original legacy queue is
+   * preserved verbatim. That keeps the migration source intact so it can be
+   * retried on the next boot without losing jobs, and lets an older binary still
+   * read its queue if the deploy is rolled back before the cutover completes.
+   */
+  private queueJsonSnapshot(): PersistedQueue {
+    if (this.printQueueStore?.repositories.meta.get(LEGACY_IMPORT_MARKER)) {
+      return { seq: 0, jobs: [] };
+    }
+    return this.legacyQueueState;
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -386,7 +430,7 @@ export class FarmStore {
     // Seed the new model from the old JSON queue exactly once. Guarded by an
     // in-DB marker, so this is a no-op on every subsequent boot — there is no
     // ongoing dual-write between the JSON store and SQLite.
-    importLegacyQueue(store, this.legacyQueueJobs, { logger });
+    importLegacyQueue(store, this.legacyQueueState.jobs, { logger });
     this.printQueueStore = store;
     this.printQueueService = new PrintQueueService(store, {
       // Refuse a pin to a printer the farm does not know (evaluated lazily, so the
@@ -795,7 +839,7 @@ export class FarmStore {
     return { meta, data };
   }
 
-  // ── Actions (→ CommandService / QueueStore) ──────────────────────────────
+  // ── Actions (→ CommandService / PrintQueueService) ───────────────────────
 
   pausePrinter(id: string) {
     return this.commands.pause(id);
@@ -1107,9 +1151,16 @@ export class FarmStore {
     const printerRef = task.pinnedPrinterId ?? task.targetPrinter;
     const printer = printerRef ? this.reads.resolvePrinter(printerRef) : undefined;
     if (!printer) {
-      // The base planner already reports the unresolved printer; only identity here.
+      // This gate is now the SOLE source of night blockers (the dashboard night
+      // section projects it verbatim), so it must report a missing/unresolvable
+      // printer itself rather than defer to a second heuristic. A night start
+      // would otherwise have nothing to dispatch to.
       return {
-        blockers: [],
+        blockers: [
+          printerRef
+            ? `принтер «${printerRef}» не найден в конфигурации`
+            : "принтер не назначен — закрепите принтер для ночного запуска"
+        ],
         taskId: task.id,
         taskVersion: task.version,
         artifactSha256: artifact?.sha256 ?? null

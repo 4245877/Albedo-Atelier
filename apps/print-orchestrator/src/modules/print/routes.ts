@@ -13,11 +13,14 @@ import { uploads } from "../../shared/env";
 import { registerSlicingRoutes } from "./slicingRoutes";
 
 /**
- * The persistent print-queue API under `/api/print` — the surface for the new
- * SQLite-backed model. It sits alongside the legacy `/api/queue` (which still
- * drives the existing dashboard and remote dispatch) rather than replacing it;
- * this stage introduces the durable backbone, and a later stage makes it
- * authoritative.
+ * The persistent print-queue API under `/api/print` — the surface for the
+ * **canonical** SQLite-backed model, and the scheduler that plans over it
+ * (`/api/print/scheduler`). It is authoritative: SQLite is the single source of
+ * truth for the queue. The legacy `/api/queue` is a thin compatibility adapter
+ * that projects the *same* model through the *same* application use cases (see
+ * `src/modules/queue/routes.ts`) — the two are views over one queue, never two
+ * queues. `GET /queue` here is the legacy-shape projection this API exposes for
+ * clients that still want the flat job shape.
  *
  * Reads:
  *   GET  /tasks         all tasks (any state; launched tasks are never deleted)

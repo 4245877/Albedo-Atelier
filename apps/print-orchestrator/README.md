@@ -12,22 +12,24 @@ real snapshots (`src/infra/printers/camera/`). Anything the farm genuinely does
 not know (material stock, maintenance history, schedule) is returned empty/null
 and the dashboard shows it as unavailable rather than inventing numbers.
 
-State (the operator queue, the event feed, today's counters) is persisted to a
-single JSON file so it survives a restart — there is still no database. The path
-is `STATE_FILE_PATH` (default `<cwd>/data/state.json`; `/app/data/state.json` on
-the `orchestrator-data` volume in Docker). Writes are atomic (temp file +
-rename) and loading is tolerant: a missing file starts empty (first run) and a
-corrupt/hand-edited one degrades to empty defaults with a logged warning instead
-of crashing startup. Queue jobs have two statuses, `ready` and `review`;
-a legacy `"error"` status from files written by older builds is normalized to
-`review` (with an explanatory `reason`) on load — nothing in the current code
-can produce it. The farm is composed of focused collaborators behind the
+The **print queue lives in SQLite** — it is the single source of truth (see
+[the next section](#persistent-print-queue-model-sqlite)). The remaining durable
+state (the event feed, today's counters, saved-snapshot metadata and filament
+deductions still awaiting delivery) is persisted to a single JSON file so it
+survives a restart. The path is `STATE_FILE_PATH` (default
+`<cwd>/data/state.json`; `/app/data/state.json` on the `orchestrator-data` volume
+in Docker). Writes are atomic (temp file + rename) and loading is tolerant: a
+missing file starts empty (first run) and a corrupt/hand-edited one degrades to
+empty defaults with a logged warning instead of crashing startup. The JSON file
+still carries a `queue` section, but only so an **old** file can be read and
+imported once (see below); after that import commits, the queue is no longer
+written to JSON. The farm is composed of focused collaborators behind the
 `FarmStore` facade (`src/app/`): the `PrinterPoller` poll loop with its
 extracted `LightScheduler`, `TodayCounters` and `FilamentConsumption`,
-plus `CameraService`, `QueueStore`, `EventFeed` and the read-only
-`DashboardReadModel` (exposed as `farmStore.reads`). Persistence lives in
-`src/infra/persistence/` (`StateStore`, `SnapshotStore`); HTTP routes in
-`src/modules/`, the CORS/token hook in `src/http/security.ts`.
+plus `CameraService`, `EventFeed` and the read-only `DashboardReadModel`
+(exposed as `farmStore.reads`). Persistence lives in `src/infra/persistence/`
+(`StateStore`, `SnapshotStore`); HTTP routes in `src/modules/`, the CORS/token
+hook in `src/http/security.ts`.
 
 Live telemetry is deliberately **not** persisted — printer statuses and the
 manual light override are re-derived on the next poll, and persisting statuses
@@ -37,12 +39,12 @@ yet; the persistence layer is structured to hold them once they are implemented.
 
 ## Persistent print-queue model (SQLite)
 
-Alongside the JSON state above, the orchestrator now carries a durable,
-relational model of the print queue in **SQLite** (`QUEUE_DB_PATH`, default
-`<state dir>/queue.db` on the same `/app/data` volume; WAL + foreign keys on,
-schema managed by numbered migrations). It is the backbone the flat "queue jobs"
-are being grown into, and it keeps the three concerns the flat model conflated
-strictly apart:
+The print queue lives in a durable, relational model in **SQLite**
+(`QUEUE_DB_PATH`, default `<state dir>/queue.db` on the same `/app/data` volume;
+WAL + foreign keys on, schema managed by numbered migrations). This is the
+**single source of truth** for the queue — the flat JSON "queue jobs" store has
+been retired (see [migration](#migration-from-the-json-queue) below). It keeps
+the three concerns the flat model conflated strictly apart:
 
 - **task state** (`PrintTask`) — what the operator wants,
 - **assignment state** (`Assignment`) — the binding of a task to a printer/bed,
@@ -67,12 +69,66 @@ Layering (the domain layer never imports `node:sqlite`):
   the legacy-format projection.
 - `src/modules/print/` — the `/api/print` HTTP surface.
 
-On first boot the existing `state.json` operator queue is imported **once** into
-this model (old ids kept as `legacyRef`, guarded by an `app_meta` marker); there
-is **no** ongoing dual-write — after the import the two evolve independently. The
-legacy `/api/queue` and the dashboard are unchanged: this stage lays the durable
-foundation, and remote start, automatic distribution and fulfillment integration
-are explicitly left to later modules (their ports exist, but nothing is faked).
+### Migration from the JSON queue
+
+The queue was originally a flat array in `state.json`. It now lives entirely in
+SQLite; the old `QueueStore` and its JSON serialization are gone.
+
+**First boot with an old `state.json`.** The legacy operator queue is imported
+**once** into the SQLite model — old ids kept as `legacyRef`, in their original
+order — and the whole import runs in a **single transaction**. Idempotence is
+guaranteed two independent ways: an `app_meta` marker (`legacy_import.state_json`)
+written *inside* that transaction, and a per-job `legacyRef` check. The marker is
+therefore set **only** after a successful commit, so an import that fails or is
+interrupted leaves **no** marker and no partial rows — it is simply retried on the
+next boot. A job that appears in the JSON queue *after* the cutover (an older
+binary, a hand edit) is imported fail-closed into `NEEDS_REVIEW` — visible to the
+operator, never silently runnable from a second source of truth. See
+`src/infra/db/legacyImport.ts`.
+
+**What happens to the JSON.** Until the import marker is set, the original
+`queue` section is preserved verbatim in `state.json` (so a failed migration can
+be retried, and an old binary can still read it on a rollback). Once the marker is
+committed, the `queue` section is written **empty** — there is **no** dual-write,
+and new jobs live only in SQLite. Restoring an **old** backup (a `state.json` with
+a populated queue and no committed SQLite marker) re-runs the one-time import and
+reproduces every job; a **new** backup carries the queue in `queue.db`, not the
+JSON. `FarmStore.queueJsonSnapshot` implements this gate.
+
+Remote start and dispatch live in `src/app/dispatch/` (the transactional
+`DispatchService` + the fail-closed `evaluateDispatchGate` admission check);
+manual planning lives in `src/app/scheduling/` (`SchedulerService` +
+`src/domain/scheduling/`).
+
+### One queue, two views
+
+The operator sees the queue through **two interfaces that are views over the one
+SQLite model — never two queues:**
+
+- the **simplified queue/night** section of the main dashboard, driven by the
+  legacy `/api/queue` compatibility adapter (reads served inside
+  `GET /api/dashboard` as `queue` + `night`); and
+- the **scheduler** (`/api/print/scheduler`) — the fuller view: per-task
+  priority/deadline/`notBefore`/day-night/pin, the compatibility matrix and
+  revisioned plans.
+
+Both go through the **same** application use cases on `PrintQueueService`
+(add/hold/release/cancel/reorder/pin) and read the **same** ordered rows
+(`repositories.queue.listOpen()`), so a change through either surfaces in the
+other with the same id, order and status. The scheduler works with the canonical
+model directly; the legacy view is a lossy **projection** of it
+(`PrintQueueService.projectLegacyQueue` → the flat `QueueJob`; a task/entry state
+pair maps to `ready`/`review`).
+
+There is **one night rule set**, not two. A physical night start
+(`POST /api/queue/night/start`) is admitted only by `evaluateDispatchGate(mode:
+"night")` inside its reserve transaction. The dashboard's night section does not
+re-derive readiness — `nightPlanner` is a pure **projection** of that same gate
+(via `FarmStore.nightGateInfo`), so the blockers the operator sees are exactly
+the reasons the start would refuse. `src/app/scheduling/`'s night report is the
+*planning-stage* view of the same model (candidate slots from ready
+slices/approved sets/material overrides), not a competing dispatch rule.
+Cross-interface consistency is pinned by `src/app/queueConsistency.test.ts`.
 
 ## File upload & analysis (`/api/print/artifacts`)
 

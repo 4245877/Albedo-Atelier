@@ -1,9 +1,26 @@
 import type { NightCandidate, QueueJob } from "../domain/dashboard/types";
 import { parseLocalTimeWindow } from "../shared/time";
 import type { PrinterConfig } from "../infra/printers/config";
-import { normalizeStartablePath } from "../infra/printers/files";
-import { supportsPrinterStart, type PrinterLiveStatus } from "../infra/printers/status";
-import { isBusyStatus } from "./printerView";
+
+/**
+ * The canonical night-readiness decision for one queue job — the SINGLE source
+ * of night blockers, computed against the SQLite task/artifact/analysis + live
+ * printer status by {@link FarmStore.nightGateInfo}, which delegates to the
+ * `evaluateDispatchGate(mode: "night")` chokepoint that the *physical* start
+ * (`POST /api/queue/night/start`) enforces inside its reserve transaction.
+ *
+ * There is deliberately no second, projection-side heuristic: the dashboard's
+ * night section shows exactly the reasons the dispatch gate will refuse, so the
+ * display can never disagree with enforcement (they are the same rule set).
+ */
+export interface NightGateDecision {
+  /** Hard reasons the job cannot launch tonight; empty → startable. */
+  blockers: string[];
+  /** Immutable preview identity the operator confirms with night-start. */
+  taskId: string;
+  taskVersion: number | null;
+  artifactSha256: string | null;
+}
 
 /**
  * One night-print candidate with the reasoning behind it. `candidate` is the
@@ -21,22 +38,15 @@ export interface NightPlanEntry {
 
 export interface NightPlanContext {
   window: string;
+  /** Resolves a job's printer to its config — for the candidate's display name only. */
   resolvePrinter: (job: QueueJob) => PrinterConfig | undefined;
-  getStatus: (id: string) => PrinterLiveStatus | undefined;
   /**
-   * Canonical-dispatch decoration: extra hard blockers computed against the
-   * SQLite task/artifact/analysis (unattended permission, artifact hash,
-   * verdict, analysis freshness) plus the immutable preview identity. When
-   * wired, its blockers are merged in so the UI shows exactly what the server
-   * dispatch gate will enforce — the plan can never look startable while the
-   * gate would refuse.
+   * The canonical night-readiness decision (see {@link NightGateDecision}). It is
+   * REQUIRED: the night plan carries no independent rules of its own — every
+   * blocker it shows comes from here, so it always matches what the dispatch gate
+   * enforces. `null` is only returned when the task cannot be found at all.
    */
-  nightGate?: (job: QueueJob) => {
-    blockers: string[];
-    taskId: string;
-    taskVersion: number | null;
-    artifactSha256: string | null;
-  } | null;
+  nightGate: (job: QueueJob) => NightGateDecision | null;
 }
 
 /** Minutes of a "HH:MM – HH:MM" window, wrapping across midnight. */
@@ -102,98 +112,37 @@ export function materialsIncompatible(needed: string, loaded: string): boolean {
     .includes(wanted);
 }
 
+/**
+ * Presentation-only risk for ranking + the `risk-meter` — NOT a rule. A startable
+ * job (no blockers) reads low; each hard blocker raises it steeply so "safest
+ * first" always surfaces the blocker-free candidate; a longer (but fitting) print
+ * nudges it up a little. It never decides startability — `blockers` does.
+ */
+function riskFrom(blockerCount: number, etaMinutes: number | null, windowMinutes: number | null): number {
+  let risk = 12 + blockerCount * 22;
+  if (etaMinutes !== null && windowMinutes) {
+    risk += Math.min(30, (etaMinutes / windowMinutes) * 30);
+  }
+  return clamp(risk, 5, 96);
+}
+
+/**
+ * Projects one queue job into a night candidate. It holds NO night rules of its
+ * own: every blocker is the canonical {@link NightPlanContext.nightGate} decision
+ * — the very reasons `evaluateDispatchGate(mode: "night")` will refuse the
+ * physical start — so the dashboard can never claim a job startable that the
+ * server would refuse (or vice versa). The printer name and risk are display-only.
+ */
 function evaluate(job: QueueJob, ctx: NightPlanContext, windowMinutes: number | null): NightPlanEntry {
   const printer = ctx.resolvePrinter(job);
-  const status = printer ? ctx.getStatus(printer.id) : undefined;
-  const blockers: string[] = [];
-  let risk = 15;
+  const gate = ctx.nightGate(job);
+  // A null gate means the task vanished between projection and lookup — treat it
+  // as un-verifiable rather than silently startable.
+  const blockers = gate
+    ? [...gate.blockers]
+    : ["готовность задания не удалось проверить — обновите очередь"];
 
-  // Unattended (night) print requires an explicit operator decision. An unmarked
-  // job is never launched at night — the absence of a night flag must NOT, by
-  // fallback, make every ready job eligible for an unattended launch.
-  if (job.night !== true) {
-    blockers.push("задание не отмечено для печати без присмотра — подтвердите ночной запуск явно");
-    risk += 20;
-  }
-
-  if (!printer) {
-    blockers.push(`принтер «${job.printer}» не найден в конфигурации`);
-    risk += 35;
-  } else {
-    if (!supportsPrinterStart(printer)) {
-      blockers.push(`удалённый запуск для «${printer.name}» не поддерживается`);
-      risk += 20;
-    }
-    if (!status || !status.online) {
-      blockers.push(`«${printer.name}» не в сети`);
-      risk += 30;
-    } else if (isBusyStatus(status.status)) {
-      blockers.push(`«${printer.name}» уже занят печатью`);
-      risk += 30;
-    } else if (status.status === "error") {
-      blockers.push(`«${printer.name}» в состоянии ошибки`);
-      risk += 30;
-    } else if (status.status !== "idle") {
-      // Unattended start demands a confirmed idle. "unknown" means the device
-      // has not answered honestly yet — that is a blocker, not a discount.
-      blockers.push(`состояние «${printer.name}» не подтверждено (${status.status})`);
-      risk += 25;
-    }
-    // Filament for an unattended print must be verifiable on BOTH sides: an
-    // unknown material — the job's or the loaded reel's — blocks the launch,
-    // because the right filament for a print nobody is watching cannot be
-    // confirmed. A known but contradicting pair is likewise blocked.
-    if (isUnknownMaterial(job.material) || isUnknownMaterial(printer.material)) {
-      blockers.push(
-        "материал не подтверждён — для ночной печати нужен известный материал с обеих сторон"
-      );
-      risk += 20;
-    } else if (materialsIncompatible(job.material, printer.material)) {
-      blockers.push(
-        `материал не совпадает: заданию нужен ${job.material}, в «${printer.name}» заправлен ${printer.material}`
-      );
-      risk += 30;
-    }
-  }
-
-  if (!job.file) {
-    blockers.push("у задания не задан файл для запуска на принтере");
-    risk += 15;
-  } else {
-    try {
-      normalizeStartablePath(job.file);
-    } catch {
-      blockers.push(`файл «${job.file}» не пройдёт проверку пути (см. правила запуска)`);
-      risk += 15;
-    }
-  }
-
-  const etaMinutes = parseEtaMinutes(job.eta);
-  if (etaMinutes === null) {
-    // With no known duration there is no way to verify the job fits the night
-    // window — for an unattended print that is a hard blocker, not a shrug.
-    blockers.push("длительность печати неизвестна — нельзя проверить, что она впишется в окно");
-    risk += 25;
-  } else if (windowMinutes !== null && etaMinutes > windowMinutes) {
-    blockers.push("печать не впишется в ночное окно");
-    risk += 40;
-  } else if (windowMinutes !== null) {
-    risk += (etaMinutes / windowMinutes) * 30;
-  }
-
-  // Merge in the canonical-gate blockers (deduplicated), so the plan and the
-  // server-side dispatch gate can never disagree about startability.
-  const gate = ctx.nightGate?.(job) ?? null;
-  if (gate) {
-    for (const extra of gate.blockers) {
-      if (!blockers.includes(extra)) {
-        blockers.push(extra);
-        risk += 10;
-      }
-    }
-  }
-
-  const finalRisk = clamp(risk, 5, 96);
+  const finalRisk = riskFrom(blockers.length, parseEtaMinutes(job.eta), windowMinutes);
   return {
     job,
     printer,
@@ -204,8 +153,8 @@ function evaluate(job: QueueJob, ctx: NightPlanContext, windowMinutes: number | 
       eta: job.eta,
       risk: finalRisk,
       riskLabel: riskLabel(finalRisk),
-      // The dashboard shows the same hard reasons and disables the start
-      // button, instead of claiming the job "fits the window" unconditionally.
+      // The dashboard shows exactly these reasons and disables the start button,
+      // instead of claiming the job "fits the window" while the gate would refuse.
       blockers: [...blockers],
       taskId: gate?.taskId ?? job.id,
       taskVersion: gate?.taskVersion ?? null,

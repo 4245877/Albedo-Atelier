@@ -26,7 +26,12 @@ import type { PrinterConfig, PrinterConfigSource } from "../infra/printers/confi
 import type { AutomationStore } from "./automationStore";
 import type { CameraService } from "./cameraService";
 import type { EventFeed } from "./eventFeed";
-import { buildNightPlan, materialsIncompatible, type NightPlanEntry } from "./nightPlanner";
+import {
+  buildNightPlan,
+  materialsIncompatible,
+  type NightGateDecision,
+  type NightPlanEntry
+} from "./nightPlanner";
 import { buildPrinterView, isBusyStatus } from "./printerView";
 import type { PrinterPoller } from "./printerPoller";
 import type { SnapshotStore } from "../infra/persistence/snapshotStore";
@@ -34,21 +39,16 @@ import type { SnapshotStore } from "../infra/persistence/snapshotStore";
 /**
  * The read model's view of the operator queue. Since the canonical-dispatch
  * cutover this is a *projection of the SQLite model* (FarmStore wires
- * `printQueue.projectLegacyQueue()` here) — the legacy JSON `QueueStore` no
- * longer feeds any read or dispatch path.
+ * `printQueue.projectLegacyQueue()` here) — the legacy JSON queue no longer
+ * feeds any read or dispatch path.
  */
 export interface QueueReader {
   list(): QueueJob[];
   size(): number;
 }
 
-/** Canonical night-gate decoration for a queue job (see NightPlanContext.nightGate). */
-export type NightGateFn = (job: QueueJob) => {
-  blockers: string[];
-  taskId: string;
-  taskVersion: number | null;
-  artifactSha256: string | null;
-} | null;
+/** Canonical night-gate decision for a queue job (see {@link NightGateDecision}). */
+export type NightGateFn = (job: QueueJob) => NightGateDecision | null;
 
 const MS_PER_MIN = 60 * 1000;
 
@@ -228,11 +228,16 @@ export class DashboardReadModel {
    */
   getNightPlan(): NightPlanEntry[] {
     if (!this.automations.isEnabled("night-queue")) return [];
+    // The night plan is a *projection* of the canonical night gate — the same
+    // decision `POST /api/queue/night/start` enforces. Without that gate wired
+    // there is no honest readiness to show, so suggestions are suppressed rather
+    // than re-derived from a second, divergent rule set.
+    const nightGate = this.nightGate;
+    if (!nightGate) return [];
     return buildNightPlan(this.queue.list(), {
       window: env.nightWindow,
       resolvePrinter: (job) => this.resolvePrinter(job.printer),
-      getStatus: (id) => this.poller.getStatus(id),
-      nightGate: this.nightGate ?? undefined
+      nightGate
     });
   }
 
