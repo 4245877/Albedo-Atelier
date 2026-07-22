@@ -1,4 +1,4 @@
-import { farmStore } from "../../app/farmStore";
+import type { DashboardReadModel } from "../../app/dashboardReadModel";
 
 interface Metric {
   name: string;
@@ -11,12 +11,13 @@ const PREFIX = "print_orchestrator_";
 
 /**
  * Real farm counters in Prometheus text exposition format, drawn from the live
- * poll state (see {@link FarmStore.getMetricsSnapshot}). Metrics whose value is
- * not yet known (e.g. the poll has not run) are omitted rather than reported as
- * a misleading zero.
+ * poll state (via {@link DashboardReadModel.getMetricsSnapshot}). Metrics whose
+ * value is not yet known (e.g. the poll has not run) are omitted rather than
+ * reported as a misleading zero. The read model is passed in explicitly — no
+ * module-level farm singleton.
  */
-export function collectMetrics(): string {
-  const m = farmStore.reads.getMetricsSnapshot();
+export function collectMetrics(reads: Pick<DashboardReadModel, "getMetricsSnapshot">): string {
+  const m = reads.getMetricsSnapshot();
 
   const metrics: Metric[] = [
     { name: "up", help: "1 when the service is running", type: "gauge", value: m.up },

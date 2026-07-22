@@ -6,7 +6,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { AppError, JobError, NotFoundError, PrinterOfflineError } from "../../core/errors";
 import { normalizeStartablePath } from "../../infra/printers/files";
 import type { PrinterFilesListing } from "../../infra/printers/files";
-import { registerPrinterRoutes, type PrinterRoutesStore } from "./routes";
+import { registerPrinterRoutes, type PrinterCommands } from "./routes";
 
 /*
  * HTTP mapping of the on-device file browser and remote start:
@@ -25,7 +25,7 @@ function makeStore(behaviour: {
   listing?: PrinterFilesListing;
   startError?: Error;
   listError?: Error;
-}): { store: PrinterRoutesStore; calls: Recorded } {
+}): { store: PrinterCommands; calls: Recorded } {
   const calls: Recorded = { listCalls: [], startCalls: [] };
   const store = {
     async listPrinterFiles(id: string, path: string) {
@@ -43,11 +43,11 @@ function makeStore(behaviour: {
       if (behaviour.startError) throw behaviour.startError;
       return { id, status: "printing" };
     }
-  } as unknown as PrinterRoutesStore;
+  } as unknown as PrinterCommands;
   return { store, calls };
 }
 
-async function buildTestApp(store: PrinterRoutesStore): Promise<FastifyInstance> {
+async function buildTestApp(store: PrinterCommands): Promise<FastifyInstance> {
   const app = Fastify();
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof AppError) {
@@ -56,7 +56,7 @@ async function buildTestApp(store: PrinterRoutesStore): Promise<FastifyInstance>
     }
     reply.code(500).send({ error: { code: "INTERNAL", message: "Internal Server Error" } });
   });
-  await app.register(registerPrinterRoutes, { prefix: "/api/printers", store });
+  await app.register(registerPrinterRoutes, { prefix: "/api/printers", reads: {} as never, commands: store });
   return app;
 }
 

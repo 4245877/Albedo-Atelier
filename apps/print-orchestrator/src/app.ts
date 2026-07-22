@@ -91,7 +91,7 @@ export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
   // Real readiness: 503 until the first poll completes, or if the poll loop
   // goes stale. A merely degraded farm still returns 200.
   app.get("/ready", async (_request, reply) => {
-    const readiness = getReadiness();
+    const readiness = getReadiness(farmStore.reads);
     reply.code(readiness.ready ? 200 : 503);
     return readiness;
   });
@@ -99,7 +99,7 @@ export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
   // Prometheus metrics drawn from the live farm state.
   app.get("/metrics", async (_request, reply) => {
     reply.header("Content-Type", METRICS_CONTENT_TYPE);
-    return collectMetrics();
+    return collectMetrics(farmStore.reads);
   });
 
   // Load the real printer config and start the live poll loop with the app;
@@ -111,14 +111,19 @@ export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
     await farmStore.stop();
   });
 
-  // Dashboard read model + per-resource modules (some also accept actions).
-  app.register(registerDashboardRoutes, { prefix: "/api" });
-  app.register(registerPrinterRoutes, { prefix: "/api/printers" });
-  app.register(registerQueueRoutes, { prefix: "/api/queue" });
+  // Dashboard read model + per-resource modules (some also accept actions). Each
+  // module is handed exactly the capabilities it needs — the read model
+  // (`reads`), the command facade (`commands`) and/or the SQLite services
+  // (`services`) — explicitly; no route module imports the farm singleton.
+  const reads = farmStore.reads;
+  const commands = farmStore.commands;
+  app.register(registerDashboardRoutes, { prefix: "/api", reads });
+  app.register(registerPrinterRoutes, { prefix: "/api/printers", reads, commands });
+  app.register(registerQueueRoutes, { prefix: "/api/queue", reads, commands });
   // Persistent print-queue model (SQLite) — the durable successor to /api/queue.
-  app.register(registerPrintQueueRoutes, { prefix: "/api/print" });
-  app.register(registerAutomationRoutes, { prefix: "/api/automations" });
-  app.register(registerMonitoringRoutes, { prefix: "/api/monitoring" });
+  app.register(registerPrintQueueRoutes, { prefix: "/api/print", services: farmStore, commands });
+  app.register(registerAutomationRoutes, { prefix: "/api/automations", reads, commands });
+  app.register(registerMonitoringRoutes, { prefix: "/api/monitoring", commands });
 
   return app;
 }

@@ -26,6 +26,7 @@ before(async () => {
   const { AppError } = await import("../../core/errors");
   const { registerSecurity } = await import("../../http/security");
   const { registerPrintQueueRoutes } = await import("./routes");
+  const { farmStore } = await import("../../app/farmStore");
 
   app = Fastify();
   registerSecurity(app);
@@ -37,7 +38,11 @@ before(async () => {
     const status = typeof error.statusCode === "number" ? error.statusCode : 500;
     reply.code(status).send({ error: { code: "ERR", message: error.message } });
   });
-  await app.register(registerPrintQueueRoutes, { prefix: "/api/print" });
+  await app.register(registerPrintQueueRoutes, {
+    prefix: "/api/print",
+    services: farmStore,
+    commands: farmStore.commands
+  });
   await app.ready();
 
   // Deterministically import the catalog (no farmStore.start in this test).

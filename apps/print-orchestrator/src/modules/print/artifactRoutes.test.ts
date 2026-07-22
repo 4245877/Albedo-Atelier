@@ -46,7 +46,11 @@ before(async () => {
     const status = typeof error.statusCode === "number" ? error.statusCode : 500;
     reply.code(status).send({ error: { code: "ERR", message: error.message } });
   });
-  await app.register(registerPrintQueueRoutes, { prefix: "/api/print" });
+  await app.register(registerPrintQueueRoutes, {
+    prefix: "/api/print",
+    services: farmStore,
+    commands: farmStore.commands
+  });
   await app.ready();
 });
 

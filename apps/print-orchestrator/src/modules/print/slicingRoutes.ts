@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 
-import { farmStore } from "../../app/farmStore";
+import type { PrintServices } from "../../bootstrap/createRuntime";
 import type { CreateProfileSetInput } from "../../app/slicing/profileService";
 import type { CreateSliceInput } from "../../app/slicing/sliceService";
 import { ValidationError } from "../../core/errors";
@@ -11,8 +11,9 @@ import type { ProfileType } from "../../domain/slicing/types";
  * same plugin as the artifact routes — so the shared CSRF/token guard covers every
  * mutation (import, create/approve set, slice, rerun) exactly like the rest of the
  * durable model. Every handler goes through the application services
- * (`farmStore.slicing.*`); none touches SQLite, the file system or a process
- * directly, and none writes to the legacy `/api/queue`.
+ * (`services.slicing.*`); none touches SQLite, the file system or a process
+ * directly, and none writes to the legacy `/api/queue`. The services are passed
+ * in from the parent `/api/print` plugin (no module-level singleton).
  *
  * Reads:
  *   GET  /slicing/runtime               OrcaSlicer runtime status + profile counts + coverage
@@ -31,46 +32,49 @@ import type { ProfileType } from "../../domain/slicing/types";
  *   POST /slicing/variants/:id/rerun    re-run a finished variant
  *   POST /slicing/variants/:id/promote  hand off a ready variant's output → queued print task
  */
-export function registerSlicingRoutes(app: FastifyInstance): void {
+export function registerSlicingRoutes(
+  app: FastifyInstance,
+  services: Pick<PrintServices, "printQueue" | "slicing">
+): void {
   // ── Runtime & profiles ─────────────────────────────────────────────────────
 
-  app.get("/slicing/runtime", async () => farmStore.slicing.profiles.runtimeReport());
+  app.get("/slicing/runtime", async () => services.slicing.profiles.runtimeReport());
 
   app.get<{ Querystring: { type?: string } }>("/slicing/profiles", async (request) => ({
-    profiles: farmStore.slicing.profiles.listProfiles(toProfileType(request.query.type))
+    profiles: services.slicing.profiles.listProfiles(toProfileType(request.query.type))
   }));
 
   app.get<{ Params: { id: string } }>("/slicing/profiles/:id", async (request) => ({
-    profile: farmStore.slicing.profiles.getProfile(request.params.id)
+    profile: services.slicing.profiles.getProfile(request.params.id)
   }));
 
   // ── Profile sets ────────────────────────────────────────────────────────────
 
-  app.get("/slicing/profile-sets", async () => ({ sets: farmStore.slicing.profiles.listSets() }));
+  app.get("/slicing/profile-sets", async () => ({ sets: services.slicing.profiles.listSets() }));
 
   app.get<{ Params: { id: string } }>("/slicing/profile-sets/:id", async (request) => ({
-    set: farmStore.slicing.profiles.getSet(request.params.id)
+    set: services.slicing.profiles.getSet(request.params.id)
   }));
 
   app.post<{ Body: unknown }>("/slicing/profile-sets", async (request) => ({
     ok: true,
-    set: farmStore.slicing.profiles.createSet(shapeCreateSet(request.body))
+    set: services.slicing.profiles.createSet(shapeCreateSet(request.body))
   }));
 
   app.post<{ Params: { id: string } }>("/slicing/profile-sets/:id/approve", async (request) => ({
     ok: true,
-    set: farmStore.slicing.profiles.approveSet(request.params.id)
+    set: services.slicing.profiles.approveSet(request.params.id)
   }));
 
   // ── Presets import ─────────────────────────────────────────────────────────
 
   app.post("/slicing/presets/import", async () => {
-    const result = await farmStore.slicing.presets.import("operator");
+    const result = await services.slicing.presets.import("operator");
     // A re-import can flip a revision `active → quarantined` (e.g. a vendor parent
     // went missing) on the very ids an approved set pins — so re-validate every set
     // now and revoke any approval a changed member invalidated, instead of leaving
     // it showing a stale `approved/valid` until someone happens to open it.
-    farmStore.slicing.profiles.revalidateSets("operator");
+    services.slicing.profiles.revalidateSets("operator");
     return { ok: true, result };
   });
 
@@ -80,30 +84,30 @@ export function registerSlicingRoutes(app: FastifyInstance): void {
     const taskId = optionalString(request.query.taskId);
     return {
       variants: taskId
-        ? farmStore.slicing.slices.listByTask(taskId)
-        : farmStore.slicing.slices.listVariants()
+        ? services.slicing.slices.listByTask(taskId)
+        : services.slicing.slices.listVariants()
     };
   });
 
   app.get<{ Params: { id: string } }>("/slicing/variants/:id", async (request) => ({
-    variant: farmStore.slicing.slices.getVariant(request.params.id)
+    variant: services.slicing.slices.getVariant(request.params.id)
   }));
 
   app.post<{ Body: unknown }>("/slicing/slice", async (request) => ({
     ok: true,
-    variant: await farmStore.slicing.slices.createSlice(shapeCreateSlice(request.body))
+    variant: await services.slicing.slices.createSlice(shapeCreateSlice(request.body))
   }));
 
   app.post<{ Params: { id: string } }>("/slicing/variants/:id/rerun", async (request) => ({
     ok: true,
-    variant: farmStore.slicing.slices.rerun(request.params.id)
+    variant: services.slicing.slices.rerun(request.params.id)
   }));
 
   // The slice → print handoff: bind a ready variant's verified output onto its task
   // and enqueue it, so it becomes an executable print job (not a stuck STL).
   app.post<{ Params: { id: string }; Body: unknown }>("/slicing/variants/:id/promote", async (request) => ({
     ok: true,
-    task: farmStore.printQueue.promoteSliceVariant(request.params.id, shapePromote(request.body))
+    task: services.printQueue.promoteSliceVariant(request.params.id, shapePromote(request.body))
   }));
 }
 

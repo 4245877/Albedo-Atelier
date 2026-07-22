@@ -1,12 +1,10 @@
 import type { FastifyInstance } from "fastify";
 
-import { farmStore as defaultFarmStore } from "../../app/farmStore";
+import type { DashboardReadModel } from "../../app/dashboardReadModel";
 
-/** The farm facade the routes read from; injectable so the HTTP layer is testable. */
-export type DashboardRoutesStore = typeof defaultFarmStore;
-
+/** The read model the dashboard routes project; passed in explicitly at registration. */
 export interface DashboardRoutesOptions {
-  store?: DashboardRoutesStore;
+  reads: DashboardReadModel;
 }
 
 /**
@@ -23,43 +21,43 @@ export interface DashboardRoutesOptions {
  */
 export async function registerDashboardRoutes(
   app: FastifyInstance,
-  opts: DashboardRoutesOptions = {}
+  opts: DashboardRoutesOptions
 ): Promise<void> {
-  const farmStore = opts.store ?? defaultFarmStore;
+  const { reads } = opts;
 
   // Whole board in one call — mirrors the frontend `state` object.
-  app.get("/dashboard", async () => farmStore.reads.snapshot());
+  app.get("/dashboard", async () => reads.snapshot());
 
   // Overall service status.
-  app.get("/status", async () => farmStore.reads.getService());
+  app.get("/status", async () => reads.getService());
 
   // Materials: filament, resin, mismatches, queue needs.
-  app.get("/materials", async () => farmStore.reads.getMaterials());
+  app.get("/materials", async () => reads.getMaterials());
 
   // Cameras, projected from the printers that have one.
-  app.get("/cameras", async () => farmStore.reads.getCameras());
+  app.get("/cameras", async () => reads.getCameras());
 
   // Maintenance schedule per printer.
-  app.get("/maintenance", async () => farmStore.reads.getMaintenance());
+  app.get("/maintenance", async () => reads.getMaintenance());
 
   // Recent events (live feed).
-  app.get("/events", async () => farmStore.reads.getFeed());
+  app.get("/events", async () => reads.getFeed());
 
   // Critical events for today.
-  app.get("/critical", async () => farmStore.reads.getCritical());
+  app.get("/critical", async () => reads.getCritical());
 
   // Warnings that need attention.
-  app.get("/warnings", async () => farmStore.reads.getWarnings());
+  app.get("/warnings", async () => reads.getWarnings());
 
   // System component status.
-  app.get("/system", async () => farmStore.reads.getSystem());
+  app.get("/system", async () => reads.getSystem());
 
   // Today's throughput counters.
-  app.get("/today", async () => farmStore.reads.getToday());
+  app.get("/today", async () => reads.getToday());
 
   // Farm performance / load.
-  app.get("/performance", async () => farmStore.reads.getPerformance());
+  app.get("/performance", async () => reads.getPerformance());
 
   // Upcoming plan.
-  app.get("/plan", async () => farmStore.reads.getPlan());
+  app.get("/plan", async () => reads.getPlan());
 }

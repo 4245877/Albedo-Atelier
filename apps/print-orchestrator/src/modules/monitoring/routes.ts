@@ -1,12 +1,10 @@
 import type { FastifyInstance } from "fastify";
 
-import { farmStore as defaultFarmStore } from "../../app/farmStore";
+import type { FarmCommands } from "../../app/FarmCommands";
 
-/** The farm facade the routes call; injectable so the HTTP layer is testable. */
-export type MonitoringRoutesStore = typeof defaultFarmStore;
-
+/** The commands the monitoring routes call; passed in explicitly at registration. */
 export interface MonitoringRoutesOptions {
-  store?: MonitoringRoutesStore;
+  commands: Pick<FarmCommands, "renewMonitoringLease" | "filamentQueueStats">;
 }
 
 /**
@@ -26,11 +24,11 @@ export interface MonitoringRoutesOptions {
  */
 export async function registerMonitoringRoutes(
   app: FastifyInstance,
-  opts: MonitoringRoutesOptions = {}
+  opts: MonitoringRoutesOptions
 ): Promise<void> {
-  const farmStore = opts.store ?? defaultFarmStore;
+  const { commands } = opts;
 
-  app.post("/lease", async () => farmStore.renewMonitoringLease());
+  app.post("/lease", async () => commands.renewMonitoringLease());
 
-  app.get("/filament-queue", async () => farmStore.filamentQueueStats());
+  app.get("/filament-queue", async () => commands.filamentQueueStats());
 }

@@ -1,11 +1,21 @@
 import type { FastifyInstance } from "fastify";
 
-import { farmStore, type NewQueueJobInput } from "../../app/farmStore";
+import type { FarmCommands, NewQueueJobInput } from "../../app/FarmCommands";
+import type { DashboardReadModel } from "../../app/dashboardReadModel";
+
+/** The exact reads + commands the legacy queue adapter needs, passed at registration. */
+export interface QueueRoutesOptions {
+  reads: Pick<DashboardReadModel, "getQueue" | "getNight">;
+  commands: Pick<
+    FarmCommands,
+    "addQueueJob" | "startNext" | "reviewQueueJob" | "removeQueueJob" | "startNight" | "advanceNightPick"
+  >;
+}
 
 /**
  * Print queue endpoints under `/api/queue` — a thin **compatibility adapter**,
- * NOT a second queue. Every handler is a one-line delegate to a `farmStore`
- * method that operates on the canonical SQLite model (`PrintQueueService` /
+ * NOT a second queue. Every handler is a one-line delegate to a command method
+ * that operates on the canonical SQLite model (`PrintQueueService` /
  * `DispatchService`) exactly as the scheduler API (`/api/print/scheduler`) does:
  * same tasks, same order, same lifecycle. The reads it serves are legacy-shape
  * *projections* of that model (`projectLegacyQueue` for the queue,
@@ -32,18 +42,23 @@ import { farmStore, type NewQueueJobInput } from "../../app/farmStore";
  *   POST   /night/start  launch the recommended night print
  *   POST   /night/pick   advance to the next night candidate
  */
-export async function registerQueueRoutes(app: FastifyInstance): Promise<void> {
-  app.get("/", async () => farmStore.reads.getQueue());
+export async function registerQueueRoutes(
+  app: FastifyInstance,
+  opts: QueueRoutesOptions
+): Promise<void> {
+  const { reads, commands } = opts;
 
-  app.get("/night", async () => farmStore.reads.getNight());
+  app.get("/", async () => reads.getQueue());
+
+  app.get("/night", async () => reads.getNight());
 
   app.post<{ Body: NewQueueJobInput }>("/", async (request) => ({
     ok: true,
-    job: farmStore.addQueueJob(request.body ?? {})
+    job: commands.addQueueJob(request.body ?? {})
   }));
 
   app.post("/start-next", async () => {
-    const { job, printer } = await farmStore.startNext();
+    const { job, printer } = await commands.startNext();
     return { ok: true, job, printer };
   });
 
@@ -54,13 +69,13 @@ export async function registerQueueRoutes(app: FastifyInstance): Promise<void> {
     "/:id/review",
     async (request) => {
       const reason = typeof request.body?.reason === "string" ? request.body.reason : undefined;
-      return { ok: true, job: farmStore.reviewQueueJob(request.params.id, reason) };
+      return { ok: true, job: commands.reviewQueueJob(request.params.id, reason) };
     }
   );
 
   app.delete<{ Params: { id: string } }>("/:id", async (request) => ({
     ok: true,
-    job: farmStore.removeQueueJob(request.params.id)
+    job: commands.removeQueueJob(request.params.id)
   }));
 
   // The body carries the immutable preview identity the operator confirmed
@@ -83,8 +98,8 @@ export async function registerQueueRoutes(app: FastifyInstance): Promise<void> {
     }
     if (typeof body.artifactSha256 === "string") preview.artifactSha256 = body.artifactSha256;
     else if (body.artifactSha256 === null) preview.artifactSha256 = null;
-    return { ok: true, ...(await farmStore.startNight(preview)) };
+    return { ok: true, ...(await commands.startNight(preview)) };
   });
 
-  app.post("/night/pick", async () => ({ ok: true, night: farmStore.advanceNightPick() }));
+  app.post("/night/pick", async () => ({ ok: true, night: commands.advanceNightPick() }));
 }

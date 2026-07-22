@@ -128,7 +128,7 @@ test("camera.jpg?ensureLight=1 (side-effect GET) requires the token; plain reads
   const { AppError } = await import("../core/errors");
 
   const calls: Array<{ id: string; ensureLight: boolean }> = [];
-  const store = {
+  const commands = {
     async getCameraFrame(id: string, options: { ensureLight?: boolean } = {}) {
       calls.push({ id, ensureLight: Boolean(options.ensureLight) });
       return { data: Buffer.from([0xff, 0xd8]), mime: "image/jpeg" };
@@ -143,7 +143,13 @@ test("camera.jpg?ensureLight=1 (side-effect GET) requires the token; plain reads
     }
     reply.code(500).send({ error: { code: "INTERNAL", message: "Internal Server Error" } });
   });
-  await app.register(registerPrinterRoutes, { prefix: "/api/printers", store });
+  // This test only exercises the side-effect GET (camera.jpg?ensureLight); the
+  // read model is never touched, so an empty stub suffices.
+  await app.register(registerPrinterRoutes, {
+    prefix: "/api/printers",
+    reads: {} as never,
+    commands
+  });
 
   const open = await app.inject({ method: "GET", url: "/api/printers/k2/camera.jpg" });
   assert.equal(open.statusCode, 200, "a plain frame read stays open");

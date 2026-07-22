@@ -1,16 +1,23 @@
 import fastifyMultipart from "@fastify/multipart";
 import type { FastifyInstance } from "fastify";
 
-import { farmStore } from "../../app/farmStore";
+import type { FarmCommands } from "../../app/FarmCommands";
 import type {
   CreateTaskInput,
   ManualTaskInput,
   TaskSchedulingPatch
 } from "../../app/printQueue/printQueueService";
+import type { PrintServices } from "../../bootstrap/createRuntime";
 import { ValidationError } from "../../core/errors";
 import type { DayNightPreference } from "../../domain/print/types";
 import { uploads } from "../../shared/env";
 import { registerSlicingRoutes } from "./slicingRoutes";
+
+/** The services + commands the print / scheduler / artifact routes need, passed explicitly. */
+export interface PrintRoutesOptions {
+  services: PrintServices;
+  commands: Pick<FarmCommands, "resolveRun">;
+}
 
 /**
  * The persistent print-queue API under `/api/print` — the surface for the
@@ -42,7 +49,12 @@ import { registerSlicingRoutes } from "./slicingRoutes";
  *   POST /artifacts              multipart upload of one file → Artifact + DRAFT task + pending analysis
  *   POST /artifacts/:id/analyze  re-run analysis (after a failed attempt)
  */
-export async function registerPrintQueueRoutes(app: FastifyInstance): Promise<void> {
+export async function registerPrintQueueRoutes(
+  app: FastifyInstance,
+  opts: PrintRoutesOptions
+): Promise<void> {
+  const { services, commands } = opts;
+
   // Scoped to this plugin: multipart is only for the upload route. One file per
   // request (accurate per-file progress on the client), streamed — never
   // buffered — with the configured single-file size limit enforced by the plugin.
@@ -50,46 +62,46 @@ export async function registerPrintQueueRoutes(app: FastifyInstance): Promise<vo
     limits: { fileSize: uploads.maxFileBytes, files: 1, fields: 8 }
   });
 
-  registerArtifactRoutes(app);
-  registerSlicingRoutes(app);
-  registerSchedulerRoutes(app);
+  registerArtifactRoutes(app, services);
+  registerSlicingRoutes(app, services);
+  registerSchedulerRoutes(app, services);
 
-  app.get("/tasks", async () => ({ tasks: farmStore.printQueue.listTasks() }));
+  app.get("/tasks", async () => ({ tasks: services.printQueue.listTasks() }));
 
   app.get<{ Params: { id: string } }>("/tasks/:id", async (request) =>
-    farmStore.printQueue.getTaskDetail(request.params.id)
+    services.printQueue.getTaskDetail(request.params.id)
   );
 
-  app.get("/queue", async () => ({ queue: farmStore.printQueue.projectLegacyQueue() }));
+  app.get("/queue", async () => ({ queue: services.printQueue.projectLegacyQueue() }));
 
   app.get<{ Querystring: { limit?: string } }>("/audit", async (request) => {
     const limit = Number.parseInt(request.query.limit ?? "", 10);
-    return { events: farmStore.printQueue.listAudit(Number.isFinite(limit) ? limit : undefined) };
+    return { events: services.printQueue.listAudit(Number.isFinite(limit) ? limit : undefined) };
   });
 
   app.post<{ Body: unknown }>("/tasks", async (request) => ({
     ok: true,
-    task: farmStore.printQueue.createTask(shapeCreateInput(request.body))
+    task: services.printQueue.createTask(shapeCreateInput(request.body))
   }));
 
   app.post<{ Params: { id: string }; Body: { reason?: unknown } }>(
     "/tasks/:id/hold",
     async (request) => ({
       ok: true,
-      task: farmStore.printQueue.holdTask(request.params.id, optionalString(request.body?.reason))
+      task: services.printQueue.holdTask(request.params.id, optionalString(request.body?.reason))
     })
   );
 
   app.post<{ Params: { id: string } }>("/tasks/:id/release", async (request) => ({
     ok: true,
-    task: farmStore.printQueue.releaseTask(request.params.id)
+    task: services.printQueue.releaseTask(request.params.id)
   }));
 
   app.post<{ Params: { id: string }; Body: { reason?: unknown } }>(
     "/tasks/:id/cancel",
     async (request) => ({
       ok: true,
-      task: farmStore.printQueue.cancelTask(request.params.id, optionalString(request.body?.reason))
+      task: services.printQueue.cancelTask(request.params.id, optionalString(request.body?.reason))
     })
   );
 
@@ -98,7 +110,7 @@ export async function registerPrintQueueRoutes(app: FastifyInstance): Promise<vo
     async (request) => {
       const printer = optionalString(request.body?.printer);
       if (!printer) throw new ValidationError("Поле «printer» обязательно");
-      return { ok: true, assignment: farmStore.printQueue.assignTask(request.params.id, printer) };
+      return { ok: true, assignment: services.printQueue.assignTask(request.params.id, printer) };
     }
   );
 
@@ -114,7 +126,7 @@ export async function registerPrintQueueRoutes(app: FastifyInstance): Promise<vo
       }
       return {
         ok: true,
-        run: farmStore.resolveRun(request.params.id, outcome, optionalString(request.body?.reason))
+        run: commands.resolveRun(request.params.id, outcome, optionalString(request.body?.reason))
       };
     }
   );
@@ -126,8 +138,11 @@ export async function registerPrintQueueRoutes(app: FastifyInstance): Promise<vo
  * covers the mutations (upload, re-analyze) exactly like every other action.
  * These never touch `/api/queue` or `state.json`.
  */
-function registerArtifactRoutes(app: FastifyInstance): void {
-  app.get("/artifacts", async () => ({ artifacts: farmStore.artifacts.listArtifacts() }));
+function registerArtifactRoutes(
+  app: FastifyInstance,
+  services: Pick<PrintServices, "artifacts">
+): void {
+  app.get("/artifacts", async () => ({ artifacts: services.artifacts.listArtifacts() }));
 
   app.get("/artifacts/config", async () => ({
     maxFileBytes: uploads.maxFileBytes,
@@ -137,7 +152,7 @@ function registerArtifactRoutes(app: FastifyInstance): void {
   }));
 
   app.get<{ Params: { id: string } }>("/artifacts/:id", async (request) =>
-    farmStore.artifacts.getArtifactDetail(request.params.id)
+    services.artifacts.getArtifactDetail(request.params.id)
   );
 
   app.post("/artifacts", async (request, reply) => {
@@ -147,7 +162,7 @@ function registerArtifactRoutes(app: FastifyInstance): void {
     const part = await request.file();
     if (!part) throw new ValidationError("Файл не передан");
 
-    const result = await farmStore.artifacts.ingest({
+    const result = await services.artifacts.ingest({
       source: part.file,
       fileName: part.filename || "upload.bin",
       mimeType: part.mimetype,
@@ -167,7 +182,7 @@ function registerArtifactRoutes(app: FastifyInstance): void {
 
   app.post<{ Params: { id: string } }>("/artifacts/:id/analyze", async (request) => ({
     ok: true,
-    analysis: farmStore.artifacts.reanalyze(request.params.id)
+    analysis: services.artifacts.reanalyze(request.params.id)
   }));
 
   // Safe manual deletion: refused (400 with the reason) while any live task,
@@ -175,7 +190,7 @@ function registerArtifactRoutes(app: FastifyInstance): void {
   // are only unlinked when the last reference goes.
   app.delete<{ Params: { id: string } }>("/artifacts/:id", async (request) => ({
     ok: true,
-    ...(await farmStore.artifacts.deleteArtifact(request.params.id))
+    ...(await services.artifacts.deleteArtifact(request.params.id))
   }));
 
   // Retention sweep (dry-run by default — pass {"dryRun": false} to act).
@@ -193,7 +208,7 @@ function registerArtifactRoutes(app: FastifyInstance): void {
           : undefined;
       return {
         ok: true,
-        ...(await farmStore.artifacts.retentionSweep({
+        ...(await services.artifacts.retentionSweep({
           olderThanDays,
           dryRun: body.dryRun !== false,
           maxDelete
@@ -213,7 +228,7 @@ function registerArtifactRoutes(app: FastifyInstance): void {
           : undefined;
       return {
         ok: true,
-        ...(await farmStore.artifacts.orphanSweep({ dryRun: body.dryRun !== false, maxDelete }))
+        ...(await services.artifacts.orphanSweep({ dryRun: body.dryRun !== false, maxDelete }))
       };
     }
   );
@@ -221,7 +236,7 @@ function registerArtifactRoutes(app: FastifyInstance): void {
 
 /**
  * The manual-scheduler API under `/api/print/scheduler`. Every handler goes
- * through the application services (`farmStore.printQueue` / `farmStore.scheduler`)
+ * through the application services (`services.printQueue` / `services.scheduler`)
  * — the HTTP layer only shapes untrusted input and never touches SQLite, and
  * never the legacy `/api/queue` or `state.json`.
  *
@@ -242,19 +257,22 @@ function registerArtifactRoutes(app: FastifyInstance): void {
  *   POST /scheduler/plans/:id/confirm    confirm a DRAFT (→ ACTIVE)
  *   GET  /scheduler/night                night (unattended) candidates + rejections
  */
-function registerSchedulerRoutes(app: FastifyInstance): void {
-  app.get("/scheduler/queue", async () => ({ queue: farmStore.printQueue.listOpenQueue() }));
+function registerSchedulerRoutes(
+  app: FastifyInstance,
+  services: Pick<PrintServices, "printQueue" | "scheduler">
+): void {
+  app.get("/scheduler/queue", async () => ({ queue: services.printQueue.listOpenQueue() }));
 
   app.post<{ Body: unknown }>("/scheduler/queue", async (request) => ({
     ok: true,
-    task: farmStore.printQueue.addTask(shapeManualTask(request.body))
+    task: services.printQueue.addTask(shapeManualTask(request.body))
   }));
 
   app.post<{ Params: { id: string }; Body: unknown }>(
     "/scheduler/tasks/:id/params",
     async (request) => ({
       ok: true,
-      task: farmStore.printQueue.setTaskScheduling(request.params.id, shapeSchedulingPatch(request.body))
+      task: services.printQueue.setTaskScheduling(request.params.id, shapeSchedulingPatch(request.body))
     })
   );
 
@@ -269,7 +287,7 @@ function registerSchedulerRoutes(app: FastifyInstance): void {
       }
       return {
         ok: true,
-        entry: farmStore.printQueue.reorderTask(request.params.id, position, expectedVersion)
+        entry: services.printQueue.reorderTask(request.params.id, position, expectedVersion)
       };
     }
   );
@@ -279,26 +297,26 @@ function registerSchedulerRoutes(app: FastifyInstance): void {
     async (request) => {
       const printer = optionalString(request.body?.printer);
       if (!printer) throw new ValidationError("Поле «printer» обязательно");
-      return { ok: true, task: farmStore.printQueue.pinPrinter(request.params.id, printer) };
+      return { ok: true, task: services.printQueue.pinPrinter(request.params.id, printer) };
     }
   );
 
   app.post<{ Params: { id: string } }>("/scheduler/tasks/:id/unpin", async (request) => ({
     ok: true,
-    task: farmStore.printQueue.unpinPrinter(request.params.id)
+    task: services.printQueue.unpinPrinter(request.params.id)
   }));
 
-  app.get("/scheduler/compatibility", async () => farmStore.scheduler.compatibilityMatrix());
+  app.get("/scheduler/compatibility", async () => services.scheduler.compatibilityMatrix());
 
-  app.get("/scheduler/plans", async () => ({ plans: farmStore.scheduler.listPlans() }));
+  app.get("/scheduler/plans", async () => ({ plans: services.scheduler.listPlans() }));
 
   app.get<{ Params: { id: string } }>("/scheduler/plans/:id", async (request) =>
-    farmStore.scheduler.getPlan(request.params.id)
+    services.scheduler.getPlan(request.params.id)
   );
 
   app.post<{ Body: { name?: unknown; window?: unknown } }>("/scheduler/plans", async (request) => ({
     ok: true,
-    plan: farmStore.scheduler.buildDraftPlan({
+    plan: services.scheduler.buildDraftPlan({
       name: optionalString(request.body?.name),
       window: optionalString(request.body?.window)
     })
@@ -306,7 +324,7 @@ function registerSchedulerRoutes(app: FastifyInstance): void {
 
   app.post<{ Params: { id: string } }>("/scheduler/plans/:id/recompute", async (request) => ({
     ok: true,
-    plan: farmStore.scheduler.recomputePlan(request.params.id)
+    plan: services.scheduler.recomputePlan(request.params.id)
   }));
 
   app.post<{ Params: { id: string }; Body: { expectedVersion?: unknown } }>(
@@ -321,24 +339,24 @@ function registerSchedulerRoutes(app: FastifyInstance): void {
       // pass the authenticated identity here as the second argument.
       return {
         ok: true,
-        plan: farmStore.scheduler.confirmPlan(request.params.id, undefined, expectedVersion)
+        plan: services.scheduler.confirmPlan(request.params.id, undefined, expectedVersion)
       };
     }
   );
 
-  app.get("/scheduler/night", async () => farmStore.scheduler.nightCandidates());
+  app.get("/scheduler/night", async () => services.scheduler.nightCandidates());
 
   // Operator material overrides — the manual "enough filament loaded" assertion the
   // night gate reads (the farm has no remaining-material telemetry).
   app.get("/scheduler/material", async () => ({
-    overrides: farmStore.scheduler.listActiveMaterialOverrides()
+    overrides: services.scheduler.listActiveMaterialOverrides()
   }));
 
   app.post<{ Params: { id: string }; Body: unknown }>(
     "/scheduler/printers/:id/material",
     async (request) => ({
       ok: true,
-      override: farmStore.scheduler.setMaterialOverride(request.params.id, shapeMaterialOverride(request.body))
+      override: services.scheduler.setMaterialOverride(request.params.id, shapeMaterialOverride(request.body))
     })
   );
 }

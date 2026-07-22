@@ -2,13 +2,37 @@ import type { FastifyInstance } from "fastify";
 
 import { UnauthorizedError, ValidationError } from "../../core/errors";
 import { isRequestAuthorized } from "../../http/security";
-import { farmStore as defaultFarmStore } from "../../app/farmStore";
+import type { FarmCommands } from "../../app/FarmCommands";
+import type { DashboardReadModel } from "../../app/dashboardReadModel";
 
-/** The farm facade the routes call; injectable so the HTTP layer is testable. */
-export type PrinterRoutesStore = typeof defaultFarmStore;
+/** The printer reads the routes serve. */
+export type PrinterQueries = Pick<
+  DashboardReadModel,
+  "listPrinters" | "listActivePrinters" | "getPrinter"
+>;
 
+/** The printer commands the routes dispatch (cameras, snapshots, files, device control). */
+export type PrinterCommands = Pick<
+  FarmCommands,
+  | "getCameraFrame"
+  | "getCameraStream"
+  | "listSnapshots"
+  | "latestSnapshot"
+  | "readSnapshot"
+  | "listPrinterFiles"
+  | "startPrinterFile"
+  | "pausePrinter"
+  | "resumePrinter"
+  | "cancelPrinter"
+  | "clearStartGuard"
+  | "snapshotPrinter"
+  | "setLight"
+>;
+
+/** Reads + commands passed to the printer routes explicitly at registration. */
 export interface PrinterRoutesOptions {
-  store?: PrinterRoutesStore;
+  reads: PrinterQueries;
+  commands: PrinterCommands;
 }
 
 interface PrinterParams {
@@ -65,17 +89,17 @@ interface CameraQuery {
  */
 export async function registerPrinterRoutes(
   app: FastifyInstance,
-  opts: PrinterRoutesOptions = {}
+  opts: PrinterRoutesOptions
 ): Promise<void> {
-  const farmStore = opts.store ?? defaultFarmStore;
+  const { reads, commands } = opts;
 
-  app.get("/", async () => farmStore.reads.listPrinters());
+  app.get("/", async () => reads.listPrinters());
 
   // Declared before "/:id" so the literal path wins unambiguously.
-  app.get("/active", async () => farmStore.reads.listActivePrinters());
+  app.get("/active", async () => reads.listActivePrinters());
 
   app.get<{ Params: PrinterParams }>("/:id", async (request) =>
-    farmStore.reads.getPrinter(request.params.id)
+    reads.getPrinter(request.params.id)
   );
 
   app.get<{ Params: PrinterParams; Querystring: CameraQuery }>(
@@ -89,7 +113,7 @@ export async function registerPrinterRoutes(
       if (ensureLight && !isRequestAuthorized(request)) {
         throw new UnauthorizedError("Параметр ensureLight требует API-токен (Authorization: Bearer)");
       }
-      const frame = await farmStore.getCameraFrame(request.params.id, { ensureLight });
+      const frame = await commands.getCameraFrame(request.params.id, { ensureLight });
       reply
         .header("Cache-Control", "no-store")
         .type(frame.mime)
@@ -98,7 +122,7 @@ export async function registerPrinterRoutes(
   );
 
   app.get<{ Params: PrinterParams }>("/:id/camera.mp4", async (request, reply) => {
-    const stream = await farmStore.getCameraStream(request.params.id);
+    const stream = await commands.getCameraStream(request.params.id);
 
     // Tear the upstream fetch down as soon as the client goes away (tab closed,
     // player reconnect) so we do not leak sockets to go2rtc. `close` is
@@ -121,15 +145,15 @@ export async function registerPrinterRoutes(
   // Saved-snapshot metadata. Declared before the parametric image route so the
   // literal "latest" path wins unambiguously.
   app.get<{ Params: PrinterParams }>("/:id/snapshots", async (request) =>
-    farmStore.listSnapshots(request.params.id)
+    commands.listSnapshots(request.params.id)
   );
 
   app.get<{ Params: PrinterParams }>("/:id/snapshots/latest", async (request) =>
-    farmStore.latestSnapshot(request.params.id)
+    commands.latestSnapshot(request.params.id)
   );
 
   app.get<{ Params: SnapshotParams }>("/:id/snapshots/:snapshotId", async (request, reply) => {
-    const { meta, data } = await farmStore.readSnapshot(
+    const { meta, data } = await commands.readSnapshot(
       request.params.id,
       request.params.snapshotId
     );
@@ -141,7 +165,7 @@ export async function registerPrinterRoutes(
   });
 
   app.get<{ Params: PrinterParams; Querystring: FilesQuery }>("/:id/files", async (request) => {
-    const listing = await farmStore.listPrinterFiles(request.params.id, request.query.path ?? "");
+    const listing = await commands.listPrinterFiles(request.params.id, request.query.path ?? "");
     return { ok: true, ...listing };
   });
 
@@ -150,17 +174,17 @@ export async function registerPrinterRoutes(
     if (typeof file !== "string" || !file.trim()) {
       throw new ValidationError('Поле «file» обязательно и должно быть непустой строкой');
     }
-    return { ok: true, printer: await farmStore.startPrinterFile(request.params.id, file) };
+    return { ok: true, printer: await commands.startPrinterFile(request.params.id, file) };
   });
 
   app.post<{ Params: PrinterParams }>("/:id/pause", async (request) => ({
     ok: true,
-    printer: await farmStore.pausePrinter(request.params.id)
+    printer: await commands.pausePrinter(request.params.id)
   }));
 
   app.post<{ Params: PrinterParams }>("/:id/resume", async (request) => ({
     ok: true,
-    printer: await farmStore.resumePrinter(request.params.id)
+    printer: await commands.resumePrinter(request.params.id)
   }));
 
   app.post<{ Params: PrinterParams; Body: { job?: unknown; runId?: unknown } }>(
@@ -179,7 +203,7 @@ export async function registerPrinterRoutes(
       else if (rawRun === null) expect.runId = null;
       return {
         ok: true,
-        printer: await farmStore.cancelPrinter(
+        printer: await commands.cancelPrinter(
           request.params.id,
           expect.job !== undefined || expect.runId !== undefined ? expect : undefined
         )
@@ -192,11 +216,11 @@ export async function registerPrinterRoutes(
   // device is actually printing, so it can never mask a running job.
   app.post<{ Params: PrinterParams }>("/:id/clear-start-guard", async (request) => ({
     ok: true,
-    printer: await farmStore.clearStartGuard(request.params.id)
+    printer: await commands.clearStartGuard(request.params.id)
   }));
 
   app.post<{ Params: PrinterParams }>("/:id/snapshot", async (request) => {
-    const { printer, snapshot } = await farmStore.snapshotPrinter(request.params.id);
+    const { printer, snapshot } = await commands.snapshotPrinter(request.params.id);
     return { ok: true, printer, snapshot };
   });
 
@@ -205,6 +229,6 @@ export async function registerPrinterRoutes(
     if (typeof on !== "boolean") {
       throw new ValidationError('Поле «on» обязательно и должно быть boolean');
     }
-    return { ok: true, printer: await farmStore.setLight(request.params.id, on) };
+    return { ok: true, printer: await commands.setLight(request.params.id, on) };
   });
 }

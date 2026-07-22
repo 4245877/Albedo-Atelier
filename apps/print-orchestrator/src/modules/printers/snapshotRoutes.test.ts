@@ -8,7 +8,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 
 import { AppError, NotFoundError } from "../../core/errors";
 import { SnapshotStore } from "../../infra/persistence/snapshotStore";
-import { registerPrinterRoutes, type PrinterRoutesStore } from "./routes";
+import { registerPrinterRoutes, type PrinterCommands } from "./routes";
 
 let dir: string;
 
@@ -26,7 +26,7 @@ afterEach(() => {
  * config-guard / not-found behaviour so the HTTP mapping (paths, status codes,
  * content types) is exercised end-to-end without a live farm or real printers.
  */
-function makeStore(snapshots: SnapshotStore, knownPrinter: string): PrinterRoutesStore {
+function makeStore(snapshots: SnapshotStore, knownPrinter: string): PrinterCommands {
   function assertKnown(id: string): void {
     if (id !== knownPrinter) throw new NotFoundError(`Printer "${id}"`);
   }
@@ -52,10 +52,10 @@ function makeStore(snapshots: SnapshotStore, knownPrinter: string): PrinterRoute
       if (!meta) throw new NotFoundError(`Snapshot "${snapshotId}"`);
       return { meta, data: await snapshots.read(meta) };
     }
-  } as unknown as PrinterRoutesStore;
+  } as unknown as PrinterCommands;
 }
 
-async function buildTestApp(store: PrinterRoutesStore): Promise<FastifyInstance> {
+async function buildTestApp(store: PrinterCommands): Promise<FastifyInstance> {
   const app = Fastify();
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof AppError) {
@@ -64,7 +64,7 @@ async function buildTestApp(store: PrinterRoutesStore): Promise<FastifyInstance>
     }
     reply.code(500).send({ error: { code: "INTERNAL", message: "Internal Server Error" } });
   });
-  await app.register(registerPrinterRoutes, { prefix: "/api/printers", store });
+  await app.register(registerPrinterRoutes, { prefix: "/api/printers", reads: {} as never, commands: store });
   return app;
 }
 

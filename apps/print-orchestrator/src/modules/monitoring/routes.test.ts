@@ -42,7 +42,7 @@ beforeEach(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "atelier-monitoring-routes-"));
   const store = new FarmStore(path.join(dir, "state.json"), path.join(dir, "snapshots"));
   app = Fastify();
-  await app.register(registerMonitoringRoutes, { prefix: "/api/monitoring", store });
+  await app.register(registerMonitoringRoutes, { prefix: "/api/monitoring", commands: store.commands });
 });
 
 afterEach(async () => {
