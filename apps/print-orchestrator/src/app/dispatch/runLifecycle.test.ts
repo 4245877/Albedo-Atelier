@@ -87,6 +87,37 @@ async function runningRun(): Promise<{
   return { store, lifecycle: new RunLifecycleService(store), runId: result.runId, taskId };
 }
 
+test("completeRun cascades the chain: task COMPLETED, assignment RELEASED, bed AWAITING_CLEARANCE", async () => {
+  const { store, lifecycle, runId, taskId } = await runningRun();
+  const repos = store.repositories;
+  const run = repos.printRuns.getById(runId)!;
+
+  const done = lifecycle.completeRun(runId, "SUCCEEDED", { reason: "operator confirmed" });
+  assert.equal(done.state, "SUCCEEDED");
+  assert.equal(done.progress, 1);
+  assert.equal(repos.tasks.getById(taskId)?.state, "COMPLETED");
+  assert.equal(repos.assignments.getById(run.assignmentId)?.state, "RELEASED");
+  assert.equal(repos.bedCycles.getById(run.bedCycleId!)?.state, "AWAITING_CLEARANCE");
+  assert.equal(repos.queue.findByTaskId(taskId)?.state, "RELEASED");
+  // The completion is journalled.
+  assert.ok(
+    repos.audit.listByEntity("print_run", runId).some((e) => e.action === "completed"),
+    "run completion is journalled"
+  );
+});
+
+test("completeRun is refused a second time (a terminal run cannot be re-completed)", async () => {
+  const { store, lifecycle, runId } = await runningRun();
+  const done = lifecycle.completeRun(runId, "SUCCEEDED");
+  assert.equal(done.state, "SUCCEEDED");
+  assert.throws(
+    () => lifecycle.completeRun(runId, "FAILED"),
+    (e: unknown) => e instanceof StateTransitionError,
+    "an already-completed run cannot transition again"
+  );
+  assert.equal(store.repositories.printRuns.getById(runId)?.state, "SUCCEEDED");
+});
+
 test("an observed printing→idle completion closes the run SUCCEEDED exactly once", async () => {
   const { store, lifecycle, runId, taskId } = await runningRun();
 

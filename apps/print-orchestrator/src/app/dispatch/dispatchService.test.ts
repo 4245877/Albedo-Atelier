@@ -235,8 +235,12 @@ test("a SQLite refusal BEFORE dispatch means no command is ever sent (preview ve
     (e: unknown) => e instanceof PreviewConflictError
   );
   assert.equal(h.startCalls.length, 0, "nothing reached the printer");
-  assert.equal(h.store.repositories.printRuns.listActive().length, 0, "no run was reserved");
-  assert.equal(h.store.repositories.tasks.getById(taskId)?.state, "QUEUED", "task untouched");
+  // The reserve transaction rolled back atomically: no run, assignment or bed leaked.
+  const repos = h.store.repositories;
+  assert.equal(repos.printRuns.listActive().length, 0, "no run was reserved");
+  assert.equal(repos.assignments.listByTask(taskId).length, 0, "no assignment leaked");
+  assert.equal(repos.bedCycles.findOpenByPrinter("k2"), null, "no bed cycle leaked");
+  assert.equal(repos.tasks.getById(taskId)?.state, "QUEUED", "task untouched");
 });
 
 test("preview of version N cannot start the queue at version N+1 (queue param edit invalidates)", async () => {
@@ -473,6 +477,98 @@ test("a file missing on the device refuses before anything is reserved", async (
   );
   assert.equal(h.startCalls.length, 0);
   assert.equal(h.store.repositories.printRuns.listByTask(taskId).length, 0);
+});
+
+// ── Service-level lifecycle invariants (canonical dispatch path) ────────────
+// These were previously asserted against PrintQueueService.startRun/completeRun,
+// an alternative lifecycle that has been removed; they now run through the
+// canonical DispatchService / RunLifecycleService.
+
+test("the dispatch path journals the run lifecycle (reserved → started, task dispatching → printing)", async () => {
+  const h = makeHarness();
+  const taskId = addManualTask(h);
+  const result = await h.dispatch.dispatch({ taskId, mode: "manual" });
+  const repos = h.store.repositories;
+
+  const runAudit = repos.audit.listByEntity("print_run", result.runId).map((e) => e.action);
+  assert.ok(runAudit.includes("reserved"), "run reservation is journalled");
+  assert.ok(runAudit.includes("started"), "run start is journalled");
+  const taskAudit = repos.audit.listByEntity("print_task", taskId).map((e) => e.action);
+  assert.ok(taskAudit.includes("dispatching"));
+  assert.ok(taskAudit.includes("printing"));
+  assert.ok(repos.audit.list().some((e) => e.entityType === "assignment"));
+});
+
+test("a second dispatch for a task already printing is refused (one active run per task)", async () => {
+  const h = makeHarness();
+  const taskId = addManualTask(h);
+  await h.dispatch.dispatch({ taskId, mode: "manual" });
+
+  await assert.rejects(
+    h.dispatch.dispatch({ taskId, mode: "manual" }),
+    (e: unknown) => e instanceof JobError
+  );
+  assert.equal(h.startCalls.length, 1, "no second physical command");
+  assert.equal(h.store.repositories.printRuns.listByTask(taskId).length, 1, "one run, ever");
+});
+
+test("a second task cannot dispatch to a printer that already runs (one active run per printer)", async () => {
+  const h = makeHarness();
+  h.knobs.deviceFiles = [
+    { filename: "a.gcode", size: 1000 },
+    { filename: "b.gcode", size: 1000 }
+  ];
+  const t1 = addManualTask(h, { file: "a.gcode" });
+  await h.dispatch.dispatch({ taskId: t1, mode: "manual" });
+
+  const t2 = h.queue.createTask({ title: "B", printer: "k2", file: "b.gcode" }).task.id;
+  await assert.rejects(
+    h.dispatch.dispatch({ taskId: t2, mode: "manual" }),
+    (e: unknown) => e instanceof JobError
+  );
+  assert.equal(h.startCalls.length, 1, "the busy printer saw no second command");
+});
+
+test("cancelTask on a live dispatched run: run CANCELLED, task CANCELLED, bed awaiting clearance", async () => {
+  const h = makeHarness();
+  const taskId = addManualTask(h);
+  const result = await h.dispatch.dispatch({ taskId, mode: "manual" });
+  const repos = h.store.repositories;
+  assert.equal(repos.printRuns.getById(result.runId)?.state, "RUNNING");
+
+  h.queue.cancelTask(taskId, "оператор отменил");
+  assert.equal(repos.tasks.getById(taskId)?.state, "CANCELLED", "task kept, not deleted");
+  assert.equal(repos.printRuns.getById(result.runId)?.state, "CANCELLED");
+  assert.equal(repos.assignments.getById(result.assignmentId)?.state, "CANCELLED");
+  assert.equal(repos.bedCycles.findOpenByPrinter("k2")?.state, "AWAITING_CLEARANCE");
+  assert.equal(repos.queue.findByTaskId(taskId)?.state, "RELEASED");
+});
+
+test("bed clearance: a completed run leaves the bed AWAITING_CLEARANCE; a manual dispatch presumes it clear", async () => {
+  const h = makeHarness();
+  h.knobs.deviceFiles = [
+    { filename: "a.gcode", size: 1000 },
+    { filename: "b.gcode", size: 1000 }
+  ];
+  const t1 = addManualTask(h, { file: "a.gcode" });
+  const r1 = await h.dispatch.dispatch({ taskId: t1, mode: "manual" });
+  h.lifecycle.completeRun(r1.runId, "SUCCEEDED");
+
+  const repos = h.store.repositories;
+  assert.equal(
+    repos.bedCycles.findOpenByPrinter("k2")?.state,
+    "AWAITING_CLEARANCE",
+    "part still on the bed after a print"
+  );
+
+  // A new manual start presumes the awaiting bed clear (audited) and runs.
+  const t2 = h.queue.createTask({ title: "B", printer: "k2", file: "b.gcode" }).task.id;
+  const r2 = await h.dispatch.dispatch({ taskId: t2, mode: "manual" });
+  assert.equal(repos.printRuns.getById(r2.runId)?.state, "RUNNING");
+  assert.ok(
+    repos.audit.list().some((e) => e.entityType === "bed_cycle" && e.action === "presumed_cleared"),
+    "the awaiting-clearance bed was presumed clear with an audit trace"
+  );
 });
 
 // ── Engine-enforced invariants (008 partial unique indexes) ─────────────────

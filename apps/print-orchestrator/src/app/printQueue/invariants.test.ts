@@ -41,36 +41,11 @@ test("one printer cannot hold two live assignments", () => {
   );
 });
 
-test("startRun refuses a second active run for the task and for the printer", () => {
-  const { queue } = makeQueue();
-  const t1 = queue.createTask({ title: "A", printer: "p1", file: "a.gcode" }).task.id;
-  const asg1 = queue.assignTask(t1, "p1");
-  queue.startRun(asg1.id);
-
-  // Same assignment again → the task already has an active run.
-  assert.throws(
-    () => queue.startRun(asg1.id),
-    (e: unknown) => e instanceof JobError && /уже есть активная печать/.test((e as JobError).message)
-  );
-
-  // A different task on the SAME printer is refused while the printer runs.
-  const t2 = queue.createTask({ title: "B", printer: "p1", file: "b.gcode" }).task.id;
-  assert.throws(() => queue.assignTask(t2, "p1"), (e: unknown) => e instanceof JobError);
-});
-
-test("a run cannot be started for a released/cancelled assignment", () => {
-  const { queue, store } = makeQueue();
-  const t1 = queue.createTask({ title: "A", printer: "p1", file: "a.gcode" }).task.id;
-  const asg = queue.assignTask(t1, "p1");
-  const run = queue.startRun(asg.id);
-  queue.completeRun(run.id, "SUCCEEDED");
-
-  assert.equal(store.repositories.assignments.getById(asg.id)?.state, "RELEASED");
-  assert.throws(
-    () => queue.startRun(asg.id),
-    (e: unknown) => e instanceof JobError && /закрыто/.test((e as JobError).message)
-  );
-});
+// The "one active run per task / per printer" invariant and the
+// no-run-off-a-closed-assignment guarantee are enforced by the canonical
+// dispatch path (fresh assignment + run per dispatch); they are exercised in
+// dispatch/dispatchService.test.ts against DispatchService and the 008 partial
+// unique indexes.
 
 test("projection NEVER guesses ready for contradictory data (cancelled task + open entry)", () => {
   const { queue, store } = makeQueue();

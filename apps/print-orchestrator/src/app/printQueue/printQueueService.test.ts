@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { JobError, StateTransitionError, VersionConflictError } from "../../core/errors";
+import { JobError, VersionConflictError } from "../../core/errors";
 import { openPrintQueueStore } from "../../infra/db/store";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import { PrintQueueService } from "./printQueueService";
@@ -49,7 +49,11 @@ test("createTask rejects a blank title", () => {
   store.close();
 });
 
-test("full chain: assign → dispatch → run → complete → clear, and the task is kept as history", () => {
+// The physical print lifecycle (dispatch attempt → run start/finish → bed
+// clearance) belongs to the canonical DispatchService / RunLifecycleService and
+// is exercised in dispatch/dispatchService.test.ts and dispatch/runLifecycle.test.ts.
+// Here we only cover the manual task→printer binding this service still owns.
+test("assignTask reserves a fresh bed and binds the assignment (manual task→printer binding)", () => {
   const { service, store } = makeService();
   const created = service.createTask({ title: "Chalice", printer: "K2", file: "chalice.gcode" });
   const taskId = created.task.id;
@@ -58,37 +62,15 @@ test("full chain: assign → dispatch → run → complete → clear, and the ta
   assert.equal(assignment.state, "RESERVED");
   assert.equal(service.getTask(taskId).state, "ASSIGNED");
 
-  // Bed cycle for K2 is now RESERVED.
+  // A fresh bed cycle for K2 is RESERVED and back-links to its assignment.
   const bed = store.repositories.bedCycles.findOpenByPrinter("K2");
   assert.equal(bed?.state, "RESERVED");
   assert.equal(bed?.assignmentId, assignment.id, "bed back-links to its assignment");
 
-  const attempt = service.recordDispatchAttempt(assignment.id, { state: "ACKED" });
-  assert.equal(attempt.attemptNo, 1);
-  assert.equal(service.getTask(taskId).state, "DISPATCHING");
-
-  const run = service.startRun(assignment.id, { dispatchAttemptId: attempt.id });
-  assert.equal(run.state, "RUNNING");
-  assert.equal(service.getTask(taskId).state, "PRINTING");
-  assert.equal(store.repositories.assignments.getById(assignment.id)?.state, "ACTIVE");
-  assert.equal(store.repositories.bedCycles.findOpenByPrinter("K2")?.state, "RUNNING");
-
-  service.completeRun(run.id, "SUCCEEDED", { durationS: 3600, filamentUsedG: 12.5 });
-  assert.equal(service.getTask(taskId).state, "COMPLETED");
-  assert.equal(store.repositories.assignments.getById(assignment.id)?.state, "RELEASED");
-  assert.equal(store.repositories.bedCycles.findOpenByPrinter("K2")?.state, "AWAITING_CLEARANCE");
-
+  // The whole durable chain is kept as history on the task.
   const detail = service.getTaskDetail(taskId);
-  assert.equal(detail.task.state, "COMPLETED", "task NOT deleted after launch");
+  assert.equal(detail.task.state, "ASSIGNED");
   assert.equal(detail.assignments.length, 1);
-  assert.equal(detail.dispatchAttempts.length, 1);
-  assert.equal(detail.printRuns.length, 1);
-  assert.equal(detail.printRuns[0].filamentUsedG, 12.5);
-
-  // Clearing the bed closes the cycle → CLEAR, freeing the printer.
-  const cleared = service.clearBed("K2");
-  assert.equal(cleared.state, "CLEAR");
-  assert.equal(store.repositories.bedCycles.findOpenByPrinter("K2"), null);
   store.close();
 });
 
@@ -117,31 +99,22 @@ test("hold parks a task; release returns it to the runnable queue", () => {
   store.close();
 });
 
-test("cancelTask mid-run keeps the task, cancels the run, and leaves the bed awaiting clearance", () => {
+test("cancelTask before a run unwinds the reservation and keeps the task as history", () => {
   const { service, store } = makeService();
   const created = service.createTask({ title: "Chalice", printer: "K2", file: "c.gcode" });
   const id = created.task.id;
   const assignment = service.assignTask(id, "K2");
-  const run = service.startRun(assignment.id);
 
   service.cancelTask(id, "оператор отменил");
   assert.equal(service.getTask(id).state, "CANCELLED", "task kept, not deleted");
-  assert.equal(store.repositories.printRuns.getById(run.id)?.state, "CANCELLED");
   assert.equal(store.repositories.assignments.getById(assignment.id)?.state, "CANCELLED");
-  assert.equal(store.repositories.bedCycles.findOpenByPrinter("K2")?.state, "AWAITING_CLEARANCE");
+  // A reserved (never-printed) bed unwinds all the way back to CLEAR.
+  assert.equal(store.repositories.bedCycles.findOpenByPrinter("K2"), null);
   assert.equal(store.repositories.queue.findByTaskId(id)?.state, "RELEASED");
   store.close();
 });
-
-test("an illegal transition is refused (completing an already-completed run)", () => {
-  const { service, store } = makeService();
-  const created = service.createTask({ title: "X", printer: "K2", file: "x.gcode" });
-  const assignment = service.assignTask(created.task.id, "K2");
-  const run = service.startRun(assignment.id);
-  service.completeRun(run.id, "SUCCEEDED");
-  assert.throws(() => service.completeRun(run.id, "FAILED"), StateTransitionError);
-  store.close();
-});
+// Cancelling a task with a *live run* (run CANCELLED, bed → AWAITING_CLEARANCE)
+// needs a real dispatched run and is covered in dispatch/dispatchService.test.ts.
 
 test("reorderTask uses optimistic concurrency on the queue entry", () => {
   const { service, store } = makeService();
@@ -165,14 +138,12 @@ test("reorderTask uses optimistic concurrency on the queue entry", () => {
 test("every mutation is journalled in the audit log", () => {
   const { service, store } = makeService();
   const created = service.createTask({ title: "X", printer: "K2", file: "x.gcode" });
-  const assignment = service.assignTask(created.task.id, "K2");
-  service.startRun(assignment.id);
+  service.assignTask(created.task.id, "K2");
 
   const taskAudit = store.repositories.audit.listByEntity("print_task", created.task.id);
   const actions = taskAudit.map((e) => e.action);
   assert.ok(actions.includes("created"));
   assert.ok(actions.includes("assigned"));
-  assert.ok(actions.includes("printing"));
   // Bed and assignment transitions are journalled too.
   assert.ok(store.repositories.audit.list().some((e) => e.entityType === "bed_cycle"));
   assert.ok(store.repositories.audit.list().some((e) => e.entityType === "assignment"));
