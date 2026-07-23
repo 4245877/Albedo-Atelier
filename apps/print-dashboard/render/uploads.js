@@ -8,6 +8,8 @@
    ═══════════════════════════════════════════════════════════════ */
 
 import { apiGet, apiPost, uploadArtifact } from "../api.js";
+import { createInflightGuard } from "../shared/inflight.js";
+import { createPoller } from "../shared/polling.js";
 import { $, esc, toast } from "../util.js";
 
 const ACCEPT = ".stl,.3mf,.gcode";
@@ -18,11 +20,12 @@ const POLL_MS = 1500;
    artifact.id (для уже сохранённых). */
 let items = [];
 let seq = 0;
-let pollTimer = null;
 let uploading = 0;
 const uploadQueue = [];
 /* File-объекты держим отдельно от модели элемента (их не сериализуем/не рендерим). */
 const fileStore = new Map();
+/* Защита от двойного запуска повторного анализа (по artifactId). */
+const analyzeGuard = createInflightGuard();
 
 const VERDICT = {
   schedulable: { label: "готово к планированию", cls: "ok" },
@@ -181,37 +184,60 @@ function findFile(item) {
 
 /* ── Опрос состояния анализа ────────────────────────────────── */
 
+/* Единый поллер: не более одного запроса одновременно (single-flight),
+   latest-only, отмена активного запроса при остановке. Следующий тик
+   планируется ПОСЛЕ завершения предыдущего — пересечения исключены. */
+const poller = createPoller({
+  run: (signal) => fetchActive(signal),
+  apply: (results) => applyActive(results),
+  onError: () => {
+    // Временная ошибка: последнее успешное состояние сохраняется, следующий тик
+    // повторит запрос. Ничего не затираем — это осознанный ретрай, не глушение.
+  },
+  intervalMs: POLL_MS,
+  // Первый тик — по таймеру: загрузка/повторный анализ уже отрисовали «анализ…».
+  immediate: false
+});
+
 function ensurePolling() {
-  if (pollTimer !== null) return;
-  pollTimer = setInterval(pollActive, POLL_MS);
+  // start() no-op, если цикл уже идёт — второй петли не возникает.
+  if (hasActiveAnalysis()) poller.start();
+}
+
+function activeItems() {
+  return items.filter(
+    (it) => it.artifact && it.analysis && (it.analysis.state === "pending" || it.analysis.state === "running")
+  );
 }
 
 function hasActiveAnalysis() {
-  return items.some(
-    (it) => it.artifact && it.analysis && (it.analysis.state === "pending" || it.analysis.state === "running")
-  );
+  return activeItems().length > 0;
 }
 
-async function pollActive() {
-  if (!hasActiveAnalysis()) {
-    clearInterval(pollTimer);
-    pollTimer = null;
-    return;
-  }
-  const active = items.filter(
-    (it) => it.artifact && it.analysis && (it.analysis.state === "pending" || it.analysis.state === "running")
-  );
-  await Promise.all(
+async function fetchActive(signal) {
+  const active = activeItems();
+  return Promise.all(
     active.map(async (it) => {
       try {
-        const detail = await apiGet(`/api/print/artifacts/${it.artifact.id}`);
-        applyDetail(it, detail);
-      } catch {
-        /* тихо: следующий тик повторит */
+        const detail = await apiGet(`/api/print/artifacts/${it.artifact.id}`, { signal });
+        return { it, detail };
+      } catch (err) {
+        // Отмена (вытеснение/стоп) — наверх, поллер её проглотит.
+        if (err?.name === "AbortError") throw err;
+        // Частичный сбой одного артефакта: сохраняем прежнее, повторим на след. тике.
+        return { it, error: err };
       }
     })
   );
+}
+
+function applyActive(results) {
+  for (const r of results) {
+    if (r.detail) applyDetail(r.it, r.detail);
+  }
   render();
+  // Активных анализов не осталось — прекращаем опрос (таймер снят, запрос оборван).
+  if (!hasActiveAnalysis()) poller.stop();
 }
 
 function applyDetail(item, detail) {
@@ -286,18 +312,22 @@ function toItem(row) {
 async function reanalyze(artifactId) {
   const item = items.find((it) => it.artifact && it.artifact.id === artifactId);
   if (!item) return;
-  item.stage = "analyzing";
-  item.error = null;
-  render();
-  try {
-    const { analysis } = await apiPost(`/api/print/artifacts/${artifactId}/analyze`);
-    item.analysis = analysis;
+  // Двойное нажатие «Повторить анализ» не запускает вторую одинаковую мутацию.
+  await analyzeGuard.run(`analyze:${artifactId}`, async () => {
+    item.stage = "analyzing";
+    item.error = null;
     render();
-    ensurePolling();
-  } catch (err) {
-    item.stage = "failed";
-    toast(`Простите, Владыка — анализ не перезапустился: ${esc(err.message)}`, "toast-danger");
-  }
+    try {
+      const { analysis } = await apiPost(`/api/print/artifacts/${artifactId}/analyze`);
+      item.analysis = analysis;
+      render();
+      ensurePolling();
+    } catch (err) {
+      item.stage = "failed";
+      toast(`Простите, Владыка — анализ не перезапустился: ${esc(err.message)}`, "toast-danger");
+      render();
+    }
+  });
 }
 
 /* ── Отрисовка ──────────────────────────────────────────────── */
@@ -452,6 +482,9 @@ document.addEventListener("click", (e) => {
     void reanalyze(btn.dataset.reanalyze);
   }
 });
+
+// Уход со страницы снимает таймер опроса и обрывает активный запрос.
+window.addEventListener("pagehide", () => poller.stop());
 
 /* ── Форматирование ─────────────────────────────────────────── */
 

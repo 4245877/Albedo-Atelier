@@ -14,7 +14,7 @@
    ═══════════════════════════════════════════════════════════════ */
 
 import { apiGet, apiPost } from "./api.js";
-import { createLatestOnly } from "./poll.js";
+import { createPoller } from "./shared/polling.js";
 import { installActions } from "./actions.js";
 import { reconcileCameras } from "./cameraPlayers.js";
 import { ensureReveal, renderNav, setupNav, setupStickyOffsets } from "./nav.js";
@@ -112,12 +112,14 @@ function renderBackendError(err) {
   toast(`Владыка, ферма не отвечает на мой зов: ${esc(err.message)}. Я не покину пост, пока связь не вернётся`, "toast-danger");
 }
 
-/* Опрос доски проходит через createLatestOnly: параллельные/подвисшие запросы
-   отменяются, и применяется результат только самого свежего запуска — старый
-   ответ, пришедший позже нового, отбрасывается и не откатывает UI. */
-const pollDashboard = createLatestOnly({
+/* Опрос доски проходит через общий createPoller: single-flight + latest-only +
+   отмена подвисших запросов. Старый ответ, пришедший позже нового, отбрасывается
+   и не откатывает UI. Следующий тик планируется ПОСЛЕ завершения предыдущего,
+   а stop() (на pagehide) снимает таймер и обрывает активный запрос. */
+const DASHBOARD_POLL_MS = 6000;
+const dashboardPoller = createPoller({
   run: (signal) => apiGet("/api/dashboard", { signal }),
-  apply: (data, { wasReachable, silent }) => {
+  apply: (data, { wasReachable }) => {
     state = data;
     backendReachable = true;
     // Эффективное ночное окно фермы определяет backend (NIGHT_PRINT_WINDOW);
@@ -131,12 +133,17 @@ const pollDashboard = createLatestOnly({
     backendReachable = false;
     renderTopbar(state, backendReachable);
     if (!silent) renderBackendError(err);
-  }
+  },
+  intervalMs: DASHBOARD_POLL_MS,
+  // Первый тик запускаем вручную (refresh с silent:false); дальше — по таймеру.
+  immediate: false,
+  // Фоновые тики — тихие; wasReachable читаем на момент цикла (backend мог отпасть).
+  pollContext: () => ({ silent: true, wasReachable: backendReachable })
 });
 
 /** Перезагрузить состояние и перерисовать. По умолчанию тихо (для поллинга). */
 function refresh({ silent = true } = {}) {
-  return pollDashboard({ silent, wasReachable: backendReachable });
+  return dashboardPoller.refresh({ silent, wasReachable: backendReachable });
 }
 
 /* ── Старт ─────────────────────────────────────────────────── */
@@ -162,8 +169,17 @@ ensureReveal();
 setupStickyOffsets();
 setupNav();
 
-refresh({ silent: false });
-setInterval(() => { void refresh(); }, 6000);
+// Запускаем цикл опроса, затем — немедленная первая (не тихая) загрузка. Дальше
+// каждый следующий тик планируется через DASHBOARD_POLL_MS после завершения
+// предыдущего — подвисший GET не накладывается на новый.
+dashboardPoller.start();
+void refresh({ silent: false });
 
 // Первая аренда мониторинга — сразу после открытия видимой панели.
 if (!document.hidden) startLeaseRenewal();
+
+// Уход со страницы: снять таймеры опроса и аренды, оборвать активный запрос.
+window.addEventListener("pagehide", () => {
+  dashboardPoller.stop();
+  stopLeaseRenewal();
+});

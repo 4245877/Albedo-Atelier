@@ -6,28 +6,71 @@ export const API_BASE = "/api/print-orchestrator";
 
 async function apiError(res) {
   const body = await res.json().catch(() => null);
+  // HTTP-статус сохраняем всегда — даже если тело пустое или без error.message,
+  // вызывающий код (напр. распознавание 409) не должен терять эту информацию.
   const message = body?.error?.message || `HTTP ${res.status}`;
   const err = new Error(message);
   err.code = body?.error?.code;
+  err.status = res.status;
   return err;
 }
 
-export async function apiGet(path, { signal, timeoutMs = 15000 } = {}) {
-  // Own hard deadline so a stalled GET can never wedge polling; combined with the
-  // caller's single-flight abort signal so a superseded poll is cancelled too. A
-  // timeout aborts with "TimeoutError" (a real failure); a caller abort is
-  // "AbortError" (superseded — the caller ignores it).
-  const deadline = AbortSignal.timeout(timeoutMs);
-  const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { Accept: "application/json" },
-    signal: combined
-  });
-  if (!res.ok) throw await apiError(res);
-  return res.json();
+/*
+ * Объединяет необязательный внешний signal вызывающей стороны с собственным
+ * жёстким дедлайном (timeout). Возвращает итоговый signal и cleanup(), который
+ * ОБЯЗАТЕЛЬНО снимает таймер после завершения запроса (иначе таймаут-таймер
+ * висел бы до срабатывания и удерживал event loop).
+ *
+ * Различение исходов по reason итогового AbortError:
+ *   • timeout   → DOMException "TimeoutError"  (настоящий сбой);
+ *   • внешняя отмена → reason внешнего signal (обычно "AbortError" — вытеснён,
+ *                      вызывающий его игнорирует).
+ * Мы НЕ создаём отдельный контроллер, игнорирующий переданный signal: внешний
+ * signal подписан и пробрасывается в общий контроллер.
+ */
+function withDeadline(signal, timeoutMs) {
+  const controller = new AbortController();
+  let timer = null;
+
+  const onExternalAbort = () => controller.abort(signal.reason);
+
+  if (signal) {
+    if (signal.aborted) controller.abort(signal.reason);
+    else signal.addEventListener("abort", onExternalAbort, { once: true });
+  }
+  if (!controller.signal.aborted && timeoutMs != null && timeoutMs > 0) {
+    timer = setTimeout(
+      () => controller.abort(new DOMException(`Истекло ожидание (${timeoutMs} мс)`, "TimeoutError")),
+      timeoutMs
+    );
+  }
+
+  function cleanup() {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (signal) signal.removeEventListener("abort", onExternalAbort);
+  }
+
+  return { signal: controller.signal, cleanup };
 }
 
-export async function apiPost(path, body) {
+export async function apiGet(path, { signal, timeoutMs = 15000 } = {}) {
+  const deadline = withDeadline(signal, timeoutMs);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      headers: { Accept: "application/json" },
+      signal: deadline.signal
+    });
+    if (!res.ok) throw await apiError(res);
+    return await res.json();
+  } finally {
+    deadline.cleanup();
+  }
+}
+
+export async function apiPost(path, body, { signal, timeoutMs = 15000 } = {}) {
   const opts = { method: "POST", headers: { Accept: "application/json" } };
   // Отправляем тело (и Content-Type) только когда оно есть — иначе Fastify
   // отвергнет пустое тело при заявленном application/json.
@@ -35,9 +78,17 @@ export async function apiPost(path, body) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(`${API_BASE}${path}`, opts);
-  if (!res.ok) throw await apiError(res);
-  return res.json().catch(() => ({}));
+  // Мутации тоже получают жёсткий дедлайн (и, при необходимости, внешний signal),
+  // чтобы подвисший POST не держал кнопку заблокированной бесконечно.
+  const deadline = withDeadline(signal, timeoutMs);
+  opts.signal = deadline.signal;
+  try {
+    const res = await fetch(`${API_BASE}${path}`, opts);
+    if (!res.ok) throw await apiError(res);
+    return await res.json().catch(() => ({}));
+  } finally {
+    deadline.cleanup();
+  }
 }
 
 /*
