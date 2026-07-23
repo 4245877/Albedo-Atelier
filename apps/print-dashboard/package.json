@@ -5,7 +5,8 @@
   "description": "Albedo dashboard — static ES modules served by nginx (no bundler). type=module lets Node run the pure view helpers' tests.",
   "type": "module",
   "scripts": {
-    "test": "node --test \"tests/**/*.test.mjs\""
+    "test": "node --test \"tests/**/*.test.mjs\"",
+    "test:smoke": "node --test \"smoke/**/*.smoke.mjs\""
   },
   "engines": {
     "node": ">=22"

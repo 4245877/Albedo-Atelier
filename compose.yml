@@ -6,11 +6,14 @@ services:
     container_name: atelier-go2rtc
     restart: unless-stopped
     environment:
-      K2_CAMERA_SOURCE: "webrtc:http://192.168.0.132:8000/call/webrtc_local#format=creality"
+      # Both values are deployment-specific (printer IP, host LAN IP) and live
+      # in .env — never hardcoded here. Compose fails fast with the message
+      # below when they are unset, instead of silently streaming nothing.
+      K2_CAMERA_SOURCE: "${K2_CAMERA_SOURCE:?set K2_CAMERA_SOURCE in .env (see .env.example — the K2 printer's WebRTC source URL)}"
       # WebRTC ICE candidate the browser dials for media. Must be the host's
       # LAN address (not the container IP) and match the published 8555 port
       # below. Change this if the host IP changes.
-      GO2RTC_WEBRTC_CANDIDATE: "192.168.0.139:8555"
+      GO2RTC_WEBRTC_CANDIDATE: "${GO2RTC_WEBRTC_CANDIDATE:?set GO2RTC_WEBRTC_CANDIDATE in .env (see .env.example — host LAN ip:8555)}"
     volumes:
       - ./apps/print-orchestrator/config/go2rtc.yaml:/config/go2rtc.yaml:ro
     ports:
@@ -27,6 +30,11 @@ services:
   print-orchestrator:
     build:
       context: ./apps/print-orchestrator
+      # The lean base image (no OrcaSlicer GTK/WebKit/GL system libraries).
+      # Mounting a host OrcaSlicer runtime needs the `production-orca` image
+      # variant AND the volume — both live in compose.orca.yml:
+      #   docker compose -f compose.yml -f compose.orca.yml up -d --build
+      target: production
     container_name: atelier-print-orchestrator
     depends_on:
       - go2rtc
@@ -110,12 +118,11 @@ services:
       - ./apps/print-orchestrator/config:/app/config:ro
       # Persisted runtime state — must be writable and outlive the container.
       - orchestrator-data:/app/data
-      # OrcaSlicer 2.3.0 slicing runtime: the host-extracted AppImage, mounted
-      # READ-ONLY. ORCA_SLICER_CMD=/opt/orca/AppRun is set in .env. The image now
-      # runs on a glibc (Debian) base and ships the AppImage's system runtime
-      # libs, so this binary can actually execute in-container. To relocate it,
-      # re-extract the AppImage elsewhere and update this host path.
-      - /home/miha/opt/orca-2.3.0/squashfs-root:/opt/orca:ro
+      # The OrcaSlicer host-runtime mount deliberately does NOT live in this
+      # base file: it is deployment-specific (an absolute host path) and needs
+      # the heavier `production-orca` image. Both are declared in
+      # compose.orca.yml, driven by ORCA_HOST_DIR in .env:
+      #   docker compose -f compose.yml -f compose.orca.yml up -d --build
       # For the container-runtime shape instead, grant a runtime rather than mounting
       # a binary, e.g. the Docker socket (a deliberate host-security decision):
       # - /var/run/docker.sock:/var/run/docker.sock

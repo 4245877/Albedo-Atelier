@@ -1,19 +1,21 @@
-import type { StoreLogger } from "../../shared/logger";
+import type { StoreLogger } from "./logger";
 
 /**
- * A tiny in-process, bounded worker pool for artifact analysis.
+ * A tiny in-process, bounded worker pool over string job ids.
  *
- * It is deliberately *not* Redis or a separate service (out of scope): analysis
- * runs inside this Node process, but never more than `concurrency` files at once,
- * so a burst of uploads cannot spawn unbounded parallel parses. Each job is an
- * analysis id; `runOne` does the actual work (open blob, analyze, persist). The
- * pool owns only scheduling — it holds no database or file state itself.
+ * It is deliberately *not* Redis or a separate service (out of scope): jobs run
+ * inside this Node process, but never more than `concurrency` at once, so a
+ * burst of work cannot spawn unbounded parallel jobs. Each job is an id;
+ * `runOne` does the actual work. The pool owns only scheduling — it holds no
+ * database or file state itself.
  *
  * Jobs survive a restart because they live as `pending`/`running` rows in
- * SQLite, not in this queue: on boot the service re-enqueues them (see
- * `ArtifactService.recover`). This queue is purely the live, in-memory schedule.
+ * SQLite, not in this queue: on boot the owning service re-enqueues them (see
+ * `ArtifactService.recover` / `SliceService.recover`). This queue is purely the
+ * live, in-memory schedule. Previously duplicated as `AnalysisWorker` and
+ * `SliceWorker`; the `label` keeps the crash-log lines distinguishable.
  */
-export class AnalysisWorker {
+export class BoundedWorkerPool {
   private readonly pending: string[] = [];
   private readonly queued = new Set<string>();
   private active = 0;
@@ -22,15 +24,15 @@ export class AnalysisWorker {
 
   constructor(
     private readonly concurrency: number,
-    private readonly runOne: (analysisId: string) => Promise<void>,
-    private readonly logger: StoreLogger = {}
+    private readonly runOne: (id: string) => Promise<void>,
+    private readonly options: { logger?: StoreLogger; label: string }
   ) {}
 
-  /** Schedules an analysis id (ignored if already scheduled or the pool is closed). */
-  enqueue(analysisId: string): void {
-    if (this.closed || this.queued.has(analysisId)) return;
-    this.queued.add(analysisId);
-    this.pending.push(analysisId);
+  /** Schedules a job id (ignored if already scheduled or the pool is closed). */
+  enqueue(id: string): void {
+    if (this.closed || this.queued.has(id)) return;
+    this.queued.add(id);
+    this.pending.push(id);
     this.pump();
   }
 
@@ -41,7 +43,7 @@ export class AnalysisWorker {
       this.active += 1;
       void this.runOne(id)
         .catch((error) => {
-          this.logger.error?.({ err: error, analysisId: id }, "analysis worker job crashed");
+          this.options.logger?.error?.({ err: error, id }, `${this.options.label} job crashed`);
         })
         .finally(() => {
           this.active -= 1;

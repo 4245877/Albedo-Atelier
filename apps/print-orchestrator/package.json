@@ -11,7 +11,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "slicing:vendor:check": "node scripts/install-orca-vendor-profiles.mjs --check",
     "slicing:vendor:install": "node scripts/install-orca-vendor-profiles.mjs",
-    "test": "TZ=UTC node --experimental-sqlite --disable-warning=ExperimentalWarning --import tsx --test \"src/**/*.test.ts\""
+    "test": "TZ=UTC node --experimental-sqlite --disable-warning=ExperimentalWarning --import tsx --test \"src/**/*.test.ts\"",
+    "test:unit": "node scripts/select-tests.mjs unit | TZ=UTC xargs node --experimental-sqlite --disable-warning=ExperimentalWarning --import tsx --test",
+    "test:integration": "node scripts/select-tests.mjs integration | TZ=UTC xargs node --experimental-sqlite --disable-warning=ExperimentalWarning --import tsx --test",
+    "lint:complexity": "node scripts/check-complexity.mjs"
   },
   "dependencies": {
     "@fastify/multipart": "^9.0.3",

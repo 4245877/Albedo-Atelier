@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createSnapshot, isSnapshotStale, paramsPayload } from "../render/editSnapshot.js";
+import { createSnapshot, isSnapshotStale, paramsPayload } from "../features/scheduler/editSnapshot.js";
 
 /*
  * The two-tab optimistic-locking scenario, simulated end-to-end against a tiny

@@ -1,4 +1,4 @@
-import type { WritableRepository } from "../print/repositories";
+import type { WritableRepository } from "../shared/repository";
 import type { ProfileRevision, ProfileSet, ProfileType, SliceVariant } from "./types";
 
 /**

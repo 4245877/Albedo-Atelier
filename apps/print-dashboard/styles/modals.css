@@ -1,0 +1,178 @@
+/* ═══════════════════════════════════════════════════════════════
+   Albedo — Модальные окна: детали принтера, браузер файлов, форма задания.
+   Часть разбиения styles.css; порядок подключения файлов в index.html
+   воспроизводит исходный каскад: tokens-base → components → dashboard →
+   theme → modals → workflows.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Модальные окна (детали принтера, форма задания, справка) ── */
+
+html.modal-open { overflow: hidden; }
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: clamp(12px, 5vh, 64px) 14px;
+  overflow-y: auto;
+  background: rgb(6 4 12 / 62%);
+  backdrop-filter: blur(6px) saturate(115%);
+  animation: modal-fade 0.18s ease;
+}
+.modal-backdrop[hidden] { display: none; }
+
+/* Днём тьма бездны неуместна: скрым — прохладная сливовая тень собора. */
+:root[data-theme="light"] .modal-backdrop { background: rgb(74 58 104 / 38%); }
+
+@keyframes modal-fade { from { opacity: 0; } to { opacity: 1; } }
+
+.modal {
+  position: relative;
+  width: 100%;
+  max-width: 660px;
+  margin: auto;
+  padding: 26px 26px 24px;
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius);
+  background: linear-gradient(168deg, var(--card-top), var(--card-bot));
+  box-shadow: var(--shadow-hover);
+  animation: modal-rise 0.2s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+@keyframes modal-rise { from { transform: translateY(10px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+.modal-x {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--btn-edge);
+  border-radius: 9px;
+  background: var(--btn-bg);
+  color: var(--ink-soft);
+  font-size: 15px;
+  cursor: pointer;
+  transition: color 0.18s, border-color 0.18s, background 0.18s;
+}
+.modal-x:hover { color: var(--gold-bright); border-color: var(--gold-line); }
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 34px 16px 0;
+}
+.modal-head h2 {
+  margin: 0;
+  font: 600 24px/1.15 var(--font-display);
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.modal-printer {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 18px;
+}
+@media (max-width: 560px) { .modal-printer { grid-template-columns: 1fr; } }
+
+.modal-cam .cam { border-radius: var(--radius-sm); }
+.modal-side { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.modal-model { font-size: 13px; color: var(--ink-faint); }
+.modal-job { font-size: 14px; color: var(--ink-soft); }
+.modal-tele { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 2px; }
+
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 20px;
+  justify-content: flex-end;
+}
+.modal-printer + .modal-actions { justify-content: flex-start; }
+
+/* ── Файлы принтера ────────────────────────────────────────── */
+
+.files-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: 14px 0 10px;
+  font-size: 12.5px;
+}
+.crumb {
+  border: 0;
+  background: none;
+  padding: 2px 4px;
+  border-radius: 6px;
+  color: var(--ink-soft);
+  font: 600 12.5px var(--font-body);
+  cursor: pointer;
+}
+.crumb:hover { background: var(--card-inner); color: var(--ink); }
+.crumb.is-here { color: var(--ink); font-weight: 700; padding: 2px 4px; }
+.crumb-sep { color: var(--ink-faint); }
+
+.files-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: min(52vh, 460px);
+  overflow-y: auto;
+}
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--card-inner);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  min-width: 0;
+  text-align: left;
+}
+.file-row.is-dir {
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+.file-row.is-dir:hover { border-color: var(--btn-edge); }
+.file-ico { flex: 0 0 auto; }
+.file-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.file-meta {
+  flex: 0 1 auto;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.file-start { flex: 0 0 auto; }
+
+.files-note {
+  margin: 10px 0;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: var(--card-inner);
+  color: var(--ink-soft);
+  font-size: 12.5px;
+}
+.files-note.files-error { color: var(--danger-ink); }
+

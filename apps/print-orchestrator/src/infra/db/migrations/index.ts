@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 import type { StoreLogger } from "../../../shared/logger";
+import type { Migration } from "./types";
 import { migration001 } from "./001_initial";
 import { migration002 } from "./002_artifact_analysis";
 import { migration003 } from "./003_slicing";
@@ -10,17 +11,8 @@ import { migration006 } from "./006_assignment_plan_index";
 import { migration007 } from "./007_start_guards";
 import { migration008 } from "./008_canonical_dispatch";
 
-/**
- * One forward-only schema migration. `up` receives the open connection and runs
- * inside a transaction the runner opens for it, so a migration that throws
- * half-way leaves the schema untouched.
- */
-export interface Migration {
-  /** Strictly increasing, unique across the registry. */
-  version: number;
-  name: string;
-  up(db: DatabaseSync): void;
-}
+/** Re-exported from `./types` so existing importers keep working. */
+export type { Migration } from "./types";
 
 /**
  * The ordered migration registry — the single source of truth for the schema.

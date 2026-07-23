@@ -6,7 +6,10 @@
 
 import { API_BASE, apiGet, apiPost } from "../api.js";
 import { reconcileCameras } from "../cameraPlayers.js";
-import { $, badge, esc, fmtLeft, materialBlock, toast } from "../util.js";
+import { $, esc, toast } from "../util.js";
+import { badge } from "../shared/chips.js";
+import { fmtBytes, fmtLeft } from "../shared/format.js";
+import { commonActionButtons, materialBlock, telemetryTempRows } from "./printerParts.js";
 import { camBlock } from "./printers.js";
 import {
   actionAvailability,
@@ -91,19 +94,12 @@ function findLight(id) {
 
 function modalActions(p) {
   const can = actionAvailability(p);
-  const lightTitle = can.lightUnknown && can.lightSupported
-    ? ' title="Состояние подсветки неизвестно — команда будет отправлена вручную"'
-    : "";
   const filesTitle = p.filesSupported
     ? "Файлы на принтере"
     : "Просмотр файлов пока поддерживается только для Moonraker-принтеров";
   return `
     <div class="modal-actions">
-      <button class="btn btn-sm" data-act="pause" data-id="${esc(p.id)}" ${can.canPause ? "" : "disabled"}>⏸ Пауза</button>
-      <button class="btn btn-sm" data-act="resume" data-id="${esc(p.id)}" ${can.canResume ? "" : "disabled"}>▶ Продолжить</button>
-      <button class="btn btn-sm btn-danger" data-act="cancel" data-id="${esc(p.id)}" ${can.canCancel ? "" : "disabled"}>✕ Отмена</button>
-      <button class="btn btn-sm" data-act="light-on" data-id="${esc(p.id)}"${lightTitle} ${can.canLightOn ? "" : "disabled"}>☀ Подсветка</button>
-      <button class="btn btn-sm" data-act="light-off" data-id="${esc(p.id)}"${lightTitle} ${can.canLightOff ? "" : "disabled"}>☾ Погасить</button>
+      ${commonActionButtons(p, can)}
       <button class="btn btn-sm" data-act="snapshot" data-id="${esc(p.id)}" ${can.canSnapshot ? "" : "disabled"}>◉ Снимок</button>
       <button class="btn btn-sm" data-act="files" data-id="${esc(p.id)}" ${can.canFiles ? "" : "disabled"} title="${esc(filesTitle)}">🗂 Файлы</button>
       ${p.interfaceUrl ? `<a class="btn btn-sm" href="${esc(p.interfaceUrl)}" target="_blank" rel="noopener">⧉ Интерфейс</a>` : ""}
@@ -112,10 +108,10 @@ function modalActions(p) {
 }
 
 function teleRows(p) {
-  const rows = [];
-  if (p.nozzle) rows.push(["Сопло", `${p.nozzle[0]}°${p.nozzle[1] != null ? ` / ${p.nozzle[1]}°` : ""}`]);
-  if (p.bed) rows.push(["Стол", `${p.bed[0]}°${p.bed[1] != null ? ` / ${p.bed[1]}°` : ""}`]);
-  if (p.chamber != null) rows.push(["Камера", `${p.chamber}°`]);
+  const rows = telemetryTempRows(p).map(([label, current, target]) => [
+    label,
+    `${current}°${target != null ? ` / ${target}°` : ""}`
+  ]);
   if (p.nozzleType) {
     rows.push([
       "Тип сопла",
@@ -192,17 +188,9 @@ export function syncModals() {
    браузер каталога G-code, папки навигируются, printable-файл запускается
    через POST /api/printers/:id/print после подтверждения. */
 
-function fmtBytes(size) {
-  if (size == null || !Number.isFinite(size)) return "";
-  if (size < 1024) return `${size} Б`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} КБ`;
-  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} МБ`;
-  return `${(size / 1024 / 1024 / 1024).toFixed(2)} ГБ`;
-}
-
 function fmtFileMeta(e) {
   const parts = [];
-  const bytes = fmtBytes(e.size);
+  const bytes = fmtBytes(e.size, "");
   if (bytes) parts.push(bytes);
   const estSec = Number(e.metadata?.estimated_time);
   if (Number.isFinite(estSec) && estSec > 0) parts.push(`≈ ${fmtLeft(estSec / 60)}`);

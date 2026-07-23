@@ -5,6 +5,7 @@ import {
   supportsPrinterLight,
   type PrinterLiveStatus
 } from "../infra/printers/status";
+import { KeyedMutex } from "../shared/keyedMutex";
 import type { StoreLogger } from "../shared/logger";
 import type { EventFeed } from "./eventFeed";
 import { isBusyStatus } from "./printerView";
@@ -86,7 +87,7 @@ export class LightScheduler {
    * a manual command and a scheduled one can never interleave on the wire and a
    * stale scheduled command can never clobber a fresh manual one.
    */
-  private chain = new Map<string, Promise<unknown>>();
+  private readonly chain = new KeyedMutex();
 
   private readonly sendLight: (printer: PrinterConfig, on: boolean) => Promise<void>;
 
@@ -116,14 +117,14 @@ export class LightScheduler {
       this.manualOverrides,
       this.failureKeys,
       this.failureCounts,
-      this.backoffUntil,
-      this.chain
+      this.backoffUntil
     ];
     for (const map of maps) {
       for (const id of map.keys()) {
         if (!live.has(id)) map.delete(id);
       }
     }
+    this.chain.prune(live);
   }
 
   /**
@@ -132,10 +133,7 @@ export class LightScheduler {
    * not break the chain: the next task still runs.
    */
   private runExclusive<T>(id: string, task: () => Promise<T>): Promise<T> {
-    const prev = (this.chain.get(id) ?? Promise.resolve()).catch(() => {});
-    const next = prev.then(task);
-    this.chain.set(id, next.catch(() => {}));
-    return next;
+    return this.chain.run(id, task);
   }
 
   /**

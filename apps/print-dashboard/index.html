@@ -31,7 +31,14 @@
     <!-- Шрифты самохостятся (assets/fonts): без интернета Google Fonts молча
          ронял Cormorant/Inter на Georgia/system-ui, теряя характер дашборда. -->
     <link rel="stylesheet" href="/assets/fonts/fonts.css" />
-    <link rel="stylesheet" href="/styles.css" />
+    <!-- Порядок подключения воспроизводит каскад исходного styles.css:
+         tokens-base → components → dashboard → theme → modals → workflows. -->
+    <link rel="stylesheet" href="/styles/tokens-base.css" />
+    <link rel="stylesheet" href="/styles/components.css" />
+    <link rel="stylesheet" href="/styles/dashboard.css" />
+    <link rel="stylesheet" href="/styles/theme.css" />
+    <link rel="stylesheet" href="/styles/modals.css" />
+    <link rel="stylesheet" href="/styles/workflows.css" />
   </head>
   <body>
     <div class="page">

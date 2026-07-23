@@ -1,115 +1,37 @@
-import { JobError, NotFoundError, ValidationError } from "../../core/errors";
-import { newId, ID_PREFIX } from "../../domain/print/ids";
 import type { PrintQueueStore } from "../../domain/print/repositories";
-import {
-  ASSIGNMENT_TRANSITIONS,
-  assertTransition,
-  BED_CYCLE_TRANSITIONS,
-  PRINT_TASK_TRANSITIONS,
-  QUEUE_ENTRY_TRANSITIONS
-} from "../../domain/print/states";
-import type {
-  Artifact,
-  ArtifactAnalysis,
-  Assignment,
-  AuditEntityType,
-  AuditEvent,
-  BedCycle,
-  DayNightPreference,
-  DispatchAttempt,
-  Metadata,
-  PrintRun,
-  PrintTask,
-  QueueEntry
-} from "../../domain/print/types";
-import type { PrintTaskState } from "../../domain/print/types";
+import type { Assignment, AuditEvent, PrintTask, QueueEntry } from "../../domain/print/types";
 import type { QueueJob } from "../../domain/dashboard/types";
-import { evaluateSliceOutput } from "../../domain/slicing/outputGate";
-import { normalizeStartablePath } from "../../infra/printers/files";
-import { toLegacyQueue, type QueueProjectionRow } from "./projection";
+import { PrintQueueContext } from "./context";
+import type { QueueProjectionRow } from "./projection";
+import { QueueCommands } from "./queueCommands";
+import { QueueQueries, type TaskDetail } from "./queueQueries";
+import {
+  TaskCommands,
+  type CreateTaskInput,
+  type ManualTaskInput,
+  type TaskSchedulingPatch
+} from "./taskCommands";
 
-/** Task states from which a finished slice may be handed off into the queue. */
-const PROMOTABLE_TASK_STATES: ReadonlySet<PrintTaskState> = new Set([
-  "DRAFT",
-  "QUEUED",
-  "PLANNED",
-  "NEEDS_REVIEW"
-]);
-
-/** Operator input for a new task; only `title` is required. */
-export interface CreateTaskInput {
-  title: string;
-  /** Target printer hint (name or id); absent → task parks in NEEDS_REVIEW. */
-  printer?: string;
-  material?: string;
-  /** On-printer G-code file name; recorded as an Artifact and projection `file`. */
-  file?: string;
-  night?: boolean;
-  priority?: number;
-  /** Presentation-only fields the legacy queue rendered; kept in task metadata. */
-  eta?: string;
-  at?: string;
-}
-
-/**
- * Operator input for the manual scheduler queue. Unlike {@link CreateTaskInput}
- * (the legacy-style quick add that parks printer-less tasks in review), a
- * manually-scheduled task always enters the queue `WAITING` — the planner is what
- * assigns a printer — and carries the scheduling intent the heuristic reads.
- */
-export interface ManualTaskInput {
-  title: string;
-  /** An existing artifact (e.g. an uploaded/sliced model) to attach; must exist. */
-  artifactId?: string | null;
-  material?: string | null;
-  priority?: number;
-  notBefore?: string | null;
-  deadline?: string | null;
-  dayNightPreference?: DayNightPreference;
-  /** Hard-pin to a printer id up front (optional). */
-  pinnedPrinterId?: string | null;
-  unattendedAllowed?: boolean;
-  night?: boolean;
-}
-
-/** A partial update of a task's scheduling parameters (all fields optional). */
-export interface TaskSchedulingPatch {
-  priority?: number;
-  notBefore?: string | null;
-  deadline?: string | null;
-  dayNightPreference?: DayNightPreference;
-  unattendedAllowed?: boolean;
-  night?: boolean;
-  material?: string | null;
-  /** Optimistic guard: when set, the update fails if the task version moved. */
-  expectedVersion?: number;
-}
-
-/** The full durable chain for one task — what a task-detail API returns. */
-export interface TaskDetail {
-  task: PrintTask;
-  artifact: Artifact | null;
-  analyses: ArtifactAnalysis[];
-  queueEntry: QueueEntry | null;
-  assignments: Assignment[];
-  dispatchAttempts: DispatchAttempt[];
-  printRuns: PrintRun[];
-  audit: AuditEvent[];
-}
-
-/** How a queue reservation is positioned relative to the current tail. */
-const POSITION_STEP = 10;
+export type { CreateTaskInput, ManualTaskInput, TaskSchedulingPatch } from "./taskCommands";
+export type { TaskDetail } from "./queueQueries";
 
 /**
  * The application service for the persistent print queue: the one place that
  * turns operator/dispatcher intents into valid, audited, transactional changes
- * across the entities.
+ * across the entities. A facade over three use-case modules sharing one
+ * {@link PrintQueueContext}:
+ *
+ *   - {@link TaskCommands} — task lifecycle (create/add/promote/hold/release/
+ *     cancel, scheduling params, printer pins);
+ *   - {@link QueueCommands} — queue shape (reorder) and the manual task→printer
+ *     binding (assignment + bed reservation);
+ *   - {@link QueueQueries} — reads (tasks, open queue, legacy projection, task
+ *     detail, audit feed).
  *
  * Every mutation goes through {@link PrintQueueStore.transaction}, so a change
- * that spans several entities (assign a task → reserve a bed → create an
- * assignment → move the task) either lands whole or not at all. Every state move
+ * that spans several entities either lands whole or not at all. Every state move
  * is checked against the domain transition maps *before* it is written, and
- * every change appends an {@link AuditEvent} — the structured successor to the
+ * every change appends an `AuditEvent` — the structured successor to the
  * JSON event feed, satisfying "сохрани существующие механизмы … журнал событий".
  *
  * Scope: task/queue authoring and the *manual* task→printer binding
@@ -120,17 +42,13 @@ const POSITION_STEP = 10;
  * completion). Those services own the dispatch/run/bed state machine so there is
  * a single, transactional source of truth for it.
  */
-/** Allowed operator priority band. Beyond this a single job would dominate/break the score. */
-const PRIORITY_MIN = -10;
-const PRIORITY_MAX = 100;
-
 export class PrintQueueService {
-  private readonly now: () => Date;
-  private readonly defaultActor: string;
-  private readonly isPrinterConfigured: ((printerId: string) => boolean) | null;
+  private readonly queries: QueueQueries;
+  private readonly tasks: TaskCommands;
+  private readonly queue: QueueCommands;
 
   constructor(
-    private readonly store: PrintQueueStore,
+    store: PrintQueueStore,
     options: {
       now?: () => Date;
       actor?: string;
@@ -138,904 +56,92 @@ export class PrintQueueService {
       isPrinterConfigured?: (printerId: string) => boolean;
     } = {}
   ) {
-    this.now = options.now ?? (() => new Date());
-    this.defaultActor = options.actor ?? "operator";
-    this.isPrinterConfigured = options.isPrinterConfigured ?? null;
+    const ctx = new PrintQueueContext(store, options);
+    this.queries = new QueueQueries(ctx);
+    this.tasks = new TaskCommands(ctx, this.queries);
+    this.queue = new QueueCommands(ctx, this.queries);
   }
 
-  // ── Reads ──────────────────────────────────────────────────────────────────
+  // ── Reads (QueueQueries) ─────────────────────────────────────────────────────
 
   listTasks(): PrintTask[] {
-    return this.store.repositories.tasks.list();
+    return this.queries.listTasks();
   }
 
   getTask(id: string): PrintTask {
-    const task = this.store.repositories.tasks.getById(id);
-    if (!task) throw new NotFoundError(`Задание «${id}»`);
-    return task;
+    return this.queries.getTask(id);
   }
 
-  /** The open queue as `{ entry, task, artifact }` rows, ordered by position. */
   listOpenQueue(): QueueProjectionRow[] {
-    const repos = this.store.repositories;
-    const entries = repos.queue.listOpen();
-    return entries.map((entry) => {
-      const task = repos.tasks.getById(entry.taskId);
-      if (!task) {
-        // A queue_entries row without its task cannot happen (FK ON DELETE
-        // CASCADE removes the entry with the task), but narrow defensively.
-        throw new NotFoundError(`Задание «${entry.taskId}»`);
-      }
-      const artifact = task.artifactId ? repos.artifacts.getById(task.artifactId) : null;
-      return { entry, task, artifact };
-    });
+    return this.queries.listOpenQueue();
   }
 
-  /** The open queue projected into the legacy dashboard shape (read-only). */
   projectLegacyQueue(): QueueJob[] {
-    return toLegacyQueue(this.listOpenQueue());
+    return this.queries.projectLegacyQueue();
   }
 
-  /** The whole durable chain for one task. */
   getTaskDetail(id: string): TaskDetail {
-    const repos = this.store.repositories;
-    const task = this.getTask(id);
-    return {
-      task,
-      artifact: task.artifactId ? repos.artifacts.getById(task.artifactId) : null,
-      analyses: task.artifactId ? repos.artifactAnalyses.listByArtifact(task.artifactId) : [],
-      queueEntry: repos.queue.findByTaskId(id),
-      assignments: repos.assignments.listByTask(id),
-      dispatchAttempts: repos.assignments
-        .listByTask(id)
-        .flatMap((a) => repos.dispatchAttempts.listByAssignment(a.id)),
-      printRuns: repos.printRuns.listByTask(id),
-      audit: repos.audit.listByEntity("print_task", id)
-    };
+    return this.queries.getTaskDetail(id);
   }
 
   listAudit(limit?: number): AuditEvent[] {
-    return this.store.repositories.audit.list(limit);
+    return this.queries.listAudit(limit);
   }
 
-  // ── Task / queue lifecycle (operator-facing) ─────────────────────────────────
+  // ── Task lifecycle (TaskCommands) ────────────────────────────────────────────
 
-  /**
-   * Creates a task (and, when a file is given, its artifact) and enqueues it.
-   * With a target printer the task starts `QUEUED` (entry `WAITING`); without
-   * one it parks in `NEEDS_REVIEW` (entry `HELD`) so it never blocks the queue —
-   * the same rule the legacy queue used, now expressed in the state machine.
-   */
   createTask(input: CreateTaskInput, actor?: string): TaskDetail {
-    const title = input.title?.trim();
-    if (!title) throw new ValidationError("Поле «title» обязательно");
-
-    const printer = input.printer?.trim() || null;
-    const file = input.file?.trim() || null;
-    const runnable = printer !== null;
-    const iso = this.nowIso();
-
-    return this.store.transaction(() => {
-      const repos = this.store.repositories;
-
-      let artifactId: string | null = null;
-      if (file) {
-        const artifact: Artifact = {
-          id: newId(ID_PREFIX.artifact),
-          kind: "gcode",
-          name: file,
-          source: file,
-          sizeBytes: null,
-          sha256: null,
-          createdAt: iso,
-          updatedAt: iso,
-          version: 1,
-          legacyRef: null,
-          metadata: {}
-        };
-        repos.artifacts.insert(artifact);
-        artifactId = artifact.id;
-        this.recordAudit({ entityType: "artifact", entityId: artifact.id, action: "created", actor });
-      }
-
-      const metadata: Metadata = {};
-      if (input.eta?.trim()) metadata.eta = input.eta.trim();
-      if (input.at?.trim()) metadata.at = input.at.trim();
-      if (file) metadata.file = file;
-
-      const task: PrintTask = {
-        id: newId(ID_PREFIX.printTask),
-        artifactId,
-        title,
-        material: input.material?.trim() || null,
-        targetPrinter: printer,
-        priority: normalizePriority(input.priority, 0),
-        state: runnable ? "QUEUED" : "NEEDS_REVIEW",
-        reason: runnable ? null : "не задан принтер",
-        night: input.night === true,
-        notBefore: null,
-        deadline: null,
-        dayNightPreference: input.night === true ? "night" : "any",
-        pinnedPrinterId: null,
-        unattendedAllowed: false,
-        createdAt: iso,
-        updatedAt: iso,
-        version: 1,
-        legacyRef: null,
-        metadata
-      };
-      repos.tasks.insert(task);
-      this.recordAudit({
-        entityType: "print_task",
-        entityId: task.id,
-        action: "created",
-        to: task.state,
-        actor
-      });
-
-      const entry: QueueEntry = {
-        id: newId(ID_PREFIX.queueEntry),
-        taskId: task.id,
-        position: this.nextPosition(),
-        state: runnable ? "WAITING" : "HELD",
-        enqueuedAt: iso,
-        updatedAt: iso,
-        version: 1
-      };
-      repos.queue.insert(entry);
-      this.recordAudit({
-        entityType: "queue_entry",
-        entityId: entry.id,
-        action: "enqueued",
-        to: entry.state,
-        actor
-      });
-
-      return this.getTaskDetail(task.id);
-    });
+    return this.tasks.createTask(input, actor);
   }
 
-  /**
-   * Parks a task for the operator: task → `NEEDS_REVIEW`, its queue entry → `HELD`,
-   * so it stops being eligible to run without being removed. The successor to the
-   * legacy "move to review".
-   */
-  holdTask(id: string, reason?: string, actor?: string): PrintTask {
-    return this.store.transaction(() => {
-      const task = this.getTask(id);
-      const trimmed = reason?.trim();
-      const updated = this.transitionTask(
-        task,
-        "NEEDS_REVIEW",
-        { reason: trimmed || task.reason || "отложено оператором на проверку" },
-        "held",
-        actor
-      );
-      this.holdEntryFor(id, actor);
-      return updated;
-    });
-  }
-
-  /** Returns a parked/failed task to the runnable queue: → `QUEUED`, entry → `WAITING`. */
-  releaseTask(id: string, actor?: string): PrintTask {
-    return this.store.transaction(() => {
-      const task = this.getTask(id);
-      const updated = this.transitionTask(task, "QUEUED", { reason: null }, "released", actor);
-      const entry = this.store.repositories.queue.findByTaskId(id);
-      if (entry && entry.state === "HELD") {
-        this.transitionEntry(entry, "WAITING", actor);
-      }
-      return updated;
-    });
-  }
-
-  /**
-   * Cancels a task without deleting it: task → `CANCELLED`, its queue entry is
-   * `RELEASED`, and any open assignment/bed cycle is unwound (a reserved bed goes
-   * back to `CLEAR`; a running one to `AWAITING_CLEARANCE`, since a part may still
-   * be on it). The row and its whole chain stay as history.
-   */
-  cancelTask(id: string, reason?: string, actor?: string): PrintTask {
-    return this.store.transaction(() => {
-      const repos = this.store.repositories;
-      const task = this.getTask(id);
-      const updated = this.transitionTask(
-        task,
-        "CANCELLED",
-        { reason: reason?.trim() || task.reason },
-        "cancelled",
-        actor
-      );
-
-      const entry = repos.queue.findByTaskId(id);
-      if (entry && entry.state !== "RELEASED") {
-        this.transitionEntry(entry, "RELEASED", actor);
-      }
-
-      for (const assignment of repos.assignments.listByTask(id)) {
-        if (assignment.state === "RELEASED" || assignment.state === "CANCELLED") continue;
-        this.unwindAssignment(assignment, "CANCELLED", actor);
-      }
-      return updated;
-    });
-  }
-
-  /**
-   * Moves a task's queue entry to a new position with optimistic concurrency:
-   * the caller passes the `expectedVersion` it read, and a racing reorder makes
-   * this throw `VersionConflictError` instead of silently reordering stale data.
-   */
-  reorderTask(id: string, newPosition: number, expectedVersion: number, actor?: string): QueueEntry {
-    return this.store.transaction(() => {
-      const repos = this.store.repositories;
-      const entry = repos.queue.findByTaskId(id);
-      if (!entry) throw new NotFoundError(`Запись очереди для задания «${id}»`);
-
-      // Re-space the whole open queue onto POSITION_STEP multiples, with `entry`
-      // slotted at `newPosition`. Renumbering on every move is what keeps ↑/↓
-      // working: the dashboard moves a task by asking for `neighbour.position ± 1`,
-      // which only lands in a clean gap while adjacent positions differ by ≥ 2.
-      // Without this the gaps collapse after enough reorders, equal positions fall
-      // back to enqueue time, and the arrows silently stop moving anything.
-      const ordered = repos.queue
-        .listOpen()
-        .map((e) => (e.id === entry.id ? { entry: e, sortPos: newPosition } : { entry: e, sortPos: e.position }))
-        .sort((a, b) =>
-          a.sortPos !== b.sortPos
-            ? a.sortPos - b.sortPos
-            : a.entry.enqueuedAt !== b.entry.enqueuedAt
-              ? a.entry.enqueuedAt < b.entry.enqueuedAt
-                ? -1
-                : 1
-              : a.entry.id < b.entry.id
-                ? -1
-                : 1
-        );
-
-      // Each entry is updated at most once: the moved one under the caller's
-      // optimistic guard (a racing reorder throws VersionConflictError, rolling the
-      // whole transaction back so no audit is written), the rest only when their
-      // normalised position actually changes.
-      let moved: QueueEntry | null = null;
-      for (let index = 0; index < ordered.length; index++) {
-        const e = ordered[index].entry;
-        const position = (index + 1) * POSITION_STEP;
-        if (e.id === entry.id) {
-          moved = repos.queue.update({ ...entry, version: expectedVersion, position, updatedAt: this.nowIso() });
-        } else if (e.position !== position) {
-          repos.queue.update({ ...e, position, updatedAt: this.nowIso() });
-        }
-      }
-      if (!moved) throw new NotFoundError(`Запись очереди для задания «${id}»`);
-
-      this.recordAudit({
-        entityType: "queue_entry",
-        entityId: entry.id,
-        action: "reordered",
-        actor,
-        detail: { position: moved.position }
-      });
-      return moved;
-    });
-  }
-
-  // ── Manual scheduler queue (operator-facing) ─────────────────────────────────
-
-  /**
-   * Adds a task straight into the manual scheduler queue: task `QUEUED`, entry
-   * `WAITING`, with the operator's scheduling intent. No target printer is
-   * required — the planner assigns one — so, unlike {@link createTask}, a
-   * printer-less task is *not* parked in review. A pin, when given, is recorded as
-   * both `pinnedPrinterId` and the `targetPrinter` hint.
-   */
   addTask(input: ManualTaskInput, actor?: string): TaskDetail {
-    const title = input.title?.trim();
-    if (!title) throw new ValidationError("Поле «title» обязательно");
-    const iso = this.nowIso();
-    const notBefore = parseIsoOrNull(input.notBefore, "notBefore");
-    const deadline = parseIsoOrNull(input.deadline, "deadline");
-    assertWindowOrder(notBefore, deadline);
-    const priority = normalizePriority(input.priority, 0);
-    const pinned = input.pinnedPrinterId?.trim() || null;
-    if (pinned) this.assertPrinterConfigured(pinned);
-
-    return this.store.transaction(() => {
-      const repos = this.store.repositories;
-      if (input.artifactId) {
-        if (!repos.artifacts.getById(input.artifactId)) {
-          throw new NotFoundError(`Артефакт «${input.artifactId}»`);
-        }
-      }
-
-      const night = input.night === true;
-      const task: PrintTask = {
-        id: newId(ID_PREFIX.printTask),
-        artifactId: input.artifactId ?? null,
-        title,
-        material: input.material?.trim() || null,
-        targetPrinter: pinned,
-        priority,
-        state: "QUEUED",
-        reason: null,
-        night,
-        notBefore,
-        deadline,
-        dayNightPreference: input.dayNightPreference ?? (night ? "night" : "any"),
-        pinnedPrinterId: pinned,
-        unattendedAllowed: input.unattendedAllowed === true,
-        createdAt: iso,
-        updatedAt: iso,
-        version: 1,
-        legacyRef: null,
-        metadata: {}
-      };
-      repos.tasks.insert(task);
-      this.recordAudit({
-        entityType: "print_task",
-        entityId: task.id,
-        action: "created",
-        to: task.state,
-        actor,
-        detail: { via: "scheduler" }
-      });
-
-      const entry: QueueEntry = {
-        id: newId(ID_PREFIX.queueEntry),
-        taskId: task.id,
-        position: this.nextPosition(),
-        state: "WAITING",
-        enqueuedAt: iso,
-        updatedAt: iso,
-        version: 1
-      };
-      repos.queue.insert(entry);
-      this.recordAudit({
-        entityType: "queue_entry",
-        entityId: entry.id,
-        action: "enqueued",
-        to: entry.state,
-        actor
-      });
-
-      return this.getTaskDetail(task.id);
-    });
+    return this.tasks.addTask(input, actor);
   }
 
-  /**
-   * The slice → print HANDOFF. Binds a `ready` slice variant's verified output onto
-   * its source task so the task becomes an executable print job, then enqueues it.
-   *
-   * The gap this closes: a finished slice lived only on `SliceVariant.output*`; its
-   * task stayed bound to the STL/3MF (analysis `needs_preparation`) with no on-device
-   * file, so dispatching it hit `NO_FILE` or was blocked as an un-prepared model.
-   * After promotion the task's executable artifact IS the sliced output (analysis
-   * `schedulable`), `metadata.file` is the on-device path, and — for a printer-scoped
-   * variant — the task is pinned to that printer. The dispatch gate then reads the
-   * OUTPUT's clean analysis, so a start uses exactly the vetted ready variant and its
-   * analysis, never the raw model.
-   *
-   * Fail-closed: the output must pass {@link evaluateSliceOutput} (completed,
-   * `schedulable`, no blocker) or promotion is refused. The file is not pushed to the
-   * printer here (no such transport exists) — its on-device identity is matched by
-   * the dispatch pre-flight (name + size), which refuses if it is absent or different.
-   */
   promoteSliceVariant(
     variantId: string,
     input: { onDeviceFile?: string | null } = {},
     actor?: string
   ): TaskDetail {
-    return this.store.transaction(() => {
-      const repos = this.store.repositories;
-      const who = actor ?? this.defaultActor;
-      const iso = this.nowIso();
-
-      const variant = repos.sliceVariants.getById(variantId);
-      if (!variant) throw new NotFoundError(`Вариант слайсинга «${variantId}»`);
-      if (variant.state !== "ready" || !variant.outputArtifactId) {
-        throw new JobError(
-          `Вариант «${variantId}» не готов к постановке в очередь (состояние «${variant.state}») — нужен ready-вариант с готовым файлом`
-        );
-      }
-
-      const output = repos.artifacts.getById(variant.outputArtifactId);
-      if (!output) throw new NotFoundError(`Выходной артефакт «${variant.outputArtifactId}»`);
-
-      // The output must be a safe, verified, schedulable file — the same bar the
-      // slice pipeline and the dispatch gate use. Never promote anything else.
-      const analysis = variant.outputAnalysisId
-        ? repos.artifactAnalyses.getById(variant.outputAnalysisId)
-        : repos.artifactAnalyses.latestForArtifact(output.id);
-      if (!analysis) throw new JobError("У выходного файла нет анализа — постановка в очередь запрещена");
-      const gate = evaluateSliceOutput(analysis);
-      if (!gate.ok) throw new JobError(`Нельзя поставить в очередь непроверенный файл: ${gate.reason}`);
-
-      const task = repos.tasks.getById(variant.taskId);
-      if (!task) throw new NotFoundError(`Задание «${variant.taskId}»`);
-      if (!PROMOTABLE_TASK_STATES.has(task.state)) {
-        throw new JobError(
-          `Задание «${task.title}» в состоянии «${task.state}» — постановка слайса в очередь недоступна`
-        );
-      }
-
-      // The on-device path a dispatch will start: an explicit override, else the
-      // output file's own name — validated as a safe, startable path.
-      const rawFile = input.onDeviceFile?.trim() || output.name;
-      let onDeviceFile: string;
-      try {
-        onDeviceFile = normalizeStartablePath(rawFile);
-      } catch {
-        throw new ValidationError(`Недопустимый путь файла на устройстве: «${rawFile}»`);
-      }
-
-      // A printer-scoped variant pins its printer so the start goes to the exact
-      // device the file was sliced for; a class-scoped one leaves placement open.
-      const pinnedPrinterId = variant.targetPrinterId ?? task.pinnedPrinterId;
-      if (pinnedPrinterId) this.assertPrinterConfigured(pinnedPrinterId);
-
-      // ── Atomic bind: the task's executable becomes the sliced output ──────────
-      if (task.state !== "QUEUED") {
-        assertTransition("задание", PRINT_TASK_TRANSITIONS, task.state, "QUEUED");
-      }
-      const bound = repos.tasks.update({
-        ...task,
-        artifactId: output.id,
-        state: "QUEUED",
-        reason: null,
-        targetPrinter: variant.targetPrinterId ?? task.targetPrinter,
-        pinnedPrinterId,
-        metadata: {
-          ...task.metadata,
-          file: onDeviceFile,
-          sourceArtifactId: variant.sourceArtifactId,
-          sliceVariantId: variant.id,
-          outputAnalysisId: analysis.id
-        },
-        updatedAt: iso
-      });
-      this.recordAudit({
-        entityType: "print_task",
-        entityId: task.id,
-        action: "slice_promoted",
-        from: task.state,
-        to: "QUEUED",
-        actor: who,
-        detail: { variantId: variant.id, outputArtifactId: output.id, file: onDeviceFile }
-      });
-
-      // Ensure a WAITING queue entry: create one for a task that had none (an
-      // upload draft), un-hold a held one, and leave an already-waiting one be.
-      const entry = repos.queue.findByTaskId(task.id);
-      if (!entry) {
-        const created: QueueEntry = {
-          id: newId(ID_PREFIX.queueEntry),
-          taskId: task.id,
-          position: this.nextPosition(),
-          state: "WAITING",
-          enqueuedAt: iso,
-          updatedAt: iso,
-          version: 1
-        };
-        repos.queue.insert(created);
-        this.recordAudit({ entityType: "queue_entry", entityId: created.id, action: "enqueued", to: "WAITING", actor: who });
-      } else if (entry.state === "HELD") {
-        this.transitionEntry(entry, "WAITING", who);
-      }
-
-      void bound;
-      return this.getTaskDetail(task.id);
-    });
+    return this.tasks.promoteSliceVariant(variantId, input, actor);
   }
 
-  /**
-   * Updates a task's scheduling parameters (priority, notBefore, deadline,
-   * day/night preference, unattended permission, material). Refuses on a terminal
-   * or in-flight task, and honours an optional optimistic `expectedVersion`.
-   */
+  holdTask(id: string, reason?: string, actor?: string): PrintTask {
+    return this.tasks.holdTask(id, reason, actor);
+  }
+
+  releaseTask(id: string, actor?: string): PrintTask {
+    return this.tasks.releaseTask(id, actor);
+  }
+
+  cancelTask(id: string, reason?: string, actor?: string): PrintTask {
+    return this.tasks.cancelTask(id, reason, actor);
+  }
+
   setTaskScheduling(id: string, patch: TaskSchedulingPatch, actor?: string): PrintTask {
-    return this.store.transaction(() => {
-      const task = this.getTask(id);
-      if (isTaskTerminal(task.state) || task.state === "PRINTING" || task.state === "DISPATCHING") {
-        throw new ValidationError(
-          `Параметры планирования нельзя менять для задания в состоянии «${task.state}»`
-        );
-      }
-      const notBefore =
-        patch.notBefore === undefined ? task.notBefore : parseIsoOrNull(patch.notBefore, "notBefore");
-      const deadline =
-        patch.deadline === undefined ? task.deadline : parseIsoOrNull(patch.deadline, "deadline");
-      // Validate the *effective* pair — a patch that moves only one of the two can
-      // still leave notBefore after the deadline.
-      assertWindowOrder(notBefore, deadline);
-      const next: PrintTask = {
-        ...task,
-        priority: patch.priority === undefined ? task.priority : normalizePriority(patch.priority, task.priority),
-        notBefore,
-        deadline,
-        dayNightPreference: patch.dayNightPreference ?? task.dayNightPreference,
-        unattendedAllowed:
-          typeof patch.unattendedAllowed === "boolean" ? patch.unattendedAllowed : task.unattendedAllowed,
-        night: typeof patch.night === "boolean" ? patch.night : task.night,
-        material: patch.material === undefined ? task.material : patch.material?.trim() || null,
-        version: patch.expectedVersion ?? task.version,
-        updatedAt: this.nowIso()
-      };
-      const saved = this.store.repositories.tasks.update(next);
-      this.recordAudit({
-        entityType: "print_task",
-        entityId: task.id,
-        action: "scheduling_updated",
-        actor,
-        detail: {
-          priority: saved.priority,
-          notBefore: saved.notBefore,
-          deadline: saved.deadline,
-          dayNight: saved.dayNightPreference,
-          unattended: saved.unattendedAllowed
-        }
-      });
-      return saved;
-    });
+    return this.tasks.setTaskScheduling(id, patch, actor);
   }
 
-  /** Pins a task to a specific printer (also updates the `targetPrinter` hint). */
   pinPrinter(id: string, printerId: string, actor?: string): PrintTask {
-    const pinned = printerId.trim();
-    if (!pinned) throw new ValidationError("Не указан принтер для закрепления");
-    this.assertPrinterConfigured(pinned);
-    return this.store.transaction(() => {
-      const task = this.getTask(id);
-      if (isTaskTerminal(task.state)) {
-        throw new ValidationError(`Нельзя закрепить принтер для завершённого задания «${task.state}»`);
-      }
-      const saved = this.store.repositories.tasks.update({
-        ...task,
-        pinnedPrinterId: pinned,
-        targetPrinter: pinned,
-        updatedAt: this.nowIso()
-      });
-      this.recordAudit({
-        entityType: "print_task",
-        entityId: task.id,
-        action: "pinned",
-        actor,
-        detail: { printerId: pinned }
-      });
-      return saved;
-    });
+    return this.tasks.pinPrinter(id, printerId, actor);
   }
 
-  /** Removes a task's printer pin (leaves the soft `targetPrinter` hint intact). */
   unpinPrinter(id: string, actor?: string): PrintTask {
-    return this.store.transaction(() => {
-      const task = this.getTask(id);
-      if (task.pinnedPrinterId === null) return task;
-      const saved = this.store.repositories.tasks.update({
-        ...task,
-        pinnedPrinterId: null,
-        updatedAt: this.nowIso()
-      });
-      this.recordAudit({ entityType: "print_task", entityId: task.id, action: "unpinned", actor });
-      return saved;
-    });
+    return this.tasks.unpinPrinter(id, actor);
   }
 
-  // ── Assignment + dispatch + run chain (dispatcher-facing) ────────────────────
+  // ── Queue shape + manual binding (QueueCommands) ─────────────────────────────
 
-  /**
-   * Binds a `QUEUED`/`PLANNED` task to a printer: opens a bed cycle in `RESERVED`
-   * (a printer with no open cycle is treated as `CLEAR`), creates the
-   * `RESERVED` assignment linked to it, and moves the task to `ASSIGNED`. Refuses
-   * when the printer's bed is not clear. This is a manual/explicit binding —
-   * automatic distribution is a later module.
-   */
+  reorderTask(id: string, newPosition: number, expectedVersion: number, actor?: string): QueueEntry {
+    return this.queue.reorderTask(id, newPosition, expectedVersion, actor);
+  }
+
   assignTask(
     taskId: string,
     printerId: string,
     options: { planId?: string } = {},
     actor?: string
   ): Assignment {
-    const printer = printerId.trim();
-    if (!printer) throw new ValidationError("Не указан принтер для назначения");
-
-    return this.store.transaction(() => {
-      const repos = this.store.repositories;
-      const task = this.getTask(taskId);
-
-      // Invariants first (the 008 partial unique indexes are the backstop):
-      // one live assignment per task, one per printer, no active run on either.
-      const liveOfTask = repos.assignments
-        .listByTask(taskId)
-        .find((a) => a.state === "RESERVED" || a.state === "ACTIVE");
-      if (liveOfTask) {
-        throw new JobError(
-          `Задание «${task.title}» уже назначено (${liveOfTask.printerId}, ${liveOfTask.state}) — сначала снимите назначение`
-        );
-      }
-      const liveOnPrinter = repos.assignments.findOpenByPrinter(printer);
-      if (liveOnPrinter) {
-        throw new JobError(
-          `Принтер «${printer}» уже занят назначением ${liveOnPrinter.id} (${liveOnPrinter.state})`
-        );
-      }
-      const activeRun =
-        repos.printRuns.findActiveByTask(taskId) ?? repos.printRuns.findActiveByPrinter(printer);
-      if (activeRun) {
-        throw new JobError(
-          `Есть активная печать ${activeRun.id} (${activeRun.state}) — назначение невозможно`
-        );
-      }
-
-      const openBed = repos.bedCycles.findOpenByPrinter(printer);
-      if (openBed) {
-        throw new JobError(
-          `Стол принтера «${printer}» не свободен (${openBed.state}) — назначение невозможно`
-        );
-      }
-
-      const iso = this.nowIso();
-      const bed: BedCycle = {
-        id: newId(ID_PREFIX.bedCycle),
-        printerId: printer,
-        state: "RESERVED",
-        assignmentId: null,
-        createdAt: iso,
-        updatedAt: iso,
-        clearedAt: null,
-        version: 1,
-        metadata: {}
-      };
-      repos.bedCycles.insert(bed);
-      this.recordAudit({
-        entityType: "bed_cycle",
-        entityId: bed.id,
-        action: "reserved",
-        from: "CLEAR",
-        to: "RESERVED",
-        actor,
-        detail: { printerId: printer }
-      });
-
-      const assignment: Assignment = {
-        id: newId(ID_PREFIX.assignment),
-        taskId,
-        printerId: printer,
-        planId: options.planId ?? null,
-        bedCycleId: bed.id,
-        state: "RESERVED",
-        createdAt: iso,
-        updatedAt: iso,
-        version: 1,
-        legacyRef: null,
-        metadata: {}
-      };
-      repos.assignments.insert(assignment);
-      this.recordAudit({
-        entityType: "assignment",
-        entityId: assignment.id,
-        action: "reserved",
-        to: "RESERVED",
-        actor,
-        detail: { printerId: printer, taskId }
-      });
-
-      // Soft back-link bed → assignment (kept consistent by the service).
-      repos.bedCycles.update({ ...bed, assignmentId: assignment.id, updatedAt: this.nowIso() });
-
-      this.transitionTask(task, "ASSIGNED", { targetPrinter: printer }, "assigned", actor);
-      return assignment;
-    });
+    return this.queue.assignTask(taskId, printerId, options, actor);
   }
-
-  // ── Internal transition helpers ──────────────────────────────────────────────
-
-  private transitionTask(
-    task: PrintTask,
-    to: PrintTask["state"],
-    patch: Partial<Pick<PrintTask, "reason" | "targetPrinter">>,
-    action: string,
-    actor?: string
-  ): PrintTask {
-    assertTransition("задание", PRINT_TASK_TRANSITIONS, task.state, to);
-    const saved = this.store.repositories.tasks.update({
-      ...task,
-      ...patch,
-      state: to,
-      updatedAt: this.nowIso()
-    });
-    this.recordAudit({
-      entityType: "print_task",
-      entityId: task.id,
-      action,
-      from: task.state,
-      to,
-      actor
-    });
-    return saved;
-  }
-
-  private transitionEntry(entry: QueueEntry, to: QueueEntry["state"], actor?: string): QueueEntry {
-    assertTransition("запись очереди", QUEUE_ENTRY_TRANSITIONS, entry.state, to);
-    const saved = this.store.repositories.queue.update({
-      ...entry,
-      state: to,
-      updatedAt: this.nowIso()
-    });
-    this.recordAudit({
-      entityType: "queue_entry",
-      entityId: entry.id,
-      action: "transition",
-      from: entry.state,
-      to,
-      actor
-    });
-    return saved;
-  }
-
-  private transitionAssignment(
-    assignment: Assignment,
-    to: Assignment["state"],
-    actor?: string
-  ): Assignment {
-    assertTransition("назначение", ASSIGNMENT_TRANSITIONS, assignment.state, to);
-    const saved = this.store.repositories.assignments.update({
-      ...assignment,
-      state: to,
-      updatedAt: this.nowIso()
-    });
-    this.recordAudit({
-      entityType: "assignment",
-      entityId: assignment.id,
-      action: "transition",
-      from: assignment.state,
-      to,
-      actor
-    });
-    return saved;
-  }
-
-  private transitionBed(bed: BedCycle, to: BedCycle["state"], actor?: string): BedCycle {
-    assertTransition("цикл стола", BED_CYCLE_TRANSITIONS, bed.state, to);
-    const saved = this.store.repositories.bedCycles.update({
-      ...bed,
-      state: to,
-      clearedAt: to === "CLEAR" ? this.nowIso() : bed.clearedAt,
-      updatedAt: this.nowIso()
-    });
-    this.recordAudit({
-      entityType: "bed_cycle",
-      entityId: bed.id,
-      action: "transition",
-      from: bed.state,
-      to,
-      actor
-    });
-    return saved;
-  }
-
-  /** Cancels/releases an assignment and returns its bed to a safe state. */
-  private unwindAssignment(assignment: Assignment, to: "CANCELLED" | "RELEASED", actor?: string): void {
-    const repos = this.store.repositories;
-    // Cancel any live run first so the run's own terminal invariant holds.
-    for (const run of repos.printRuns.listByTask(assignment.taskId)) {
-      if (run.assignmentId === assignment.id && (run.state === "RUNNING" || run.state === "PAUSED")) {
-        const saved = repos.printRuns.update({
-          ...run,
-          state: "CANCELLED",
-          endedAt: this.nowIso(),
-          updatedAt: this.nowIso()
-        });
-        this.recordAudit({
-          entityType: "print_run",
-          entityId: saved.id,
-          action: "cancelled",
-          from: run.state,
-          to: "CANCELLED",
-          actor
-        });
-      }
-    }
-    this.transitionAssignment(assignment, to, actor);
-    if (assignment.bedCycleId) {
-      const bed = repos.bedCycles.getById(assignment.bedCycleId);
-      if (bed) {
-        // A reserved bed had nothing printed → back to CLEAR; a running/awaiting
-        // bed may hold a part → AWAITING_CLEARANCE for the operator.
-        if (bed.state === "RESERVED") this.transitionBed(bed, "CLEAR", actor);
-        else if (bed.state === "RUNNING") this.transitionBed(bed, "AWAITING_CLEARANCE", actor);
-      }
-    }
-  }
-
-  private holdEntryFor(taskId: string, actor?: string): void {
-    const entry = this.store.repositories.queue.findByTaskId(taskId);
-    if (entry && entry.state === "WAITING") {
-      this.transitionEntry(entry, "HELD", actor);
-    }
-  }
-
-  /** Refuses a pin to a printer the farm does not know (when a config check is wired). */
-  private assertPrinterConfigured(printerId: string): void {
-    if (this.isPrinterConfigured && !this.isPrinterConfigured(printerId)) {
-      throw new ValidationError(`Принтер «${printerId}» отсутствует в конфигурации фермы`);
-    }
-  }
-
-  private nextPosition(): number {
-    const max = this.store.repositories.queue.maxPosition();
-    return (max ?? 0) + POSITION_STEP;
-  }
-
-  private nowIso(): string {
-    return this.now().toISOString();
-  }
-
-  private recordAudit(input: {
-    entityType: AuditEntityType;
-    entityId: string;
-    action: string;
-    from?: string;
-    to?: string;
-    actor?: string;
-    detail?: Metadata;
-  }): void {
-    this.store.repositories.audit.insert({
-      id: newId(ID_PREFIX.auditEvent),
-      at: this.nowIso(),
-      entityType: input.entityType,
-      entityId: input.entityId,
-      action: input.action,
-      fromState: input.from ?? null,
-      toState: input.to ?? null,
-      actor: input.actor ?? this.defaultActor,
-      detail: input.detail ?? {}
-    });
-  }
-}
-
-function isTaskTerminal(state: PrintTask["state"]): boolean {
-  return state === "COMPLETED" || state === "FAILED" || state === "CANCELLED";
-}
-
-/**
- * Coerces an operator-supplied priority: absent/non-finite falls back, and a value
- * outside the allowed band is a `ValidationError` (400) rather than silently
- * clamped — an unbounded priority (e.g. `1e308`) would make the whole planning
- * score `Infinity` and swamp every other factor.
- */
-function normalizePriority(value: number | undefined, fallback: number): number {
-  if (value === undefined || !Number.isFinite(value)) return fallback;
-  if (value < PRIORITY_MIN || value > PRIORITY_MAX) {
-    throw new ValidationError(`Приоритет должен быть в диапазоне ${PRIORITY_MIN}…${PRIORITY_MAX}`);
-  }
-  return value;
-}
-
-/**
- * Rejects an impossible scheduling window: a `notBefore` at or after the `deadline`
- * is unsatisfiable, so it fails loudly at write time instead of surfacing only as a
- * warning buried in a later plan. Either side null (no bound) is always fine.
- */
-function assertWindowOrder(notBefore: string | null, deadline: string | null): void {
-  if (notBefore === null || deadline === null) return;
-  const nb = Date.parse(notBefore);
-  const dl = Date.parse(deadline);
-  if (Number.isFinite(nb) && Number.isFinite(dl) && nb >= dl) {
-    throw new ValidationError(
-      `«notBefore» (${notBefore}) не может быть позже дедлайна (${deadline})`
-    );
-  }
-}
-
-/**
- * Normalises an optional ISO timestamp: `null`/empty clears it, a valid ISO
- * string is canonicalised, and anything unparseable is a `ValidationError` (so a
- * bad `notBefore`/`deadline` fails loudly instead of silently becoming null).
- */
-function parseIsoOrNull(value: string | null | undefined, field: string): string | null {
-  if (value === null || value === undefined) return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const ms = Date.parse(trimmed);
-  if (!Number.isFinite(ms)) throw new ValidationError(`Поле «${field}» — некорректная дата: «${value}»`);
-  return new Date(ms).toISOString();
 }

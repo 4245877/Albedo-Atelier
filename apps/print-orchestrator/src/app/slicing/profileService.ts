@@ -1,5 +1,6 @@
 import { JobError, NotFoundError, ValidationError } from "../../core/errors";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
+import { recordAuditEvent } from "../audit";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { AuditEntityType, Metadata } from "../../domain/print/types";
 import {
@@ -443,17 +444,7 @@ export class ProfileService {
     actor: string,
     input: { entityType: AuditEntityType; entityId: string; action: string; to?: string; detail?: Metadata }
   ): void {
-    this.store.repositories.audit.insert({
-      id: newId(ID_PREFIX.auditEvent),
-      at: this.nowIso(),
-      entityType: input.entityType,
-      entityId: input.entityId,
-      action: input.action,
-      fromState: null,
-      toState: input.to ?? null,
-      actor,
-      detail: input.detail ?? {}
-    });
+    recordAuditEvent(this.store, () => this.nowIso(), actor, input);
   }
 }
 

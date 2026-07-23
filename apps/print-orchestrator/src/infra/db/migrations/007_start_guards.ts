@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-import type { Migration } from "./index";
+import type { Migration } from "./types";
 
 /**
  * `start_guards` — the durable idempotency ledger for physical start-of-print.

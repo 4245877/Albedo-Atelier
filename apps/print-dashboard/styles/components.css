@@ -1,0 +1,305 @@
+/* ═══════════════════════════════════════════════════════════════
+   Albedo — Переиспользуемые компоненты: пилюли, списки-строки, бейджи,
+   кнопки, прогресс, тосты, фокус, формы.
+   Часть разбиения styles.css; порядок подключения файлов в index.html
+   воспроизводит исходный каскад: tokens-base → components → dashboard →
+   theme → modals → workflows.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Пилюли статусов ────────────────────────────────────────── */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 13px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--card);
+  border: 1px solid var(--card-edge);
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+.pill-ok    { color: var(--ok-ink); background: var(--ok-soft); border-color: rgb(111 190 141 / 30%); }
+.pill-warn  { color: var(--warn-ink); background: var(--warn-soft); border-color: rgb(210 154 68 / 32%); }
+.pill-danger{ color: var(--danger-ink); background: var(--danger-soft); border-color: rgb(207 98 115 / 32%); }
+.pill-gold  { color: var(--gold-bright); background: var(--gold-soft); border-color: var(--gold-line); }
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.dot-pulse { animation: pulse 2.2s ease-in-out infinite; }
+
+
+/* ── Общие списки-строки ────────────────────────────────────── */
+
+.row-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--card-inner);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: border-color 0.2s, background 0.2s, transform 0.2s;
+}
+
+.row:hover { border-color: var(--gold-line); background: rgb(244 238 226 / 6%); }
+
+/* Растягивающийся столбец строки. min-width:0 обязателен, иначе длинный текст
+   не даёт flex-элементу сжаться и выталкивает соседей за край (гориз. overflow).
+   Правило общее (не только внутри .row): те же .grow есть в .next-job и .plan-next. */
+.grow { flex: 1; min-width: 0; }
+
+/* Заголовки/подписи приходят с backend (имена заданий, файлов, материалов) —
+   длинный неразрывный токен обязан переноситься, иначе рвёт карточку по горизонтали. */
+.row-title { font-weight: 700; font-size: 14px; overflow-wrap: anywhere; }
+.row-sub { font-size: 12.5px; color: var(--ink-soft); margin-top: 1px; overflow-wrap: anywhere; }
+
+.row-time {
+  font-size: 12px;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.row-danger { background: var(--danger-soft); }
+.row-danger:hover { border-color: rgb(207 98 115 / 38%); background: rgb(207 98 115 / 18%); }
+.row-warn { background: var(--warn-soft); }
+.row-warn:hover { border-color: rgb(210 154 68 / 38%); background: rgb(210 154 68 / 18%); }
+
+.row-icon {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 13px;
+  background: var(--card);
+  border: 1px solid var(--card-edge);
+}
+
+/* ── Бейджи ─────────────────────────────────────────────────── */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.badge .dot { width: 6px; height: 6px; }
+
+.badge-printing { color: var(--gold-bright); background: var(--gold-soft); }
+.badge-idle     { color: var(--ok-ink); background: var(--ok-soft); }
+.badge-paused   { color: var(--warn-ink); background: var(--warn-soft); }
+.badge-error    { color: var(--danger-ink); background: var(--danger-soft); }
+.badge-offline  { color: #a9a4bb; background: var(--offline-soft); }
+.badge-amethyst { color: var(--amethyst-ink); background: var(--amethyst-soft); }
+.badge-plain    { color: var(--ink-soft); background: var(--card-inner); border: 1px solid var(--card-edge); }
+
+/* ── Кнопки ─────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 9px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--btn-edge);
+  background: var(--btn-bg);
+  color: var(--ink);
+  font: 700 13.5px var(--font-body);
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s, border-color 0.18s, color 0.18s;
+}
+
+/* :not([disabled]) — погашенная кнопка не отзывается на наведение вовсе:
+   правило [disabled] ниже гасит только transform/box-shadow, а золото текста
+   и рамки при равной специфичности просачивалось бы и на неживые кнопки. */
+.btn:not([disabled]):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px -8px rgb(3 2 8 / 80%);
+  border-color: var(--gold-line);
+  color: var(--gold-bright);
+}
+.btn:not([disabled]):active { transform: translateY(0); box-shadow: none; }
+
+.btn-primary {
+  background: linear-gradient(135deg, #e0bd63, #b08834);
+  border-color: #8a6a24;
+  color: #221806;
+}
+
+.btn-primary:not([disabled]):hover {
+  background: linear-gradient(135deg, #eaca74, #c2963c);
+  border-color: #8a6a24;
+  color: #221806;
+  box-shadow: 0 8px 22px -8px rgb(201 162 75 / 55%);
+}
+
+.btn-ghost { background: transparent; }
+
+.btn-danger { color: var(--danger-ink); }
+.btn-danger:not([disabled]):hover { border-color: rgb(207 98 115 / 40%); background: var(--danger-soft); color: var(--danger-ink); }
+
+.btn-sm { padding: 6px 11px; font-size: 12.5px; border-radius: 8px; }
+
+.btn[disabled] { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; }
+
+/* ── Прогресс ───────────────────────────────────────────────── */
+
+.progress {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+/* Заполнение — слой во всю дорожку, сжатый scaleX(доля выполнения): transform
+   анимируется на композиторе, тогда как переход по width гонял бы layout. */
+.progress > i {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--gold-deep), var(--gold) 55%, var(--topaz));
+  transform-origin: left;
+  transform: scaleX(0);
+  transition: transform 0.8s ease;
+}
+
+.progress > i::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 30%, rgb(255 245 220 / 35%) 50%, transparent 70%);
+  animation: shimmer 2.6s linear infinite;
+}
+
+.progress.is-paused > i { background: linear-gradient(90deg, #6e6046, #8d7d57); }
+.progress.is-paused > i::after { animation: none; }
+
+
+/* ── Тосты ──────────────────────────────────────────────────── */
+
+.toast-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: min(360px, calc(100vw - 36px));
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #1d1830, #161226);
+  border: 1px solid #33294a;
+  border-left: 3px solid var(--gold);
+  box-shadow: var(--shadow-hover);
+  font-size: 13.5px;
+  font-weight: 600;
+  animation: toast-in 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+
+.toast.out { animation: toast-out 0.3s ease both; }
+.toast .star { flex: none; }
+.toast-danger { border-left-color: var(--danger); }
+.toast-ok { border-left-color: var(--ok); }
+
+/* ── Фокус и тактильный отклик (клавиатура + тач) ───────────── */
+
+:focus-visible {
+  outline: 2px solid var(--gold-bright);
+  outline-offset: 2px;
+}
+
+.card-night :focus-visible { outline-color: var(--topaz); }
+
+/* Отклик на нажатие для тач-устройств, где :hover не срабатывает, — только у
+   реально кликабельного (кнопки, вкладки, превью камер): «нажимной» отклик на
+   пассивных строках и плитках обещал бы действие, которого нет. */
+.nav-chip:active {
+  transform: translateY(0) scale(0.96);
+  color: var(--gold-bright);
+  border-color: var(--gold-line);
+  background: var(--gold-soft);
+}
+.quick:active { transform: scale(0.98); border-color: var(--gold-line); background: var(--gold-soft); }
+.cam-thumb:active { transform: scale(0.98); }
+
+
+/* ── Формы ─────────────────────────────────────────────────── */
+
+.modal-form { display: flex; flex-direction: column; gap: 14px; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 460px) { .field-row { grid-template-columns: 1fr; } }
+.field-lbl { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
+.field-lbl .req { color: var(--danger-ink); }
+.field-hint { font-size: 11.5px; color: var(--ink-faint); }
+
+.input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--btn-edge);
+  border-radius: var(--radius-sm);
+  background: var(--btn-bg);
+  color: var(--ink);
+  font: 500 14px var(--font-body);
+  transition: border-color 0.18s, box-shadow 0.18s;
+}
+.input::placeholder { color: var(--ink-faint); }
+.input:focus {
+  outline: none;
+  border-color: var(--gold-line);
+  box-shadow: 0 0 0 3px var(--gold-soft);
+}
+
+.field-check { flex-direction: row; align-items: center; gap: 9px; font-size: 13.5px; color: var(--ink-soft); }
+.field-check input { width: 16px; height: 16px; accent-color: var(--gold); }
+
+.form-error {
+  padding: 9px 12px;
+  border: 1px solid rgb(207 98 115 / 40%);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger-ink);
+  font-size: 13px;
+}
+
+.modal-info { font-size: 14px; line-height: 1.6; color: var(--ink-soft); display: flex; flex-direction: column; gap: 10px; }
+.modal-info p { margin: 0; }
+.modal-info code {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--card-inner);
+  border: 1px solid var(--card-edge);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 12.5px;
+  color: var(--gold-bright);
+}
+

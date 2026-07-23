@@ -1,4 +1,6 @@
-import { $, badge, esc, emptyRow, fmtLeft } from "../util.js";
+import { $, esc, emptyRow } from "../util.js";
+import { badge } from "../shared/chips.js";
+import { fmtLeft } from "../shared/format.js";
 import { isBusy, progressBarHtml, progressPercentText } from "./printerView.js";
 
 /* ── Верхняя панель (статус сервиса / backend) ─────────────── */

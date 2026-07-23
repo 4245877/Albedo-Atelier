@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-import type { Migration } from "./index";
+import type { Migration } from "./types";
 
 /**
  * Canonical-dispatch hardening: the schema changes that let SQLite become the

@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-import type { Migration } from "./index";
+import type { Migration } from "./types";
 
 /**
  * Adds the manual-scheduler fields to the existing print-queue model. Purely

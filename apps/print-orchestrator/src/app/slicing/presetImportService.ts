@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { ID_PREFIX, newId } from "../../domain/print/ids";
+import { recordAuditEvent } from "../audit";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { AnalysisFinding, AuditEntityType, Metadata } from "../../domain/print/types";
 import { checkProfileSelf } from "../../domain/slicing/compatibility";
@@ -285,16 +286,10 @@ export class PresetImportService {
     actor: string,
     input: { entityType?: AuditEntityType; entityId?: string; action: string; from?: string; to?: string; detail?: Metadata }
   ): void {
-    this.store.repositories.audit.insert({
-      id: newId(ID_PREFIX.auditEvent),
-      at: this.now(),
+    recordAuditEvent(this.store, () => this.now(), actor, {
+      ...input,
       entityType: input.entityType ?? "profile_revision",
-      entityId: input.entityId ?? "catalog",
-      action: input.action,
-      fromState: input.from ?? null,
-      toState: input.to ?? null,
-      actor,
-      detail: input.detail ?? {}
+      entityId: input.entityId ?? "catalog"
     });
   }
 }

@@ -5,6 +5,7 @@ import { pipeline } from "node:stream/promises";
 
 import { JobError, NotFoundError, ValidationError } from "../../core/errors";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
+import { recordAuditEvent } from "../audit";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import { assertTransition } from "../../domain/print/states";
 import type { ArtifactAnalysis, AuditEntityType, Metadata } from "../../domain/print/types";
@@ -19,7 +20,7 @@ import { SliceRuntimeUnavailableError, type SliceRunner } from "../../infra/slic
 import type { StoreLogger } from "../../shared/logger";
 import type { ArtifactService } from "../artifacts/artifactService";
 import { normalizeClass, setMembersOf, targetOf, type SlicerPrinterRef } from "./profileService";
-import { SliceWorker } from "./sliceWorker";
+import { BoundedWorkerPool } from "../../shared/boundedWorkerPool";
 
 export interface CreateSliceInput {
   artifactId: string;
@@ -52,7 +53,7 @@ export interface SliceServiceOptions {
  *
  * `createSlice` validates the preconditions (a `needs_preparation` analysis, an
  * **approved** set of **active** profiles, a real task) and either returns a cache
- * hit or a `pending` variant queued on the bounded {@link SliceWorker}. `runSlice`
+ * hit or a `pending` variant queued on the bounded {@link BoundedWorkerPool}. `runSlice`
  * (the worker body) then: probes the runtime (no runtime → honest `blocked`, never
  * a fake); copies the model and writes the resolved profile JSONs into an isolated
  * temp dir; spawns OrcaSlicer under a timeout; on success stages the output through
@@ -64,7 +65,7 @@ export interface SliceServiceOptions {
 export class SliceService {
   private readonly now: () => Date;
   private readonly defaultActor: string;
-  private readonly worker: SliceWorker;
+  private readonly worker: BoundedWorkerPool;
   private readonly logger: StoreLogger;
 
   constructor(
@@ -77,7 +78,10 @@ export class SliceService {
     this.now = options.now ?? (() => new Date());
     this.defaultActor = options.actor ?? "operator";
     this.logger = options.logger ?? {};
-    this.worker = new SliceWorker(options.concurrency, (id) => this.runSlice(id), this.logger);
+    this.worker = new BoundedWorkerPool(options.concurrency, (id) => this.runSlice(id), {
+      logger: this.logger,
+      label: "slice worker"
+    });
     // The per-slice work dirs are created under this root; ensure it exists once.
     fs.mkdirSync(this.options.tmpRoot, { recursive: true });
   }
@@ -617,18 +621,7 @@ export class SliceService {
     actor: string,
     input: { entityId: string; action: string; from?: string; to?: string; detail?: Metadata }
   ): void {
-    const entityType: AuditEntityType = "slice_variant";
-    this.store.repositories.audit.insert({
-      id: newId(ID_PREFIX.auditEvent),
-      at: this.nowIso(),
-      entityType,
-      entityId: input.entityId,
-      action: input.action,
-      fromState: input.from ?? null,
-      toState: input.to ?? null,
-      actor,
-      detail: input.detail ?? {}
-    });
+    recordAuditEvent(this.store, () => this.nowIso(), actor, { ...input, entityType: "slice_variant" });
   }
 }
 

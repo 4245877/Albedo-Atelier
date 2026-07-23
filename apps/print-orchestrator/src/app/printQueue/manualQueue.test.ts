@@ -57,7 +57,7 @@ test("reorder renormalises positions so repeated neighbour±1 moves never wedge"
   const positions = (): number[] => svc.listOpenQueue().map((r) => r.entry.position);
 
   // Mimic the dashboard's "move up": position = upper-neighbour.position − 1, with
-  // a reload (a fresh listOpenQueue) between moves, exactly as render/scheduler.js does.
+  // a reload (a fresh listOpenQueue) between moves, exactly as features/scheduler/controller.js does.
   const moveUp = (taskId: string): void => {
     const queue = svc.listOpenQueue();
     const idx = queue.findIndex((r) => r.task.id === taskId);

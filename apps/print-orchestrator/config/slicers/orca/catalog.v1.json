@@ -1,15 +1,15 @@
 {
   "catalogVersion": 1,
   "generator": "scripts/stage-orca-presets.py",
-  "stagedAt": "2026-07-17T10:42:05+00:00",
+  "stagedAt": "2026-07-23T13:14:00+00:00",
   "slicer": "OrcaSlicer",
   "sources": [
     {
       "id": "bambu-lab-a1-0.4-petg",
       "file": "sources/bambu-lab-a1-0.4-petg.orca_printer",
       "originalName": "Bambu Lab A1 0.4 PETG.orca_printer",
-      "sha256": "391dfe02b3b415978bfc770a881bea15c6173f8fa94972d6fd48c60357a8874f",
-      "sizeBytes": 16112,
+      "sha256": "87ea778e19ee21f17e30b23a85b4b4d9bd21bccf14ad091621b9ae04755379dd",
+      "sizeBytes": 14833,
       "bundleType": "printer config bundle",
       "orcaVersion": "02.03.00.62"
     },
@@ -17,8 +17,8 @@
       "id": "creality-k2-petg-0.4-fast",
       "file": "sources/creality-k2-petg-0.4-fast.orca_printer",
       "originalName": "Creality K2 PETG 0.4 FAST.orca_printer",
-      "sha256": "828b5a94eba7059a99696160484cf3efbe1b744b3ef7c4721ab0b9aab8dbcb44",
-      "sizeBytes": 11497,
+      "sha256": "24dc9659a6fe43c8ba1c647143b83ff1f5f7bb3d0d8d7e4d3d0890d865f5ce6b",
+      "sizeBytes": 9294,
       "bundleType": "printer config bundle",
       "orcaVersion": "02.03.00.62"
     },
@@ -26,8 +26,8 @@
       "id": "printer-presets",
       "file": "sources/printer-presets.zip",
       "originalName": "Printer presets.zip",
-      "sha256": "e062ffedd653ae5d28ddd1d4ad9917c243eee9ef6e6b9d6531489a7e5826b91d",
-      "sizeBytes": 9116,
+      "sha256": "7a83c6bc939e885e5895e1f42ab3849f8df5a65e92a021858214531cd2363d23",
+      "sizeBytes": 9084,
       "bundleType": null,
       "orcaVersion": null
     }
@@ -45,19 +45,6 @@
       "sources": [
         "bambu-lab-a1-0.4-petg",
         "creality-k2-petg-0.4-fast"
-      ]
-    },
-    {
-      "logicalId": "filament:Creality Hyper PLA @BBL A1 - Copy",
-      "type": "filament",
-      "name": "Creality Hyper PLA @BBL A1 - Copy",
-      "file": "profiles/filament/creality-hyper-pla-at-bbl-a1-copy.json",
-      "sha256": "fffa34a72203a190904b2093529560ba6b7a33058d54addb83421550c01fbcb1",
-      "sizeBytes": 634,
-      "inherits": "Bambu PLA Basic @BBL A1",
-      "from": "User",
-      "sources": [
-        "bambu-lab-a1-0.4-petg"
       ]
     },
     {
@@ -121,19 +108,6 @@
       "file": "profiles/filament/petg-at-k2-fast.json",
       "sha256": "71dc402939f0223b0084b8df017c573fdb3dce6f2f4cac33503735070a84bf19",
       "sizeBytes": 2033,
-      "inherits": "Creality Generic PLA @K2-all",
-      "from": "User",
-      "sources": [
-        "creality-k2-petg-0.4-fast"
-      ]
-    },
-    {
-      "logicalId": "filament:PETG @K2 FAST1",
-      "type": "filament",
-      "name": "PETG @K2 FAST1",
-      "file": "profiles/filament/petg-at-k2-fast1.json",
-      "sha256": "2f52fc36b00ed846795d42fd8f5c429a90a303993afb45cab80dd0970834080d",
-      "sizeBytes": 2035,
       "inherits": "Creality Generic PLA @K2-all",
       "from": "User",
       "sources": [
@@ -220,38 +194,12 @@
       ]
     },
     {
-      "logicalId": "process:0.08mm SuperDetail @Creality K2 0.2 nozzle - Copy",
-      "type": "process",
-      "name": "0.08mm SuperDetail @Creality K2 0.2 nozzle - Copy",
-      "file": "profiles/process/0.08mm-superdetail-at-creality-k2-0.2-nozzle-copy.json",
-      "sha256": "f4bd85c6084a400eae40b3769508f38055b0814707dd5ff123ba41599dc7d62a",
-      "sizeBytes": 372,
-      "inherits": "0.08mm SuperDetail @Creality K2 0.2 nozzle",
-      "from": "User",
-      "sources": [
-        "creality-k2-petg-0.4-fast"
-      ]
-    },
-    {
       "logicalId": "process:@BBL A1 0.4 PLA",
       "type": "process",
       "name": "@BBL A1 0.4 PLA",
       "file": "profiles/process/at-bbl-a1-0.4-pla.json",
       "sha256": "a4ceaa6aa25038f351399b500ba7c610ab508f4a93726181ba95ed4696d0ddf6",
       "sizeBytes": 1087,
-      "inherits": "0.20mm Strength @BBL A1",
-      "from": "User",
-      "sources": [
-        "bambu-lab-a1-0.4-petg"
-      ]
-    },
-    {
-      "logicalId": "process:@BBL A1 0.4 PLA тест",
-      "type": "process",
-      "name": "@BBL A1 0.4 PLA тест",
-      "file": "profiles/process/at-bbl-a1-0.4-pla-test.json",
-      "sha256": "4d0ab4813a062359f3a45dffcfb820d9de286f5f36eb2e4760584a50115ce0f6",
-      "sizeBytes": 1293,
       "inherits": "0.20mm Strength @BBL A1",
       "from": "User",
       "sources": [
@@ -291,19 +239,6 @@
       "file": "profiles/process/creality-k2-0.4-fast.json",
       "sha256": "218f8df872bd56d5850a64a338f04f92692f0ea69bed302d2e96c7960c545340",
       "sizeBytes": 1367,
-      "inherits": "0.08mm SuperDetail @Creality K2 0.2 nozzle",
-      "from": "User",
-      "sources": [
-        "creality-k2-petg-0.4-fast"
-      ]
-    },
-    {
-      "logicalId": "process:Creality K2 0.4 FAST1",
-      "type": "process",
-      "name": "Creality K2 0.4 FAST1",
-      "file": "profiles/process/creality-k2-0.4-fast1.json",
-      "sha256": "36e5d1109ab12ec78ac12eccad09f3b922bd57d7a877d2477bb45ed024af552d",
-      "sizeBytes": 2120,
       "inherits": "0.08mm SuperDetail @Creality K2 0.2 nozzle",
       "from": "User",
       "sources": [

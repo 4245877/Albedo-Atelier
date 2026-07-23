@@ -7,7 +7,7 @@ import {
   distinctClasses,
   nextPollMs,
   targetOptions
-} from "../render/slicingForm.js";
+} from "../features/slicing/formModel.js";
 
 /*
  * The "Новый набор" target logic (P0-#3 + friends): the form must offer BOTH server

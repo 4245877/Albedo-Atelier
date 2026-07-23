@@ -59,7 +59,7 @@ after(async () => {
   fs.rmSync(TMP, { recursive: true, force: true });
 });
 
-test("POST /slicing/presets/import imports the real catalog (3 active, 22 quarantined)", async () => {
+test("POST /slicing/presets/import imports the real catalog (3 active, 17 quarantined)", async () => {
   const res = await app.inject({
     method: "POST",
     url: "/api/print/slicing/presets/import",
@@ -68,7 +68,7 @@ test("POST /slicing/presets/import imports the real catalog (3 active, 22 quaran
   assert.equal(res.statusCode, 200);
   const { result } = res.json();
   assert.equal(result.counts.active, 3);
-  assert.equal(result.counts.quarantined, 22);
+  assert.equal(result.counts.quarantined, 17);
   assert.equal(result.counts.invalid, 0);
   assert.equal(result.sourceIntegrity.ok, true);
 });
@@ -80,14 +80,14 @@ test("GET /slicing/runtime honestly reports no runtime + the profile counts", as
   assert.equal(body.runtime.available, false);
   assert.ok(body.runtime.error, "expected an honest diagnostic");
   assert.equal(body.profileCounts.active, 3);
-  assert.equal(body.profileCounts.quarantined, 22);
+  assert.equal(body.profileCounts.quarantined, 17);
   assert.ok(Array.isArray(body.coverage));
   assert.ok(body.missingParents.length >= 7);
 });
 
-test("GET /slicing/profiles lists all 25 revisions; ?type filters", async () => {
+test("GET /slicing/profiles lists all 20 revisions; ?type filters", async () => {
   const all = await app.inject({ method: "GET", url: "/api/print/slicing/profiles" });
-  assert.equal(all.json().profiles.length, 25);
+  assert.equal(all.json().profiles.length, 20);
   const filament = await app.inject({ method: "GET", url: "/api/print/slicing/profiles?type=filament" });
   const names = filament.json().profiles.map((p: { name: string }) => p.name);
   assert.ok(names.includes("Creality"));

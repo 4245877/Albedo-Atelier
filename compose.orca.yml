@@ -1,0 +1,24 @@
+# OPTIONAL override: run the orchestrator with a host-mounted OrcaSlicer
+# runtime (the extracted AppImage's squashfs-root). Adds two things the base
+# compose.yml deliberately does not carry:
+#
+#   1. the `production-orca` image variant — the base image plus the system
+#      GTK/WebKit/GL libraries the OrcaSlicer AppImage links against (heavy;
+#      never installed into the lean base image);
+#   2. the read-only /opt/orca mount of the host directory named by
+#      ORCA_HOST_DIR in .env (an absolute, deployment-specific path that must
+#      not be hardcoded in the shared base file).
+#
+# Usage (set ORCA_HOST_DIR and ORCA_SLICER_CMD=/opt/orca/AppRun in .env first):
+#   docker compose -f compose.yml -f compose.orca.yml up -d --build
+# Or persist the file pair in .env:  COMPOSE_FILE=compose.yml:compose.orca.yml
+#
+# Without this override the farm runs fine — slicing is honestly BLOCKED until
+# a runtime is configured (see "OrcaSlicer slicing runtime" in .env.example).
+services:
+  print-orchestrator:
+    build:
+      context: ./apps/print-orchestrator
+      target: production-orca
+    volumes:
+      - "${ORCA_HOST_DIR:?set ORCA_HOST_DIR in .env (see .env.example — the extracted OrcaSlicer squashfs-root)}:/opt/orca:ro"

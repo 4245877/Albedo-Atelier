@@ -1,0 +1,317 @@
+/* ═══════════════════════════════════════════════════════════════
+   Albedo — Темы: переключатель тьма/свет/авто и светлая тема «Соборный свет».
+   Часть разбиения styles.css; порядок подключения файлов в index.html
+   воспроизводит исходный каскад: tokens-base → components → dashboard →
+   theme → modals → workflows.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Переключатель темы (тьма ↔ свет ↔ авто) ─────────────────── */
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 13px;
+  border-radius: 999px;
+  background: var(--card);
+  border: 1px solid var(--card-edge);
+  color: var(--ink-soft);
+  font: 700 12.5px var(--font-body);
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s, background 0.2s, transform 0.2s, box-shadow 0.2s;
+}
+
+.theme-toggle:hover {
+  color: var(--gold-bright);
+  border-color: var(--gold-line);
+  background: var(--gold-soft);
+  transform: translateY(-1px);
+}
+
+.theme-toggle:active { transform: translateY(0) scale(0.97); }
+
+.theme-toggle-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--gold);
+  transition: color 0.2s, transform 0.4s ease;
+}
+
+.theme-toggle-icon svg { width: 16px; height: 16px; display: block; }
+
+/* Иконка светит цветом текущего облика: луна — аметист, солнце — золото. */
+.theme-toggle[data-effective="dark"] .theme-toggle-icon { color: var(--amethyst-ink); }
+.theme-toggle[data-effective="light"] .theme-toggle-icon { color: var(--gold); }
+.theme-toggle:hover .theme-toggle-icon { color: var(--gold-bright); transform: rotate(-12deg); }
+.theme-toggle-label { line-height: 1; }
+
+/* ═══════════════════════════════════════════════════════════════
+   СВЕТЛАЯ ТЕМА · «Соборный свет»
+   Фарфоровая кожа и белоснежное платье Альбедо; обсидиановые волосы
+   в строках заголовков; старинное золото рогов и топазовый ирис глаз;
+   аметистовая слива и чёрные перья крыльев. Тот же Назарик — но в
+   утреннем свете витражей, а не в тронной тьме.
+
+   Активна только при [data-theme="light"] и выше по специфичности,
+   чем тёмные значения в :root, — тёмная система остаётся нетронутой.
+   ═══════════════════════════════════════════════════════════════ */
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* Фарфор и жемчуг · светлый мрамор зала */
+  --bg: #f3edf4;
+  --card: #ffffff;
+  --card-edge: #e6dde7;          /* Холодная тень кожи, смягчённая */
+  --card-inner: rgb(31 27 40 / 4%);
+  --track: #e7dfea;
+
+  --card-top: #ffffff;
+  --card-bot: #f7f1f8;
+  --edge-strong: #d8c9db;
+  --btn-bg: #fbf7fc;
+  --btn-edge: #e3d9e6;
+  --toggle-off: #d2c7d6;
+  --table-line: #eee7f0;
+
+  /* Обсидиановый волос · индиговый отлив — иерархия текста */
+  --ink: #201a2b;
+  --ink-soft: #55506c;
+  --ink-faint: #736b82;          /* 5.05:1 на белом — микрометки проходят AA */
+
+  /* Старинное золото рогов · топазовый ирис.
+     Для ТЕКСТА на светлом фоне золото углубляем (иначе теряет контраст);
+     декоративные штрихи и рамки остаются в живом «старинном золоте». */
+  --gold: #c49a3a;
+  --gold-bright: #96701c;
+  --gold-deep: #7c5c16;
+  --gold-soft: rgb(196 154 58 / 15%);
+  --gold-line: rgb(196 154 58 / 42%);
+  --topaz: #b78d24;
+
+  /* Аметистовая слива крыльев */
+  --amethyst: #6d4c78;
+  --amethyst-soft: rgb(109 76 120 / 13%);
+  --amethyst-ink: #5a3d66;
+
+  /* Заголовки — обсидиан на фарфоре (чёрные волосы на бледной коже). */
+  --ivory: #221a2b;
+
+  --ok: #3f9769;
+  --ok-soft: rgb(63 151 105 / 13%);
+  --warn: #b5792a;
+  --warn-soft: rgb(181 121 42 / 14%);
+  --danger: #c0485c;
+  --danger-soft: rgb(192 72 92 / 12%);
+
+  --ok-ink: #2f7d52;
+  --warn-ink: #8c5c16;
+  --danger-ink: #a5384b;
+  --slate: #6a6786;
+  --slate-soft: rgb(106 103 134 / 14%);
+  --offline: #857f95;
+  --offline-soft: rgb(133 127 149 / 16%);
+
+  /* Ночная карточка остаётся тёмной (тронная чернота) и днём —
+     чёрное крыло Альбедо, обсидиановая брошь на фарфоре зала. */
+  --night-ink: #efe9dc;
+  --night-bg: #120e1c;
+  --night-deep: #0a0714;
+
+  /* Тени — прохладные и лёгкие, свет словно из витражей, не из бездны. */
+  --shadow: 0 16px 34px -14px rgb(74 58 104 / 26%);
+  --shadow-hover: 0 26px 50px -16px rgb(66 50 96 / 34%);
+
+  /* Кружево-парча (светлый облик): сливовое плетение и узлы, старинно-золотые
+     перья — тот же мотив, что и ночью, но для фарфора зала. */
+  --damask: url("data:image/svg+xml,%3Csvg xmlns='http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg' width='168' height='235' viewBox='0 0 150 210'%3E%3Cpath d='M75 0 C40 20 0 55 0 105 C0 155 40 190 75 210M75 0 C110 20 150 55 150 105 C150 155 110 190 75 210' fill='none' stroke='%236d4c78' stroke-opacity='0.17' stroke-width='1.1'%2F%3E%3Cg fill='%236d4c78' fill-opacity='0.22'%3E%3Cpath d='M0 105 l6 -6 -6 -6 -6 6 z'%2F%3E%3Cpath d='M150 105 l6 -6 -6 -6 -6 6 z'%2F%3E%3Cpath d='M75 0 l6 6 -6 6 -6 -6 z'%2F%3E%3Cpath d='M75 210 l6 -6 -6 -6 -6 6 z'%2F%3E%3C%2Fg%3E%3Cg transform='translate(59.5 87) scale(1.55)' fill='%23b58a2a' fill-opacity='0.17' stroke='%236d4c78' stroke-opacity='0.17' stroke-width='0.5'%3E%3Cpath d='M16 3.5C10.6 6.2 6.6 11.4 4.6 20.4c5.2-1.5 9.1-5.6 11-12.3z'%2F%3E%3Cpath d='M4.6 20.4C8.4 13.6 12.2 8.2 16 3.5' fill='none'%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E");
+}
+
+/* Соборный свет: фарфор, тёплые нити золота и сливы; то же кружево-парча, что
+   и ночью, но сливовым по фарфору — фактура белого платья Альбедо при свете
+   витражей. Значение самого узора переопределено в :root[data-theme="light"]. */
+:root[data-theme="light"] body {
+  background:
+    var(--damask) 0 0 / 168px 235px,
+    radial-gradient(1200px 600px at 78% -10%, rgb(196 154 58 / 10%), transparent 60%),
+    radial-gradient(900px 520px at -10% 24%, rgb(109 76 120 / 8%), transparent 62%),
+    radial-gradient(1000px 700px at 50% 118%, rgb(191 198 214 / 35%), transparent 66%),
+    linear-gradient(180deg, #faf7fb 0%, #f2ecf4 42%, #ece4ef 100%);
+}
+
+/* Мягкий верхний блик и почти незримая сливовая рама вместо тёмной виньетки. */
+:root[data-theme="light"] body::before {
+  background:
+    radial-gradient(150% 120% at 50% -12%, rgb(255 255 255 / 60%), transparent 45%),
+    radial-gradient(150% 130% at 50% 112%, rgb(120 100 148 / 9%), transparent 62%);
+}
+
+:root[data-theme="light"] ::selection { background: rgb(196 154 58 / 28%); color: #2a2012; }
+
+/* Липкие панели — полупрозрачный жемчуг поверх контента. */
+:root[data-theme="light"] .topbar,
+:root[data-theme="light"] .section-nav { background: rgb(248 245 251 / 82%); }
+
+:root[data-theme="light"].scrolled .section-nav {
+  box-shadow:
+    0 1px 0 rgb(196 154 58 / 24%),
+    0 16px 26px -22px rgb(80 60 110 / 55%);
+}
+
+/* Медальон-герб — белая эмаль в золотом ободе. */
+:root[data-theme="light"] .brand-sigil {
+  background: linear-gradient(180deg, #ffffff, #f2ecf3);
+  box-shadow: 0 0 0 1px rgb(196 154 58 / 22%), 0 6px 16px -4px rgb(96 74 128 / 24%);
+}
+
+:root[data-theme="light"] .brand-sub { color: var(--gold-bright); }
+
+/* Hero: светящаяся фарфоровая плита с золотым и сливовым свечением. */
+:root[data-theme="light"] .hero {
+  background:
+    radial-gradient(720px 300px at 84% -8%, rgb(196 154 58 / 15%), transparent 68%),
+    radial-gradient(560px 320px at -4% 104%, rgb(109 76 120 / 12%), transparent 70%),
+    radial-gradient(900px 420px at 50% 130%, rgb(255 255 255 / 55%), transparent 72%),
+    linear-gradient(150deg, #ffffff 0%, #f7f0f8 55%, #f0e7f2 100%);
+  border-color: rgb(196 154 58 / 32%);
+}
+
+/* Заголовок: обсидиан → индиго → старинное золото (волосы, ловящие свет).
+   Клип по тексту повторяем здесь: сокращённое свойство `background` сбрасывает
+   background-clip, поэтому без повторного объявления градиент залил бы прямоугольник.
+   Обёрнуто в тот же @supports, что и базовое правило, — старые движки покажут
+   обсидиановый текст (var(--ivory)), а не залитую плашку. */
+@supports (-webkit-background-clip: text) or (background-clip: text) {
+  :root[data-theme="light"] .hero h1 {
+    background: linear-gradient(105deg, #1d1727 0%, #3e3a57 44%, #96701c 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+  }
+}
+
+/* Днём скетч — графит на фарфоре: плотнее и почти без сепии, тёплый тон
+   подобран под свечение из тьмы и на белом отдаёт желтизной. */
+:root[data-theme="light"] .hero-sketch {
+  --hero-sketch-opacity: 0.6;
+  --hero-sketch-opacity-breathe: 0.64;
+}
+:root[data-theme="light"] .hero-sketch img { filter: sepia(0.18) contrast(1.03); }
+
+/* В одну колонку портрет оказывается за текстом — днём приглушаем сильнее:
+   тёмный графит волос под обсидиановым текстом съедает контраст быстрее,
+   чем тот же портрет под слоновой костью ночи. */
+@media (max-width: 900px) {
+  :root[data-theme="light"] .hero-sketch {
+    --hero-sketch-opacity: 0.32;
+    --hero-sketch-opacity-breathe: 0.35;
+  }
+}
+
+/* Днём над залом опадают чёрные перья крыльев (одно — сливовое). */
+:root[data-theme="light"] .feather { color: rgb(26 20 34 / 34%); }
+:root[data-theme="light"] .feather.f2 { color: rgb(109 76 120 / 32%); }
+
+/* Плитки показателей — белые изразцы с прохладной гранью, цифры-обсидиан. */
+:root[data-theme="light"] .stat-tile {
+  background: linear-gradient(180deg, #ffffff, #f6f0f7);
+  border-color: #e7dee9;
+  box-shadow: 0 1px 2px rgb(80 60 110 / 5%);
+}
+
+/* На фарфоре светлое золото фаски пропадает — углубляем до старинного. */
+:root[data-theme="light"] .stat-tile::before {
+  background: linear-gradient(90deg, transparent 12%, rgb(196 154 58 / 55%) 50%, transparent 88%);
+}
+
+/* В hero изразцы полупрозрачны: глухой белый прятал скетч целиком, а сквозь
+   матовый фарфор портрет просвечивает, оставляя обсидиановые цифры чёткими. */
+:root[data-theme="light"] .hero-stats .stat-tile {
+  background: linear-gradient(180deg, rgb(255 255 255 / 82%), rgb(246 240 247 / 66%));
+}
+
+:root[data-theme="light"] .stat-tile:hover {
+  box-shadow: 0 10px 22px -12px rgb(80 60 110 / 30%), 0 0 0 1px rgb(196 154 58 / 20%);
+  border-color: var(--gold-line);
+}
+
+/* Строки-списки: наведение — лёгкий обсидиановый иней. */
+:root[data-theme="light"] .row:hover { background: rgb(31 27 40 / 5%); }
+:root[data-theme="light"] .row-danger:hover { background: rgb(192 72 92 / 14%); border-color: rgb(192 72 92 / 40%); }
+:root[data-theme="light"] .row-warn:hover { background: rgb(181 121 42 / 16%); border-color: rgb(181 121 42 / 40%); }
+
+/* Иконка быстрого действия — светлый изразец с золотым знаком. */
+:root[data-theme="light"] .quick .q-icon {
+  background: #f4eef6;
+  border-color: #e7dce9;
+  color: var(--gold-bright);
+}
+
+/* Тост — белый пергамент; золотую/статусную грань слева не трогаем. */
+:root[data-theme="light"] .toast {
+  background: linear-gradient(180deg, #ffffff, #f7f1f8);
+  border-top-color: #e8dfea;
+  border-right-color: #e8dfea;
+  border-bottom-color: #e8dfea;
+}
+
+/* Свотчи материалов: near-white (жемчужный PLA) на белой карточке держится
+   только на рамке — углубляем её, чтобы образец не сливался с фоном. */
+:root[data-theme="light"] .swatch {
+  border-color: rgb(33 26 43 / 30%);
+  box-shadow: 0 1px 2px rgb(74 58 104 / 12%);
+}
+
+/* Глифы-иконки заголовков секций: --gold (#c49a3a) = 2.62:1 на белом — почти
+   не видны. Углубляем до #96701c (4.53:1); статусные (danger/warn) и глиф на
+   тёмной ночной карточке (топаз) не трогаем. */
+:root[data-theme="light"] .card:not(.card-night) .glyph:not(.glyph-danger):not(.glyph-warn) {
+  color: #96701c;
+}
+
+/* «Следующий запуск» плана — было захардкоженное тёмное золото; приводим к
+   светлой палитре. */
+:root[data-theme="light"] .plan-next {
+  background: linear-gradient(135deg, rgb(196 154 58 / 16%), rgb(196 154 58 / 6%));
+}
+
+/* Панели камер в светлой теме: обсидиановый градиент .cam превращал каждую
+   карточку принтера в тяжёлый чёрный блок, а заглушки — в большие чёрные плашки
+   поверх фарфора. Даём фарфоровый фон и приглушённый глиф. Живое видео/.cam-img
+   держат свой тёмный фон (background:#0b0912, object-fit:cover) и перекрывают
+   эту подложку, поэтому реальные трансляции не светлеют. */
+:root[data-theme="light"] .cam {
+  background:
+    repeating-linear-gradient(0deg, rgb(31 27 40 / 3.5%) 0 1px, transparent 1px 22px),
+    repeating-linear-gradient(90deg, rgb(31 27 40 / 3.5%) 0 1px, transparent 1px 22px),
+    radial-gradient(320px 150px at 50% 115%, rgb(196 154 58 / 14%), transparent 70%),
+    linear-gradient(170deg, #f5eff7, #e9e0ec);
+  color: #9187a4;
+}
+
+:root[data-theme="light"] .cam-offline,
+:root[data-theme="light"] .cam-state {
+  color: #7a7288;
+  background:
+    repeating-linear-gradient(45deg, rgb(31 27 40 / 3%) 0 6px, transparent 6px 12px),
+    rgb(245 239 247 / 86%);
+}
+
+/* Приглушённые бейджи — углубляем текст для читаемости на светлом. */
+:root[data-theme="light"] .badge-offline { color: #6d687e; }
+
+:root[data-theme="light"] .footer-sig { color: var(--gold-bright); }
+
+/* Ночная карточка на светлой доске — намеренная тёмная брошь: усиливаем
+   золотую раму и подъём, чтобы читалась как замысел, а не сбой. */
+:root[data-theme="light"] .card-night {
+  border-color: rgb(196 154 58 / 40%);
+  box-shadow: var(--shadow-hover), inset 0 1px 0 rgb(236 229 216 / 5%);
+}
+
+@media (pointer: coarse) {
+  .theme-toggle { min-height: 44px; }
+}
+

@@ -12,6 +12,7 @@ import {
   type PrinterLiveStatus
 } from "../infra/printers/status";
 import type { CameraService } from "./cameraService";
+import { KeyedMutex } from "../shared/keyedMutex";
 import { runDriverOperation, toDriverError } from "./driverErrors";
 import { classifyDispatchError, reconcileStartGuard, type StartGuardStore } from "./startGuard";
 import type { EventFeed } from "./eventFeed";
@@ -51,7 +52,7 @@ export class PrinterCommandService {
    * never interleave their check-then-dispatch sections on one device.
    * Failures do not break the chain: the next task still runs.
    */
-  private chain = new Map<string, Promise<unknown>>();
+  private readonly chain = new KeyedMutex();
   /** Per-printer wall-clock until which a just-dispatched start blocks another. */
   private recentStarts = new Map<string, number>();
 
@@ -75,10 +76,7 @@ export class PrinterCommandService {
   ) {}
 
   private runExclusive<T>(id: string, task: () => Promise<T>): Promise<T> {
-    const prev = (this.chain.get(id) ?? Promise.resolve()).catch(() => {});
-    const next = prev.then(task);
-    this.chain.set(id, next.catch(() => {}));
-    return next;
+    return this.chain.run(id, task);
   }
 
   /** Wires the store logger in once it is available (after config load). */

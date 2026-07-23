@@ -1,4 +1,5 @@
 import type { AnalysisFinding } from "../print/types";
+import { gcodeFlavorFitsProtocol } from "../shared/gcodeFlavor";
 import { dedupeFindings, finding } from "./findings";
 import {
   intendedNozzleFromName,
@@ -575,14 +576,3 @@ function modelTokenMismatch(filamentName: string, printerModel: string): boolean
   return false;
 }
 
-function gcodeFlavorFitsProtocol(flavor: string, protocol: string): boolean {
-  const f = flavor.toLowerCase();
-  const expected: Record<string, string[]> = {
-    moonraker: ["klipper", "reprapfirmware", "marlin"],
-    creality: ["klipper", "marlin"],
-    bambu: ["marlin", "bbl", "klipper"]
-  };
-  const allowed = expected[protocol.toLowerCase()];
-  if (!allowed) return true; // unknown protocol → don't complain
-  return allowed.some((a) => f.includes(a));
-}

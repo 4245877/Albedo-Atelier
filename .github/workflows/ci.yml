@@ -37,8 +37,18 @@ jobs:
       - name: Typecheck (source + tests)
         run: pnpm run typecheck
 
-      - name: Unit + integration tests (dispatch, invariants, guards, shutdown, retention, security)
-        run: pnpm test
+      # Fast unit tests first (pure domain/app, no store boot): a quick failure
+      # signal. The split is by content (scripts/select-tests.mjs), so a new
+      # test classifies itself; the two commands together still cover the whole
+      # suite that `pnpm test` runs.
+      - name: Unit tests (fast; pure domain + app)
+        run: pnpm run test:unit
+
+      - name: Integration tests (SQLite store, HTTP routes, real catalog, dispatch/shutdown/retention/security)
+        run: pnpm run test:integration
+
+      - name: Complexity & file-size report (warn-only, never fails CI)
+        run: pnpm run lint:complexity
 
       - name: Build
         run: pnpm run build
@@ -65,6 +75,28 @@ jobs:
 
       - name: Dashboard tests (view helpers, polling race, edit snapshots, camera freshness, nginx hardening)
         run: node --test "tests/**/*.test.mjs"
+
+      # Browser smoke test: boots the real dashboard in headless Chrome against a
+      # mocked backend and asserts the app loads, the board renders live data,
+      # and the frontend called the API. The chromedp/headless-shell service
+      # exposes CDP on 9222; the test SKIPS when no browser is reachable.
+      - name: Start headless Chrome (CDP)
+        run: |
+          docker run -d --name headless-shell --network host \
+            chromedp/headless-shell:latest
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:9222/json/version >/dev/null && break
+            sleep 1
+          done
+
+      - name: Dashboard browser smoke test
+        env:
+          CHROME_CDP_URL: http://127.0.0.1:9222
+        run: node --test "smoke/**/*.smoke.mjs"
+
+      - name: Stop headless Chrome
+        if: always()
+        run: docker rm -f headless-shell || true
 
       - name: Validate the rendered nginx config with the PINNED image (nginx -t)
         # Uses the exact image the Dockerfile pins (version + digest), so CI

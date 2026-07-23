@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { mergeSchedulerState } from "../render/scheduler.js";
+import { mergeSchedulerState } from "../features/scheduler/controller.js";
 
 /*
- * Слияние состояния планировщика при частичном отказе (render/scheduler.js).
+ * Слияние состояния планировщика при частичном отказе (features/scheduler/controller.js).
  * Ключевая гарантия: сбойный источник (отсутствующий в результате) НЕ затирает
  * ранее загруженные данные пустым массивом — оператор не видит ложной пустоты;
  * ошибка живёт отдельным полем и сбрасывается следующим успешным опросом.

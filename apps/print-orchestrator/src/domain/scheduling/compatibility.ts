@@ -21,6 +21,7 @@
  */
 
 import type { BedCycleState } from "../print/types";
+import { gcodeFlavorFitsProtocol } from "../shared/gcodeFlavor";
 import { resolveEta, type EtaEstimate } from "./eta";
 
 export type CompatibilityVerdict = "compatible" | "review" | "blocked";
@@ -144,17 +145,6 @@ function materialsClash(a: string, b: string): boolean {
   return !(fa === fb || fa.startsWith(fb) || fb.startsWith(fa));
 }
 
-function gcodeFlavorFitsProtocol(flavor: string, protocol: string): boolean {
-  const f = flavor.toLowerCase();
-  const expected: Record<string, string[]> = {
-    moonraker: ["klipper", "reprapfirmware", "marlin"],
-    creality: ["klipper", "marlin"],
-    bambu: ["marlin", "bbl", "klipper"]
-  };
-  const allowed = expected[protocol.toLowerCase()];
-  if (!allowed) return true;
-  return allowed.some((a) => f.includes(a));
-}
 
 /** True when the model does not fit the build volume on any axis. */
 function exceedsVolume(dims: Dimensions, volume: Dimensions): boolean {

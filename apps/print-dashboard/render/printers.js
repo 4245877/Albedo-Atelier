@@ -1,5 +1,8 @@
 import { API_BASE } from "../api.js";
-import { $, badge, esc, emptyRow, fmtLeft, materialBlock } from "../util.js";
+import { $, esc, emptyRow } from "../util.js";
+import { badge } from "../shared/chips.js";
+import { fmtLeft } from "../shared/format.js";
+import { commonActionButtons, materialBlock, telemetryTempRows } from "./printerParts.js";
 import {
   actionAvailability,
   jobLine,
@@ -75,16 +78,13 @@ export function camBlock(p, ctx) {
 }
 
 /** Температура вида «тек/цель»; цель может быть неизвестна — тогда только текущая. */
-function tempCell(pair) {
-  const target = pair[1] != null ? `<span style="color:var(--ink-faint)">/${pair[1]}°</span>` : "";
-  return `${pair[0]}°${target}`;
+function tempCell(current, target) {
+  const tail = target != null ? `<span style="color:var(--ink-faint)">/${target}°</span>` : "";
+  return `${current}°${tail}`;
 }
 
 function teleBlock(p) {
-  const cells = [];
-  if (p.nozzle) cells.push(["Сопло", tempCell(p.nozzle)]);
-  if (p.bed) cells.push(["Стол", tempCell(p.bed)]);
-  if (p.chamber != null) cells.push(["Камера", `${p.chamber}°`]);
+  const cells = telemetryTempRows(p).map(([label, current, target]) => [label, tempCell(current, target)]);
   cells.push(["Осталось", fmtLeft(p.minutesLeft)]);
   if (cells.length === 1 && p.minutesLeft == null) {
     return `<div class="telemetry"><div class="tele"><span class="t-lbl">Телеметрия</span><span class="t-val">недоступна</span></div></div>`;
@@ -99,16 +99,9 @@ function printerCard(p, lightEntry) {
   // Решение автоматики подсветки (state.lights) — отдельно от фактического
   // состояния лампы, которое показывают кнопки ☀/☾ и подсветка камеры.
   const lightLine = lightEntry ? `<div class="printer-light">${esc(lightPolicyLine(lightEntry))}</div>` : "";
-  const lightTitle = can.lightUnknown && can.lightSupported
-    ? ' title="Состояние подсветки неизвестно — команда будет отправлена вручную"'
-    : "";
   const actions = `
     <button class="btn btn-sm" data-act="open" data-id="${p.id}">Открыть</button>
-    <button class="btn btn-sm" data-act="pause" data-id="${p.id}" ${can.canPause ? "" : "disabled"}>⏸ Пауза</button>
-    <button class="btn btn-sm" data-act="resume" data-id="${p.id}" ${can.canResume ? "" : "disabled"}>▶ Продолжить</button>
-    <button class="btn btn-sm btn-danger" data-act="cancel" data-id="${p.id}" ${can.canCancel ? "" : "disabled"}>✕ Отмена</button>
-    <button class="btn btn-sm" data-act="light-on" data-id="${p.id}"${lightTitle} ${can.canLightOn ? "" : "disabled"}>☀ Подсветка</button>
-    <button class="btn btn-sm" data-act="light-off" data-id="${p.id}"${lightTitle} ${can.canLightOff ? "" : "disabled"}>☾ Погасить</button>
+    ${commonActionButtons(p, can)}
     <button class="btn btn-sm" data-act="snapshot" data-id="${p.id}"${p.snapshotAvailable ? "" : ' title="Для этой камеры снимок недоступен"'} ${can.canSnapshot ? "" : "disabled"}>◉ Снимок</button>
     ${p.latestSnapshotUrl ? `<a class="btn btn-sm" href="${API_BASE}${esc(p.latestSnapshotUrl)}" target="_blank" rel="noopener" title="Открыть последний сохранённый снимок">🖼 Снимок</a>` : ""}`;
 

@@ -21,9 +21,9 @@ import { ensureReveal, renderNav, setupNav, setupStickyOffsets } from "./nav.js"
 import { renderBoard } from "./render/board.js";
 import { syncModals } from "./render/modals.js";
 import { renderTopbar } from "./render/sections.js";
-import { setupScheduler } from "./render/scheduler.js";
-import { setupSlicing } from "./render/slicing.js";
-import { setupUploads } from "./render/uploads.js";
+import { setupScheduler } from "./features/scheduler/controller.js";
+import { setupSlicing } from "./features/slicing/controller.js";
+import { setupUploads } from "./features/uploads/controller.js";
 import { setNightWindow, setupTheme } from "./theme.js";
 import { $, esc, toast } from "./util.js";
 

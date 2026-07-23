@@ -1,3 +1,4 @@
+import type { WritableRepository } from "../shared/repository";
 import type {
   ProfileRevisionRepository,
   ProfileSetRepository,
@@ -42,20 +43,8 @@ import type {
  * either all the writes land or none do.
  */
 
-/** Insert + optimistic-update, shared shape for the versioned entities. */
-export interface WritableRepository<T extends { id: string; version: number }> {
-  /** Persists a new row verbatim (the caller supplies id/timestamps/version). */
-  insert(entity: T): T;
-  /** One row by id, or null when absent. */
-  getById(id: string): T | null;
-  /**
-   * Writes `entity`'s columns only if the stored `version` still matches
-   * `entity.version`, then bumps the stored version by one and returns the
-   * written row. Throws `VersionConflictError` on a stale version, `NotFoundError`
-   * when the id is gone.
-   */
-  update(entity: T): T;
-}
+/** Re-exported from the neutral module so existing importers keep working. */
+export type { WritableRepository } from "../shared/repository";
 
 export interface ArtifactRepository extends WritableRepository<Artifact> {
   findByLegacyRef(legacyRef: string): Artifact | null;

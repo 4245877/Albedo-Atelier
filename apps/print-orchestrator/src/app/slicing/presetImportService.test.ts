@@ -20,11 +20,11 @@ test("imports the real catalog: 3 active filaments, the rest quarantined on miss
     const service = new PresetImportService(store, new OrcaCatalogSource(REAL_CATALOG));
     const result = await service.import();
 
-    assert.equal(result.totalProfiles, 25);
+    assert.equal(result.totalProfiles, 20);
     assert.equal(result.counts.invalid, 0);
     assert.equal(result.counts.active, 3);
-    assert.equal(result.counts.quarantined, 22);
-    assert.equal(result.inserted, 25);
+    assert.equal(result.counts.quarantined, 17);
+    assert.equal(result.inserted, 20);
 
     // Source archives hash to what the catalog recorded (immutability).
     assert.equal(result.sourceIntegrity.ok, true);
@@ -68,9 +68,9 @@ test("re-importing the real catalog is idempotent (no new revisions, nothing cha
     const second = await service.import();
     assert.equal(second.inserted, 0);
     assert.equal(second.updated, 0);
-    assert.equal(second.unchanged, 25);
-    // Still exactly 25 revisions in the table.
-    assert.equal(store.repositories.profileRevisions.list().length, 25);
+    assert.equal(second.unchanged, 20);
+    // Still exactly 20 revisions in the table.
+    assert.equal(store.repositories.profileRevisions.list().length, 20);
   } finally {
     store.close();
   }
