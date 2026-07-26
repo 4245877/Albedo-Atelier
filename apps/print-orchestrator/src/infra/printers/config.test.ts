@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { loadPrintersConfig, normalizePrinterConfig } from "./config";
+import { automaticContinuationEnabled, loadPrintersConfig, normalizePrinterConfig } from "./config";
 
 /*
  * Light config normalization, focused on the active-low (`invert`) pin support:
@@ -124,4 +124,73 @@ test("loadPrintersConfig drops duplicate ids (first wins) and warns", async () =
   );
   assert.equal(printers[0].name, "First", "the first entry for an id wins");
   assert.match(String(source.warning), /Повторяющиеся id/);
+});
+
+// ── Automatic continuation (bed self-clearing) capability ──────────────────
+
+test("an existing config with no automaticContinuation defaults to NOT allowed", () => {
+  // Backward compatibility: every printers.json written before this field exists
+  // must keep working, and must land on the safe side of the default.
+  const printer = normalizePrinterConfig({ id: "k2", name: "K2", host: "127.0.0.1" });
+  assert.ok(printer);
+  assert.equal(printer.automaticContinuation?.allowed, false);
+  assert.equal(automaticContinuationEnabled(printer), false);
+});
+
+test("automatic continuation needs an explicit opt-in AND a recorded verification", () => {
+  const base = { id: "k2", name: "K2", host: "127.0.0.1" };
+
+  // Opted in but never physically verified → still refused.
+  const unverified = normalizePrinterConfig({
+    ...base,
+    automaticContinuation: { allowed: true, mechanism: "auto-eject" }
+  });
+  assert.ok(unverified);
+  assert.equal(automaticContinuationEnabled(unverified), false, "unverified hardware does not count");
+
+  // Verified but not opted in → still refused.
+  const notAllowed = normalizePrinterConfig({
+    ...base,
+    automaticContinuation: { allowed: false, mechanism: "belt", verifiedAt: "2026-07-01T00:00:00Z" }
+  });
+  assert.ok(notAllowed);
+  assert.equal(automaticContinuationEnabled(notAllowed), false);
+
+  // Both → allowed.
+  const enabled = normalizePrinterConfig({
+    ...base,
+    automaticContinuation: {
+      allowed: true,
+      mechanism: "belt",
+      verifiedAt: "2026-07-01T00:00:00Z"
+    }
+  });
+  assert.ok(enabled);
+  assert.equal(automaticContinuationEnabled(enabled), true);
+  assert.equal(enabled.automaticContinuation?.mechanism, "belt");
+});
+
+test("a truthy-but-not-true opt-in never enables automatic continuation", () => {
+  for (const allowed of ["true", 1, "yes", {}]) {
+    const printer = normalizePrinterConfig({
+      id: "k2",
+      name: "K2",
+      host: "127.0.0.1",
+      automaticContinuation: { allowed, mechanism: "x", verifiedAt: "2026-07-01T00:00:00Z" }
+    });
+    assert.ok(printer);
+    assert.equal(automaticContinuationEnabled(printer), false, `allowed=${JSON.stringify(allowed)}`);
+  }
+});
+
+test("an unparseable verifiedAt is discarded rather than trusted", () => {
+  const printer = normalizePrinterConfig({
+    id: "k2",
+    name: "K2",
+    host: "127.0.0.1",
+    automaticContinuation: { allowed: true, mechanism: "belt", verifiedAt: "как-нибудь потом" }
+  });
+  assert.ok(printer);
+  assert.equal(printer.automaticContinuation?.verifiedAt, null);
+  assert.equal(automaticContinuationEnabled(printer), false);
 });

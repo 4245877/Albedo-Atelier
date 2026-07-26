@@ -1,30 +1,35 @@
 import type { PrintQueueStore } from "../../domain/print/repositories";
+import type { DispatchEligibility } from "../../domain/dispatch/eligibility";
 import type { PrinterConfig } from "../../infra/printers/config";
-import { supportsPrinterStart, type PrinterLiveStatus } from "../../infra/printers/status";
-import { ANALYZER_VERSION } from "../artifacts/analyzers";
-import { evaluateDispatchGate } from "../dispatch/dispatchGate";
-import { windowLengthMinutes, type NightGateDecision } from "../nightPlanner";
+import { blockersOf } from "../dispatch/dispatchGate";
+import type { NightGateDecision } from "../nightPlanner";
 
 export interface NightGateDeps {
   /** The open SQLite queue store, or null when it has not been opened yet. */
   store: PrintQueueStore | null;
   /** Resolves a queue job's free-text printer field to an enabled config. */
   resolvePrinter: (reference: string) => PrinterConfig | undefined;
-  /** Live device status for the resolved printer (real poll). */
-  getStatus: (printerId: string) => PrinterLiveStatus | undefined;
-  nightWindow: string;
-  nightSafetyBufferRatio: number;
+  /**
+   * The SINGLE authoritative eligibility evaluator — the very call the physical
+   * night start makes inside its reserve transaction. Injected (rather than
+   * re-derived here) so the dashboard's night section can never show a different
+   * set of reasons from the one enforcement uses.
+   */
+  evaluateEligibility: (input: {
+    taskId: string;
+    printerId: string;
+    mode: "night";
+  }) => DispatchEligibility;
 }
 
 /**
- * The canonical night-gate decoration for one projected queue job: the same
- * fail-closed blockers {@link evaluateDispatchGate} enforces, computed against
- * the SQLite task / artifact / analysis — plus the immutable preview identity.
+ * The canonical night-gate decoration for one projected queue job: the blockers
+ * `DispatchEligibility` reports for a night start, plus the immutable preview
+ * identity the operator confirms with `POST /api/queue/night/start`.
  *
  * A read model: it reads through the passed-in repositories, resolves nothing
  * from a global, creates no repositories, starts no background work and mutates
- * nothing. Extracted verbatim from the former `FarmStore.nightGateInfo` so the
- * dashboard night section and the physical night start keep sharing one rule.
+ * nothing.
  */
 export function buildNightGateInfo(deps: NightGateDeps, taskId: string): NightGateDecision | null {
   const store = deps.store;
@@ -33,7 +38,6 @@ export function buildNightGateInfo(deps: NightGateDeps, taskId: string): NightGa
   const task = repos.tasks.getById(taskId) ?? repos.tasks.findByLegacyRef(taskId);
   if (!task) return null;
   const artifact = task.artifactId ? repos.artifacts.getById(task.artifactId) : null;
-  const analysis = artifact ? repos.artifactAnalyses.latestForArtifact(artifact.id) : null;
   const printerRef = task.pinnedPrinterId ?? task.targetPrinter;
   const printer = printerRef ? deps.resolvePrinter(printerRef) : undefined;
   if (!printer) {
@@ -52,21 +56,23 @@ export function buildNightGateInfo(deps: NightGateDeps, taskId: string): NightGa
       artifactSha256: artifact?.sha256 ?? null
     };
   }
-  const blockers = evaluateDispatchGate({
-    mode: "night",
-    task,
-    entry: repos.queue.findByTaskId(task.id),
-    artifact,
-    analysis,
-    printer,
-    status: deps.getStatus(printer.id),
-    remoteStartSupported: supportsPrinterStart(printer),
-    nightWindowMinutes: windowLengthMinutes(deps.nightWindow),
-    nightSafetyBufferRatio: deps.nightSafetyBufferRatio,
-    currentAnalyzerVersion: ANALYZER_VERSION
-  });
+
+  let blockers: string[];
+  try {
+    const eligibility = deps.evaluateEligibility({
+      taskId: task.id,
+      printerId: printer.id,
+      mode: "night"
+    });
+    blockers = blockersOf(eligibility).map((b) => b.message);
+  } catch (error) {
+    // Fail-closed: an evidence-resolution failure is never "no blockers".
+    blockers = [
+      `готовность задания не удалось проверить (${error instanceof Error ? error.message : String(error)})`
+    ];
+  }
   return {
-    blockers: blockers.map((b) => b.message),
+    blockers,
     taskId: task.id,
     taskVersion: task.version,
     artifactSha256: artifact?.sha256 ?? null

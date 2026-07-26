@@ -10,6 +10,10 @@ import type { PrinterLiveStatus } from "../../infra/printers/status";
 import { openPrintQueueStore } from "../../infra/db/store";
 import { PrintQueueService } from "../printQueue/printQueueService";
 import { ANALYZER_VERSION } from "../artifacts/analyzers";
+import { SchedulerContext } from "../scheduling/context";
+import { EligibilityQueries } from "../scheduling/eligibility";
+import { EvidenceResolver } from "../scheduling/evidence";
+import type { SchedulerPrinterRef } from "../scheduling/types";
 import { DispatchService, type DispatchDeps } from "./dispatchService";
 import { RunLifecycleService } from "./runLifecycle";
 
@@ -77,7 +81,14 @@ interface Harness {
     startImpl: (printerId: string, file: string, runId: string) => Promise<void>;
     classify: (error: unknown) => "rejected" | "unknown";
     deviceFiles: { filename: string; size: number }[];
+    telemetryAgeMs: number | null;
+    now: Date;
+    nightWindow: string;
+    farmTimeZone: string;
+    nightSafetyBufferRatio: number;
   };
+  /** The same authoritative evaluator the dispatch uses, for preview assertions. */
+  eligibility: () => EligibilityQueries;
 }
 
 function makeHarness(): Harness {
@@ -88,7 +99,14 @@ function makeHarness(): Harness {
     status: idle(),
     startImpl: async () => {},
     classify: () => "unknown",
-    deviceFiles: [{ filename: "chalice.gcode", size: 1000 }]
+    deviceFiles: [{ filename: "chalice.gcode", size: 1000 }],
+    telemetryAgeMs: 1_000,
+    // 23:00 local in the 21:30–07:30 window: 8h30m of window left, so a 2h print
+    // fits and the tests can shrink the remaining window by moving this clock.
+    now: new Date("2026-07-26T23:00:00Z"),
+    nightWindow: "21:30 – 07:30",
+    farmTimeZone: "UTC",
+    nightSafetyBufferRatio: 0.2
   };
   const deps: DispatchDeps = {
     store,
@@ -112,8 +130,9 @@ function makeHarness(): Harness {
         printable: true
       }))
     }),
-    nightWindow: "21:30 – 07:30",
-    nightSafetyBufferRatio: 1
+    // The REAL authoritative evaluator over the same store — the tests exercise
+    // the shipped rule set, not a stub that could drift from it.
+    evaluateEligibility: (input) => makeEligibility(store, knobs).evaluate(input)
   };
   return {
     store,
@@ -121,7 +140,47 @@ function makeHarness(): Harness {
     dispatch: new DispatchService(deps),
     lifecycle: new RunLifecycleService(store),
     startCalls,
-    knobs
+    knobs,
+    eligibility: () => makeEligibility(store, knobs)
+  };
+}
+
+/**
+ * The production {@link EligibilityQueries} bound to the fake printer + status
+ * knobs. Preview, planner and dispatch all go through this one object in the
+ * tests exactly as they do in the runtime.
+ */
+function makeEligibility(store: PrintQueueStore, knobs: Harness["knobs"]): EligibilityQueries {
+  const ctx = new SchedulerContext(store, () => [schedulerPrinter(knobs)], {
+    now: () => knobs.now,
+    runtimeAvailable: true,
+    nightSafetyBufferRatio: knobs.nightSafetyBufferRatio,
+    nightWindow: knobs.nightWindow,
+    farmTimeZone: knobs.farmTimeZone,
+    compatibility: { telemetryStaleMs: 120_000 },
+    unknownEtaAssumptionS: 4 * 3600
+  });
+  return new EligibilityQueries(ctx, new EvidenceResolver(ctx));
+}
+
+function schedulerPrinter(knobs: Harness["knobs"]): SchedulerPrinterRef {
+  return {
+    id: K2.id,
+    name: K2.name,
+    model: K2.model,
+    protocol: K2.protocol,
+    printerClass: null,
+    material: K2.material,
+    nozzleMm: 0.4,
+    buildVolume: { x: 350, y: 350, z: 350 },
+    online: knobs.status.online,
+    status: knobs.status.status as SchedulerPrinterRef["status"],
+    remoteStartSupported: true,
+    ams: null,
+    telemetryAgeMs: knobs.telemetryAgeMs,
+    materialRemainingSufficient: null,
+    printingTimeLeftMs: null,
+    activeRunState: null
   };
 }
 
@@ -177,7 +236,16 @@ function addNightTask(
     layerHeightMm: 0.2,
     warnings: [],
     blockers: [],
-    data: {},
+    // A *fully* qualified night file: a bounding box in declared millimetres, the
+    // target printer it was sliced for, and the firmware flavor. Each of these is
+    // a fail-closed requirement for an unattended start, so the happy-path fixture
+    // must carry all of them.
+    data: {
+      units: "millimeter",
+      bbox: { min: [0, 0, 0], max: [100, 100, 100], size: [100, 100, 100] },
+      printerModel: "K2 Plus",
+      flavor: "klipper"
+    },
     error: null,
     createdAt: iso,
     updatedAt: iso,
@@ -544,7 +612,7 @@ test("cancelTask on a live dispatched run: run CANCELLED, task CANCELLED, bed aw
   assert.equal(repos.queue.findByTaskId(taskId)?.state, "RELEASED");
 });
 
-test("bed clearance: a completed run leaves the bed AWAITING_CLEARANCE; a manual dispatch presumes it clear", async () => {
+test("a completed run leaves the bed AWAITING_CLEARANCE and NO dispatch may presume it clear", async () => {
   const h = makeHarness();
   h.knobs.deviceFiles = [
     { filename: "a.gcode", size: 1000 },
@@ -561,13 +629,32 @@ test("bed clearance: a completed run leaves the bed AWAITING_CLEARANCE; a manual
     "part still on the bed after a print"
   );
 
-  // A new manual start presumes the awaiting bed clear (audited) and runs.
+  // A manual (attended) start must NOT presume the bed clear — the operator being
+  // present is not the same as the operator having emptied the plate.
   const t2 = h.queue.createTask({ title: "B", printer: "k2", file: "b.gcode" }).task.id;
+  await assert.rejects(
+    h.dispatch.dispatch({ taskId: t2, mode: "manual" }),
+    /осталась готовая модель|не подтверждён свободным/
+  );
+  assert.equal(h.startCalls.length, 1, "no second command reached the printer");
+  assert.equal(
+    repos.bedCycles.findOpenByPrinter("k2")?.state,
+    "AWAITING_CLEARANCE",
+    "the refused dispatch did not touch the bed"
+  );
+  assert.ok(
+    !repos.audit.list().some((e) => e.action === "presumed_cleared"),
+    "nothing in the system presumes a bed clear any more"
+  );
+
+  // Only an explicit clearance opens the printer up again.
+  h.lifecycle.clearBed("k2", { confirmation: "part_removed", actor: "operator-1" });
+  assert.equal(repos.bedCycles.findOpenByPrinter("k2"), null, "cleared bed is no longer open");
   const r2 = await h.dispatch.dispatch({ taskId: t2, mode: "manual" });
   assert.equal(repos.printRuns.getById(r2.runId)?.state, "RUNNING");
   assert.ok(
-    repos.audit.list().some((e) => e.entityType === "bed_cycle" && e.action === "presumed_cleared"),
-    "the awaiting-clearance bed was presumed clear with an audit trace"
+    repos.audit.list().some((e) => e.entityType === "bed_cycle" && e.action === "cleared"),
+    "the clearance itself is audited with its confirmation"
   );
 });
 

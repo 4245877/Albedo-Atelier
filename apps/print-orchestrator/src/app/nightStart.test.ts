@@ -83,7 +83,13 @@ test("the unknown.gcode / unknown-material / client-ETA case is blocked for unat
 
   await assert.rejects(
     () => store.startNight(),
-    (e: unknown) => e instanceof JobError && /материал не подтверждён/.test(e.message)
+    (e: unknown) =>
+      e instanceof JobError &&
+      // The unattended refusal now names every unmet precondition, not just the
+      // material: no proven hash, no analysis, no unattended permission and an
+      // unverifiable ETA are each independently fatal for a print nobody watches.
+      /[Мм]атериал задания не задан/.test(e.message) &&
+      /длительность печати неизвестна/.test(e.message)
   );
   assert.equal(startCalls.length, 0);
 

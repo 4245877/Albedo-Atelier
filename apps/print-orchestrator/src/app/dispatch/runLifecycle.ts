@@ -10,10 +10,16 @@ import {
   PRINT_TASK_TRANSITIONS,
   QUEUE_ENTRY_TRANSITIONS
 } from "../../domain/print/states";
-import type { AuditEntityType, Metadata, PrintRun } from "../../domain/print/types";
+import type { AuditEntityType, BedCycle, Metadata, PrintRun } from "../../domain/print/types";
 import type { PrinterLiveStatus } from "../../infra/printers/status";
 import type { StoreLogger } from "../../shared/logger";
 import { classifyPrintOutcome } from "../printOutcome";
+
+/**
+ * What an operator (or a verified mechanism) asserts when a bed is cleared. There
+ * is no "assumed"/"probably" member on purpose — an assumption is not a clearance.
+ */
+export type BedClearanceConfirmation = "part_removed" | "plate_swapped" | "auto_cleared";
 
 /** Loose filename match — devices may report a path while the run holds a basename. */
 function sameFile(a: string | null, b: string | null): boolean {
@@ -213,6 +219,83 @@ export class RunLifecycleService {
       );
     }
     return this.completeRun(runId, outcome, { reason: options.reason, actor: options.actor });
+  }
+
+  /** The open bed cycle holding a printer, if any (for the UI's clearance prompt). */
+  openBedCycle(printerId: string): BedCycle | null {
+    return this.store.repositories.bedCycles.findOpenByPrinter(printerId);
+  }
+
+  /**
+   * The ONLY way a bed returns to `CLEAR` after a print — the explicit clearance
+   * event the whole night-safety model rests on.
+   *
+   * `AWAITING_CLEARANCE` is never left automatically: not because the printer
+   * reports idle, not because the next job is due, not because the previous print
+   * succeeded, and not because a task carried `unattendedAllowed`. One of three
+   * things must be asserted here, and it is recorded with who asserted it:
+   *
+   *   - `part_removed`  — an operator took the finished model off the plate;
+   *   - `plate_swapped` — an operator swapped in a fresh build plate;
+   *   - `auto_cleared`  — the printer's own *verified* mechanism reported success.
+   *
+   * `auto_cleared` is refused unless the caller passes
+   * `automaticContinuationAllowed` (the farm config's verified capability), so a
+   * driver cannot claim an automation the hardware does not have.
+   */
+  clearBed(
+    printerId: string,
+    options: {
+      confirmation: BedClearanceConfirmation;
+      actor?: string;
+      note?: string;
+      /** The printer's verified auto-clearing capability; required for `auto_cleared`. */
+      automaticContinuationAllowed?: boolean;
+    }
+  ): BedCycle {
+    return this.store.transaction(() => {
+      const repos = this.store.repositories;
+      const bed = repos.bedCycles.findOpenByPrinter(printerId);
+      if (!bed) {
+        throw new NotFoundError(`Открытый цикл стола для принтера «${printerId}»`);
+      }
+      if (bed.state === "RUNNING" || bed.state === "RESERVED") {
+        throw new JobError(
+          `Стол «${printerId}» занят активной печатью (${bed.state}) — очистка невозможна`
+        );
+      }
+      if (options.confirmation === "auto_cleared" && options.automaticContinuationAllowed !== true) {
+        throw new JobError(
+          `У принтера «${printerId}» нет подтверждённой автоматической очистки стола — подтвердите снятие модели вручную`
+        );
+      }
+
+      const iso = this.nowIso();
+      assertTransition("цикл стола", BED_CYCLE_TRANSITIONS, bed.state, "CLEAR");
+      const saved = repos.bedCycles.update({
+        ...bed,
+        state: "CLEAR",
+        clearedAt: iso,
+        updatedAt: iso,
+        metadata: {
+          ...bed.metadata,
+          clearance: options.confirmation,
+          clearedBy: options.actor ?? "operator",
+          ...(options.note ? { clearanceNote: options.note } : {})
+        }
+      });
+      this.audit("bed_cycle", bed.id, "cleared", {
+        from: bed.state,
+        to: "CLEAR",
+        actor: options.actor,
+        detail: {
+          printerId,
+          confirmation: options.confirmation,
+          ...(options.note ? { note: options.note } : {})
+        }
+      });
+      return saved;
+    });
   }
 
   // ── State movers (each wraps its own transaction) ─────────────────────────

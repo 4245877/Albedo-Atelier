@@ -14,7 +14,11 @@ import type { PrinterLiveStatus } from "../../infra/printers/status";
 import { ArtifactStorage } from "../../infra/storage/artifactStorage";
 import { ANALYZER_VERSION } from "../artifacts/analyzers";
 import { ArtifactService } from "../artifacts/artifactService";
-import { evaluateDispatchGate } from "../dispatch/dispatchGate";
+import { blockersOf } from "../dispatch/dispatchGate";
+import { SchedulerContext } from "../scheduling/context";
+import { EligibilityQueries } from "../scheduling/eligibility";
+import { EvidenceResolver } from "../scheduling/evidence";
+import type { SchedulerPrinterRef } from "../scheduling/types";
 import { PrintQueueService } from "../printQueue/printQueueService";
 import { ProfileService, type SlicerPrinterRef } from "./profileService";
 import { SliceService } from "./sliceService";
@@ -190,10 +194,9 @@ test("handoff: a ready slice is promoted onto its task, which becomes dispatchab
   assert.equal(detail.task.pinnedPrinterId, "creality-k2"); // pinned to the sliced-for printer
   assert.equal(detail.queueEntry?.state, "WAITING");
 
-  // The dispatch gate now reads the OUTPUT's clean analysis — no NO_FILE, and the
-  // verdict/format/blocker checks pass (they blocked on the raw STL before).
-  const outArtifact = store.repositories.artifacts.getById(ready.outputArtifactId as string) ?? null;
-  const outAnalysis = store.repositories.artifactAnalyses.latestForArtifact(ready.outputArtifactId as string);
+  // The authoritative eligibility now reads the OUTPUT's clean analysis — no
+  // NO_FILE, and the verdict/format/blocker checks pass (they blocked on the raw
+  // STL before). Same component the physical dispatch runs.
   const printer = normalizePrinterConfig({
     id: "creality-k2",
     name: "Creality K2",
@@ -202,24 +205,51 @@ test("handoff: a ready slice is promoted onto its task, which becomes dispatchab
     material: "PETG"
   });
   assert.ok(printer);
-  const blockers = evaluateDispatchGate({
-    mode: "manual",
-    task: detail.task,
-    entry: detail.queueEntry,
-    artifact: outArtifact,
-    analysis: outAnalysis,
-    printer,
-    status: idleStatus(),
-    remoteStartSupported: true,
-    nightWindowMinutes: 600,
-    nightSafetyBufferRatio: 1,
-    currentAnalyzerVersion: ANALYZER_VERSION
-  });
-  const codes = blockers.map((b) => b.code);
+  const eligibility = eligibilityFor(idleStatus());
+  const codes = blockersOf(
+    eligibility.evaluate({
+      taskId: detail.task.id,
+      printerId: "creality-k2",
+      mode: "manual",
+      deviceFileIdentity: "name+size"
+    })
+  ).map((b) => b.code);
   for (const gone of ["NO_FILE", "ANALYSIS_VERDICT", "ANALYSIS_BLOCKERS", "FORMAT_UNKNOWN"]) {
     assert.ok(!codes.includes(gone), `expected ${gone} cleared, got ${JSON.stringify(codes)}`);
   }
 });
+
+/** The production eligibility component over the test store + a fake K2. */
+function eligibilityFor(status: PrinterLiveStatus): EligibilityQueries {
+  const ref: SchedulerPrinterRef = {
+    id: "creality-k2",
+    name: "Creality K2",
+    model: "Creality K2",
+    protocol: "moonraker",
+    printerClass: null,
+    material: "PETG",
+    nozzleMm: 0.4,
+    buildVolume: { x: 350, y: 350, z: 350 },
+    online: status.online,
+    status: status.status as SchedulerPrinterRef["status"],
+    remoteStartSupported: true,
+    ams: null,
+    telemetryAgeMs: 1000,
+    materialRemainingSufficient: null,
+    printingTimeLeftMs: null,
+    activeRunState: null
+  };
+  const ctx = new SchedulerContext(store, () => [ref], {
+    now: () => new Date(),
+    runtimeAvailable: true,
+    nightSafetyBufferRatio: 0.2,
+    nightWindow: "21:30 - 07:30",
+    farmTimeZone: "UTC",
+    compatibility: { telemetryStaleMs: 120_000 },
+    unknownEtaAssumptionS: 4 * 3600
+  });
+  return new EligibilityQueries(ctx, new EvidenceResolver(ctx));
+}
 
 test("handoff refuses a variant whose output is not schedulable", async () => {
   const { artifactId } = await uploadModel();

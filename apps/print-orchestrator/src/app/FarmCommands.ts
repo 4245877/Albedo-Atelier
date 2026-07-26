@@ -16,7 +16,7 @@ import {
   type PrinterFilesListing
 } from "../infra/printers/files";
 import type { DispatchService } from "./dispatch/dispatchService";
-import type { RunLifecycleService } from "./dispatch/runLifecycle";
+import type { BedClearanceConfirmation, RunLifecycleService } from "./dispatch/runLifecycle";
 import { runDriverOperation } from "./driverErrors";
 import type { NightPlanEntry } from "./nightPlanner";
 import { toLegacyQueueJob } from "./printQueue/projection";
@@ -299,13 +299,56 @@ export class FarmCommands {
 
   /**
    * Starts an on-device file picked in the file browser.
-   * {@link PrinterCommandService.startPrint} is the single choke point: it
-   * normalizes the path (no `..`/absolute/non-G-code paths reach the device)
-   * and re-checks the live offline/busy/unsupported state at start time,
-   * because the printer may have changed state since the file list was fetched.
+   *
+   * This is the operator's "run this file on that printer" escape hatch, NOT a
+   * second dispatch path — it deliberately creates no task, run or assignment.
+   * Because it reaches a device, it must still honour the physical safety rules
+   * the canonical dispatch enforces, so before delegating to
+   * {@link PrinterCommandService.startPrint} (which normalizes the path and
+   * re-checks live offline/busy/guard state) it refuses on an uncleared bed.
+   *
+   * Without this the file browser was a complete bypass of the bed model: a
+   * finished part still on the plate did not stop a start here, which is exactly
+   * the "второй обходной путь" the brief asks to close.
    */
   startPrinterFile(id: string, file: string) {
+    this.assertBedClearForDirectStart(id);
     return this.runtime.deviceCommands.startPrint(id, file);
+  }
+
+  /**
+   * Refuses a direct (non-queue) start while the printer's bed cycle is anything
+   * other than genuinely free. A printer with no tracked cycle at all is allowed:
+   * the file browser predates the bed model and a farm that never dispatched
+   * through the queue has no cycles — but an *open* cycle is authoritative.
+   */
+  private assertBedClearForDirectStart(printerId: string): void {
+    if (!this.runtime.printQueueStore) return;
+    const bed = this.runtime.runLifecycle?.openBedCycle(printerId) ?? null;
+    if (!bed) return;
+    throw new JobError(
+      bed.state === "AWAITING_CLEARANCE"
+        ? `На столе «${printerId}» осталась готовая модель — снимите её и подтвердите очистку стола перед запуском`
+        : `Стол принтера «${printerId}» не подтверждён свободным (${bed.state}) — запуск запрещён`
+    );
+  }
+
+  /**
+   * Operator confirmation that the bed is physically free — the only transition
+   * out of `AWAITING_CLEARANCE`. See {@link RunLifecycleService.clearBed}.
+   */
+  clearBed(
+    printerId: string,
+    confirmation: BedClearanceConfirmation,
+    options: { actor?: string; note?: string } = {}
+  ) {
+    this.runtime.ensureQueue();
+    return (this.runtime.runLifecycle as RunLifecycleService).clearBed(printerId, {
+      confirmation,
+      actor: options.actor ?? "operator",
+      note: options.note,
+      automaticContinuationAllowed: this.runtime.automaticContinuationAllowed(printerId)
+    });
   }
 
   /**

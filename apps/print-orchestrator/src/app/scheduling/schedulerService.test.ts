@@ -29,6 +29,7 @@ function config(over: Partial<SchedulerConfig> = {}): SchedulerConfig {
     runtimeAvailable: true,
     nightSafetyBufferRatio: 0.2,
     nightWindow: "21:30 – 07:30",
+    farmTimeZone: "UTC",
     unknownEtaAssumptionS: 4 * 3600,
     ...over
   };

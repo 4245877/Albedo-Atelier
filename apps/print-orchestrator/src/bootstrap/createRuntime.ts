@@ -11,7 +11,15 @@ import { openPrintQueueStore } from "../infra/db/store";
 import { FulfillmentInventoryClient } from "../infra/fulfillment/inventoryClient";
 import { SnapshotStore } from "../infra/persistence/snapshotStore";
 import { StateStore, type PersistedQueue } from "../infra/persistence/stateStore";
-import type { PrinterConfig, PrinterConfigSource } from "../infra/printers/config";
+import {
+  automaticContinuationEnabled,
+  type PrinterConfig,
+  type PrinterConfigSource
+} from "../infra/printers/config";
+import type {
+  DeviceFileIdentity,
+  DispatchEligibility
+} from "../domain/dispatch/eligibility";
 import { OrcaCatalogSource } from "../infra/slicing/catalogSource";
 import { OrcaCliRunner } from "../infra/slicing/orcaCliRunner";
 import type { SliceRunner } from "../infra/slicing/sliceRunner";
@@ -264,6 +272,16 @@ export class FarmRuntime implements PrintServices {
     return this.configs.some((c) => c.id === id);
   }
 
+  /**
+   * Whether the printer has a configured AND verified mechanism that leaves its
+   * bed clear without an operator. False for an unknown printer — the fail-closed
+   * answer, and the answer for every printer in the farm today.
+   */
+  automaticContinuationAllowed(id: string): boolean {
+    const config = this.configs.find((c) => c.id === id);
+    return config ? automaticContinuationEnabled(config) : false;
+  }
+
   /** Installs the loaded printer config; called once by the lifecycle on start. */
   setConfig(printers: PrinterConfig[], source: PrinterConfigSource): void {
     this.configs = printers;
@@ -331,8 +349,31 @@ export class FarmRuntime implements PrintServices {
       runtimeAvailable: this.sliceRuntimeAvailableFlag,
       nightSafetyBufferRatio: env.nightEtaSafetyBuffer,
       nightWindow: env.nightWindow,
+      farmTimeZone: env.farmTimezone,
       compatibility: { telemetryStaleMs: env.schedulerTelemetryStaleMs },
       unknownEtaAssumptionS: 4 * 60 * 60
+    });
+  }
+
+  /**
+   * The authoritative eligibility evaluator, bound to the *current* telemetry.
+   *
+   * Built from the scheduler (so preview, plan confirmation and the physical
+   * dispatch share one implementation), with the printer's verified
+   * auto-clearing capability folded in from the farm config. Rebuilt per call
+   * because the scheduler getter itself joins fresh telemetry.
+   */
+  evaluateDispatchEligibility(input: {
+    taskId: string;
+    printerId: string;
+    mode: "manual" | "night";
+    deviceFileIdentity?: DeviceFileIdentity;
+    file?: string | null;
+    filePathValid?: boolean;
+  }): DispatchEligibility {
+    return this.scheduler.dispatchEligibility({
+      ...input,
+      automaticContinuationAllowed: this.automaticContinuationAllowed(input.printerId)
     });
   }
 
@@ -369,9 +410,7 @@ export class FarmRuntime implements PrintServices {
     return {
       store: this.printQueueStoreRef,
       resolvePrinter: (reference) => this.reads.resolvePrinter(reference),
-      getStatus: (id) => this.poller.getStatus(id),
-      nightWindow: env.nightWindow,
-      nightSafetyBufferRatio: env.nightEtaSafetyBuffer
+      evaluateEligibility: (input) => this.evaluateDispatchEligibility(input)
     };
   }
 
@@ -416,8 +455,7 @@ export class FarmRuntime implements PrintServices {
         await this.deviceCommands.startPrint(printerId, file, runId, { runId });
       },
       classifyError: classifyDispatchError,
-      nightWindow: env.nightWindow,
-      nightSafetyBufferRatio: env.nightEtaSafetyBuffer,
+      evaluateEligibility: (input) => this.evaluateDispatchEligibility(input),
       logger
     });
 

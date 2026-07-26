@@ -112,9 +112,9 @@ test("buildNightGateInfo returns null before the queue store is open", () => {
   assert.equal(buildNightGateInfo({
     store: null,
     resolvePrinter: () => undefined,
-    getStatus: () => undefined,
-    nightWindow: "21:30 – 07:30",
-    nightSafetyBufferRatio: 0.15
+    evaluateEligibility: () => {
+      throw new Error("never called without a store");
+    }
   }, "any"), null);
 });
 
@@ -128,9 +128,9 @@ test("buildNightGateInfo reports the immutable identity + a hard blocker for an 
       store,
       // No printer resolves → the gate must itself surface the missing-printer blocker.
       resolvePrinter: () => undefined,
-      getStatus: () => undefined,
-      nightWindow: "21:30 – 07:30",
-      nightSafetyBufferRatio: 0.15
+      evaluateEligibility: () => {
+        throw new Error("never called when the printer does not resolve");
+      }
     },
     detail.task.id
   );

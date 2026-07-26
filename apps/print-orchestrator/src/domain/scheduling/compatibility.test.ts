@@ -15,6 +15,7 @@ function task(over: Partial<CompatibilityTaskInput> = {}): CompatibilityTaskInpu
     material: "PLA",
     pinnedPrinterId: null,
     dimensions: { x: 100, y: 100, z: 100 },
+    dimensionsScaleKnown: true,
     requiredNozzleMm: 0.4,
     gcodeFlavor: "klipper",
     amsRequired: null,

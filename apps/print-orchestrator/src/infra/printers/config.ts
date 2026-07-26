@@ -100,7 +100,65 @@ export interface PrinterConfig {
    * and configs stay valid; absent means `false` (refuse).
    */
   allowInsecureTls?: boolean;
+  /**
+   * Whether this printer may continue the queue **by itself** after a print
+   * finishes, i.e. whether it clears its own bed.
+   *
+   * Deliberately separate from a task's `unattendedAllowed`: that is permission
+   * to run *one* print with nobody watching, which is a statement about the
+   * print. This is a statement about the *hardware* — an auto-eject arm, a belt,
+   * a plate changer — and only it may move a bed from `AWAITING_CLEARANCE` to
+   * `CLEAR` without a human. Conflating the two is what let a night queue start
+   * its next job onto a plate that still held the previous part.
+   *
+   * Absent means `{ allowed: false }`: no printer in the farm has such hardware
+   * today, so the safe default is the one that requires an operator.
+   */
+  automaticContinuation?: AutomaticContinuationConfig;
   light: PrinterLightConfig;
+}
+
+/** Verified hardware that leaves the bed clear without an operator. */
+export interface AutomaticContinuationConfig {
+  /** Master switch. False (the default) → the bed always needs a human. */
+  allowed: boolean;
+  /** What the hardware is, for the audit trail; free text from the config. */
+  mechanism: string;
+  /**
+   * ISO date the mechanism was last *physically verified* by an operator. An
+   * unverified mechanism does not count as one: `allowed` alone never clears a
+   * bed — {@link automaticContinuationEnabled} requires both.
+   */
+  verifiedAt: string | null;
+}
+
+export const NO_AUTOMATIC_CONTINUATION: AutomaticContinuationConfig = {
+  allowed: false,
+  mechanism: "",
+  verifiedAt: null
+};
+
+/**
+ * Whether a printer may clear its own bed. Requires an explicit opt-in **and** a
+ * recorded physical verification — the fail-closed reading of "явно настроена и
+ * подтверждена соответствующая аппаратная возможность".
+ */
+export function automaticContinuationEnabled(printer: {
+  automaticContinuation?: AutomaticContinuationConfig;
+}): boolean {
+  const c = printer.automaticContinuation;
+  return c?.allowed === true && typeof c.verifiedAt === "string" && c.verifiedAt.trim().length > 0;
+}
+
+function normalizeAutomaticContinuation(value: unknown): AutomaticContinuationConfig {
+  if (!isObject(value)) return NO_AUTOMATIC_CONTINUATION;
+  const verifiedAt = asString(value.verifiedAt);
+  return {
+    // Opt-in only: anything other than a literal `true` stays false.
+    allowed: value.allowed === true,
+    mechanism: asString(value.mechanism),
+    verifiedAt: verifiedAt && Number.isFinite(Date.parse(verifiedAt)) ? verifiedAt : null
+  };
 }
 
 export type PrinterConfigSourceKind = "file" | "env" | "none";
@@ -242,6 +300,7 @@ export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
     serial: asString(value.serial),
     accessCode: asString(value.accessCode),
     allowInsecureTls: value.allowInsecureTls === true,
+    automaticContinuation: normalizeAutomaticContinuation(value.automaticContinuation),
     light: normalizeLightConfig(value.light, protocol)
   };
 }

@@ -25,9 +25,12 @@ export type PrinterCommands = Pick<
   | "resumePrinter"
   | "cancelPrinter"
   | "clearStartGuard"
+  | "clearBed"
   | "snapshotPrinter"
   | "setLight"
 >;
+
+const BED_CLEARANCE_CONFIRMATIONS = ["part_removed", "plate_swapped", "auto_cleared"] as const;
 
 /** Reads + commands passed to the printer routes explicitly at registration. */
 export interface PrinterRoutesOptions {
@@ -176,6 +179,36 @@ export async function registerPrinterRoutes(
     }
     return { ok: true, printer: await commands.startPrinterFile(request.params.id, file) };
   });
+
+  /**
+   * Operator confirmation that the bed is physically free — the only transition
+   * out of `AWAITING_CLEARANCE`, and therefore the gate the next print waits on.
+   * `confirmation` is mandatory and explicit: the server never infers a clearance
+   * from idle telemetry, a successful previous print or an unattended permission.
+   */
+  app.post<{ Params: PrinterParams; Body: { confirmation?: unknown; note?: unknown } }>(
+    "/:id/bed/clear",
+    async (request) => {
+      const confirmation = request.body?.confirmation;
+      if (
+        typeof confirmation !== "string" ||
+        !BED_CLEARANCE_CONFIRMATIONS.includes(confirmation as (typeof BED_CLEARANCE_CONFIRMATIONS)[number])
+      ) {
+        throw new ValidationError(
+          `Поле «confirmation» обязательно и должно быть одним из: ${BED_CLEARANCE_CONFIRMATIONS.join(", ")}`
+        );
+      }
+      const note = typeof request.body?.note === "string" ? request.body.note : undefined;
+      return {
+        ok: true,
+        bed: commands.clearBed(
+          request.params.id,
+          confirmation as (typeof BED_CLEARANCE_CONFIRMATIONS)[number],
+          { note }
+        )
+      };
+    }
+  );
 
   app.post<{ Params: PrinterParams }>("/:id/pause", async (request) => ({
     ok: true,

@@ -341,6 +341,15 @@ export class PlanningService {
       // the printer is never treated as free-now while a run holds it.
       freeAtMs = Math.max(freeAtMs, nowMs + this.ctx.config.unknownEtaAssumptionS * 1000);
       estimated = true;
+    } else if (this.bedBlocksPrinter(printer.id)) {
+      // The device reports idle, but a finished part is still on the plate. This is
+      // the 03:00–08:00 case from the brief: the printer is NOT available, it is in
+      // forced downtime waiting for an operator. How long that lasts is genuinely
+      // unknown (it depends on a human arriving), so the free-time is pushed out by
+      // the disclosed assumption and flagged estimated — the planner may show the
+      // gap, but it can no longer promise a start into it.
+      freeAtMs = Math.max(freeAtMs, nowMs + this.ctx.config.unknownEtaAssumptionS * 1000);
+      estimated = true;
     }
 
     for (const assignment of this.activeAssignmentsForPrinter(printer.id)) {
@@ -350,6 +359,16 @@ export class PlanningService {
     }
 
     return { freeAtMs, estimated };
+  }
+
+  /**
+   * True when the printer's bed still holds a part (or its state is unknown), so
+   * nothing may be planned onto it until an operator confirms clearance. A printer
+   * with no tracked cycle at all is not blocked — it simply has no history yet.
+   */
+  private bedBlocksPrinter(printerId: string): boolean {
+    const bed = this.store.repositories.bedCycles.findOpenByPrinter(printerId);
+    return bed !== null && bed.state !== "CLEAR";
   }
 
   /** Open assignments (not released/cancelled) a confirmed ACTIVE plan holds on a printer. */

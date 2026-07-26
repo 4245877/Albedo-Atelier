@@ -81,7 +81,22 @@ async function runningRun(): Promise<{
       path: "",
       entries: [{ name: "chalice.gcode", path: "chalice.gcode", type: "file", size: 5, printable: true }]
     }),
-    nightWindow: "21:30 – 07:30"
+    // Nothing under test here depends on admission rules — the lifecycle tests
+    // start from an already-reserved run, so a permissive evaluator is honest.
+    evaluateEligibility: () => ({
+      status: "eligible" as const,
+      reasons: [],
+      preflight: {
+        taskId: "",
+        printerId: "",
+        verdict: "compatible" as const,
+        blockers: [],
+        reviews: [],
+        warnings: [],
+        eta: { seconds: null, source: "unknown" as const, preliminary: true }
+      },
+      nightWindowFit: null
+    })
   };
   const result = await new DispatchService(deps).dispatch({ taskId, mode: "manual" });
   return { store, lifecycle: new RunLifecycleService(store), runId: result.runId, taskId };

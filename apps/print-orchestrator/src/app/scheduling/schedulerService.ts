@@ -1,6 +1,8 @@
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { MaterialOverride, Plan } from "../../domain/print/types";
+import type { DispatchEligibility } from "../../domain/dispatch/eligibility";
 import { SchedulerContext } from "./context";
+import { EligibilityQueries, type EligibilityRequest } from "./eligibility";
 import { EvidenceResolver } from "./evidence";
 import { NightQueries } from "./night";
 import { PlanningService } from "./planning";
@@ -12,6 +14,7 @@ import type {
   SchedulerPrinterRef
 } from "./types";
 
+export type { EligibilityRequest } from "./eligibility";
 export type {
   CompatibilityMatrix,
   CompatibilityRow,
@@ -44,6 +47,7 @@ export class SchedulerService {
   private readonly evidence: EvidenceResolver;
   private readonly planning: PlanningService;
   private readonly night: NightQueries;
+  private readonly eligibilityQueries: EligibilityQueries;
 
   constructor(
     store: PrintQueueStore,
@@ -54,12 +58,24 @@ export class SchedulerService {
     this.evidence = new EvidenceResolver(ctx);
     this.planning = new PlanningService(ctx, this.evidence);
     this.night = new NightQueries(ctx, this.evidence);
+    this.eligibilityQueries = new EligibilityQueries(ctx, this.evidence);
   }
 
   // ── Compatibility matrix (EvidenceResolver) ──────────────────────────────────
 
   compatibilityMatrix(): CompatibilityMatrix {
     return this.evidence.compatibilityMatrix();
+  }
+
+  // ── Dispatch eligibility (EligibilityQueries) ───────────────────────────────
+
+  /**
+   * The authoritative "may this start now?" check — the SAME call the physical
+   * dispatch makes inside its reserve transaction. Exposed here so the preview
+   * and the plan-confirmation path cannot answer differently from enforcement.
+   */
+  dispatchEligibility(request: EligibilityRequest): DispatchEligibility {
+    return this.eligibilityQueries.evaluate(request);
   }
 
   // ── Plans (PlanningService) ──────────────────────────────────────────────────

@@ -47,6 +47,18 @@ export interface CompatibilityTaskInput {
   pinnedPrinterId: string | null;
   /** Model bounding box in mm, or null when the size could not be read. */
   dimensions: Dimensions | null;
+  /**
+   * Whether {@link dimensions} is known to be in millimetres.
+   *
+   * STL carries no unit declaration, so a bounding box read from one is a bare
+   * set of numbers that may be mm, cm or inches. Trusting it as mm is how a
+   * 25.4×-too-small model passes a fit check. `false` therefore means "we have
+   * numbers but not a scale" and downgrades to `model_scale_unknown` — the
+   * planner may still show the box, but nothing may auto-start on it. A 3MF
+   * declares its unit and is normalised to mm by the caller (→ `true`).
+   * `true` when there are no dimensions at all (nothing to mis-scale).
+   */
+  dimensionsScaleKnown: boolean;
   /** Required nozzle diameter (from slice/profile/analysis) in mm; null when unknown. */
   requiredNozzleMm: number | null;
   /** G-code flavor / firmware the file or machine profile targets; null when unknown. */
@@ -110,10 +122,17 @@ export interface CompatibilityEvidence {
 export interface CompatibilityConfig {
   /** Telemetry older than this (ms) is stale → review. */
   telemetryStaleMs: number;
+  /**
+   * Clearance (mm) kept free on each bed axis: a part may not use the nominal
+   * build volume to its last millimetre. Optional so existing callers keep
+   * working; absent means the default below.
+   */
+  buildVolumeMarginMm?: number;
 }
 
 export const DEFAULT_COMPATIBILITY_CONFIG: CompatibilityConfig = {
-  telemetryStaleMs: 120_000
+  telemetryStaleMs: 120_000,
+  buildVolumeMarginMm: 5
 };
 
 export interface CompatibilityResult {
@@ -146,9 +165,24 @@ function materialsClash(a: string, b: string): boolean {
 }
 
 
-/** True when the model does not fit the build volume on any axis. */
-function exceedsVolume(dims: Dimensions, volume: Dimensions): boolean {
-  return dims.x > volume.x + 0.01 || dims.y > volume.y + 0.01 || dims.z > volume.z + 0.01;
+/**
+ * True when the model does not fit the build volume on any axis, once the safety
+ * margin is subtracted from the volume. The margin exists because a nominal build
+ * volume is not usable to its last millimetre: skirts/brims, bed clips and the
+ * gantry's own approach all need clearance, and a part touching the exact bound
+ * is a collision, not a fit.
+ */
+function exceedsVolume(dims: Dimensions, volume: Dimensions, marginMm: number): boolean {
+  const m = Math.max(0, marginMm);
+  // The margin applies to the two bed axes; Z is bounded by physical head travel
+  // and takes only the rounding tolerance.
+  return (
+    dims.x > volume.x - m + 0.01 || dims.y > volume.y - m + 0.01 || dims.z > volume.z + 0.01
+  );
+}
+
+function safetyMarginMm(config: CompatibilityConfig): number {
+  return config.buildVolumeMarginMm ?? DEFAULT_COMPATIBILITY_CONFIG.buildVolumeMarginMm ?? 0;
 }
 
 /**
@@ -254,11 +288,21 @@ export function evaluateCompatibility(
     review("dimensions_unknown", "Размеры модели не определены");
   } else if (printer.buildVolume === null) {
     review("build_volume_unknown", `Рабочая область «${printer.name}» неизвестна`);
-  } else if (exceedsVolume(task.dimensions, printer.buildVolume)) {
+  } else if (exceedsVolume(task.dimensions, printer.buildVolume, safetyMarginMm(config))) {
     block(
       "too_large",
-      `Модель ${fmtDims(task.dimensions)} не помещается в область ${fmtDims(printer.buildVolume)}`
+      `Модель ${fmtDims(task.dimensions)} не помещается в область ${fmtDims(printer.buildVolume)} (с отступом ${safetyMarginMm(config)} мм)`
     );
+  } else if (!task.dimensionsScaleKnown) {
+    // The box fits *if* the numbers are millimetres — and nothing proved they are.
+    // An honest `review`: visible in the matrix, refused by dispatch.
+    review(
+      "model_scale_unknown",
+      "Единицы измерения модели не подтверждены (STL без масштаба) — размеры нельзя считать миллиметрами"
+    );
+  }
+  if (task.dimensions !== null && !task.dimensionsScaleKnown && printer.buildVolume === null) {
+    review("model_scale_unknown", "Единицы измерения модели не подтверждены");
   }
 
   // ── G-code flavor / firmware ──────────────────────────────────────────────────

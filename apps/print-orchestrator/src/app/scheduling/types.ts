@@ -56,10 +56,18 @@ export interface SchedulerConfig {
   now: () => Date;
   /** OrcaSlicer runtime availability (probed by the caller); gates un-sliced work. */
   runtimeAvailable: boolean;
-  /** Night ETA safety buffer, e.g. 0.2. */
+  /**
+   * Night ETA safety buffer as a **fraction**: 0.2 → +20% → `eta × 1.2`. Never a
+   * bare multiplier and never minutes.
+   */
   nightSafetyBufferRatio: number;
-  /** Night window label to stamp on a night plan. */
+  /** Night window label ("HH:MM – HH:MM") in the farm's local wall clock. */
   nightWindow: string;
+  /**
+   * IANA timezone the night window's wall clock refers to. Stored timestamps stay
+   * UTC; only window arithmetic is localized, and only through this zone.
+   */
+  farmTimeZone: string;
   compatibility?: CompatibilityConfig;
   /** Scheduling-only assumption (s) for advancing free-time when ETA is unknown. */
   unknownEtaAssumptionS: number;

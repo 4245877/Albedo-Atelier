@@ -1,5 +1,12 @@
 import { ACTIVE_RUN_STATES, type PrintRunState } from "../../domain/print/types";
-import type { BedCycleState, Metadata, PrintTask } from "../../domain/print/types";
+import type {
+  Artifact,
+  ArtifactAnalysis,
+  BedCycle,
+  BedCycleState,
+  Metadata,
+  PrintTask
+} from "../../domain/print/types";
 import {
   evaluateCompatibility,
   type CompatibilityEvidence,
@@ -21,6 +28,13 @@ export interface ResolvedEvidence {
   buildVolume: Dimensions | null;
   needsSlicing: boolean;
   gcodeReady: boolean;
+  /** The rows behind the evidence, so the dispatch layer re-reads nothing. */
+  artifact: Artifact | null;
+  analysis: ArtifactAnalysis | null;
+  /** The ready slice variant targeting this printer, when one exists. */
+  variant: SliceVariant | null;
+  /** Live bed-cycle row for the printer (null when nothing is tracked). */
+  bedCycle: BedCycle | null;
 }
 
 /**
@@ -51,13 +65,14 @@ export class EvidenceResolver {
     const { taskInput, evidence, buildVolume } = this.resolveEvidence(task, printer);
     return evaluateCompatibility(
       taskInput,
-      this.printerInput(printer, buildVolume),
+      this.printerInputFor(printer, buildVolume),
       evidence,
       this.ctx.compatibilityConfig
     );
   }
 
-  private printerInput(
+  /** The printer half of the preflight input; shared with the dispatch-eligibility path. */
+  printerInputFor(
     printer: SchedulerPrinterRef,
     buildVolume: Dimensions | null
   ): CompatibilityPrinterInput {
@@ -86,7 +101,15 @@ export class EvidenceResolver {
   resolveEvidence(task: PrintTask, printer: SchedulerPrinterRef): ResolvedEvidence {
     const repos = this.ctx.store.repositories;
     const artifact = task.artifactId ? repos.artifacts.getById(task.artifactId) : null;
-    const needsSlicing = artifact ? artifact.kind !== "gcode" : true;
+    // "Needs slicing" means there is source geometry the farm must turn into
+    // printer-specific G-code. A task with no registered artifact that names a
+    // file already sitting on the printer (the legacy/manual flow) has no bytes
+    // to slice — treating it as un-sliced work would block every attended start
+    // on a slice that can never exist. Its honesty is enforced elsewhere: with no
+    // analysis it can never satisfy `gcodeReady`, so it stays night-ineligible.
+    const needsSlicing = artifact
+      ? artifact.kind !== "gcode"
+      : typeof task.metadata.file !== "string" || task.metadata.file.trim() === "";
 
     const variant = this.readyVariantFor(task.id, printer);
     const profileSet = variant ? repos.profileSets.getById(variant.profileSetId) : null;
@@ -103,8 +126,10 @@ export class EvidenceResolver {
       analysis.verdict !== "blocked" &&
       analysis.blockers.length === 0;
 
-    const dimensions =
-      readDims(variant?.dimensions ?? null) ?? readDims(analysis?.data ?? null) ?? null;
+    // A ready slice's own dimensions win (the slicer worked in mm on this exact
+    // machine); otherwise the source analysis, whose unit may be unproven.
+    const readDimensions = readDims(variant?.dimensions ?? null) ?? readDims(analysis?.data ?? null);
+    const dimensions = readDimensions?.dimensions ?? null;
     const requiredNozzleMm =
       machineFields?.nozzleDiameterMm ?? analysis?.nozzleDiameterMm ?? null;
     const material =
@@ -131,6 +156,9 @@ export class EvidenceResolver {
       material,
       pinnedPrinterId: task.pinnedPrinterId,
       dimensions,
+      // No dimensions at all is already reported as `dimensions_unknown`; the
+      // scale flag only matters when there ARE numbers, so it defaults to true.
+      dimensionsScaleKnown: readDimensions?.scaleKnown ?? true,
       requiredNozzleMm,
       gcodeFlavor,
       // No AMS/multi-material requirement is recorded anywhere in the model yet
@@ -155,7 +183,17 @@ export class EvidenceResolver {
       gcodeEtaS: analysis?.estimatedDurationS ?? null
     };
 
-    return { taskInput, evidence, buildVolume, needsSlicing, gcodeReady };
+    return {
+      taskInput,
+      evidence,
+      buildVolume,
+      needsSlicing,
+      gcodeReady,
+      artifact,
+      analysis,
+      variant,
+      bedCycle: bed
+    };
   }
 
   /**
@@ -305,22 +343,100 @@ function dimsDiffer(a: Dimensions, b: Dimensions): boolean {
   return Math.abs(a.x - b.x) > eps || Math.abs(a.y - b.y) > eps || Math.abs(a.z - b.z) > eps;
 }
 
-/** Reads a `{x,y,z}` bounding box from a slice/analysis metadata blob; null when absent. */
-function readDims(meta: Metadata | null): Dimensions | null {
+/**
+ * A bounding box read out of a slice/analysis metadata blob, together with
+ * whether its unit is *proven* to be millimetres.
+ *
+ * The analyzers emit `bbox: { min, max, size }` (STL, 3MF, G-code) alongside a
+ * `units` field; earlier readers only understood a bare `size` array or a
+ * `{x,y,z}` object, so every analysis-derived box silently came back `null` and
+ * no model was ever checked against a build volume. Both shapes are handled here,
+ * and the unit is resolved rather than assumed:
+ *
+ *   - 3MF declares its unit → converted to mm, scale known;
+ *   - G-code is machine coordinates → already mm, scale known;
+ *   - STL declares nothing → numbers kept, scale **unknown** (never assumed mm).
+ */
+interface ReadDimensions {
+  dimensions: Dimensions;
+  scaleKnown: boolean;
+}
+
+/** 3MF `unit` values → millimetres per unit (the 3MF core spec set). */
+const UNIT_TO_MM: Record<string, number> = {
+  micron: 0.001,
+  micrometer: 0.001,
+  millimeter: 1,
+  millimetre: 1,
+  mm: 1,
+  centimeter: 10,
+  centimetre: 10,
+  cm: 10,
+  meter: 1000,
+  metre: 1000,
+  m: 1000,
+  inch: 25.4,
+  in: 25.4,
+  foot: 304.8,
+  ft: 304.8
+};
+
+function readDims(meta: Metadata | null): ReadDimensions | null {
   if (!meta) return null;
-  const size = (meta as Record<string, unknown>).size ?? (meta as Record<string, unknown>).bbox;
-  if (Array.isArray(size) && size.length >= 3) {
-    const [x, y, z] = size;
-    if (typeof x === "number" && typeof y === "number" && typeof z === "number") {
-      return { x, y, z };
+  const record = meta as Record<string, unknown>;
+  const raw = readRawDims(record);
+  if (!raw) return null;
+
+  const declared = typeof record.units === "string" ? record.units.trim().toLowerCase() : null;
+  // A slice variant's stored dimensions are produced by the slicer in mm.
+  if (declared === null) return { dimensions: raw, scaleKnown: true };
+  if (declared === "unknown") return { dimensions: raw, scaleKnown: false };
+
+  const factor = UNIT_TO_MM[declared];
+  if (factor === undefined) {
+    // A unit we do not know how to convert is not a unit we may guess at.
+    return { dimensions: raw, scaleKnown: false };
+  }
+  return {
+    dimensions: { x: raw.x * factor, y: raw.y * factor, z: raw.z * factor },
+    scaleKnown: true
+  };
+}
+
+/** The `{x,y,z}` extent, from any of the shapes the analyzers/slicer produce. */
+function readRawDims(record: Record<string, unknown>): Dimensions | null {
+  // `bbox: { min, max, size }` — what every built-in analyzer emits.
+  const bbox = record.bbox;
+  if (bbox && typeof bbox === "object" && !Array.isArray(bbox)) {
+    const b = bbox as Record<string, unknown>;
+    const fromSize = tripleOf(b.size);
+    if (fromSize) return fromSize;
+    const min = tripleOf(b.min);
+    const max = tripleOf(b.max);
+    if (min && max) {
+      return { x: max.x - min.x, y: max.y - min.y, z: max.z - min.z };
     }
   }
-  const dims = (meta as Record<string, unknown>).dimensions;
-  if (dims && typeof dims === "object") {
-    const d = dims as Record<string, unknown>;
-    if (typeof d.x === "number" && typeof d.y === "number" && typeof d.z === "number") {
+  // Bare `size` / `bbox` arrays and a `{x,y,z}` object (slice-variant shapes).
+  return tripleOf(record.size) ?? tripleOf(record.bbox) ?? tripleOf(record.dimensions);
+}
+
+/** A `[x,y,z]` array or `{x,y,z}` object of finite numbers, else null. */
+function tripleOf(value: unknown): Dimensions | null {
+  if (Array.isArray(value) && value.length >= 3) {
+    const [x, y, z] = value;
+    if (isFiniteNumber(x) && isFiniteNumber(y) && isFiniteNumber(z)) return { x, y, z };
+    return null;
+  }
+  if (value && typeof value === "object") {
+    const d = value as Record<string, unknown>;
+    if (isFiniteNumber(d.x) && isFiniteNumber(d.y) && isFiniteNumber(d.z)) {
       return { x: d.x, y: d.y, z: d.z };
     }
   }
   return null;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
 }

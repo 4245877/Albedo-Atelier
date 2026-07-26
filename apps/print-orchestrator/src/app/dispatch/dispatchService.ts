@@ -34,14 +34,29 @@ import {
 } from "../../infra/printers/files";
 import { supportsPrinterStart, type PrinterLiveStatus } from "../../infra/printers/status";
 import type { StoreLogger } from "../../shared/logger";
-import { windowLengthMinutes } from "../nightPlanner";
-import { ANALYZER_VERSION } from "../artifacts/analyzers";
+import type { DeviceFileIdentity, DispatchEligibility } from "../../domain/dispatch/eligibility";
+import { REASON } from "../../domain/dispatch/reasons";
 import {
-  evaluateDispatchGate,
+  blockersOf,
+  remainingBlockers,
   resolveDispatchFile,
   type DispatchBlocker,
   type DispatchMode
 } from "./dispatchGate";
+
+/**
+ * An explicit, audited operator decision to proceed despite non-hard warnings.
+ * Hard rules (occupied bed, wrong target printer, unverified file, busy printer,
+ * model that does not fit…) are NOT clearable by it — see `NON_OVERRIDABLE`.
+ */
+export interface DispatchOverride {
+  /** Reason codes the operator explicitly accepts. */
+  codes: string[];
+  /** Free-text justification; required — an override with no reason is not one. */
+  reason: string;
+  /** Who is accountable. */
+  operator: string;
+}
 
 export interface DispatchRequest {
   taskId: string;
@@ -52,6 +67,8 @@ export interface DispatchRequest {
   expectedArtifactSha256?: string | null;
   /** Repeating the same key returns the original run — never a second command. */
   idempotencyKey?: string;
+  /** Explicit operator override of overridable warnings (manual mode only). */
+  override?: DispatchOverride;
   actor?: string;
 }
 
@@ -71,6 +88,20 @@ export interface DispatchDeps {
   store: PrintQueueStore;
   /** Resolves a task's printer hint (name or id) to the farm config. */
   resolvePrinter(reference: string): PrinterConfig | undefined;
+  /**
+   * The single authoritative admission check (`DispatchEligibility`), shared
+   * verbatim with the compatibility preview and plan confirmation. Injected so
+   * the dispatch cannot grow a private second rule set — the defect this whole
+   * module was rewritten to remove.
+   */
+  evaluateEligibility(input: {
+    taskId: string;
+    printerId: string;
+    mode: DispatchMode;
+    deviceFileIdentity: DeviceFileIdentity;
+    file: string | null;
+    filePathValid: boolean;
+  }): DispatchEligibility;
   /** Poll-cache live status (the physical layer re-reads fresh before sending). */
   getStatus(printerId: string): PrinterLiveStatus | undefined;
   /**
@@ -84,8 +115,6 @@ export interface DispatchDeps {
   /** On-device file listing (identity pre-flight); defaults to the Moonraker adapter. */
   listFiles?: (printer: PrinterConfig, dir: string) => Promise<PrinterFilesListing>;
   now?: () => Date;
-  nightWindow: string;
-  nightSafetyBufferRatio?: number;
   logger?: StoreLogger;
 }
 
@@ -130,6 +159,15 @@ export class DispatchService {
   async dispatch(request: DispatchRequest): Promise<DispatchResult> {
     const repos = this.deps.store.repositories;
 
+    // Request shape first: a malformed or illegal override is rejected before
+    // anything is read, listed over the network, or reserved. An override is
+    // *only* ever an attended decision — an unattended start has nobody to be
+    // accountable for it, so night mode refuses one outright.
+    if (request.override && request.mode !== "manual") {
+      throw new ValidationError("Override допустим только для ручного запуска");
+    }
+    normalizeOverride(request.override);
+
     // Idempotency: the same key returns the original run, whatever its state —
     // the caller retried a request whose first instance already acted.
     if (request.idempotencyKey) {
@@ -145,11 +183,7 @@ export class DispatchService {
     if (!file) throw new JobError(`У задания «${task.title}» не задан файл для запуска`);
     const target = normalizeStartablePath(file);
 
-    const printerRef = task.pinnedPrinterId ?? task.targetPrinter;
-    if (!printerRef) throw new JobError(`У задания «${task.title}» не задан принтер`);
-    const printer = this.deps.resolvePrinter(printerRef);
-    if (!printer) throw new JobError(`Принтер «${printerRef}» не найден в конфигурации фермы`);
-
+    const printer = this.resolveTargetPrinter(task);
     const identity = await this.verifyOnDeviceFile(printer, target, artifact, request.mode);
 
     // ── Reserve transaction ──────────────────────────────────────────────────
@@ -182,11 +216,118 @@ export class DispatchService {
 
   // ── Phase helpers ──────────────────────────────────────────────────────────
 
+  /**
+   * The printer a dispatch may target.
+   *
+   * A **confirmed** (ACTIVE-plan) assignment is executable data, not a hint: when
+   * one exists it decides, and `task.pinnedPrinterId` / `task.targetPrinter` may
+   * not silently override it. Previously the task hints were read directly, so a
+   * task edited after a plan was confirmed would start on a printer the plan never
+   * approved — with a compatibility answer computed for a different machine.
+   *
+   * A divergence between the confirmed assignment and the task hints does not
+   * pick a winner: it refuses, so the operator replans or clears the assignment.
+   */
+  private resolveTargetPrinter(task: PrintTask): PrinterConfig {
+    const reservation = this.confirmedAssignment(task.id);
+    const hint = task.pinnedPrinterId ?? task.targetPrinter;
+
+    if (reservation) {
+      const assigned = this.deps.resolvePrinter(reservation.printerId);
+      if (!assigned) {
+        throw new JobError(
+          `Принтер «${reservation.printerId}» из подтверждённого плана не найден в конфигурации фермы`
+        );
+      }
+      if (hint) {
+        const hinted = this.deps.resolvePrinter(hint);
+        if (hinted && hinted.id !== assigned.id) {
+          throw new JobError(
+            `Задание «${task.title}» подтверждено в плане на «${assigned.name}», но закреплено за «${hinted.name}» — расхождение назначения, требуется перепланирование или ручная проверка`,
+            {
+              blockers: [
+                {
+                  code: REASON.ASSIGNMENT_PRINTER_MISMATCH,
+                  message: `план: ${assigned.id}, задание: ${hinted.id}`
+                }
+              ],
+              assignmentId: reservation.id,
+              planId: reservation.planId
+            }
+          );
+        }
+      }
+      return assigned;
+    }
+
+    if (!hint) throw new JobError(`У задания «${task.title}» не задан принтер`);
+    const printer = this.deps.resolvePrinter(hint);
+    if (!printer) throw new JobError(`Принтер «${hint}» не найден в конфигурации фермы`);
+    return printer;
+  }
+
+  /**
+   * Refuses the start unless the authoritative eligibility permits it.
+   *
+   * An operator override may clear only *overridable* reasons, only in `manual`
+   * mode, and only with a stated reason and an operator id — every override is
+   * written to the audit trail with the exact codes it waved through. Hard rules
+   * (bed not clear, wrong target printer, unverified file, busy printer, model
+   * does not fit…) are refused regardless: there is no request shape that starts
+   * a print over them.
+   */
+  private enforceEligibility(
+    task: PrintTask,
+    eligibility: DispatchEligibility,
+    request: DispatchRequest
+  ): void {
+    // Shape and mode were validated up front in `dispatch`; re-normalizing here
+    // keeps this method correct on its own terms.
+    const override = request.mode === "manual" ? normalizeOverride(request.override) : null;
+
+    const remaining = remainingBlockers(eligibility, override?.codes ?? []);
+    if (remaining.length > 0) {
+      throw new JobError(
+        `Нельзя запустить «${task.title}»: ${remaining.map((r) => r.message).join("; ")}`,
+        { blockers: remaining.map((r) => ({ code: r.code, message: r.message })), status: eligibility.status }
+      );
+    }
+
+    if (override) {
+      const cleared = eligibility.reasons.filter((r) => override.codes.includes(r.code));
+      if (cleared.length === 0) {
+        throw new ValidationError(
+          "Override не относится ни к одному из предупреждений — обновите предпросмотр"
+        );
+      }
+      this.audit("print_task", task.id, "eligibility_override", override.operator, {
+        detail: {
+          reason: override.reason,
+          operator: override.operator,
+          overridden: cleared.map((r) => ({ code: r.code, message: r.message })),
+          at: this.nowIso()
+        }
+      });
+    }
+  }
+
+  /** The task's live assignment under a confirmed (ACTIVE) plan, if any. */
+  private confirmedAssignment(taskId: string): Assignment | null {
+    const repos = this.deps.store.repositories;
+    for (const assignment of repos.assignments.listByTask(taskId)) {
+      if (assignment.state === "CANCELLED" || assignment.state === "RELEASED") continue;
+      if (!assignment.planId) continue;
+      const plan = repos.plans.getById(assignment.planId);
+      if (plan?.state === "ACTIVE") return assignment;
+    }
+    return null;
+  }
+
   private reserve(
     request: DispatchRequest,
     printer: PrinterConfig,
     target: string,
-    identity: { level: string; note: string | null }
+    identity: { level: DeviceFileIdentity; note: string | null }
   ): ReservedDispatch {
     const repos = this.deps.store.repositories;
     const iso = this.nowIso();
@@ -217,25 +358,18 @@ export class DispatchService {
     const entry = repos.queue.findByTaskId(task.id);
     const analysis = artifact ? repos.artifactAnalyses.latestForArtifact(artifact.id) : null;
 
-    const blockers = evaluateDispatchGate({
+    // The ONE authoritative admission check, re-run here against rows just
+    // re-read inside the transaction — never against anything a client sent and
+    // never against the preview's snapshot.
+    const eligibility = this.deps.evaluateEligibility({
+      taskId: task.id,
+      printerId: printer.id,
       mode: request.mode,
-      task,
-      entry,
-      artifact,
-      analysis,
-      printer,
-      status: this.deps.getStatus(printer.id),
-      remoteStartSupported: supportsPrinterStart(printer),
-      nightWindowMinutes: windowLengthMinutes(this.deps.nightWindow),
-      nightSafetyBufferRatio: this.deps.nightSafetyBufferRatio ?? 1,
-      currentAnalyzerVersion: ANALYZER_VERSION
+      deviceFileIdentity: identity.level,
+      file: target,
+      filePathValid: true
     });
-    if (blockers.length > 0) {
-      throw new JobError(
-        `Нельзя запустить «${task.title}»: ${blockers.map((b) => b.message).join("; ")}`,
-        { blockers }
-      );
-    }
+    this.enforceEligibility(task, eligibility, request);
 
     // One active run per task / per printer, one live assignment — checked here
     // for an honest message; the 008 partial unique indexes are the backstop.
@@ -251,8 +385,12 @@ export class DispatchService {
         `На «${printer.name}» уже есть активная печать (${activePrinterRun.id}, ${activePrinterRun.state})`
       );
     }
+    // The confirmed plan's own assignment for THIS task is the reservation this
+    // dispatch is executing — it is consumed below, not treated as a rival. Any
+    // *other* live assignment on the printer still blocks.
+    const reserved = this.confirmedAssignment(task.id);
     const openAssignment = repos.assignments.findOpenByPrinter(printer.id);
-    if (openAssignment) {
+    if (openAssignment && openAssignment.id !== reserved?.id) {
       throw new JobError(
         `На «${printer.name}» уже есть живое назначение (${openAssignment.id}, ${openAssignment.state})`
       );
@@ -264,26 +402,35 @@ export class DispatchService {
       );
     }
 
-    // Bed occupancy: fail-closed for anything unknown/occupied. An attended
-    // start (or an unattended one the operator explicitly permitted on an
-    // uncleared bed) closes an AWAITING_CLEARANCE cycle with an audit trace.
+    // Bed occupancy: fail-closed, with NO presumption path.
+    //
+    // A dispatch never clears a bed. `AWAITING_CLEARANCE` means the previous
+    // part is still on the plate as far as the system knows, and only an
+    // explicit clearance event (operator removal, plate swap, or a *verified*
+    // automatic mechanism — see `PrintQueueService.clearBed`) may move it to
+    // `CLEAR`. Neither an attended start nor `unattendedAllowed` substitutes for
+    // one: "печать без присмотра" is permission to run one print unwatched, not
+    // permission to continue the queue onto an occupied bed. The eligibility
+    // check above already refuses this case; the throw here is the last-resort
+    // backstop in case a caller is ever wired with a laxer evaluator.
     const openBed = repos.bedCycles.findOpenByPrinter(printer.id);
     if (openBed) {
-      const mayPresumeClear =
-        openBed.state === "AWAITING_CLEARANCE" &&
-        (request.mode === "manual" || task.unattendedAllowed === true);
-      if (!mayPresumeClear) {
-        throw new JobError(
-          `Стол принтера «${printer.name}» не подтверждён свободным (${openBed.state}) — очистите стол и подтвердите`
-        );
-      }
-      assertTransition("цикл стола", BED_CYCLE_TRANSITIONS, openBed.state, "CLEAR");
-      repos.bedCycles.update({ ...openBed, state: "CLEAR", clearedAt: iso, updatedAt: iso });
-      this.audit("bed_cycle", openBed.id, "presumed_cleared", actor, {
-        from: openBed.state,
-        to: "CLEAR",
-        detail: { mode: request.mode, reason: "start dispatched over an awaiting-clearance bed" }
-      });
+      throw new JobError(
+        openBed.state === "AWAITING_CLEARANCE"
+          ? `На столе «${printer.name}» осталась готовая модель — снимите её и подтвердите очистку стола перед запуском`
+          : `Стол принтера «${printer.name}» не подтверждён свободным (${openBed.state}) — очистите стол и подтвердите`,
+        {
+          blockers: [
+            {
+              code:
+                openBed.state === "AWAITING_CLEARANCE"
+                  ? REASON.BED_NOT_CLEAR
+                  : REASON.BED_STATE_UNKNOWN,
+              message: `bed cycle ${openBed.id} = ${openBed.state}`
+            }
+          ]
+        }
+      );
     }
 
     // ── Writes: bed → assignment → attempt → run → task transitions ────────
@@ -300,24 +447,47 @@ export class DispatchService {
     };
     repos.bedCycles.insert(bed);
 
-    const assignment: Assignment = {
-      id: newId(ID_PREFIX.assignment),
-      taskId: task.id,
-      printerId: printer.id,
-      planId: null,
-      bedCycleId: bed.id,
-      state: "RESERVED",
-      createdAt: iso,
-      updatedAt: iso,
-      version: 1,
-      legacyRef: null,
-      metadata: { via: "dispatch", mode: request.mode }
-    };
-    repos.assignments.insert(assignment);
+    // A confirmed plan's assignment is *consumed* (PROPOSED → RESERVED), never
+    // duplicated: the run then traces back to the very reservation the operator
+    // confirmed, and the plan's placement is not shadowed by a second, unplanned
+    // assignment for the same task. Without a confirmed plan a fresh assignment
+    // is minted as before.
+    let assignment: Assignment;
+    if (reserved) {
+      assertTransition("назначение", ASSIGNMENT_TRANSITIONS, reserved.state, "RESERVED");
+      assignment = repos.assignments.update({
+        ...reserved,
+        state: "RESERVED",
+        bedCycleId: bed.id,
+        updatedAt: iso,
+        metadata: { ...reserved.metadata, via: "dispatch", mode: request.mode }
+      });
+    } else {
+      assignment = {
+        id: newId(ID_PREFIX.assignment),
+        taskId: task.id,
+        printerId: printer.id,
+        planId: null,
+        bedCycleId: bed.id,
+        state: "RESERVED",
+        createdAt: iso,
+        updatedAt: iso,
+        version: 1,
+        legacyRef: null,
+        metadata: { via: "dispatch", mode: request.mode }
+      };
+      repos.assignments.insert(assignment);
+    }
     repos.bedCycles.update({ ...bed, assignmentId: assignment.id, updatedAt: iso });
     this.audit("assignment", assignment.id, "reserved", actor, {
+      from: reserved?.state,
       to: "RESERVED",
-      detail: { taskId: task.id, printerId: printer.id, mode: request.mode }
+      detail: {
+        taskId: task.id,
+        printerId: printer.id,
+        mode: request.mode,
+        ...(reserved?.planId ? { planId: reserved.planId } : {})
+      }
     });
 
     const attempt: DispatchAttempt = {
@@ -538,14 +708,18 @@ export class DispatchService {
     target: string,
     artifact: { sha256: string | null; sizeBytes: number | null } | null,
     mode: DispatchMode
-  ): Promise<{ level: string; note: string | null }> {
+  ): Promise<{ level: DeviceFileIdentity; note: string | null }> {
     if (!supportsPrinterFiles(printer)) {
       if (mode === "night") {
         throw new JobError(
-          `Протокол «${printer.protocol}» не позволяет проверить файл на устройстве — ночной запуск запрещён`
+          `Протокол «${printer.protocol}» не позволяет проверить файл на устройстве — ночной запуск запрещён`,
+          { blockers: [{ code: REASON.DEVICE_FILE_NOT_VERIFIED, message: "listing unsupported" }] }
         );
       }
-      return { level: "name-only", note: `протокол ${printer.protocol} не поддерживает листинг файлов` };
+      return {
+        level: "unsupported",
+        note: `протокол ${printer.protocol} не поддерживает листинг файлов`
+      };
     }
 
     let listing: PrinterFilesListing;
@@ -557,7 +731,8 @@ export class DispatchService {
       // re-validates against the device. For unattended mode it IS a refusal.
       if (mode === "night") {
         throw new JobError(
-          `Не удалось проверить файл на «${printer.name}» перед ночным запуском — запуск запрещён`
+          `Не удалось проверить файл на «${printer.name}» перед ночным запуском — запуск запрещён`,
+          { blockers: [{ code: REASON.DEVICE_FILE_NOT_VERIFIED, message: "listing failed" }] }
         );
       }
       this.logger.warn?.({ err: error, printer: printer.id }, "on-device file pre-flight failed");
@@ -566,7 +741,9 @@ export class DispatchService {
 
     const entry = listing.entries.find((e) => e.type === "file" && e.path === target);
     if (!entry) {
-      throw new JobError(`Файл «${target}» не найден на «${printer.name}»`);
+      throw new JobError(`Файл «${target}» не найден на «${printer.name}»`, {
+        blockers: [{ code: REASON.DEVICE_FILE_MISSING, message: `${target} @ ${printer.name}` }]
+      });
     }
     if (artifact?.sizeBytes != null && typeof entry.size === "number") {
       if (entry.size !== artifact.sizeBytes) {
@@ -638,8 +815,20 @@ interface ReservedDispatch {
   run: PrintRun;
 }
 
+/** Validates an operator override; an override without accountability is not one. */
+function normalizeOverride(override: DispatchOverride | undefined): DispatchOverride | null {
+  if (!override) return null;
+  const codes = (override.codes ?? []).map((c) => c.trim()).filter(Boolean);
+  const reason = override.reason?.trim() ?? "";
+  const operator = override.operator?.trim() ?? "";
+  if (codes.length === 0) throw new ValidationError("Override должен перечислять коды предупреждений");
+  if (!reason) throw new ValidationError("Override требует указания причины");
+  if (!operator) throw new ValidationError("Override требует идентификатор оператора");
+  return { codes, reason, operator };
+}
+
 export type { DispatchBlocker, DispatchMode };
-export { evaluateDispatchGate, resolveDispatchFile };
+export { blockersOf, resolveDispatchFile };
 
 /** Narrow re-export so callers get one import site for validation errors. */
 export { ValidationError };
