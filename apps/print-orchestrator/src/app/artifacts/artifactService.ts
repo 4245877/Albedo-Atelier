@@ -4,6 +4,7 @@ import type { ArtifactStorage } from "../../infra/storage/artifactStorage";
 import { AnalysisRunner, type AnalyzeFn } from "./analysisRunner";
 import { ArtifactContext, type ArtifactServiceOptions } from "./context";
 import { ArtifactIngest, type IngestInput, type IngestResult } from "./ingest";
+import { ModelScaleService } from "./modelScale";
 import { ArtifactQueries, type ArtifactDetail, type ArtifactSummary } from "./queries";
 import { ArtifactRetention } from "./retention";
 
@@ -32,6 +33,7 @@ export class ArtifactService {
   private readonly ingestOps: ArtifactIngest;
   private readonly queries: ArtifactQueries;
   private readonly retention: ArtifactRetention;
+  private readonly modelScale: ModelScaleService;
 
   constructor(store: PrintQueueStore, storage: ArtifactStorage, options: ArtifactServiceOptions) {
     const ctx = new ArtifactContext(store, storage, options);
@@ -39,6 +41,7 @@ export class ArtifactService {
     this.ingestOps = new ArtifactIngest(ctx, this.analysis);
     this.queries = new ArtifactQueries(ctx);
     this.retention = new ArtifactRetention(ctx);
+    this.modelScale = new ModelScaleService(ctx);
   }
 
   // ── Ingest (ArtifactIngest) ────────────────────────────────────────────────
@@ -78,6 +81,24 @@ export class ArtifactService {
 
   close(): void {
     this.analysis.close();
+  }
+
+  // ── Model scale (ModelScaleService) ────────────────────────────────────────
+
+  /**
+   * Records the operator's statement of what a model's coordinates mean. Until
+   * this exists an STL's size is unproven and nothing may auto-start on it.
+   */
+  confirmModelScale(
+    artifactId: string,
+    input: { units: unknown; scaleFactor?: unknown; actor?: string }
+  ): ReturnType<ModelScaleService["confirm"]> {
+    return this.modelScale.confirm(artifactId, input);
+  }
+
+  /** Withdraws a scale confirmation; the size reverts to unproven. */
+  clearModelScale(artifactId: string, actor?: string): ReturnType<ModelScaleService["clear"]> {
+    return this.modelScale.clear(artifactId, actor);
   }
 
   // ── Reads (ArtifactQueries) ────────────────────────────────────────────────

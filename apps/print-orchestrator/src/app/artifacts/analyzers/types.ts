@@ -4,8 +4,14 @@ import type { AnalysisFinding, AnalysisVerdict, DetectedFormat } from "../../../
  * The built-in analyzer suite version. Bumped when the extraction logic changes
  * so a re-analysis after a deploy is comparable to the old one (stored on the
  * {@link ArtifactAnalysis.analyzerVersion} column).
+ *
+ * `1.1.0` added the normalized {@link file://./geometry.ts geometry} payload:
+ * unit-resolved millimetre bounds, an explicit `scaleKnown` flag and per-plate
+ * scoping. A row written by `1.0.0` is still *readable* (the scheduler falls
+ * back to its `bbox`/`units` pair) but dispatch refuses it as outdated until it
+ * is re-analysed — which is the intended, fail-closed upgrade path.
  */
-export const ANALYZER_VERSION = "1.0.0";
+export const ANALYZER_VERSION = "1.1.0";
 
 /**
  * The pure output of analysing one file's bytes — no persistence, no ids. The

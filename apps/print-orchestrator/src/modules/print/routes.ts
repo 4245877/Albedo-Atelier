@@ -197,6 +197,29 @@ function registerArtifactRoutes(
     analysis: services.artifacts.reanalyze(request.params.id)
   }));
 
+  // An STL stores no unit, so its bounding box is numbers without a scale. This
+  // is the operator saying what they mean; it is bound to the artifact's content
+  // hash and lapses if the file is replaced. Without it the scheduler reports
+  // `model_scale_unknown` and refuses an unattended start.
+  app.post<{ Params: { id: string }; Body: { units?: unknown; scaleFactor?: unknown } }>(
+    "/artifacts/:id/scale",
+    async (request) => {
+      const body = request.body ?? {};
+      return {
+        ok: true,
+        ...services.artifacts.confirmModelScale(request.params.id, {
+          units: body.units,
+          scaleFactor: body.scaleFactor
+        })
+      };
+    }
+  );
+
+  app.delete<{ Params: { id: string } }>("/artifacts/:id/scale", async (request) => ({
+    ok: true,
+    ...services.artifacts.clearModelScale(request.params.id)
+  }));
+
   // Safe manual deletion: refused (400 with the reason) while any live task,
   // run, analysis or slice variant still uses the artifact; deduplicated blobs
   // are only unlinked when the last reference goes.

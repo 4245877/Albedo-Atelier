@@ -3,6 +3,13 @@ import type { FileHandle } from "node:fs/promises";
 import readline from "node:readline";
 
 import type { AnalysisFinding } from "../../../domain/print/types";
+import { unknownUnits } from "../../../domain/shared/units";
+import {
+  addPoint,
+  newBounds,
+  normalizeGeometry,
+  type BoundsAccumulator
+} from "./geometry";
 import { ANALYZER_VERSION, finding, type AnalyzerResult } from "./types";
 
 /**
@@ -12,47 +19,26 @@ import { ANALYZER_VERSION, finding, type AnalyzerResult } from "./types";
  * reads fixed 50-byte triangle records in chunks, the ASCII path reads line by
  * line. It reports the concrete variant, triangle count, per-axis bounds and the
  * bounding-box size, and flags the corruption a file can carry *without* a full
- * mesh repair: a truncated/over-declared binary body, an empty model, and
- * non-finite (NaN/∞) coordinates.
+ * mesh repair: a truncated/over-declared binary body, an empty model, non-finite
+ * (NaN/∞) coordinates, absurd magnitudes and a degenerate (zero-extent) box.
  *
- * Units are deliberately reported as `unknown` — STL carries no reliable unit —
- * so nothing here claims millimetres. Only heuristic size warnings are emitted
- * (suspiciously tiny/large bounds). A clean STL is always `needs_preparation`:
- * it is a source model that still needs a profile and slicing.
+ * **The format stores no unit.** That is the single most important fact about an
+ * STL here, and it is represented structurally rather than as a caveat: the
+ * normalized {@link file://./geometry.ts geometry} comes back with `sizeMm ===
+ * null` and `scaleKnown === false`, so no consumer can read millimetres out of
+ * it. The raw numbers are still published (`sizeRaw`, and the legacy `bbox`) for
+ * display and for the moment an operator confirms what they mean — see
+ * {@link file://../../../domain/print/modelScale.ts ModelScaleConfirmation}.
+ * Until that confirmation exists the scheduler treats the size as unproven, and
+ * an unattended start is refused.
+ *
+ * A clean STL is always `needs_preparation`: it is a source model that still
+ * needs a profile and slicing.
  */
 
 const TRIANGLE_BYTES = 50;
 const HEADER_BYTES = 84;
 const CHUNK_BYTES = 64 * TRIANGLE_BYTES * 16; // ~51 KiB, whole triangles per chunk
-
-interface Bounds {
-  min: [number, number, number];
-  max: [number, number, number];
-  any: boolean;
-  nonFinite: boolean;
-}
-
-function newBounds(): Bounds {
-  return {
-    min: [Infinity, Infinity, Infinity],
-    max: [-Infinity, -Infinity, -Infinity],
-    any: false,
-    nonFinite: false
-  };
-}
-
-function addPoint(b: Bounds, x: number, y: number, z: number): void {
-  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
-    b.nonFinite = true;
-    return;
-  }
-  b.any = true;
-  const p: [number, number, number] = [x, y, z];
-  for (let i = 0; i < 3; i++) {
-    if (p[i] < b.min[i]) b.min[i] = p[i];
-    if (p[i] > b.max[i]) b.max[i] = p[i];
-  }
-}
 
 export async function analyzeStl(
   handle: FileHandle,
@@ -68,38 +54,22 @@ export async function analyzeStl(
       ? await readBinary(handle, size, blockers, warnings)
       : await readAscii(path, blockers);
 
-  const bounds = geom.bounds;
-  if (bounds.nonFinite) {
-    blockers.push(finding("stl_non_finite", "Модель содержит нечисловые или бесконечные координаты"));
-  }
   if (geom.triangles === 0) {
     blockers.push(finding("stl_empty", "Пустая модель (0 треугольников)"));
   }
 
-  const bbox = bounds.any
-    ? {
-        min: bounds.min,
-        max: bounds.max,
-        size: [
-          bounds.max[0] - bounds.min[0],
-          bounds.max[1] - bounds.min[1],
-          bounds.max[2] - bounds.min[2]
-        ] as [number, number, number]
-      }
-    : null;
+  // An STL declares no unit at all — not "millimetre by default", genuinely none.
+  const normalized = normalizeGeometry({
+    prefix: "stl",
+    bounds: geom.bounds,
+    units: unknownUnits(),
+    objectCount: geom.triangles > 0 ? 1 : 0,
+    plateCount: geom.triangles > 0 ? 1 : 0
+  });
+  warnings.push(...normalized.warnings);
+  blockers.push(...normalized.blockers);
 
-  if (bbox) {
-    const maxDim = Math.max(...bbox.size);
-    if (maxDim > 0 && maxDim < 1) {
-      warnings.push(
-        finding("stl_suspicious_scale", "Подозрительно маленькая модель (единицы измерения неизвестны)")
-      );
-    } else if (maxDim > 1000) {
-      warnings.push(
-        finding("stl_suspicious_scale", "Подозрительно большая модель (единицы измерения неизвестны)")
-      );
-    }
-  }
+  const geometry = normalized.geometry;
 
   return {
     detectedFormat: "stl",
@@ -111,7 +81,13 @@ export async function analyzeStl(
       stlVariant: variant,
       triangles: geom.triangles,
       units: "unknown",
-      bbox
+      // Legacy shape, kept for readers written before `geometry` existed. These
+      // are the file's own numbers — deliberately NOT millimetres.
+      bbox:
+        geometry.minRaw && geometry.maxRaw && geometry.sizeRaw
+          ? { min: geometry.minRaw, max: geometry.maxRaw, size: geometry.sizeRaw }
+          : null,
+      geometry
     },
     analyzer: "stl",
     analyzerVersion: ANALYZER_VERSION
@@ -120,7 +96,7 @@ export async function analyzeStl(
 
 interface Geometry {
   triangles: number;
-  bounds: Bounds;
+  bounds: BoundsAccumulator;
 }
 
 async function readBinary(
@@ -159,7 +135,7 @@ async function readBinary(
     if (bytesRead === 0) break;
     offset += bytesRead;
 
-    let data = remainder.length ? Buffer.concat([remainder, buf.subarray(0, bytesRead)]) : buf.subarray(0, bytesRead);
+    const data = remainder.length ? Buffer.concat([remainder, buf.subarray(0, bytesRead)]) : buf.subarray(0, bytesRead);
     let pos = 0;
     while (pos + TRIANGLE_BYTES <= data.length && triangles < declared) {
       // Skip the 12-byte normal; read the 3 vertices (9 floats).
@@ -200,10 +176,9 @@ async function readAscii(path: string, blockers: AnalysisFinding[]): Promise<Geo
       } else if (lower.startsWith("vertex")) {
         vertices++;
         const parts = line.split(/\s+/);
-        const x = Number(parts[1]);
-        const y = Number(parts[2]);
-        const z = Number(parts[3]);
-        addPoint(bounds, x, y, z);
+        // A short/garbled `vertex` line yields NaN here, which the accumulator
+        // counts as non-finite → a blocker, rather than a silently smaller box.
+        addPoint(bounds, Number(parts[1]), Number(parts[2]), Number(parts[3]));
       }
     }
   } finally {

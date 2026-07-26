@@ -207,19 +207,115 @@ const RELS_XML =
 
 /** A minimal but valid `3dmodel.model` XML: one object mesh, one build item. */
 export function make3mfModelXml(options: { unit?: string; size?: number; transform?: string } = {}): string {
-  const unit = options.unit ?? "millimeter";
   const s = options.size ?? 10;
-  const transform = options.transform ? ` transform="${options.transform}"` : "";
+  return make3mfModel({
+    unit: options.unit ?? "millimeter",
+    objects: [{ id: "1", vertices: [[0, 0, 0], [s, 0, 0], [s, s, s]] }],
+    items: [{ objectid: "1", transform: options.transform }]
+  });
+}
+
+export type Vertex = [number, number, number];
+
+export interface ThreeMfObject {
+  id: string;
+  /** Mesh vertices; omit for a pure component-assembly object. */
+  vertices?: (Vertex | [unknown, unknown, unknown])[];
+  /** Nested component references, each with its own optional transform. */
+  components?: { objectid: string; transform?: string }[];
+}
+
+export interface ThreeMfItem {
+  objectid: string;
+  transform?: string;
+}
+
+/**
+ * A `3dmodel.model` with arbitrary objects, components, transforms and build
+ * items — the knobs the geometry tests need (units, multi-object scenes,
+ * component assemblies, corrupt coordinates). `unit: null` omits the attribute
+ * entirely, which is how the spec's millimetre default gets exercised.
+ */
+export function make3mfModel(options: {
+  unit?: string | null;
+  objects: ThreeMfObject[];
+  items: ThreeMfItem[];
+}): string {
+  const unitAttr = options.unit === null || options.unit === undefined ? "" : ` unit="${options.unit}"`;
+  const objects = options.objects
+    .map((o) => {
+      const vertices = (o.vertices ?? [])
+        .map((v) => `<vertex x="${v[0]}" y="${v[1]}" z="${v[2]}"/>`)
+        .join("");
+      const mesh = o.vertices
+        ? `<mesh><vertices>${vertices}</vertices>` +
+          '<triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh>'
+        : "";
+      const components = o.components
+        ? `<components>${o.components
+            .map(
+              (c) =>
+                `<component objectid="${c.objectid}"${c.transform === undefined ? "" : ` transform="${c.transform}"`}/>`
+            )
+            .join("")}</components>`
+        : "";
+      return `<object id="${o.id}" type="model">${mesh}${components}</object>`;
+    })
+    .join("");
+  const items = options.items
+    .map(
+      (i) =>
+        `<item objectid="${i.objectid}"${i.transform === undefined ? "" : ` transform="${i.transform}"`}/>`
+    )
+    .join("");
   return (
     '<?xml version="1.0" encoding="UTF-8"?>\n' +
-    `<model unit="${unit}" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">` +
-    "<metadata name=\"Application\">FixtureSlicer 1.0</metadata>" +
-    "<resources><object id=\"1\" type=\"model\"><mesh><vertices>" +
-    `<vertex x="0" y="0" z="0"/><vertex x="${s}" y="0" z="0"/><vertex x="${s}" y="${s}" z="${s}"/>` +
-    "</vertices><triangles><triangle v1=\"0\" v2=\"1\" v3=\"2\"/></triangles></mesh></object></resources>" +
-    `<build><item objectid="1"${transform}/></build>` +
+    `<model${unitAttr} xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">` +
+    '<metadata name="Application">FixtureSlicer 1.0</metadata>' +
+    `<resources>${objects}</resources>` +
+    `<build>${items}</build>` +
     "</model>"
   );
+}
+
+/** The 8 corners of an axis-aligned box from the origin — a bbox-realistic mesh. */
+export function boxVertices(sx: number, sy = sx, sz = sx, origin: Vertex = [0, 0, 0]): Vertex[] {
+  const [ox, oy, oz] = origin;
+  const out: Vertex[] = [];
+  for (const x of [ox, ox + sx]) for (const y of [oy, oy + sy]) for (const z of [oz, oz + sz]) out.push([x, y, z]);
+  return out;
+}
+
+/**
+ * An OrcaSlicer-style `Metadata/model_settings.config` mapping plates to the
+ * build items they hold — what makes a multi-plate project's plates attributable.
+ */
+export function makeModelSettingsConfig(plates: { index: number; objectIds: string[] }[]): string {
+  const body = plates
+    .map(
+      (p) =>
+        `<plate><metadata key="plater_id" value="${p.index}"/>` +
+        p.objectIds
+          .map(
+            (id) =>
+              `<model_instance><metadata key="object_id" value="${id}"/>` +
+              '<metadata key="instance_id" value="0"/></model_instance>'
+          )
+          .join("") +
+        "</plate>"
+    )
+    .join("");
+  return `<?xml version="1.0"?><config>${body}</config>`;
+}
+
+/** A 3MF package from a model XML plus any extra entries (configs, plate assets). */
+export function make3mfPackage(modelXml: string, extra: ZipInput[] = []): Buffer {
+  return makeZip([
+    { name: "[Content_Types].xml", data: CONTENT_TYPES_XML },
+    { name: "_rels/.rels", data: RELS_XML },
+    { name: "3D/3dmodel.model", data: modelXml },
+    ...extra
+  ]);
 }
 
 /** A generic (un-sliced) 3MF package as ZIP bytes. */

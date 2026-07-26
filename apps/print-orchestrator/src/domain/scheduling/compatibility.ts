@@ -293,16 +293,18 @@ export function evaluateCompatibility(
       "too_large",
       `Модель ${fmtDims(task.dimensions)} не помещается в область ${fmtDims(printer.buildVolume)} (с отступом ${safetyMarginMm(config)} мм)`
     );
-  } else if (!task.dimensionsScaleKnown) {
-    // The box fits *if* the numbers are millimetres — and nothing proved they are.
-    // An honest `review`: visible in the matrix, refused by dispatch.
+  }
+  // Deliberately *not* part of the chain above: whether the numbers are proven
+  // millimetres is independent of whether they happen to fit. A box that fits
+  // only *if* it is millimetres — and nothing proved it is — must still be an
+  // honest `review` (visible in the matrix, refused by an unattended dispatch),
+  // and a box read from an un-scaled STL must never be silently trusted just
+  // because the printer's build volume is unknown too.
+  if (task.dimensions !== null && !task.dimensionsScaleKnown) {
     review(
       "model_scale_unknown",
       "Единицы измерения модели не подтверждены (STL без масштаба) — размеры нельзя считать миллиметрами"
     );
-  }
-  if (task.dimensions !== null && !task.dimensionsScaleKnown && printer.buildVolume === null) {
-    review("model_scale_unknown", "Единицы измерения модели не подтверждены");
   }
 
   // ── G-code flavor / firmware ──────────────────────────────────────────────────

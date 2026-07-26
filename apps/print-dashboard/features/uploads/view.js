@@ -119,8 +119,8 @@ function metaRows(a) {
   if (a.detectedFormat === "stl") {
     add("Тип STL", d.stlVariant === "ascii" ? "ASCII" : "бинарный");
     add("Треугольников", d.triangles);
-    add("Единицы", "неизвестны");
-    add("Габариты", fmtBbox(d.bbox, false));
+    add("Единицы", "неизвестны (STL их не хранит)");
+    add("Габариты", fmtGeometry(d));
   } else if (a.detectedFormat === "gcode") {
     add("Слайсер", joinVer(d.slicer, d.slicerVersion));
     add("Принтер", d.printerModel);
@@ -133,14 +133,15 @@ function metaRows(a) {
     add("Габариты", fmtBbox(d.bbox, true));
   } else if (a.detectedFormat === "3mf") {
     add("Класс", fmt3mfClass(d.threeMfClass));
-    add("Единицы", d.units);
+    add("Единицы", fmtUnits(d));
     add("Объектов", d.objectCount);
     add("Build items", d.buildItemCount);
     add("Пластин", d.plateCount);
     add("Слайсер", d.slicer);
     add("Материал", a.material);
     add("G-code внутри", d.hasGcodePayload ? "да" : "нет");
-    add("Габариты", fmtBbox(d.bbox, true));
+    add("Габариты", fmtGeometry(d));
+    add("По пластинам", fmtPlates(d.geometry));
   }
   return parts.join("");
 }
@@ -170,10 +171,51 @@ export function guessFormat(name) {
 
 function fmtBbox(bbox, unitsKnown) {
   if (!bbox || !bbox.size) return null;
-  const [x, y, z] = bbox.size.map((v) => Math.round(v * 100) / 100);
-  const suffix = unitsKnown ? " мм" : " (ед. неизв.)";
   const conf = bbox.confidence && bbox.confidence !== "high" ? ` · точность: ${bbox.confidence}` : "";
-  return `${x} × ${y} × ${z}${suffix}${conf}`;
+  return `${fmtTriple(bbox.size, unitsKnown)}${conf}`;
+}
+
+/* Габариты из нормализованного `geometry` (анализатор ≥ 1.1.0): миллиметры
+   показываются только тогда, когда файл действительно доказал единицы —
+   иначе выводятся исходные числа с явной пометкой. Старые записи анализа
+   (без `geometry`) читаются по прежней схеме bbox + units. */
+function fmtGeometry(d) {
+  const g = d.geometry;
+  if (!g) return fmtBbox(d.bbox, d.units && d.units !== "unknown");
+  if (g.sizeMm) return fmtTriple(g.sizeMm, true);
+  if (g.multiPlate) {
+    return g.sceneSizeMm
+      ? `${fmtTriple(g.sceneSizeMm, true)} — суммарно по ${g.plateCount} пластинам, не размер одной печати`
+      : `не определены: ${g.plateCount} пластин, выберите одну`;
+  }
+  if (g.sizeRaw) return fmtTriple(g.sizeRaw, false);
+  return null;
+}
+
+function fmtPlates(g) {
+  if (!g || !Array.isArray(g.plates) || g.plates.length < 2) return null;
+  return g.plates
+    .map((p) => {
+      const size = p.sizeMm ? fmtTriple(p.sizeMm, true) : p.sizeRaw ? fmtTriple(p.sizeRaw, false) : "—";
+      return `#${p.index}: ${size} (объектов: ${p.objectCount})`;
+    })
+    .join(" · ");
+}
+
+function fmtUnits(d) {
+  const g = d.geometry;
+  const units = (g && g.sourceUnits) || d.units;
+  if (!units) return null;
+  if (units === "unknown") {
+    const declared = g && g.declaredUnits;
+    return declared ? `не распознаны («${declared}»)` : "не указаны";
+  }
+  return units;
+}
+
+function fmtTriple(size, unitsKnown) {
+  const [x, y, z] = size.map((v) => Math.round(v * 100) / 100);
+  return `${x} × ${y} × ${z}${unitsKnown ? " мм" : " (ед. неизв.)"}`;
 }
 
 function fmtTemps(nozzle, bed) {

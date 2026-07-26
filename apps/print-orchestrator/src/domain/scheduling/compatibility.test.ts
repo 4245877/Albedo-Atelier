@@ -160,3 +160,44 @@ test("an AMS requirement the printer cannot meet is blocked", () => {
   assert.equal(r.verdict, "blocked");
   assert.ok(r.blockers.some((b) => b.code === "ams_unsupported"));
 });
+
+// ── Model scale ──────────────────────────────────────────────────────────────
+
+test("a fitting box whose unit is unproven is review, never compatible", () => {
+  const r = evaluateCompatibility(task({ dimensionsScaleKnown: false }), printer(), evidence());
+  assert.equal(r.verdict, "review");
+  assert.ok(r.reviews.some((x) => x.code === "model_scale_unknown"));
+});
+
+test("an unproven scale is reported even when the build volume is unknown too", () => {
+  // The two unknowns are independent: an unreadable bed size must not swallow
+  // the fact that the model's own numbers were never proven to be millimetres.
+  const r = evaluateCompatibility(
+    task({ dimensionsScaleKnown: false }),
+    printer({ buildVolume: null }),
+    evidence()
+  );
+  assert.equal(r.verdict, "review");
+  const codes = r.reviews.map((x) => x.code);
+  assert.ok(codes.includes("model_scale_unknown"));
+  assert.ok(codes.includes("build_volume_unknown"));
+});
+
+test("no dimensions at all is `dimensions_unknown`, not a scale complaint", () => {
+  const r = evaluateCompatibility(task({ dimensions: null }), printer(), evidence());
+  assert.equal(r.verdict, "review");
+  const codes = r.reviews.map((x) => x.code);
+  assert.ok(codes.includes("dimensions_unknown"));
+  assert.ok(!codes.includes("model_scale_unknown"));
+});
+
+test("an unproven box that already overflows the bed is blocked outright", () => {
+  const r = evaluateCompatibility(
+    task({ dimensions: { x: 400, y: 100, z: 100 }, dimensionsScaleKnown: false }),
+    printer(),
+    evidence()
+  );
+  assert.equal(r.verdict, "blocked");
+  assert.ok(r.blockers.some((b) => b.code === "too_large"));
+  assert.ok(r.reviews.some((x) => x.code === "model_scale_unknown"));
+});

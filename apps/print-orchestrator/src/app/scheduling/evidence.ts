@@ -15,6 +15,8 @@ import {
   type CompatibilityTaskInput,
   type Dimensions
 } from "../../domain/scheduling/compatibility";
+import { readModelScale, type ResolvedModelScale } from "../../domain/print/modelScale";
+import { resolveUnits } from "../../domain/shared/units";
 import { readFilament, readMachine } from "../../domain/slicing/orcaProfile";
 import type { ProfileSet, SliceVariant } from "../../domain/slicing/types";
 import { settingsOf } from "../slicing/profileService";
@@ -127,8 +129,13 @@ export class EvidenceResolver {
       analysis.blockers.length === 0;
 
     // A ready slice's own dimensions win (the slicer worked in mm on this exact
-    // machine); otherwise the source analysis, whose unit may be unproven.
-    const readDimensions = readDims(variant?.dimensions ?? null) ?? readDims(analysis?.data ?? null);
+    // machine); otherwise the source analysis, whose unit may be unproven — in
+    // which case an operator's scale confirmation for THESE bytes is what makes
+    // the numbers millimetres (and nothing else may).
+    const modelScale = artifact ? readModelScale(artifact) : null;
+    const readDimensions =
+      readSliceDims(variant?.dimensions ?? null) ??
+      readAnalysisDims(analysis?.data ?? null, modelScale);
     const dimensions = readDimensions?.dimensions ?? null;
     const requiredNozzleMm =
       machineFields?.nozzleDiameterMm ?? analysis?.nozzleDiameterMm ?? null;
@@ -347,78 +354,132 @@ function dimsDiffer(a: Dimensions, b: Dimensions): boolean {
  * A bounding box read out of a slice/analysis metadata blob, together with
  * whether its unit is *proven* to be millimetres.
  *
- * The analyzers emit `bbox: { min, max, size }` (STL, 3MF, G-code) alongside a
- * `units` field; earlier readers only understood a bare `size` array or a
- * `{x,y,z}` object, so every analysis-derived box silently came back `null` and
- * no model was ever checked against a build volume. Both shapes are handled here,
- * and the unit is resolved rather than assumed:
+ * There are three producers of such a blob and they are NOT interchangeable:
  *
- *   - 3MF declares its unit → converted to mm, scale known;
- *   - G-code is machine coordinates → already mm, scale known;
- *   - STL declares nothing → numbers kept, scale **unknown** (never assumed mm).
+ *   - a **slice variant** — the box of the sliced G-code, produced by the slicer
+ *     in machine coordinates → millimetres, scale known;
+ *   - a **current analysis** — carries the normalized `geometry` payload, which
+ *     already states `sizeMm` (converted from the file's declared unit) and
+ *     `scaleKnown` explicitly. This is read verbatim: no unit logic is repeated
+ *     here, so the analyzer and the scheduler can never disagree about a size;
+ *   - a **legacy analysis** (analyzer < 1.1.0) — only the old `bbox` + `units`
+ *     pair. Still readable, converted the same way, so an old row degrades to an
+ *     honest verdict instead of an error. Dispatch separately refuses it as
+ *     `ANALYZER_OUTDATED` until it is re-analysed.
+ *
+ * Everything is fail-closed: a box with a non-finite or non-positive axis, a
+ * multi-plate package with no plate chosen, and an unconvertible unit all yield
+ * either `null` (size unknown) or `scaleKnown: false` — never a plausible-looking
+ * number the planner would compare against a build volume.
  */
 interface ReadDimensions {
   dimensions: Dimensions;
   scaleKnown: boolean;
 }
 
-/** 3MF `unit` values → millimetres per unit (the 3MF core spec set). */
-const UNIT_TO_MM: Record<string, number> = {
-  micron: 0.001,
-  micrometer: 0.001,
-  millimeter: 1,
-  millimetre: 1,
-  mm: 1,
-  centimeter: 10,
-  centimetre: 10,
-  cm: 10,
-  meter: 1000,
-  metre: 1000,
-  m: 1000,
-  inch: 25.4,
-  in: 25.4,
-  foot: 304.8,
-  ft: 304.8
-};
-
-function readDims(meta: Metadata | null): ReadDimensions | null {
+/**
+ * Dimensions from a slice variant's stored box. The slicer worked in millimetres
+ * on this exact machine, so its numbers need no unit resolution.
+ */
+function readSliceDims(meta: Metadata | null): ReadDimensions | null {
   if (!meta) return null;
-  const record = meta as Record<string, unknown>;
-  const raw = readRawDims(record);
-  if (!raw) return null;
-
-  const declared = typeof record.units === "string" ? record.units.trim().toLowerCase() : null;
-  // A slice variant's stored dimensions are produced by the slicer in mm.
-  if (declared === null) return { dimensions: raw, scaleKnown: true };
-  if (declared === "unknown") return { dimensions: raw, scaleKnown: false };
-
-  const factor = UNIT_TO_MM[declared];
-  if (factor === undefined) {
-    // A unit we do not know how to convert is not a unit we may guess at.
-    return { dimensions: raw, scaleKnown: false };
-  }
-  return {
-    dimensions: { x: raw.x * factor, y: raw.y * factor, z: raw.z * factor },
-    scaleKnown: true
-  };
+  const dimensions = readLegacyBox(meta as Record<string, unknown>);
+  return dimensions ? { dimensions, scaleKnown: true } : null;
 }
 
-/** The `{x,y,z}` extent, from any of the shapes the analyzers/slicer produce. */
-function readRawDims(record: Record<string, unknown>): Dimensions | null {
+/**
+ * Dimensions from an artifact analysis, honouring the operator's scale
+ * confirmation when the file itself could not prove its unit.
+ */
+function readAnalysisDims(
+  meta: Metadata | null,
+  scale: ResolvedModelScale | null
+): ReadDimensions | null {
+  if (!meta) return null;
+  const record = meta as Record<string, unknown>;
+  const geometry = record.geometry;
+  if (geometry && typeof geometry === "object" && !Array.isArray(geometry)) {
+    return fromGeometry(geometry as Record<string, unknown>, scale);
+  }
+  return fromLegacy(record, scale);
+}
+
+/** The normalized `geometry` payload (analyzer ≥ 1.1.0) — the authoritative shape. */
+function fromGeometry(
+  geometry: Record<string, unknown>,
+  scale: ResolvedModelScale | null
+): ReadDimensions | null {
+  // A package holding several plates describes several prints; a box spanning
+  // them is the size of nothing that will ever be printed.
+  if (geometry.multiPlate === true) return null;
+
+  if (geometry.scaleKnown === true) {
+    // The analyzer proved the unit, so its millimetre box is the only answer
+    // there is. A missing or degenerate one means the geometry is unusable —
+    // falling back to the raw numbers here would quietly resurrect a box the
+    // analyzer had already refused.
+    const mm = positiveTriple(geometry.sizeMm);
+    return mm ? { dimensions: mm, scaleKnown: true } : null;
+  }
+
+  // Unproven unit: the raw numbers stand only if an operator said what they mean.
+  const raw = positiveTriple(geometry.sizeRaw);
+  if (!raw) return null;
+  return applyConfirmedScale(raw, scale);
+}
+
+/** The pre-1.1.0 `bbox` + `units` pair, converted the way the analyzer would now. */
+function fromLegacy(
+  record: Record<string, unknown>,
+  scale: ResolvedModelScale | null
+): ReadDimensions | null {
+  const raw = readLegacyBox(record);
+  if (!raw) return null;
+
+  const declared = record.units;
+  // No `units` key at all: a pre-analysis/slicer blob whose numbers are mm.
+  if (typeof declared !== "string" || declared.trim() === "") {
+    return { dimensions: raw, scaleKnown: true };
+  }
+  const resolved = resolveUnits(declared);
+  if (resolved.mmPerUnit === null) {
+    // An undeclared or unconvertible unit is not one we may guess at — but the
+    // operator may have confirmed it.
+    return applyConfirmedScale(raw, scale);
+  }
+  return { dimensions: scaled(raw, resolved.mmPerUnit), scaleKnown: true };
+}
+
+/**
+ * Applies an operator scale confirmation to unproven numbers. A confirmation
+ * that no longer matches the artifact's bytes is ignored — the size goes back to
+ * unproven rather than silently carrying over to a different file.
+ */
+function applyConfirmedScale(raw: Dimensions, scale: ResolvedModelScale | null): ReadDimensions {
+  if (!scale || scale.stale) return { dimensions: raw, scaleKnown: false };
+  return { dimensions: scaled(raw, scale.mmPerUnit), scaleKnown: true };
+}
+
+function scaled(d: Dimensions, factor: number): Dimensions {
+  return { x: d.x * factor, y: d.y * factor, z: d.z * factor };
+}
+
+/** The `{x,y,z}` extent, from any of the shapes the legacy analyzers/slicer produce. */
+function readLegacyBox(record: Record<string, unknown>): Dimensions | null {
   // `bbox: { min, max, size }` — what every built-in analyzer emits.
   const bbox = record.bbox;
   if (bbox && typeof bbox === "object" && !Array.isArray(bbox)) {
     const b = bbox as Record<string, unknown>;
-    const fromSize = tripleOf(b.size);
+    const fromSize = positiveTriple(b.size);
     if (fromSize) return fromSize;
     const min = tripleOf(b.min);
     const max = tripleOf(b.max);
     if (min && max) {
-      return { x: max.x - min.x, y: max.y - min.y, z: max.z - min.z };
+      return positive({ x: max.x - min.x, y: max.y - min.y, z: max.z - min.z });
     }
   }
   // Bare `size` / `bbox` arrays and a `{x,y,z}` object (slice-variant shapes).
-  return tripleOf(record.size) ?? tripleOf(record.bbox) ?? tripleOf(record.dimensions);
+  return positiveTriple(record.size) ?? positiveTriple(record.bbox) ?? positiveTriple(record.dimensions);
 }
 
 /** A `[x,y,z]` array or `{x,y,z}` object of finite numbers, else null. */
@@ -435,6 +496,16 @@ function tripleOf(value: unknown): Dimensions | null {
     }
   }
   return null;
+}
+
+/** The same, but a zero/negative extent on any axis is not a size — it is corruption. */
+function positiveTriple(value: unknown): Dimensions | null {
+  const triple = tripleOf(value);
+  return triple ? positive(triple) : null;
+}
+
+function positive(d: Dimensions): Dimensions | null {
+  return d.x > 0 && d.y > 0 && d.z > 0 ? d : null;
 }
 
 function isFiniteNumber(value: unknown): value is number {

@@ -226,3 +226,53 @@ test("uploads never leak into the legacy queue or state.json", async () => {
   const tasks = await app.inject({ method: "GET", url: "/api/print/tasks" });
   assert.ok(tasks.json().tasks.some((t: { state: string }) => t.state === "DRAFT"));
 });
+
+test("POST/DELETE /artifacts/:id/scale confirms and withdraws the model scale", async () => {
+  const up = await uploadReq("scaled.stl", binaryStl(7));
+  const artifactId = up.json().artifact.id;
+  await farmStore.artifacts.whenIdle();
+
+  // An STL arrives with no proven unit at all.
+  const before = await analyzed(artifactId);
+  assert.equal(before.analyses.at(-1).data.geometry.scaleKnown, false);
+  assert.equal(before.analyses.at(-1).data.geometry.sizeMm, null);
+
+  const confirm = await app.inject({
+    method: "POST",
+    url: `/api/print/artifacts/${artifactId}/scale`,
+    payload: { units: "centimeter" },
+    headers: { authorization: `Bearer ${TOKEN}` }
+  });
+  assert.equal(confirm.statusCode, 200);
+  assert.equal(confirm.json().confirmation.units, "centimeter");
+  assert.equal(confirm.json().artifact.metadata.modelScale.units, "centimeter");
+
+  const cleared = await app.inject({
+    method: "DELETE",
+    url: `/api/print/artifacts/${artifactId}/scale`,
+    headers: { authorization: `Bearer ${TOKEN}` }
+  });
+  assert.equal(cleared.statusCode, 200);
+  assert.equal(cleared.json().artifact.metadata.modelScale, undefined);
+});
+
+test("a scale confirmation in an unconvertible unit is refused with 400", async () => {
+  const up = await uploadReq("bad-scale.stl", binaryStl(9));
+  const res = await app.inject({
+    method: "POST",
+    url: `/api/print/artifacts/${up.json().artifact.id}/scale`,
+    payload: { units: "parsec" },
+    headers: { authorization: `Bearer ${TOKEN}` }
+  });
+  assert.equal(res.statusCode, 400);
+});
+
+test("the scale endpoint is behind the same API token as every other mutation", async () => {
+  const up = await uploadReq("guarded.stl", binaryStl(11));
+  const res = await app.inject({
+    method: "POST",
+    url: `/api/print/artifacts/${up.json().artifact.id}/scale`,
+    payload: { units: "millimeter" }
+  });
+  assert.equal(res.statusCode, 401);
+});

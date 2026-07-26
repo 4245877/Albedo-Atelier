@@ -1,6 +1,22 @@
 import type { FileHandle } from "node:fs/promises";
 
 import type { AnalysisFinding } from "../../../domain/print/types";
+import { resolveUnits, type ResolvedUnits } from "../../../domain/shared/units";
+import {
+  addPoint,
+  mergeBounds,
+  newBounds,
+  normalizeGeometry,
+  type BoundsAccumulator,
+  type NormalizedGeometry
+} from "./geometry";
+import {
+  countPlateEntries,
+  readPlateAssignment,
+  resolvePlates,
+  type PlacedItem,
+  type PlateAssignment
+} from "./threemfPlates";
 import { ANALYZER_VERSION, finding, worstVerdict, type AnalyzerResult, type AnalyzerLimits } from "./types";
 import { fileHandleSource, SafeZip, ZipSafetyError } from "./zip";
 import { asArray, parseSafeXml, XmlSafetyError } from "./xml";
@@ -18,12 +34,34 @@ import { asArray, parseSafeXml, XmlSafetyError } from "./xml";
  * unknown/unsupported 3MF — and a plain project is never treated as
  * ready-to-print (`needs_preparation`), while a sliced payload follows the same
  * G-code-style verdict rules.
+ *
+ * ## How the size is computed
+ *
+ * A 3MF's coordinates mean nothing without three things, and all three are
+ * honoured here:
+ *
+ *   1. **The declared unit.** `<model unit="…">` may be micron, millimeter,
+ *      centimetre, metre, inch or foot; the spec's default (millimetre) applies
+ *      only when the attribute is absent. The box is converted to mm exactly
+ *      once, in {@link file://./geometry.ts normalizeGeometry}. A unit we cannot
+ *      map is reported as unknown — never silently treated as millimetres.
+ *   2. **The transforms.** Only what the `<build>` places is printed, each item
+ *      through its own matrix, and each nested `<component>` through the
+ *      composition of its parent's. Vertices are folded into the box *after*
+ *      transformation, so a scaled/rotated/translated instance measures what it
+ *      will actually occupy.
+ *   3. **The plates.** A slicer project may hold several plates — several
+ *      separate prints. Their union is not the size of anything that will be
+ *      printed, so a multi-plate package publishes per-plate boxes and withholds
+ *      the merged one (see {@link NormalizedGeometry}).
  */
 
 const MODEL_CANDIDATES = ["3D/3dmodel.model", "3D/3Dmodel.model"];
 const CONTENT_TYPES = "[Content_Types].xml";
 /** Cap on vertices folded into the bounding box, so a dense mesh cannot stall the worker. */
 const MAX_BBOX_VERTICES = 2_000_000;
+/** Guard against a hostile/degenerate component graph (also caught by cycle detection). */
+const MAX_COMPONENT_DEPTH = 20;
 
 type Matrix = number[]; // 12 numbers: linear 3x3 (row-major) + translation
 
@@ -84,34 +122,41 @@ export async function analyze3mf(
     throw error;
   }
 
-  const modelInfo = extractModel(model, warnings);
-
-  // Classify by the auxiliary entries.
   const entryNames = zip.entries.map((e) => e.name);
-  const hasGcode = entryNames.some((n) => /\.gcode(\.\w+)?$/i.test(n) || /\.gcode$/i.test(n));
-  const hasSlicerProject = entryNames.some((n) =>
-    /Metadata\/(project_settings|model_settings|slice_info|process_settings)\.config$/i.test(n)
-  );
-  const hasThumbnail = entryNames.some((n) => /\.(png|jpg|jpeg)$/i.test(n) || /thumbnail/i.test(n));
-  const hasEmbeddedProfiles = entryNames.some((n) => /Metadata\/.*\.config$/i.test(n));
+  // Plate → object assignment, when the package records one (OrcaSlicer /
+  // BambuStudio projects). Best-effort: an unreadable or unmappable file leaves
+  // the plates unattributed, which is reported rather than guessed around.
+  const plateAssignment = await readPlateAssignment(zip, entryNames, limits.xmlMaxBytes);
+  const modelInfo = extractModel(model, warnings, {
+    plateAssignment,
+    entryPlateCount: countPlateEntries(entryNames)
+  });
+  warnings.push(...modelInfo.geometryWarnings);
+  blockers.push(...modelInfo.geometryBlockers);
 
-  const threeMfClass = hasGcode
-    ? "sliced"
-    : hasSlicerProject
-      ? "slicer_project"
-      : "generic";
-
+  const payload = classifyEntries(entryNames);
+  const threeMfClass = payload.threeMfClass;
+  const geometry = modelInfo.geometry;
   const data: Record<string, unknown> = {
     threeMfClass,
-    units: modelInfo.unit,
+    // The resolved canonical unit ("millimeter", "inch", … or "unknown" when the
+    // file declared something we cannot convert). Legacy readers key off this.
+    units: geometry.sourceUnits,
+    declaredUnits: geometry.declaredUnits,
     objectCount: modelInfo.objectCount,
     buildItemCount: modelInfo.buildItemCount,
-    plateCount: countPlates(entryNames),
-    hasThumbnail,
-    hasEmbeddedProfiles,
-    hasGcodePayload: hasGcode,
+    plateCount: geometry.plateCount,
+    hasThumbnail: payload.hasThumbnail,
+    hasEmbeddedProfiles: payload.hasEmbeddedProfiles,
+    hasGcodePayload: payload.hasGcode,
     slicer: modelInfo.slicer,
-    bbox: modelInfo.bbox,
+    // Legacy shape: the box in the file's own units (NOT millimetres). Kept for
+    // readers written before `geometry`; new code reads `geometry.sizeMm`.
+    bbox:
+      geometry.minRaw && geometry.maxRaw && geometry.sizeRaw
+        ? { min: geometry.minRaw, max: geometry.maxRaw, size: geometry.sizeRaw }
+        : null,
+    geometry,
     entries: zip.entries.length
   };
 
@@ -155,6 +200,29 @@ export async function analyze3mf(
   };
 }
 
+/**
+ * What the auxiliary entries say the package *is*: a plain model, a slicer
+ * project awaiting slicing, or a sliced payload carrying G-code. The file name
+ * never decides this — only what the archive actually contains.
+ */
+function classifyEntries(entryNames: string[]): {
+  threeMfClass: "sliced" | "slicer_project" | "generic";
+  hasGcode: boolean;
+  hasThumbnail: boolean;
+  hasEmbeddedProfiles: boolean;
+} {
+  const hasGcode = entryNames.some((n) => /\.gcode(\.\w+)?$/i.test(n) || /\.gcode$/i.test(n));
+  const hasSlicerProject = entryNames.some((n) =>
+    /Metadata\/(project_settings|model_settings|slice_info|process_settings)\.config$/i.test(n)
+  );
+  return {
+    threeMfClass: hasGcode ? "sliced" : hasSlicerProject ? "slicer_project" : "generic",
+    hasGcode,
+    hasThumbnail: entryNames.some((n) => /\.(png|jpg|jpeg)$/i.test(n) || /thumbnail/i.test(n)),
+    hasEmbeddedProfiles: entryNames.some((n) => /Metadata\/.*\.config$/i.test(n))
+  };
+}
+
 function blocked3mf(blocker: AnalysisFinding): AnalyzerResult {
   return {
     detectedFormat: "3mf",
@@ -170,17 +238,22 @@ function blocked3mf(blocker: AnalysisFinding): AnalyzerResult {
 // ── Model XML extraction ─────────────────────────────────────────────────────
 
 interface ModelInfo {
-  unit: string;
   objectCount: number;
   buildItemCount: number;
   slicer: string | null;
-  bbox: { min: number[]; max: number[]; size: number[] } | null;
+  geometry: NormalizedGeometry;
+  geometryWarnings: AnalysisFinding[];
+  geometryBlockers: AnalysisFinding[];
 }
 
-function extractModel(parsed: unknown, warnings: AnalysisFinding[]): ModelInfo {
+function extractModel(
+  parsed: unknown,
+  warnings: AnalysisFinding[],
+  context: { plateAssignment: PlateAssignment | null; entryPlateCount: number }
+): ModelInfo {
   const root = asRecord(parsed);
   const model = asRecord(root.model);
-  const unit = typeof model["@_unit"] === "string" ? (model["@_unit"] as string) : "millimeter";
+  const units = readUnit(model);
 
   const resources = asRecord(model.resources);
   const objects = asArray(resources.object as unknown);
@@ -197,78 +270,151 @@ function extractModel(parsed: unknown, warnings: AnalysisFinding[]): ModelInfo {
 
   const slicer = extractSlicer(asArray(model.metadata as unknown));
 
-  const bounds = {
-    min: [Infinity, Infinity, Infinity],
-    max: [-Infinity, -Infinity, -Infinity],
-    any: false,
+  const traversal: TraversalState = {
     vertices: 0,
-    truncated: false
+    truncated: false,
+    badTransforms: 0,
+    missingObjects: 0,
+    cycles: 0,
+    degenerateTransforms: 0
   };
 
-  for (const item of items) {
+  // Each build item is accumulated on its own, so plates can be scoped later
+  // without re-reading the mesh.
+  const placed: PlacedItem[] = [];
+  items.forEach((item, index) => {
     const rec = asRecord(item);
     const objectId = String(rec["@_objectid"] ?? "");
-    const transform = parseTransform(rec["@_transform"]);
-    accumulateObject(objectId, transform, objectsById, bounds, 0);
-    if (bounds.truncated) break;
+    const transform = parseTransform(rec["@_transform"], traversal);
+    const bounds = newBounds();
+    accumulateObject(objectId, transform, objectsById, bounds, traversal, [], 0);
+    placed.push({ position: index + 1, objectId, bounds });
+  });
+
+  const scene = newBounds();
+  for (const item of placed) mergeBounds(scene, item.bounds);
+
+  if (traversal.badTransforms > 0) {
+    warnings.push(
+      finding(
+        "threemf_bad_transform",
+        `Некорректная матрица преобразования (${traversal.badTransforms}) — объект размещён без неё, габариты могут быть занижены`
+      )
+    );
+  }
+  if (traversal.degenerateTransforms > 0) {
+    warnings.push(
+      finding(
+        "threemf_degenerate_transform",
+        `Вырожденное преобразование (${traversal.degenerateTransforms}) — объект схлопнут в плоскость или точку`
+      )
+    );
+  }
+  if (traversal.missingObjects > 0) {
+    warnings.push(
+      finding(
+        "threemf_missing_object",
+        `Ссылка на несуществующий объект (${traversal.missingObjects}) — часть сцены не учтена в габаритах`
+      )
+    );
+  }
+  if (traversal.cycles > 0) {
+    warnings.push(
+      finding("threemf_component_cycle", "Циклическая ссылка между компонентами — обход прерван")
+    );
+  }
+  if (items.length === 0 && objects.length > 0) {
+    warnings.push(
+      finding(
+        "threemf_no_build_items",
+        "В <build> нет ни одного элемента — печатать нечего, габариты не определены"
+      )
+    );
   }
 
-  if (bounds.truncated) {
-    warnings.push(finding("threemf_bbox_truncated", "Модель очень плотная — габариты рассчитаны частично"));
-  }
-
-  const bbox = bounds.any
-    ? {
-        min: bounds.min,
-        max: bounds.max,
-        size: [
-          bounds.max[0] - bounds.min[0],
-          bounds.max[1] - bounds.min[1],
-          bounds.max[2] - bounds.min[2]
-        ]
-      }
-    : null;
+  const plates = resolvePlates(placed, context.plateAssignment, context.entryPlateCount);
+  const normalized = normalizeGeometry({
+    prefix: "threemf",
+    bounds: scene,
+    units,
+    // What will actually be printed: the build items resolved to real objects.
+    objectCount: placed.filter((p) => objectsById.has(p.objectId)).length,
+    plateCount: plates.count,
+    plates: plates.scoped,
+    truncated: traversal.truncated
+  });
 
   return {
-    unit,
     objectCount: objects.length,
     buildItemCount: items.length,
     slicer,
-    bbox
+    geometry: normalized.geometry,
+    geometryWarnings: normalized.warnings,
+    geometryBlockers: normalized.blockers
   };
+}
+
+/**
+ * The model's unit. The 3MF core spec defaults an *absent* `unit` attribute to
+ * millimetre — but only an absent one: a present-and-unreadable value is an
+ * unknown unit, not a millimetre.
+ */
+function readUnit(model: Record<string, unknown>): ResolvedUnits {
+  const raw = model["@_unit"];
+  if (typeof raw !== "string" || raw.trim() === "") {
+    return { units: "millimeter", mmPerUnit: 1, declared: null, unrecognized: false };
+  }
+  return resolveUnits(raw);
+}
+
+/** Counters for the malformed-but-not-fatal things a component graph can contain. */
+interface TraversalState {
+  vertices: number;
+  truncated: boolean;
+  badTransforms: number;
+  missingObjects: number;
+  cycles: number;
+  degenerateTransforms: number;
 }
 
 function accumulateObject(
   objectId: string,
   worldTransform: Matrix,
   objectsById: Map<string, Record<string, unknown>>,
-  bounds: { min: number[]; max: number[]; any: boolean; vertices: number; truncated: boolean },
+  bounds: BoundsAccumulator,
+  state: TraversalState,
+  chain: readonly string[],
   depth: number
 ): void {
-  if (depth > 20 || bounds.truncated) return;
+  if (depth > MAX_COMPONENT_DEPTH || state.truncated) return;
   const object = objectsById.get(objectId);
-  if (!object) return;
+  if (!object) {
+    state.missingObjects++;
+    return;
+  }
+  if (chain.includes(objectId)) {
+    // A component graph that references an ancestor would recurse forever;
+    // stop and say so instead of silently multiplying the geometry.
+    state.cycles++;
+    return;
+  }
 
   const mesh = asRecord(object.mesh);
   const vertices = asArray(asRecord(mesh.vertices).vertex as unknown);
   for (const v of vertices) {
-    if (bounds.vertices >= MAX_BBOX_VERTICES) {
-      bounds.truncated = true;
+    if (state.vertices >= MAX_BBOX_VERTICES) {
+      state.truncated = true;
       return;
     }
-    bounds.vertices++;
+    state.vertices++;
     const rec = asRecord(v);
     const p = applyTransform(
       [Number(rec["@_x"]), Number(rec["@_y"]), Number(rec["@_z"])],
       worldTransform
     );
-    if (p.every(Number.isFinite)) {
-      bounds.any = true;
-      for (let i = 0; i < 3; i++) {
-        if (p[i] < bounds.min[i]) bounds.min[i] = p[i];
-        if (p[i] > bounds.max[i]) bounds.max[i] = p[i];
-      }
-    }
+    // Non-finite / absurd coordinates are counted by the accumulator and become
+    // analysis blockers — never quietly dropped from the box.
+    addPoint(bounds, p[0], p[1], p[2]);
   }
 
   // Nested components reference other objects with their own transforms.
@@ -276,9 +422,17 @@ function accumulateObject(
   for (const c of components) {
     const rec = asRecord(c);
     const childId = String(rec["@_objectid"] ?? "");
-    const childTransform = parseTransform(rec["@_transform"]);
-    accumulateObject(childId, multiply(worldTransform, childTransform), objectsById, bounds, depth + 1);
-    if (bounds.truncated) return;
+    const childTransform = parseTransform(rec["@_transform"], state);
+    accumulateObject(
+      childId,
+      multiply(worldTransform, childTransform),
+      objectsById,
+      bounds,
+      state,
+      [...chain, objectId],
+      depth + 1
+    );
+    if (state.truncated) return;
   }
 }
 
@@ -323,22 +477,45 @@ async function readSliceInfo(
   }
 }
 
-function countPlates(entryNames: string[]): number {
-  const plates = new Set<string>();
-  for (const name of entryNames) {
-    const m = name.match(/plate_(\d+)/i);
-    if (m) plates.add(m[1]);
-  }
-  return plates.size;
-}
-
 // ── Transform maths (row-vector · matrix convention, per the 3MF spec) ────────
 
-function parseTransform(value: unknown): Matrix {
-  if (typeof value !== "string") return IDENTITY;
-  const nums = value.trim().split(/\s+/).map(Number);
-  if (nums.length !== 12 || nums.some((n) => !Number.isFinite(n))) return IDENTITY;
+/**
+ * Parses a `transform` attribute: 12 finite numbers, linear 3×3 row-major
+ * followed by the translation. An absent attribute is legal (identity); a
+ * *present but unparseable* one is not — it is counted so the analysis can say
+ * the object was placed without its transform rather than pretending it had none.
+ */
+function parseTransform(value: unknown, state: TraversalState): Matrix {
+  if (value === undefined || value === null) return IDENTITY;
+  if (typeof value !== "string") {
+    state.badTransforms++;
+    return IDENTITY;
+  }
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    state.badTransforms++;
+    return IDENTITY;
+  }
+  const nums = trimmed.split(/\s+/).map(Number);
+  if (nums.length !== 12 || nums.some((n) => !Number.isFinite(n))) {
+    state.badTransforms++;
+    return IDENTITY;
+  }
+  if (determinant(nums) === 0) {
+    // A singular linear part collapses the object; the resulting degenerate box
+    // is a blocker downstream, but the *cause* belongs in the findings here.
+    state.degenerateTransforms++;
+  }
   return nums;
+}
+
+/** Determinant of the linear 3×3 part — zero means the transform is singular. */
+function determinant(m: Matrix): number {
+  return (
+    m[0] * (m[4] * m[8] - m[5] * m[7]) -
+    m[1] * (m[3] * m[8] - m[5] * m[6]) +
+    m[2] * (m[3] * m[7] - m[4] * m[6])
+  );
 }
 
 /** Transforms a point by an affine matrix: p' = p·L + t. */
