@@ -75,6 +75,9 @@ function facts(mode: DispatchMode, over: Partial<DispatchFacts> = {}): DispatchF
     mode,
     taskState: "QUEUED",
     entryState: "WAITING",
+    currentProfileRevisionIds: [],
+    adapterUploadSupported: true,
+    deviceArtifact: null,
     night: mode === "night",
     unattendedAllowed: mode === "night",
     file: "chalice.gcode",
@@ -273,6 +276,8 @@ test("a slice variant other than the one the confirmed plan approved blocks", ()
         sliceVariantId: "sv1",
         artifactSha256: null,
         profileRevisionIds: [],
+      stale: false,
+      staleReason: null,
         expectedRemotePath: null
       }
     }
@@ -292,6 +297,8 @@ test("a confirmed assignment is only executable on the printer it names", () => 
         sliceVariantId: null,
         artifactSha256: null,
         profileRevisionIds: [],
+      stale: false,
+      staleReason: null,
         expectedRemotePath: null
       }
     }
@@ -310,6 +317,8 @@ test("content drift from the confirmed plan blocks the start", () => {
         sliceVariantId: null,
         artifactSha256: "b".repeat(64),
         profileRevisionIds: [],
+      stale: false,
+      staleReason: null,
         expectedRemotePath: null
       }
     }

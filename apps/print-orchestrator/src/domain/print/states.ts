@@ -3,6 +3,7 @@ import type {
   ArtifactAnalysisState,
   AssignmentState,
   BedCycleState,
+  DeviceArtifactState,
   DispatchAttemptState,
   PlanState,
   PrintRunState,
@@ -117,6 +118,21 @@ export const ARTIFACT_ANALYSIS_TRANSITIONS: TransitionMap<ArtifactAnalysisState>
   running: ["ready", "failed", "pending"],
   ready: ["pending"],
   failed: ["pending"]
+};
+
+/**
+ * DeviceArtifact lifecycle — the file *on the printer*, tracked separately from
+ * the task/assignment/run. A failed or superseded delivery goes `INVALID` and
+ * may be retried from there (`INVALID → UPLOADING/NOT_PRESENT`); a `VERIFIED`
+ * file can be invalidated (the device listing stopped matching) or re-uploaded,
+ * but never silently downgraded to "present" without fresh evidence.
+ */
+export const DEVICE_ARTIFACT_TRANSITIONS: TransitionMap<DeviceArtifactState> = {
+  NOT_PRESENT: ["UPLOADING", "PRESENT_UNVERIFIED", "VERIFIED", "INVALID"],
+  UPLOADING: ["PRESENT_UNVERIFIED", "VERIFIED", "INVALID", "NOT_PRESENT"],
+  PRESENT_UNVERIFIED: ["VERIFIED", "INVALID", "UPLOADING", "NOT_PRESENT"],
+  VERIFIED: ["INVALID", "UPLOADING", "NOT_PRESENT"],
+  INVALID: ["UPLOADING", "NOT_PRESENT"]
 };
 
 /** True when a state has no outgoing transitions (a launched task stays put). */

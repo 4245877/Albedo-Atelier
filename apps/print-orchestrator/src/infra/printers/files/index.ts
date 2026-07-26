@@ -11,6 +11,8 @@ import type { PrinterFilesListing } from "./types";
  */
 
 export type { PrinterFileEntry, PrinterFilesListing } from "./types";
+export type { UploadResult } from "./upload";
+export { supportsPrinterUpload, uploadPrinterFile } from "./upload";
 export {
   isPrintableFile,
   normalizePrinterPath,

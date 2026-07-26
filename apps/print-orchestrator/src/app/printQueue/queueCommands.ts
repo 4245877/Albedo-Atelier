@@ -1,6 +1,7 @@
 import { JobError, NotFoundError, ValidationError } from "../../core/errors";
 import { newId, ID_PREFIX } from "../../domain/print/ids";
-import type { Assignment, BedCycle, QueueEntry } from "../../domain/print/types";
+import type { Assignment, QueueEntry } from "../../domain/print/types";
+import { resolveTaskBinding } from "../dispatch/binding";
 import { POSITION_STEP, type PrintQueueContext } from "./context";
 import type { QueueQueries } from "./queueQueries";
 
@@ -67,6 +68,7 @@ export class QueueCommands {
       }
       if (!moved) throw new NotFoundError(`Запись очереди для задания «${id}»`);
 
+      this.ctx.invalidatePlacementsFor(id, "изменён порядок очереди", actor);
       this.ctx.recordAudit({
         entityType: "queue_entry",
         entityId: entry.id,
@@ -79,30 +81,49 @@ export class QueueCommands {
   }
 
   /**
-   * Binds a `QUEUED`/`PLANNED` task to a printer: opens a bed cycle in `RESERVED`
-   * (a printer with no open cycle is treated as `CLEAR`), creates the
-   * `RESERVED` assignment linked to it, and moves the task to `ASSIGNED`. Refuses
-   * when the printer's bed is not clear. This is a manual/explicit binding —
-   * automatic distribution is a later module.
+   * Binds a `QUEUED`/`PLANNED` task to a printer manually — the operator's
+   * "print this on that machine" decision.
+   *
+   * The result is an **executable** `PROPOSED` assignment carrying the task's full
+   * {@link resolveTaskBinding binding} (slice variant, artifact + hash, the three
+   * profile revisions, expected remote path, material/nozzle/flavor/ETA), the
+   * printer id, the operator's reason and who made the call — everything
+   * `DispatchService.startAssignment` needs to execute exactly this decision.
+   *
+   * What changed and why: this used to open a `RESERVED` bed cycle and move the
+   * task to `ASSIGNED` immediately. That was a **dead end** — the dispatch gate
+   * refuses any task not in `QUEUED`, refuses a printer whose bed cycle is open,
+   * and refuses a printer already holding a live assignment, so a manually
+   * assigned task could never be started by any route; the only way out was to
+   * cancel it. A manual assignment now holds no hardware (exactly like a plan's
+   * proposal): the bed is reserved and the task moves on inside the dispatch
+   * transaction, at the moment a start is actually attempted.
    */
   assignTask(
     taskId: string,
     printerId: string,
-    options: { planId?: string } = {},
+    options: { planId?: string; reason?: string } = {},
     actor?: string
   ): Assignment {
     const printer = printerId.trim();
     if (!printer) throw new ValidationError("Не указан принтер для назначения");
+    this.ctx.assertPrinterConfigured(printer);
 
     return this.store.transaction(() => {
       const repos = this.store.repositories;
       const task = this.queries.getTask(taskId);
 
+      if (task.state !== "QUEUED" && task.state !== "PLANNED") {
+        throw new JobError(
+          `Задание «${task.title}» в состоянии «${task.state}» — ручное назначение доступно только из QUEUED/PLANNED`
+        );
+      }
+
       // Invariants first (the 008 partial unique indexes are the backstop):
       // one live assignment per task, one per printer, no active run on either.
       const liveOfTask = repos.assignments
         .listByTask(taskId)
-        .find((a) => a.state === "RESERVED" || a.state === "ACTIVE");
+        .find((a) => a.state !== "CANCELLED" && a.state !== "RELEASED");
       if (liveOfTask) {
         throw new JobError(
           `Задание «${task.title}» уже назначено (${liveOfTask.printerId}, ${liveOfTask.state}) — сначала снимите назначение`
@@ -122,43 +143,22 @@ export class QueueCommands {
         );
       }
 
-      const openBed = repos.bedCycles.findOpenByPrinter(printer);
-      if (openBed) {
-        throw new JobError(
-          `Стол принтера «${printer}» не свободен (${openBed.state}) — назначение невозможно`
-        );
-      }
-
       const iso = this.ctx.nowIso();
-      const bed: BedCycle = {
-        id: newId(ID_PREFIX.bedCycle),
-        printerId: printer,
-        state: "RESERVED",
-        assignmentId: null,
-        createdAt: iso,
-        updatedAt: iso,
-        clearedAt: null,
-        version: 1,
-        metadata: {}
-      };
-      repos.bedCycles.insert(bed);
-      this.ctx.recordAudit({
-        entityType: "bed_cycle",
-        entityId: bed.id,
-        action: "reserved",
-        from: "CLEAR",
-        to: "RESERVED",
-        actor,
-        detail: { printerId: printer }
-      });
+      const { binding } = resolveTaskBinding(repos, task);
 
       const assignment: Assignment = {
         id: newId(ID_PREFIX.assignment),
         taskId,
         printerId: printer,
         planId: options.planId ?? null,
-        bedCycleId: bed.id,
-        state: "RESERVED",
+        bedCycleId: null,
+        state: "PROPOSED",
+        source: options.planId ? "plan" : "manual",
+        reason: options.reason?.trim() || null,
+        createdBy: actor ?? this.ctx.defaultActor,
+        binding,
+        invalidatedAt: null,
+        invalidatedReason: null,
         createdAt: iso,
         updatedAt: iso,
         version: 1,
@@ -169,17 +169,62 @@ export class QueueCommands {
       this.ctx.recordAudit({
         entityType: "assignment",
         entityId: assignment.id,
-        action: "reserved",
-        to: "RESERVED",
+        action: "assigned_manually",
+        to: "PROPOSED",
         actor,
-        detail: { printerId: printer, taskId }
+        detail: {
+          printerId: printer,
+          taskId,
+          reason: assignment.reason,
+          sliceVariantId: binding.sliceVariantId,
+          artifactSha256: binding.artifactSha256,
+          profileRevisionIds: [
+            binding.machineRevisionId,
+            binding.processRevisionId,
+            binding.filamentRevisionId
+          ].filter(Boolean),
+          expectedRemotePath: binding.expectedRemotePath
+        }
       });
 
-      // Soft back-link bed → assignment (kept consistent by the service).
-      repos.bedCycles.update({ ...bed, assignmentId: assignment.id, updatedAt: this.ctx.nowIso() });
-
-      this.ctx.transitionTask(task, "ASSIGNED", { targetPrinter: printer }, "assigned", actor);
+      // The task stays QUEUED/WAITING on purpose: it is still queue work, now with
+      // a printer decided. `PLANNED` records that a placement exists without
+      // claiming the device — the state the dispatch gate accepts a start from is
+      // still QUEUED, so nothing here can wedge it.
       return assignment;
+    });
+  }
+
+  /**
+   * Marks an assignment stale: it stays in history but may never be executed.
+   * Used when the queue changes underneath a confirmed plan, when the task is
+   * re-sliced, or when an operator withdraws a manual placement.
+   */
+  invalidateAssignment(assignmentId: string, reason: string, actor?: string): Assignment {
+    return this.store.transaction(() => {
+      const repos = this.store.repositories;
+      const assignment = repos.assignments.getById(assignmentId);
+      if (!assignment) throw new NotFoundError(`Назначение «${assignmentId}»`);
+      if (assignment.state === "ACTIVE") {
+        throw new JobError(
+          `Назначение ${assignmentId} уже исполняется — остановите печать, а не пометку назначения`
+        );
+      }
+      if (assignment.invalidatedAt) return assignment;
+      const saved = repos.assignments.update({
+        ...assignment,
+        invalidatedAt: this.ctx.nowIso(),
+        invalidatedReason: reason,
+        updatedAt: this.ctx.nowIso()
+      });
+      this.ctx.recordAudit({
+        entityType: "assignment",
+        entityId: assignmentId,
+        action: "invalidated",
+        actor,
+        detail: { reason }
+      });
+      return saved;
     });
   }
 }

@@ -54,6 +54,14 @@ export class FarmStore implements PrintServices {
   get scheduler() {
     return this.runtime.scheduler;
   }
+  /** File delivery to printers (upload + verify / tracked manual transfer), lazy. */
+  get deviceArtifacts() {
+    return this.runtime.deviceArtifacts;
+  }
+  /** The single physical-start service; null before the queue store is opened. */
+  get dispatchService() {
+    return this.runtime.dispatchService;
+  }
 
   // ── Lifecycle (delegated to FarmLifecycle) ─────────────────────────────────
 

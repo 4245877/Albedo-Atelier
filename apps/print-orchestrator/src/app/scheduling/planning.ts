@@ -5,7 +5,14 @@ import {
   assertTransition,
   PLAN_TRANSITIONS
 } from "../../domain/print/states";
-import type { Assignment, Metadata, Plan } from "../../domain/print/types";
+import {
+  EMPTY_ASSIGNMENT_BINDING,
+  type Assignment,
+  type Metadata,
+  type Plan,
+  type PrintTask
+} from "../../domain/print/types";
+import { profileRevisionsIntact, resolveTaskBinding } from "../dispatch/binding";
 import type { CompatibilityResult } from "../../domain/scheduling/compatibility";
 import {
   buildPlan,
@@ -84,6 +91,10 @@ export class PlanningService {
   confirmPlan(planId: string, actor?: string, expectedVersion?: number): PlanDetail {
     return this.store.transaction(() => {
       const plan = this.requirePlan(planId);
+      // Idempotent: re-confirming the plan that is already live is a no-op, not a
+      // second set of assignments (§6.2 "не создавай дубликаты при повторном
+      // подтверждении"). A retried request must never re-enter the write path.
+      if (plan.state === "ACTIVE") return this.buildPlanDetail(plan);
       if (plan.state !== "DRAFT") {
         throw new JobError(`Подтвердить можно только черновик; план «${planId}» — «${plan.state}»`);
       }
@@ -105,6 +116,18 @@ export class PlanningService {
         );
       }
 
+      // The executability re-check: slice variants, artifact hashes, profile
+      // revisions and printer availability, per placed assignment. A confirmed
+      // plan is executed verbatim later, so anything unverifiable now must refuse
+      // here rather than surface as a mystery blocker at start time.
+      const problems = this.executabilityProblems(plan.id);
+      if (problems.length > 0) {
+        throw new JobError(
+          `План нельзя подтвердить: ${problems.map((p) => `${p.title} — ${p.reason}`).join("; ")}`,
+          { unexecutable: problems }
+        );
+      }
+
       assertTransition("план", PLAN_TRANSITIONS, plan.state, "ACTIVE");
 
       // Supersede the currently-confirmed plan, if any, before this one goes ACTIVE
@@ -116,6 +139,49 @@ export class PlanningService {
       }
 
       const iso = this.ctx.nowIso();
+
+      // Freeze the binding as it is *at confirmation*: what the operator confirms is
+      // the executable identity of each placement, not whatever the draft happened
+      // to see. From here the dispatch verifies against these exact values.
+      for (const assignment of this.assignmentsOf(plan.id)) {
+        if (assignment.state !== "PROPOSED") continue;
+        const task = this.store.repositories.tasks.getById(assignment.taskId);
+        if (!task) continue;
+        const { binding } = resolveTaskBinding(this.store.repositories, task);
+        this.store.repositories.assignments.update({
+          ...assignment,
+          binding: {
+            ...binding,
+            etaS: binding.etaS ?? assignment.binding.etaS,
+            plannedStartAt: assignment.binding.plannedStartAt,
+            planRevision: plan.revision
+          },
+          updatedAt: iso
+        });
+        this.ctx.recordAudit({
+          entityType: "assignment",
+          entityId: assignment.id,
+          action: "binding_confirmed",
+          actor,
+          detail: {
+            planId: plan.id,
+            taskId: task.id,
+            printerId: assignment.printerId,
+            sliceVariantId: binding.sliceVariantId,
+            artifactId: binding.artifactId,
+            artifactSha256: binding.artifactSha256,
+            machineRevisionId: binding.machineRevisionId,
+            processRevisionId: binding.processRevisionId,
+            filamentRevisionId: binding.filamentRevisionId,
+            expectedRemotePath: binding.expectedRemotePath,
+            gcodeFlavor: binding.gcodeFlavor,
+            nozzleMm: binding.nozzleMm,
+            material: binding.material,
+            etaS: binding.etaS
+          }
+        });
+      }
+
       const saved = this.store.repositories.plans.update({
         ...plan,
         state: "ACTIVE",
@@ -131,8 +197,74 @@ export class PlanningService {
         to: "ACTIVE",
         actor
       });
+      // Confirming a plan reserves nothing physical and starts no printer — the
+      // assignments stay PROPOSED until an explicit startAssignment.
       return this.buildPlanDetail(saved);
     });
+  }
+
+  /**
+   * Per-assignment reasons the plan cannot be confirmed. Everything checked here
+   * is *identity and availability*, not the here-and-now of a start (bed, live
+   * telemetry, device file) — those legitimately change between confirmation and
+   * dispatch and are re-checked by `DispatchEligibility` at start time.
+   */
+  private executabilityProblems(planId: string): { taskId: string; title: string; reason: string }[] {
+    const repos = this.store.repositories;
+    const printers = new Map(this.ctx.listPrinters().map((p) => [p.id, p]));
+    const problems: { taskId: string; title: string; reason: string }[] = [];
+
+    for (const assignment of this.assignmentsOf(planId)) {
+      if (assignment.state === "CANCELLED" || assignment.state === "RELEASED") continue;
+      const task = repos.tasks.getById(assignment.taskId);
+      if (!task) {
+        problems.push({ taskId: assignment.taskId, title: assignment.taskId, reason: "задание исчезло" });
+        continue;
+      }
+      const reason = this.executabilityProblem(task, assignment.printerId, printers.has(assignment.printerId));
+      if (reason) problems.push({ taskId: task.id, title: task.title, reason });
+    }
+    return problems;
+  }
+
+  /** The single unexecutable reason for one placement, or null when it is sound. */
+  private executabilityProblem(
+    task: PrintTask,
+    printerId: string,
+    printerKnown: boolean
+  ): string | null {
+    const repos = this.store.repositories;
+    if (!printerKnown) return `принтер «${printerId}» отключён или отсутствует в конфигурации`;
+
+    // An executable variant must exist: either a ready slice, or an artifact that
+    // is already a printable file. A task with neither is a plan that cannot run.
+    const artifact = task.artifactId ? repos.artifacts.getById(task.artifactId) : null;
+    if (!artifact) return "у задания нет исполнимого артефакта";
+
+    if (task.sliceVariantId) {
+      const variant = repos.sliceVariants.getById(task.sliceVariantId);
+      if (!variant) return `слайс «${task.sliceVariantId}» больше не существует`;
+      if (variant.state !== "ready") return `слайс в состоянии «${variant.state}», не ready`;
+      if (variant.outputArtifactId !== artifact.id) {
+        return "исполнимый артефакт задания не совпадает с выходом подтверждённого слайса";
+      }
+      if (
+        variant.targetPrinterId !== null &&
+        variant.targetPrinterId !== printerId
+      ) {
+        return `слайс собран для «${variant.targetPrinterId}», а план ставит его на «${printerId}»`;
+      }
+    }
+
+    const { binding } = resolveTaskBinding(repos, task);
+    if (binding.artifactSha256 === null && artifact.sha256 !== null) {
+      return "не удалось зафиксировать контрольную сумму файла";
+    }
+    const revisions = profileRevisionsIntact(repos, binding);
+    if (!revisions.ok) return revisions.reason;
+
+    if (!task.onDeviceFile) return "не задан путь файла на устройстве";
+    return null;
   }
 
   /** Placed tasks in a plan that are no longer schedulable (title + id), for a confirm-time check. */
@@ -272,6 +404,14 @@ export class PlanningService {
         etaSource: result?.eta.source ?? "unknown",
         etaPreliminary: result?.eta.preliminary ?? true
       };
+      // The placement is executable data from the moment it is drafted: the exact
+      // slice, artifact hash and profile revisions the compatibility answer was
+      // computed against travel with it, so confirmation re-checks them rather
+      // than re-deriving a possibly-different answer later.
+      const placedTask = tasks.find((t) => t.id === a.taskId) ?? null;
+      const resolved = placedTask
+        ? resolveTaskBinding(this.store.repositories, placedTask)
+        : null;
       const assignment: Assignment = {
         id: newId(ID_PREFIX.assignment),
         taskId: a.taskId,
@@ -279,6 +419,17 @@ export class PlanningService {
         planId: plan.id,
         bedCycleId: null,
         state: "PROPOSED",
+        source: "plan",
+        reason: a.reason,
+        createdBy: null,
+        binding: {
+          ...(resolved?.binding ?? EMPTY_ASSIGNMENT_BINDING),
+          etaS: a.etaSeconds ?? resolved?.binding.etaS ?? null,
+          plannedStartAt: new Date(a.startMs).toISOString(),
+          planRevision: revision
+        },
+        invalidatedAt: null,
+        invalidatedReason: null,
         createdAt: iso,
         updatedAt: iso,
         version: 1,

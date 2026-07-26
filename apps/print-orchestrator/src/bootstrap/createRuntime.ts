@@ -16,6 +16,7 @@ import {
   type PrinterConfig,
   type PrinterConfigSource
 } from "../infra/printers/config";
+import { fetchPrinterFiles, uploadPrinterFile } from "../infra/printers/files";
 import type {
   DeviceFileIdentity,
   DispatchEligibility
@@ -29,6 +30,7 @@ import { AutomationStore } from "../app/automationStore";
 import { CameraService } from "../app/cameraService";
 import { PrinterCommandService } from "../app/commandService";
 import { DashboardReadModel } from "../app/dashboardReadModel";
+import { DeviceArtifactService } from "../app/dispatch/deviceArtifactService";
 import { DispatchService } from "../app/dispatch/dispatchService";
 import { RunLifecycleService } from "../app/dispatch/runLifecycle";
 import { EventFeed } from "../app/eventFeed";
@@ -66,6 +68,10 @@ export interface PrintServices {
   readonly printQueue: PrintQueueService;
   readonly artifacts: ArtifactService;
   readonly scheduler: SchedulerService;
+  /** File delivery to a printer (upload + verify, or a tracked manual transfer). */
+  readonly deviceArtifacts: DeviceArtifactService;
+  /** The single physical-start service; null until the queue store is opened. */
+  readonly dispatchService: DispatchService | null;
   readonly slicing: {
     presets: PresetImportService;
     profiles: ProfileService;
@@ -118,6 +124,7 @@ export class FarmRuntime implements PrintServices {
   private printQueueStoreRef: PrintQueueStore | null = null;
   private printQueueServiceRef: PrintQueueService | null = null;
   private dispatchServiceRef: DispatchService | null = null;
+  private deviceArtifactServiceRef: DeviceArtifactService | null = null;
   private runLifecycleRef: RunLifecycleService | null = null;
   private artifactStorageRef: ArtifactStorage | null = null;
   private artifactServiceRef: ArtifactService | null = null;
@@ -323,6 +330,12 @@ export class FarmRuntime implements PrintServices {
     return this.artifactServiceRef as ArtifactService;
   }
 
+  /** File delivery to printers (upload + verify / tracked manual transfer), lazy. */
+  get deviceArtifacts(): DeviceArtifactService {
+    this.ensureQueue();
+    return this.deviceArtifactServiceRef as DeviceArtifactService;
+  }
+
   /** The OrcaSlicer preset/profile/slice services (SQLite-backed), lazy. */
   get slicing(): {
     presets: PresetImportService;
@@ -463,6 +476,16 @@ export class FarmRuntime implements PrintServices {
       root: this.storageRoot,
       tmpDir: this.uploadTmpDir
     });
+    // File delivery. Only Moonraker can be pushed to; every other adapter is
+    // routed through the tracked manual-transfer path (never faked automation).
+    this.deviceArtifactServiceRef = new DeviceArtifactService({
+      store,
+      storage: this.artifactStorageRef,
+      resolvePrinter: (id) => this.enabledConfigs().find((p) => p.id === id),
+      listFiles: fetchPrinterFiles,
+      uploadFile: uploadPrinterFile,
+      logger
+    });
     this.artifactServiceRef = new ArtifactService(store, this.artifactStorageRef, {
       limits: {
         zipMaxEntries: uploads.zipMaxEntries,
@@ -557,6 +580,7 @@ export class FarmRuntime implements PrintServices {
     this.printQueueStoreRef = null;
     this.printQueueServiceRef = null;
     this.dispatchServiceRef = null;
+    this.deviceArtifactServiceRef = null;
     this.runLifecycleRef = null;
     this.artifactServiceRef = null;
     this.artifactStorageRef = null;

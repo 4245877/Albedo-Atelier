@@ -115,6 +115,10 @@ export class ArtifactIngest {
         const task: PrintTask = {
           id: newId(ID_PREFIX.printTask),
           artifactId: artifact.id,
+          // The upload IS the source here; nothing has been sliced yet.
+          sliceVariantId: null,
+          sourceArtifactId: artifact.id,
+          onDeviceFile: null,
           title: fileName,
           material: null,
           targetPrinter: null,

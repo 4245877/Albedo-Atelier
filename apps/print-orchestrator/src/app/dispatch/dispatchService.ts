@@ -43,6 +43,7 @@ import {
   type DispatchBlocker,
   type DispatchMode
 } from "./dispatchGate";
+import { bindingMatchesTask, profileRevisionsIntact, resolveTaskBinding } from "./binding";
 
 /**
  * An explicit, audited operator decision to proceed despite non-hard warnings.
@@ -61,6 +62,12 @@ export interface DispatchOverride {
 export interface DispatchRequest {
   taskId: string;
   mode: DispatchMode;
+  /**
+   * Execute exactly this assignment. Set by {@link DispatchService.startAssignment};
+   * when present the printer, slice and file come from the assignment's binding and
+   * the task's `pinnedPrinterId`/`targetPrinter` hints may not override them.
+   */
+  assignmentId?: string;
   /** Optimistic preview guard: the task version the operator saw; mismatch → 409. */
   expectedTaskVersion?: number;
   /** Preview identity guard: the artifact hash the operator saw; mismatch → 409. */
@@ -156,6 +163,31 @@ export class DispatchService {
     this.logger = deps.logger ?? {};
   }
 
+  /**
+   * **The canonical launch operation.** Executes one confirmed/manual assignment
+   * verbatim: its printer, its slice, its file — never a printer re-derived from
+   * `task.pinnedPrinterId` or `task.targetPrinter`.
+   *
+   * Every start path funnels here or through {@link dispatch} (which resolves the
+   * task's executable assignment first and then behaves identically), so there is
+   * exactly one place that reaches a printer and exactly one eligibility check in
+   * front of it.
+   */
+  async startAssignment(
+    assignmentId: string,
+    options: Omit<DispatchRequest, "taskId" | "assignmentId" | "mode"> & { mode?: DispatchMode } = {}
+  ): Promise<DispatchResult> {
+    const assignment = this.deps.store.repositories.assignments.getById(assignmentId);
+    if (!assignment) throw new NotFoundError(`Назначение «${assignmentId}»`);
+    this.assertExecutable(assignment);
+    return this.dispatch({
+      ...options,
+      mode: options.mode ?? "manual",
+      taskId: assignment.taskId,
+      assignmentId: assignment.id
+    });
+  }
+
   async dispatch(request: DispatchRequest): Promise<DispatchResult> {
     const repos = this.deps.store.repositories;
 
@@ -179,11 +211,14 @@ export class DispatchService {
     const task = repos.tasks.getById(request.taskId);
     if (!task) throw new NotFoundError(`Задание «${request.taskId}»`);
     const artifact = task.artifactId ? repos.artifacts.getById(task.artifactId) : null;
-    const file = resolveDispatchFile(task, artifact);
+    const reservation = this.executableAssignment(task.id, request.assignmentId);
+    // A reservation's expected path is authoritative: the plan/operator confirmed
+    // THAT file, so a task edited afterwards cannot redirect the start elsewhere.
+    const file = reservation?.binding.expectedRemotePath ?? resolveDispatchFile(task, artifact);
     if (!file) throw new JobError(`У задания «${task.title}» не задан файл для запуска`);
     const target = normalizeStartablePath(file);
 
-    const printer = this.resolveTargetPrinter(task);
+    const printer = this.resolveTargetPrinter(task, reservation);
     const identity = await this.verifyOnDeviceFile(printer, target, artifact, request.mode);
 
     // ── Reserve transaction ──────────────────────────────────────────────────
@@ -228,8 +263,7 @@ export class DispatchService {
    * A divergence between the confirmed assignment and the task hints does not
    * pick a winner: it refuses, so the operator replans or clears the assignment.
    */
-  private resolveTargetPrinter(task: PrintTask): PrinterConfig {
-    const reservation = this.confirmedAssignment(task.id);
+  private resolveTargetPrinter(task: PrintTask, reservation: Assignment | null): PrinterConfig {
     const hint = task.pinnedPrinterId ?? task.targetPrinter;
 
     if (reservation) {
@@ -311,16 +345,117 @@ export class DispatchService {
     }
   }
 
-  /** The task's live assignment under a confirmed (ACTIVE) plan, if any. */
-  private confirmedAssignment(taskId: string): Assignment | null {
+  /**
+   * The task's **executable** assignment: the one a start must run verbatim.
+   *
+   * Two kinds qualify — an assignment under a confirmed (`ACTIVE`) plan, and an
+   * explicit manual placement. A proposal on a *draft* plan is a recommendation
+   * and binds nothing. When `wantedId` is given (the `startAssignment` path) that
+   * exact assignment is required, so a caller can never be silently handed a
+   * different one.
+   */
+  private executableAssignment(taskId: string, wantedId?: string): Assignment | null {
     const repos = this.deps.store.repositories;
+    if (wantedId) {
+      const assignment = repos.assignments.getById(wantedId);
+      if (!assignment) throw new NotFoundError(`Назначение «${wantedId}»`);
+      if (assignment.taskId !== taskId) {
+        throw new JobError(
+          `Назначение ${wantedId} принадлежит другому заданию (${assignment.taskId})`
+        );
+      }
+      this.assertExecutable(assignment);
+      return assignment;
+    }
     for (const assignment of repos.assignments.listByTask(taskId)) {
       if (assignment.state === "CANCELLED" || assignment.state === "RELEASED") continue;
-      if (!assignment.planId) continue;
-      const plan = repos.plans.getById(assignment.planId);
-      if (plan?.state === "ACTIVE") return assignment;
+      if (assignment.invalidatedAt) continue;
+      if (assignment.planId) {
+        const plan = repos.plans.getById(assignment.planId);
+        if (plan?.state === "ACTIVE") return assignment;
+        continue;
+      }
+      if (assignment.source === "manual") return assignment;
     }
     return null;
+  }
+
+  /**
+   * Refuses an assignment that may not be executed: closed, invalidated, or a
+   * proposal on a plan nobody confirmed. Fail-closed — an assignment whose plan
+   * cannot be read is not executable either.
+   */
+  private assertExecutable(assignment: Assignment): void {
+    if (assignment.state === "RELEASED" || assignment.state === "CANCELLED") {
+      throw new JobError(`Назначение ${assignment.id} закрыто (${assignment.state}) — запуск невозможен`, {
+        blockers: [{ code: REASON.ASSIGNMENT_STALE, message: assignment.state }]
+      });
+    }
+    if (assignment.invalidatedAt) {
+      throw new JobError(
+        `Назначение ${assignment.id} устарело${assignment.invalidatedReason ? `: ${assignment.invalidatedReason}` : ""} — требуется перепланирование`,
+        {
+          blockers: [
+            { code: REASON.ASSIGNMENT_STALE, message: assignment.invalidatedReason ?? "invalidated" }
+          ]
+        }
+      );
+    }
+    if (assignment.planId) {
+      const plan = this.deps.store.repositories.plans.getById(assignment.planId);
+      if (!plan || plan.state !== "ACTIVE") {
+        throw new JobError(
+          `Назначение ${assignment.id} принадлежит неподтверждённому плану (${plan?.state ?? "нет плана"}) — подтвердите план перед запуском`,
+          {
+            blockers: [
+              { code: REASON.ASSIGNMENT_NOT_CONFIRMED, message: plan?.state ?? "plan missing" }
+            ]
+          }
+        );
+      }
+    } else if (assignment.source !== "manual") {
+      throw new JobError(
+        `Назначение ${assignment.id} не подтверждено ни планом, ни оператором — запуск невозможен`,
+        { blockers: [{ code: REASON.ASSIGNMENT_NOT_CONFIRMED, message: assignment.source }] }
+      );
+    }
+  }
+
+  /**
+   * The assignment's binding must still describe the task, and every profile
+   * revision it pinned must still exist and be `active`.
+   *
+   * This is the check that stops a confirmed placement being executed against
+   * changed data: the task was re-sliced, re-promoted onto a different variant, or
+   * a preset re-import quarantined a profile the approved set pinned. Each is a
+   * refusal with a concrete reason — never a silent substitution.
+   */
+  private assertBindingCurrent(assignment: Assignment, task: PrintTask): void {
+    if (!bindingMatchesTask(assignment.binding, task)) {
+      throw new JobError(
+        `Назначение ${assignment.id} больше не соответствует заданию «${task.title}» — задание изменилось после подтверждения, требуется перепланирование`,
+        {
+          blockers: [
+            {
+              code: REASON.ASSIGNMENT_STALE,
+              message: `confirmed slice=${assignment.binding.sliceVariantId ?? "—"}, task slice=${task.sliceVariantId ?? "—"}`
+            }
+          ],
+          assignmentId: assignment.id,
+          planId: assignment.planId
+        }
+      );
+    }
+    const revisions = profileRevisionsIntact(this.deps.store.repositories, assignment.binding);
+    if (!revisions.ok) {
+      throw new JobError(
+        `Нельзя запустить «${task.title}»: ${revisions.reason} — перепроверьте профили и перепланируйте`,
+        {
+          blockers: [{ code: REASON.PROFILE_REVISION_MISMATCH, message: revisions.reason }],
+          assignmentId: assignment.id
+        }
+      );
+    }
   }
 
   private reserve(
@@ -358,6 +493,13 @@ export class DispatchService {
     const entry = repos.queue.findByTaskId(task.id);
     const analysis = artifact ? repos.artifactAnalyses.latestForArtifact(artifact.id) : null;
 
+    // The reservation is resolved and checked FIRST, so a binding that no longer
+    // describes the task refuses with that specific reason rather than surfacing
+    // as a confusing downstream symptom (a "profile drift" that is really a task
+    // pointed at a different slice).
+    const reserved = this.executableAssignment(task.id, request.assignmentId);
+    if (reserved) this.assertBindingCurrent(reserved, task);
+
     // The ONE authoritative admission check, re-run here against rows just
     // re-read inside the transaction — never against anything a client sent and
     // never against the preview's snapshot.
@@ -385,10 +527,9 @@ export class DispatchService {
         `На «${printer.name}» уже есть активная печать (${activePrinterRun.id}, ${activePrinterRun.state})`
       );
     }
-    // The confirmed plan's own assignment for THIS task is the reservation this
-    // dispatch is executing — it is consumed below, not treated as a rival. Any
-    // *other* live assignment on the printer still blocks.
-    const reserved = this.confirmedAssignment(task.id);
+    // The confirmed plan's (or the operator's) own assignment for THIS task is the
+    // reservation this dispatch is executing (resolved above) — it is consumed
+    // below, not treated as a rival. Any *other* live assignment still blocks.
     const openAssignment = repos.assignments.findOpenByPrinter(printer.id);
     if (openAssignment && openAssignment.id !== reserved?.id) {
       throw new JobError(
@@ -463,6 +604,9 @@ export class DispatchService {
         metadata: { ...reserved.metadata, via: "dispatch", mode: request.mode }
       });
     } else {
+      // No plan and no manual placement: the dispatch mints its own assignment so
+      // the run still traces to one. It carries the same typed binding every other
+      // path records, so the file that was started is reconstructable afterwards.
       assignment = {
         id: newId(ID_PREFIX.assignment),
         taskId: task.id,
@@ -470,6 +614,15 @@ export class DispatchService {
         planId: null,
         bedCycleId: bed.id,
         state: "RESERVED",
+        source: "dispatch",
+        reason: `прямой запуск (${request.mode})`,
+        createdBy: actor,
+        binding: {
+          ...resolveTaskBinding(repos, task).binding,
+          expectedRemotePath: target
+        },
+        invalidatedAt: null,
+        invalidatedReason: null,
         createdAt: iso,
         updatedAt: iso,
         version: 1,

@@ -300,8 +300,161 @@ function variantRow(state, v) {
         <span class="slice-spacer"></span>
         ${rerun}
       </div>
-      ${facts}${metaRow}${out}${err}${findings}${timeRow}
+      ${facts}${metaRow}${out}${err}${findings}${timeRow}${promoteHtml(state, v)}
     </li>`;
+}
+
+/* «Добавить в очередь» — переход от готового слайса к исполнимому заданию.
+   Показываем ровно то, что оператор должен видеть перед решением: материал,
+   сопло, размер результата, статус анализа G-code и состояние продвижения.
+   Кнопка активна только для варианта, который сервер действительно примет;
+   сервер всё равно перепроверяет — это подсказка, а не разрешение. */
+function promoteHtml(state, v) {
+  if (v.state !== "ready" || !v.outputArtifactId) return "";
+
+  const promotedTask = (state.tasks || []).find((t) => t.sliceVariantId === v.id);
+  const output = (state.outputs || []).find((a) => a.artifact && a.artifact.id === v.outputArtifactId);
+  const analysis = output && output.analysis;
+
+  const details = [];
+  if (analysis && analysis.material) details.push(`Материал: ${analysis.material}`);
+  if (analysis && analysis.nozzleDiameterMm != null) details.push(`Сопло: ${analysis.nozzleDiameterMm} мм`);
+  if (output && output.artifact && output.artifact.sizeBytes != null) {
+    details.push(`Размер файла: ${fmtBytes(output.artifact.sizeBytes)}`);
+  }
+  const detailRow = details.length
+    ? `<div class="slice-meta">${details.map((d) => `<span>${esc(d)}</span>`).join("")}</div>`
+    : "";
+
+  // Честный статус анализа выходного файла: без завершённого schedulable-анализа
+  // продвижение запрещено, и мы объясняем это, а не просто гасим кнопку.
+  const analysisReady = analysis && analysis.state === "ready" && analysis.verdict === "schedulable";
+  const analysisChip = !analysis
+    ? chip("анализ G-code: нет", "warn")
+    : analysis.state !== "ready"
+      ? chip(`анализ G-code: ${esc(analysis.state)}`, "info", true)
+      : analysisReady
+        ? chip("анализ G-code: пройден", "ok")
+        : chip(`анализ G-code: ${esc(analysis.verdict || "не пройден")}`, "error");
+
+  const outBlockers = ((analysis && analysis.blockers) || [])
+    .map((b) => `<li class="slice-block-li">⛔ ${esc(b.message)}</li>`)
+    .join("");
+  const outWarnings = ((analysis && analysis.warnings) || [])
+    .map((w) => `<li class="slice-warn">⚠ ${esc(w.message)}</li>`)
+    .join("");
+  const outFindings = outBlockers || outWarnings
+    ? `<ul class="slice-findings">${outBlockers}${outWarnings}</ul>`
+    : "";
+
+  if (promotedTask) {
+    // Состояние продвижения сохраняется на сервере, поэтому переживает F5.
+    return `
+      <div class="slice-promote">
+        ${detailRow}
+        <div class="slice-meta">${analysisChip} ${chip(`в очереди: ${esc(promotedTask.state)}`, "ok")}</div>
+        <div class="slice-out">Задание: <code>${esc(promotedTask.title)}</code>
+          — файл <code>${esc(promotedTask.onDeviceFile || "—")}</code></div>
+        <button type="button" class="btn btn-sm" data-goto="scheduler">→ Перейти к очереди</button>
+      </div>`;
+  }
+
+  const disabled = analysisReady ? "" : ' disabled title="Выходной файл не прошёл проверку анализа"';
+  return `
+    <div class="slice-promote">
+      ${detailRow}
+      <div class="slice-meta">${analysisChip}</div>
+      ${outFindings}
+      <button type="button" class="btn btn-primary btn-sm"
+        data-slice-action="promote" data-id="${esc(v.id)}"${disabled}>＋ Добавить в очередь</button>
+    </div>`;
+}
+
+/* ── Исполнение: подготовка файла → проверка → запуск ──────────
+   Разделяем «запланировано», «файл готов» и «разрешено к запуску» явно —
+   оператор не должен догадываться, на каком шаге стоит задание. */
+export function executionHtml(state) {
+  const rows = state.assignments || [];
+  if (!rows.length) return "";
+  const items = rows.map((row) => assignmentRow(state, row)).join("");
+  return `<div class="slice-panel"><div class="slice-panel-head"><b>Исполнение</b></div>
+    <ul class="slice-list" role="status" aria-live="polite">${items}</ul></div>`;
+}
+
+const DEVICE_STATE = {
+  NOT_PRESENT: { label: "файла нет на принтере", cls: "warn" },
+  UPLOADING: { label: "загрузка…", cls: "info", pulse: true },
+  PRESENT_UNVERIFIED: { label: "файл есть, не сверен", cls: "warn" },
+  VERIFIED: { label: "файл сверен", cls: "ok" },
+  INVALID: { label: "ошибка подготовки файла", cls: "error" }
+};
+
+function assignmentRow(state, row) {
+  const a = row.assignment;
+  const dev = row.deviceArtifact;
+  const devState = dev ? DEVICE_STATE[dev.state] || { label: dev.state, cls: "info" } : null;
+
+  const facts = [
+    `Принтер: ${esc(printerName(state, a.printerId))}`,
+    `Источник: ${a.source === "plan" ? "план" : a.source === "manual" ? "оператор" : "прямой запуск"}`,
+    a.binding.expectedRemotePath ? `Файл: ${esc(a.binding.expectedRemotePath)}` : null,
+    a.binding.material ? `Материал: ${esc(a.binding.material)}` : null,
+    a.binding.nozzleMm != null ? `Сопло: ${a.binding.nozzleMm} мм` : null,
+    a.binding.etaS != null ? `Время печати: ${fmtDuration(a.binding.etaS)}` : null
+  ].filter(Boolean);
+
+  const stale = a.invalidatedAt
+    ? `<div class="slice-block">⛔ Назначение устарело${a.invalidatedReason ? `: ${esc(a.invalidatedReason)}` : ""}.
+         Требуется перепланирование.</div>`
+    : "";
+
+  // Ручной перенос — единственный честный режим для адаптеров без загрузки:
+  // показываем точный путь и требуем именное подтверждение.
+  const manual =
+    dev && dev.transferMode === "manual_file_transfer" && !row.fileReady
+      ? `<div class="slice-block">Адаптер принтера не умеет загружать файлы. Скопируйте
+           <code>${esc(dev.remotePath)}</code> на принтер вручную и подтвердите перенос.</div>`
+      : "";
+
+  const verification = dev && dev.verification
+    ? `<span class="slice-tag">проверка: ${esc(dev.verification)}</span>`
+    : "";
+
+  let action = "";
+  if (a.invalidatedAt) action = "";
+  else if (row.nextAction === "prepare-file") {
+    action = `<button type="button" class="btn btn-sm" data-slice-action="prepare-file" data-id="${esc(a.id)}">↑ Подготовить файл</button>`;
+  } else if (row.nextAction === "confirm-file") {
+    action = `<button type="button" class="btn btn-sm" data-slice-action="confirm-file" data-id="${esc(a.id)}">✓ Файл перенесён</button>`;
+  } else if (row.nextAction === "start") {
+    action = `<button type="button" class="btn btn-primary btn-sm" data-slice-action="start-assignment" data-id="${esc(a.id)}">▶ Запустить</button>`;
+  }
+
+  return `
+    <li class="slice-item">
+      <div class="slice-item-head">
+        <span class="slice-name" title="Назначение ${esc(a.id)}">${esc(taskTitle(state, a.taskId))}</span>
+        ${chip(esc(a.state), a.state === "ACTIVE" ? "ok" : "info")}
+        ${devState ? chip(esc(devState.label), devState.cls, devState.pulse) : chip("файл не готовился", "warn")}
+        ${verification}
+        <span class="slice-spacer"></span>
+        ${action}
+      </div>
+      <div class="slice-facts">${facts.map((f) => `<span>${f}</span>`).join("")}</div>
+      ${manual}${stale}
+      ${dev && dev.lastError ? `<div class="slice-block">⛔ ${esc(dev.lastError)}</div>` : ""}
+    </li>`;
+}
+
+function taskTitle(state, id) {
+  const t = (state.tasks || []).find((x) => x.id === id);
+  return t ? t.title : shortId(id);
+}
+
+function fmtBytes(bytes) {
+  if (bytes < 1024) return `${bytes} Б`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 102.4) / 10} КБ`;
+  return `${Math.round(bytes / (1024 * 104.8)) / 10} МБ`;
 }
 
 export function newSliceHtml(state) {

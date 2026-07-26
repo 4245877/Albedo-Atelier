@@ -300,37 +300,60 @@ export class FarmCommands {
   /**
    * Starts an on-device file picked in the file browser.
    *
-   * This is the operator's "run this file on that printer" escape hatch, NOT a
-   * second dispatch path — it deliberately creates no task, run or assignment.
-   * Because it reaches a device, it must still honour the physical safety rules
-   * the canonical dispatch enforces, so before delegating to
-   * {@link PrinterCommandService.startPrint} (which normalizes the path and
-   * re-checks live offline/busy/guard state) it refuses on an uncleared bed.
+   * This is the operator's "run this file on that printer" escape hatch — and it
+   * is **not** a second dispatch path. It used to call the driver directly, which
+   * meant a start through the file browser skipped the queue, the assignment, the
+   * device-file record, `DispatchEligibility`, idempotency, the reservation and
+   * the audit trail; only a bed check stood in front of it.
    *
-   * Without this the file browser was a complete bypass of the bed model: a
-   * finished part still on the plate did not stop a start here, which is exactly
-   * the "второй обходной путь" the brief asks to close.
+   * Now it does exactly what §8 of the brief prescribes for an operational
+   * direct-start endpoint: it creates a *managed* task for the file, creates a
+   * manual assignment for the chosen printer, records the file that is already on
+   * the device as an operator-adopted {@link DeviceArtifact}, and then calls the
+   * same {@link DispatchService.startAssignment} every other start goes through.
+   * There is no convenience bypass left: a refusal here is a refusal everywhere.
    */
-  startPrinterFile(id: string, file: string) {
-    this.assertBedClearForDirectStart(id);
-    return this.runtime.deviceCommands.startPrint(id, file);
-  }
+  async startPrinterFile(id: string, file: string): Promise<{ runId: string; taskId: string; assignmentId: string; file: string }> {
+    this.runtime.ensureQueue();
+    const printer = this.runtime.configById(id);
+    const target = normalizeStartablePath(file);
 
-  /**
-   * Refuses a direct (non-queue) start while the printer's bed cycle is anything
-   * other than genuinely free. A printer with no tracked cycle at all is allowed:
-   * the file browser predates the bed model and a farm that never dispatched
-   * through the queue has no cycles — but an *open* cycle is authoritative.
-   */
-  private assertBedClearForDirectStart(printerId: string): void {
-    if (!this.runtime.printQueueStore) return;
-    const bed = this.runtime.runLifecycle?.openBedCycle(printerId) ?? null;
-    if (!bed) return;
-    throw new JobError(
-      bed.state === "AWAITING_CLEARANCE"
-        ? `На столе «${printerId}» осталась готовая модель — снимите её и подтвердите очистку стола перед запуском`
-        : `Стол принтера «${printerId}» не подтверждён свободным (${bed.state}) — запуск запрещён`
+    // The bytes must actually be there before anything is recorded — an adopted
+    // device file that does not exist would be a lie in the ledger.
+    if (supportsPrinterFiles(printer)) {
+      const dir = target.includes("/") ? target.slice(0, target.lastIndexOf("/")) : "";
+      const listing = await runDriverOperation(printer.id, () => fetchPrinterFiles(printer, dir));
+      if (!listing.entries.some((e) => e.type === "file" && e.path === target)) {
+        throw new NotFoundError(`Файл «${target}» на принтере «${printer.name}»`);
+      }
+    }
+
+    // A managed task + a manual assignment: the run is traceable to an intent,
+    // exactly like every other start. `createTask` registers the on-device file
+    // as the task's artifact and enqueues it QUEUED/WAITING.
+    const detail = this.runtime.printQueue.createTask({
+      title: `Прямой запуск: ${target}`,
+      printer: printer.id,
+      file: target
+    });
+    const assignment = this.runtime.printQueue.assignTask(detail.task.id, printer.id, {
+      reason: "прямой запуск файла из файлового браузера принтера"
+    });
+    // The file was not delivered by us — it was found on the device. Recorded as
+    // exactly that, then re-verified against the listing where the adapter allows.
+    await this.runtime.deviceArtifacts.confirmManualTransfer(assignment.id, "operator");
+
+    const result = await (this.runtime.dispatchService as DispatchService).startAssignment(
+      assignment.id,
+      { mode: "manual", actor: "operator" }
     );
+    this.runtime.deviceCommands.resolveStartGuard(result.printerId);
+    return {
+      runId: result.runId,
+      taskId: result.taskId,
+      assignmentId: result.assignmentId,
+      file: result.file
+    };
   }
 
   /**

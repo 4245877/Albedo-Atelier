@@ -184,8 +184,23 @@ export type DayNightPreference = "any" | "day" | "night";
  */
 export interface PrintTask {
   id: string;
-  /** Source artifact; null for a bare title-only task (legacy import, drafts). */
+  /**
+   * The **executable** artifact: the sliced output once a slice has been
+   * promoted, the uploaded G-code for a ready-file task, the source model while
+   * the task is still a draft. This is what a dispatch would send.
+   */
   artifactId: string | null;
+  /**
+   * The exact {@link SliceVariant} the executable artifact came from; null for a
+   * task whose file was uploaded ready-made or created before slicing existed.
+   * A typed column (not `metadata`) so the queue is bound to a *slice*, not to a
+   * file name — the whole point of the slice→queue handoff.
+   */
+  sliceVariantId: string | null;
+  /** The source model (STL/3MF) the slice was produced from; null when there was none. */
+  sourceArtifactId: string | null;
+  /** The on-device path a dispatch will start; null until a file is bound. */
+  onDeviceFile: string | null;
   title: string;
   /** Operator-stated material requirement; null when unspecified. */
   material: string | null;
@@ -293,12 +308,74 @@ export interface Plan {
  */
 export type AssignmentState = "PROPOSED" | "RESERVED" | "ACTIVE" | "RELEASED" | "CANCELLED";
 
+/** Where an assignment came from — the provenance a dispatch and the UI branch on. */
+export type AssignmentSource = "plan" | "manual" | "dispatch";
+
+/**
+ * The **executable binding** of an assignment: exactly *what* is to be printed,
+ * pinned at the moment the assignment was created or confirmed.
+ *
+ * This is the structure the brief calls for in place of "profile revision IDs
+ * that are only checked when the planner happened to write them into
+ * `assignment.metadata`". Every field is a typed column (migration 009), so the
+ * dispatch can verify the file it is about to send is the one that was planned,
+ * and a divergence is a refusal rather than an unnoticed substitution.
+ *
+ * `null` in any field means "not known at binding time" — never "does not
+ * matter": the eligibility check treats a known value as a hard constraint and
+ * an unknown one as an unresolved fact (fail-closed for unattended starts).
+ */
+export interface AssignmentBinding {
+  /** The exact slice variant this assignment executes; null for a ready-file task. */
+  sliceVariantId: string | null;
+  /** The executable artifact (sliced output / uploaded G-code). */
+  artifactId: string | null;
+  /** Its content hash, captured when the binding was made (immutable identity). */
+  artifactSha256: string | null;
+  machineRevisionId: string | null;
+  processRevisionId: string | null;
+  filamentRevisionId: string | null;
+  /** Where the file is expected to live on the device. */
+  expectedRemotePath: string | null;
+  gcodeFlavor: string | null;
+  nozzleMm: number | null;
+  material: string | null;
+  /** Expected print duration in seconds (slicer ETA / analysis), when known. */
+  etaS: number | null;
+  /** Scheduled start from the plan; null for a manual assignment. */
+  plannedStartAt: IsoTimestamp | null;
+  /** The plan revision this binding was computed under; null outside a plan. */
+  planRevision: number | null;
+}
+
+/** An empty binding — every field unknown. */
+export const EMPTY_ASSIGNMENT_BINDING: AssignmentBinding = {
+  sliceVariantId: null,
+  artifactId: null,
+  artifactSha256: null,
+  machineRevisionId: null,
+  processRevisionId: null,
+  filamentRevisionId: null,
+  expectedRemotePath: null,
+  gcodeFlavor: null,
+  nozzleMm: null,
+  material: null,
+  etaS: null,
+  plannedStartAt: null,
+  planRevision: null
+};
+
 /**
  * Binds a {@link PrintTask} to a printer (and optionally a {@link Plan} and the
  * {@link BedCycle} it occupies). This is the middle link of the durable chain
  * `PrintTask → Assignment → DispatchAttempt → PrintRun`: one task may accrue
  * several assignments over its life (re-assigned after a failure), and each is
  * kept.
+ *
+ * An assignment is **executable data**, not a recommendation: together with its
+ * {@link AssignmentBinding} it names the printer, the slice and the file bytes a
+ * dispatch must use. An assignment whose task changed underneath it is marked
+ * {@link Assignment.invalidatedAt invalidated} rather than silently executed.
  */
 export interface Assignment {
   id: string;
@@ -308,6 +385,16 @@ export interface Assignment {
   /** The bed cycle this assignment reserved/ran on; null until it reserves one. */
   bedCycleId: string | null;
   state: AssignmentState;
+  /** What produced it: a confirmed plan, an operator, or the dispatch itself. */
+  source: AssignmentSource;
+  /** Why this printer was chosen (operator justification / planner reason). */
+  reason: string | null;
+  /** Who created it; null for system-created rows. */
+  createdBy: string | null;
+  binding: AssignmentBinding;
+  /** When the binding stopped matching the task; null while it is still valid. */
+  invalidatedAt: IsoTimestamp | null;
+  invalidatedReason: string | null;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
   version: number;
@@ -382,6 +469,74 @@ export interface DispatchAttempt {
   requestedAt: IsoTimestamp;
   /** When the attempt reached a terminal state; null while in flight. */
   completedAt: IsoTimestamp | null;
+  createdAt: IsoTimestamp;
+  updatedAt: IsoTimestamp;
+  version: number;
+  metadata: Metadata;
+}
+
+// ── DeviceArtifact ───────────────────────────────────────────────────────────
+
+/**
+ * The state of the *file on the printer* — deliberately a separate axis from
+ * the task, the assignment and the run, because "the slice is ready" and "the
+ * bytes are on that machine" are different facts and conflating them is how a
+ * dispatch ends up starting a file that is absent or stale.
+ *
+ *   NOT_PRESENT → UPLOADING → PRESENT_UNVERIFIED → VERIFIED
+ *                                   ↘ INVALID ↙
+ */
+export type DeviceArtifactState =
+  | "NOT_PRESENT"
+  | "UPLOADING"
+  | "PRESENT_UNVERIFIED"
+  | "VERIFIED"
+  | "INVALID";
+
+/**
+ * How the bytes got onto the device. `adapter_upload` — the orchestrator pushed
+ * them over the adapter's file API; `manual_file_transfer` — the adapter has no
+ * upload API (Bambu, Creality WS), so an operator copied the file and confirmed
+ * it. There is no third, pretend-automatic mode.
+ */
+export type DeviceTransferMode = "adapter_upload" | "manual_file_transfer";
+
+/**
+ * How strongly the on-device file was matched against the registered artifact.
+ * Recorded honestly: no adapter in this farm exposes a content hash, so
+ * `name_and_size` (Moonraker's listing) is the strongest evidence available and
+ * is never dressed up as a cryptographic check.
+ */
+export type DeviceVerification = "name_and_size" | "name_only" | "operator_confirmed";
+
+/**
+ * One tracked file on one printer: the link between a {@link SliceVariant}'s
+ * output and the bytes a start command will actually execute. Keyed in storage
+ * by `(printerId, remotePath)` — the physical slot — so a re-upload of the same
+ * slice updates the record instead of accumulating duplicates.
+ */
+export interface DeviceArtifact {
+  id: string;
+  printerId: string;
+  /** The assignment this delivery was prepared for; null for an ad-hoc record. */
+  assignmentId: string | null;
+  sliceVariantId: string | null;
+  artifactId: string | null;
+  /** The artifact's content hash — what the file *should* be. */
+  artifactSha256: string | null;
+  /** Normalized path on the device (relative to its G-code root). */
+  remotePath: string;
+  sizeBytes: number | null;
+  state: DeviceArtifactState;
+  transferMode: DeviceTransferMode;
+  /** Null until the file reaches `PRESENT_UNVERIFIED`/`VERIFIED`. */
+  verification: DeviceVerification | null;
+  uploadedAt: IsoTimestamp | null;
+  verifiedAt: IsoTimestamp | null;
+  /** Operator who confirmed a manual transfer; null otherwise. */
+  confirmedBy: string | null;
+  /** Failure detail when `state === "INVALID"` (or the last failed attempt). */
+  lastError: string | null;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
   version: number;
@@ -544,7 +699,8 @@ export type AuditEntityType =
   | "material_override"
   | "profile_revision"
   | "profile_set"
-  | "slice_variant";
+  | "slice_variant"
+  | "device_artifact";
 
 /**
  * An append-only record of a domain change — every state transition and

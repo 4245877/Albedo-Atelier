@@ -46,6 +46,9 @@ const mapper: RowMapper<PrintTask> = {
   columns: [
     "id",
     "artifact_id",
+    "slice_variant_id",
+    "source_artifact_id",
+    "on_device_file",
     "title",
     "material",
     "target_printer",
@@ -68,6 +71,9 @@ const mapper: RowMapper<PrintTask> = {
     return {
       id: t.id,
       artifact_id: t.artifactId,
+      slice_variant_id: t.sliceVariantId,
+      source_artifact_id: t.sourceArtifactId,
+      on_device_file: t.onDeviceFile,
       title: t.title,
       material: t.material,
       target_printer: t.targetPrinter,
@@ -91,6 +97,9 @@ const mapper: RowMapper<PrintTask> = {
     return {
       id: asString(row.id),
       artifactId: asStringOrNull(row.artifact_id),
+      sliceVariantId: asStringOrNull(row.slice_variant_id),
+      sourceArtifactId: asStringOrNull(row.source_artifact_id),
+      onDeviceFile: asStringOrNull(row.on_device_file),
       title: asString(row.title),
       material: asStringOrNull(row.material),
       targetPrinter: asStringOrNull(row.target_printer),

@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 import type { AssignmentRepository } from "../../../domain/print/repositories";
-import type { Assignment, AssignmentState } from "../../../domain/print/types";
+import type { Assignment, AssignmentSource, AssignmentState } from "../../../domain/print/types";
 import {
   asNumberOrNull,
   asString,
@@ -28,6 +28,19 @@ function toState(value: unknown): AssignmentState {
     : "CANCELLED";
 }
 
+const ASSIGNMENT_SOURCES: readonly AssignmentSource[] = ["plan", "manual", "dispatch"];
+
+/**
+ * Rows written before migration 009 have no `source`. They were all produced by
+ * the dispatch path or the planner and are read back as `dispatch` — the most
+ * conservative label (it grants no plan authority and no manual provenance).
+ */
+function toSource(value: unknown): AssignmentSource {
+  return ASSIGNMENT_SOURCES.includes(value as AssignmentSource)
+    ? (value as AssignmentSource)
+    : "dispatch";
+}
+
 const mapper: RowMapper<Assignment> = {
   table: "assignments",
   entity: "назначение",
@@ -38,6 +51,24 @@ const mapper: RowMapper<Assignment> = {
     "plan_id",
     "bed_cycle_id",
     "state",
+    "source",
+    "reason",
+    "created_by",
+    "slice_variant_id",
+    "artifact_id",
+    "artifact_sha256",
+    "machine_revision_id",
+    "process_revision_id",
+    "filament_revision_id",
+    "expected_remote_path",
+    "gcode_flavor",
+    "nozzle_mm",
+    "material",
+    "eta_s",
+    "planned_start_at",
+    "plan_revision",
+    "invalidated_at",
+    "invalidated_reason",
     "created_at",
     "updated_at",
     "version",
@@ -52,6 +83,24 @@ const mapper: RowMapper<Assignment> = {
       plan_id: a.planId,
       bed_cycle_id: a.bedCycleId,
       state: a.state,
+      source: a.source,
+      reason: a.reason,
+      created_by: a.createdBy,
+      slice_variant_id: a.binding.sliceVariantId,
+      artifact_id: a.binding.artifactId,
+      artifact_sha256: a.binding.artifactSha256,
+      machine_revision_id: a.binding.machineRevisionId,
+      process_revision_id: a.binding.processRevisionId,
+      filament_revision_id: a.binding.filamentRevisionId,
+      expected_remote_path: a.binding.expectedRemotePath,
+      gcode_flavor: a.binding.gcodeFlavor,
+      nozzle_mm: a.binding.nozzleMm,
+      material: a.binding.material,
+      eta_s: a.binding.etaS,
+      planned_start_at: a.binding.plannedStartAt,
+      plan_revision: a.binding.planRevision,
+      invalidated_at: a.invalidatedAt,
+      invalidated_reason: a.invalidatedReason,
       created_at: a.createdAt,
       updated_at: a.updatedAt,
       version: a.version,
@@ -67,6 +116,26 @@ const mapper: RowMapper<Assignment> = {
       planId: asStringOrNull(row.plan_id),
       bedCycleId: asStringOrNull(row.bed_cycle_id),
       state: toState(row.state),
+      source: toSource(row.source),
+      reason: asStringOrNull(row.reason),
+      createdBy: asStringOrNull(row.created_by),
+      binding: {
+        sliceVariantId: asStringOrNull(row.slice_variant_id),
+        artifactId: asStringOrNull(row.artifact_id),
+        artifactSha256: asStringOrNull(row.artifact_sha256),
+        machineRevisionId: asStringOrNull(row.machine_revision_id),
+        processRevisionId: asStringOrNull(row.process_revision_id),
+        filamentRevisionId: asStringOrNull(row.filament_revision_id),
+        expectedRemotePath: asStringOrNull(row.expected_remote_path),
+        gcodeFlavor: asStringOrNull(row.gcode_flavor),
+        nozzleMm: asNumberOrNull(row.nozzle_mm),
+        material: asStringOrNull(row.material),
+        etaS: asNumberOrNull(row.eta_s),
+        plannedStartAt: asStringOrNull(row.planned_start_at),
+        planRevision: asNumberOrNull(row.plan_revision)
+      },
+      invalidatedAt: asStringOrNull(row.invalidated_at),
+      invalidatedReason: asStringOrNull(row.invalidated_reason),
       createdAt: asString(row.created_at),
       updatedAt: asString(row.updated_at),
       version: asNumberOrNull(row.version) ?? 1,

@@ -121,6 +121,11 @@ function insertGcodeTask(
   const task: PrintTask = {
     id,
     artifactId: artifact.id,
+    sliceVariantId: null,
+    sourceArtifactId: null,
+    // A ready G-code task names the file it would start; without one it has no
+    // executable variant and a plan placing it can no longer be confirmed.
+    onDeviceFile: `${id}.gcode`,
     title: id,
     material: over.material === undefined ? "PLA" : over.material,
     targetPrinter: null,
@@ -247,6 +252,9 @@ function insertSlicedTask(
   const task: PrintTask = {
     id,
     artifactId: source.id,
+    sliceVariantId: null,
+    sourceArtifactId: source.id,
+    onDeviceFile: null,
     title: id,
     material: "PLA",
     targetPrinter: null,
@@ -395,6 +403,9 @@ test("compatibility: a model with no ready slice is blocked (slice_missing)", ()
   repos.tasks.insert({
     id: "m1",
     artifactId: "art_m",
+    sliceVariantId: null,
+    sourceArtifactId: null,
+    onDeviceFile: null,
     title: "m1",
     material: "PLA",
     targetPrinter: null,
@@ -478,7 +489,7 @@ test("buildDraftPlan places a task and stores a full explanation", () => {
   assert.equal(a.explanation?.etaSource, "gcode_analysis");
 });
 
-test("confirmPlan moves DRAFT → ACTIVE once and refuses a second confirm", () => {
+test("confirmPlan moves DRAFT → ACTIVE and a repeat is idempotent (no duplicate assignments)", () => {
   const db = store();
   insertGcodeTask(db, "t1");
   const svc = makeService(db, [printer("p1")]);
@@ -486,7 +497,49 @@ test("confirmPlan moves DRAFT → ACTIVE once and refuses a second confirm", () 
   const confirmed = svc.confirmPlan(draft.plan.id);
   assert.equal(confirmed.plan.state, "ACTIVE");
   assert.ok(confirmed.plan.confirmedAt);
-  assert.throws(() => svc.confirmPlan(draft.plan.id), /только черновик/);
+
+  // A retried confirmation must not mint a second set of assignments — the
+  // request is the same intent, not a new one (§6.2).
+  const again = svc.confirmPlan(draft.plan.id);
+  assert.equal(again.plan.state, "ACTIVE");
+  assert.equal(again.plan.version, confirmed.plan.version, "no second write");
+  assert.equal(again.assignments.length, confirmed.assignments.length);
+  assert.equal(db.repositories.assignments.listByPlan(draft.plan.id).length, confirmed.assignments.length);
+});
+
+test("confirmPlan freezes the executable binding on every assignment", () => {
+  const db = store();
+  insertGcodeTask(db, "t1");
+  const svc = makeService(db, [printer("p1")]);
+  const confirmed = svc.confirmPlan(svc.buildDraftPlan().plan.id);
+
+  const binding = confirmed.assignments[0].assignment.binding;
+  assert.equal(binding.artifactId, "art_t1", "the exact executable artifact");
+  assert.equal(binding.expectedRemotePath, "t1.gcode", "the exact file to start");
+  assert.equal(binding.planRevision, confirmed.plan.revision);
+  assert.ok(binding.plannedStartAt, "the scheduled start travels with the assignment");
+
+  // The confirmation is journalled with the full identity, not just "confirmed".
+  const audit = db.repositories.audit
+    .listByEntity("assignment", confirmed.assignments[0].assignment.id)
+    .find((e) => e.action === "binding_confirmed");
+  assert.ok(audit, "the binding confirmation is auditable");
+  assert.equal((audit?.detail as { expectedRemotePath?: unknown }).expectedRemotePath, "t1.gcode");
+});
+
+test("a task with no executable variant cannot be confirmed into a plan", () => {
+  const db = store();
+  const task = insertGcodeTask(db, "t1");
+  // Strip the on-device file: the task is queued but there is nothing to start.
+  db.repositories.tasks.update({ ...task, onDeviceFile: null, updatedAt: ISO });
+  const svc = makeService(db, [printer("p1")]);
+  const draft = svc.buildDraftPlan();
+
+  assert.throws(
+    () => svc.confirmPlan(draft.plan.id),
+    (e: unknown) => e instanceof Error && /нельзя подтвердить/.test(e.message)
+  );
+  assert.equal(db.repositories.plans.getById(draft.plan.id)?.state, "DRAFT", "nothing was confirmed");
 });
 
 test("recomputePlan creates a new DRAFT revision, supersedes the old draft, and keeps stability", () => {

@@ -15,6 +15,7 @@ import { buildCreateSetPayload, nextPollMs } from "./formModel.js";
 import {
   createSetHtml,
   errorsHtml,
+  executionHtml,
   newSliceHtml,
   profilesHtml,
   runtimeHtml,
@@ -27,7 +28,21 @@ const POLL_MS = 4000;
 // оператора или фонового процесса не оставались невидимыми до следующего клика.
 const IDLE_POLL_MS = 20000;
 
-const state = { runtime: null, profiles: [], sets: [], variants: [], models: [], loaded: false, errors: [] };
+const state = {
+  runtime: null,
+  profiles: [],
+  sets: [],
+  variants: [],
+  models: [],
+  /* Sliced OUTPUT artifacts (with their analysis) — what «добавить в очередь» shows. */
+  outputs: [],
+  /* Tasks, so a promoted variant renders its queue state instead of the button. */
+  tasks: [],
+  /* Open assignments + their device-file state — the «Исполнение» panel. */
+  assignments: [],
+  loaded: false,
+  errors: []
+};
 let pollTimer = null;
 let wired = false;
 /* Latest-only guard: каждый loadAll берёт номер; ответ применяется, только если он
@@ -59,12 +74,14 @@ async function loadAll({ full = false } = {}) {
     apiGet("/api/print/slicing/profiles"),
     apiGet("/api/print/slicing/profile-sets"),
     apiGet("/api/print/slicing/variants"),
-    apiGet("/api/print/artifacts")
+    apiGet("/api/print/artifacts"),
+    apiGet("/api/print/tasks"),
+    apiGet("/api/print/assignments")
   ]);
   // Более свежий запрос уже стартовал, пока этот шёл по сети — его ответ и станет
   // истиной; устаревший результат молча отбрасываем, чтобы не откатить state.
   if (seq !== loadSeq) return;
-  const [runtime, profiles, sets, variants, artifacts] = results;
+  const [runtime, profiles, sets, variants, artifacts, tasks, assignments] = results;
   const errors = [];
 
   if (runtime.status === "fulfilled") state.runtime = runtime.value;
@@ -76,10 +93,15 @@ async function loadAll({ full = false } = {}) {
   if (variants.status === "fulfilled") state.variants = variants.value.variants || [];
   else errors.push("варианты слайсинга");
   if (artifacts.status === "fulfilled") {
-    state.models = (artifacts.value.artifacts || []).filter(
-      (a) => a.analysis && a.analysis.verdict === "needs_preparation"
-    );
+    const all = artifacts.value.artifacts || [];
+    state.models = all.filter((a) => a.analysis && a.analysis.verdict === "needs_preparation");
+    // Sliced outputs carry the G-code analysis the promote decision is shown from.
+    state.outputs = all.filter((a) => a.artifact && a.artifact.kind === "gcode");
   } else errors.push("модели");
+  if (tasks.status === "fulfilled") state.tasks = tasks.value.tasks || [];
+  else errors.push("задания");
+  if (assignments.status === "fulfilled") state.assignments = assignments.value.assignments || [];
+  else errors.push("назначения");
 
   state.errors = errors;
 
@@ -107,7 +129,9 @@ function renderConnectionError() {
 
 let pollMs = null;
 function ensurePolling() {
-  const busyVariants = state.variants.some((v) => v.state === "pending" || v.state === "running");
+  const busyVariants =
+    state.variants.some((v) => v.state === "pending" || v.state === "running") ||
+    state.assignments.some((a) => a.deviceArtifact && a.deviceArtifact.state === "UPLOADING");
   // Быстрый опрос при активной работе или ошибках; иначе — редкий фоновый, но
   // всегда: изменения, сделанные другим оператором или фоновым процессом, не
   // должны оставаться незаметными сколь угодно долго. Пересоздаём таймер, только
@@ -136,6 +160,7 @@ const REGIONS = {
   sets: () => setsHtml(state),
   createSet: () => createSetHtml(state),
   variants: () => variantsHtml(state),
+  execution: () => executionHtml(state),
   newSlice: () => newSliceHtml(state)
 };
 // Формы: их нельзя перерисовывать, пока оператор их редактирует (иначе теряются
@@ -201,6 +226,16 @@ function wireDelegates() {
     if (action === "import") void run(btn, () => apiPost("/api/print/slicing/presets/import"), "Пресеты импортированы, Владыка");
     else if (action === "approve") void run(btn, () => apiPost(`/api/print/slicing/profile-sets/${id}/approve`), "Набор утверждён — воля ваша исполнена");
     else if (action === "rerun") void run(btn, () => apiPost(`/api/print/slicing/variants/${id}/rerun`), "Слайсинг перезапущен — на этот раз всё будет безупречно");
+    // Слайс → очередь. Повторное нажатие безопасно: сервер идемпотентен и не
+    // создаёт второе задание, поэтому кнопку не нужно «защищать» на клиенте.
+    else if (action === "promote")
+      void run(btn, () => apiPost(`/api/print/slicing/variants/${id}/promote`), "Вариант поставлен в очередь, Владыка");
+    else if (action === "prepare-file")
+      void run(btn, () => apiPost(`/api/print/assignments/${id}/prepare-file`), "Файл подготовлен на принтере");
+    else if (action === "confirm-file")
+      void run(btn, () => confirmFile(id), "Перенос файла подтверждён");
+    else if (action === "start-assignment")
+      void run(btn, () => startAssignment(id), "Запуск отправлен — я прослежу за каждым слоем");
   });
 
   // Переключатель типа цели в «Новом наборе»: показываем ровно один список
@@ -261,6 +296,24 @@ function applyTargetType(form, type) {
     const sel = wrapper.querySelector("select");
     if (sel) sel.disabled = !active;
   }
+}
+
+/* Ручной перенос подтверждается ИМЕНЕМ: без него сервер откажет (подтверждение
+   должно быть именным — это и есть доказательство вместо загрузки адаптером). */
+function confirmFile(assignmentId) {
+  const operator = window.prompt("Кто подтверждает перенос файла на принтер?");
+  if (!operator || !operator.trim()) {
+    return Promise.reject(new Error("подтверждение переноса должно быть именным"));
+  }
+  return apiPost(`/api/print/assignments/${assignmentId}/confirm-file`, { operator: operator.trim() });
+}
+
+/* Ключ идемпотентности привязан к назначению: повторный клик (или ретрай сети)
+   вернёт тот же запуск, а не отправит вторую физическую команду. */
+function startAssignment(assignmentId) {
+  return apiPost(`/api/print/assignments/${assignmentId}/start`, {
+    idempotencyKey: `ui-${assignmentId}`
+  });
 }
 
 async function run(btn, fn, okMsg) {

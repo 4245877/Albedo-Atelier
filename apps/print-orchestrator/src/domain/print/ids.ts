@@ -16,6 +16,7 @@ export const ID_PREFIX = {
   dispatchAttempt: "dsp",
   printRun: "run",
   materialOverride: "mat",
+  deviceArtifact: "dev",
   auditEvent: "aud",
   // slicing domain (domain/slicing)
   profileRevision: "prof",

@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { JobError, ValidationError } from "../../core/errors";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
 import type { PrintQueueStore } from "../../domain/print/repositories";
-import type { Assignment, Plan } from "../../domain/print/types";
+import { EMPTY_ASSIGNMENT_BINDING, type Assignment, type Plan } from "../../domain/print/types";
 import { REASON } from "../../domain/dispatch/reasons";
 import type { PrinterConfig } from "../../infra/printers/config";
 import { openPrintQueueStore } from "../../infra/db/store";
@@ -111,7 +111,12 @@ function makeHarness(): Harness {
 }
 
 /** A confirmed (ACTIVE) plan binding `taskId` to `printerId`. */
-function confirmPlan(h: Harness, taskId: string, printerId: string, meta: Record<string, unknown> = {}): Plan {
+function confirmPlan(
+  h: Harness,
+  taskId: string,
+  printerId: string,
+  bindingPatch: Partial<Assignment["binding"]> = {}
+): Plan {
   const iso = new Date().toISOString();
   const plan: Plan = {
     id: newId(ID_PREFIX.plan),
@@ -135,14 +140,46 @@ function confirmPlan(h: Harness, taskId: string, printerId: string, meta: Record
     planId: plan.id,
     bedCycleId: null,
     state: "PROPOSED",
+    source: "plan",
+    reason: null,
+    createdBy: null,
+    binding: { ...EMPTY_ASSIGNMENT_BINDING, ...bindingPatch },
+    invalidatedAt: null,
+    invalidatedReason: null,
     createdAt: iso,
     updatedAt: iso,
     version: 1,
     legacyRef: null,
-    metadata: meta
+    metadata: {}
   };
   h.store.repositories.assignments.insert(assignment);
   return plan;
+}
+
+/** An operator-confirmed manual file transfer — the evidence a non-upload adapter needs. */
+function confirmManualTransfer(h: Harness, printerId: string, remotePath: string): void {
+  const iso = new Date().toISOString();
+  h.store.repositories.deviceArtifacts.insert({
+    id: newId(ID_PREFIX.deviceArtifact),
+    printerId,
+    assignmentId: null,
+    sliceVariantId: null,
+    artifactId: null,
+    artifactSha256: null,
+    remotePath,
+    sizeBytes: 1000,
+    state: "PRESENT_UNVERIFIED",
+    transferMode: "manual_file_transfer",
+    verification: "operator_confirmed",
+    uploadedAt: null,
+    verifiedAt: null,
+    confirmedBy: "operator",
+    lastError: null,
+    createdAt: iso,
+    updatedAt: iso,
+    version: 1,
+    metadata: {}
+  });
 }
 
 function addTask(h: Harness, printer: string): string {
@@ -185,6 +222,9 @@ test("a superseded (CANCELLED) plan no longer binds the dispatch", async () => {
   const taskId = addTask(h, "x1c");
   const plan = confirmPlan(h, taskId, "k2");
   h.store.repositories.plans.update({ ...plan, state: "CANCELLED", updatedAt: new Date().toISOString() });
+  // x1c has no upload adapter, so the manual transfer must be confirmed before a
+  // start is admissible at all (that rule is asserted separately below).
+  confirmManualTransfer(h, "x1c", "part.gcode");
 
   // With no live confirmed assignment the task's own pin decides again.
   const result = await h.dispatch.dispatch({ taskId, mode: "manual" });
@@ -196,9 +236,29 @@ test("a DRAFT plan's proposal does not bind a dispatch (only a confirmed one doe
   const taskId = addTask(h, "x1c");
   const plan = confirmPlan(h, taskId, "k2");
   h.store.repositories.plans.update({ ...plan, state: "DRAFT", confirmedAt: null, updatedAt: new Date().toISOString() });
+  confirmManualTransfer(h, "x1c", "part.gcode");
 
   const result = await h.dispatch.dispatch({ taskId, mode: "manual" });
   assert.equal(result.printerId, "x1c", "a draft is a suggestion, not a reservation");
+});
+
+test("a printer whose adapter cannot upload refuses a start until the transfer is confirmed", async () => {
+  const h = makeHarness();
+  const taskId = addTask(h, "x1c");
+
+  await assert.rejects(
+    h.dispatch.dispatch({ taskId, mode: "manual" }),
+    (e: unknown) =>
+      e instanceof JobError &&
+      (e.details as { blockers?: { code: string }[] }).blockers?.some(
+        (b) => b.code === REASON.DEVICE_TRANSFER_NOT_CONFIRMED
+      ) === true
+  );
+  assert.equal(h.startCalls.length, 0, "nothing was sent to a printer we cannot deliver to");
+
+  confirmManualTransfer(h, "x1c", "part.gcode");
+  const result = await h.dispatch.dispatch({ taskId, mode: "manual" });
+  assert.equal(result.printerId, "x1c");
 });
 
 test("a confirmed plan expecting a different file refuses the start", async () => {

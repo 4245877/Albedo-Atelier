@@ -188,9 +188,12 @@ test("handoff: a ready slice is promoted onto its task, which becomes dispatchab
   const detail = printQueue.promoteSliceVariant(ready.id);
   assert.equal(detail.task.state, "QUEUED");
   assert.equal(detail.task.artifactId, ready.outputArtifactId); // now the sliced G-code
-  assert.equal(detail.task.metadata.file, "cube.gcode"); // an on-device path to start
-  assert.equal(detail.task.metadata.sourceArtifactId, artifactId); // provenance preserved
-  assert.equal(detail.task.metadata.sliceVariantId, ready.id);
+  // Typed binding (migration 009): the queue references the exact slice, its
+  // source model and the on-device path — not a free-form metadata blob.
+  assert.equal(detail.task.onDeviceFile, "cube.gcode"); // an on-device path to start
+  assert.equal(detail.task.sourceArtifactId, artifactId); // provenance preserved
+  assert.equal(detail.task.sliceVariantId, ready.id);
+  assert.equal(detail.task.metadata.file, "cube.gcode"); // legacy projection field kept
   assert.equal(detail.task.pinnedPrinterId, "creality-k2"); // pinned to the sliced-for printer
   assert.equal(detail.queueEntry?.state, "WAITING");
 

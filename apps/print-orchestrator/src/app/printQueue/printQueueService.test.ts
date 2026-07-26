@@ -53,28 +53,38 @@ test("createTask rejects a blank title", () => {
 // clearance) belongs to the canonical DispatchService / RunLifecycleService and
 // is exercised in dispatch/dispatchService.test.ts and dispatch/runLifecycle.test.ts.
 // Here we only cover the manual task→printer binding this service still owns.
-test("assignTask reserves a fresh bed and binds the assignment (manual task→printer binding)", () => {
+test("assignTask creates an EXECUTABLE proposal that holds no hardware", () => {
   const { service, store } = makeService();
   const created = service.createTask({ title: "Chalice", printer: "K2", file: "chalice.gcode" });
   const taskId = created.task.id;
 
-  const assignment = service.assignTask(taskId, "K2");
-  assert.equal(assignment.state, "RESERVED");
-  assert.equal(service.getTask(taskId).state, "ASSIGNED");
+  const assignment = service.assignTask(taskId, "K2", { reason: "ближайший свободный" });
 
-  // A fresh bed cycle for K2 is RESERVED and back-links to its assignment.
-  const bed = store.repositories.bedCycles.findOpenByPrinter("K2");
-  assert.equal(bed?.state, "RESERVED");
-  assert.equal(bed?.assignmentId, assignment.id, "bed back-links to its assignment");
+  // PROPOSED, not RESERVED: a manual placement decides *where*, it does not seize
+  // the bed. Reserving the bed and moving the task on happens inside the dispatch
+  // transaction. Before this fix the pair (ASSIGNED task + RESERVED bed) made the
+  // task permanently unstartable — the dispatch gate refuses both.
+  assert.equal(assignment.state, "PROPOSED");
+  assert.equal(assignment.source, "manual");
+  assert.equal(assignment.reason, "ближайший свободный");
+  assert.equal(assignment.bedCycleId, null);
+  assert.equal(store.repositories.bedCycles.findOpenByPrinter("K2"), null, "no bed is held");
 
-  // The whole durable chain is kept as history on the task.
+  // The task stays runnable queue work, so the dispatch gate (which admits only
+  // QUEUED/WAITING) can still start it.
+  assert.equal(service.getTask(taskId).state, "QUEUED");
+  assert.equal(store.repositories.queue.findByTaskId(taskId)?.state, "WAITING");
+
+  // The binding carries the executable identity, not just a printer id.
+  assert.equal(assignment.binding.expectedRemotePath, "chalice.gcode");
+  assert.equal(assignment.binding.artifactId, created.task.artifactId);
+
   const detail = service.getTaskDetail(taskId);
-  assert.equal(detail.task.state, "ASSIGNED");
   assert.equal(detail.assignments.length, 1);
   store.close();
 });
 
-test("a reserved bed blocks a second assignment until it is cleared", () => {
+test("a live assignment blocks a second one on the same printer", () => {
   const { service, store } = makeService();
   const a = service.createTask({ title: "A", printer: "K2", file: "a.gcode" });
   const b = service.createTask({ title: "B", printer: "K2", file: "b.gcode" });
@@ -108,7 +118,7 @@ test("cancelTask before a run unwinds the reservation and keeps the task as hist
   service.cancelTask(id, "оператор отменил");
   assert.equal(service.getTask(id).state, "CANCELLED", "task kept, not deleted");
   assert.equal(store.repositories.assignments.getById(assignment.id)?.state, "CANCELLED");
-  // A reserved (never-printed) bed unwinds all the way back to CLEAR.
+  // The proposal held no bed, so there is none to unwind.
   assert.equal(store.repositories.bedCycles.findOpenByPrinter("K2"), null);
   assert.equal(store.repositories.queue.findByTaskId(id)?.state, "RELEASED");
   store.close();
@@ -143,10 +153,16 @@ test("every mutation is journalled in the audit log", () => {
   const taskAudit = store.repositories.audit.listByEntity("print_task", created.task.id);
   const actions = taskAudit.map((e) => e.action);
   assert.ok(actions.includes("created"));
-  assert.ok(actions.includes("assigned"));
-  // Bed and assignment transitions are journalled too.
-  assert.ok(store.repositories.audit.list().some((e) => e.entityType === "bed_cycle"));
-  assert.ok(store.repositories.audit.list().some((e) => e.entityType === "assignment"));
+  // The manual binding is journalled on the assignment (with its full executable
+  // detail), not as a task transition — the task itself does not move.
+  const assignmentAudit = store.repositories.audit
+    .list()
+    .filter((e) => e.entityType === "assignment");
+  assert.ok(assignmentAudit.some((e) => e.action === "assigned_manually"));
+  assert.ok(
+    assignmentAudit.some((e) => (e.detail as { expectedRemotePath?: unknown }).expectedRemotePath === "x.gcode"),
+    "the audit records WHAT was bound, not only that something was"
+  );
   store.close();
 });
 

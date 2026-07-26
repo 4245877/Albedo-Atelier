@@ -137,6 +137,9 @@ export class TaskCommands {
       const task: PrintTask = {
         id: newId(ID_PREFIX.printTask),
         artifactId,
+        sliceVariantId: null,
+        sourceArtifactId: null,
+        onDeviceFile: file,
         title,
         material: input.material?.trim() || null,
         targetPrinter: printer,
@@ -203,6 +206,7 @@ export class TaskCommands {
         actor
       );
       this.ctx.holdEntryFor(id, actor);
+      this.ctx.invalidatePlacementsFor(id, "задание отложено на проверку", actor);
       return updated;
     });
   }
@@ -281,6 +285,9 @@ export class TaskCommands {
       const task: PrintTask = {
         id: newId(ID_PREFIX.printTask),
         artifactId: input.artifactId ?? null,
+        sliceVariantId: null,
+        sourceArtifactId: null,
+        onDeviceFile: null,
         title,
         material: input.material?.trim() || null,
         targetPrinter: pinned,
@@ -346,8 +353,14 @@ export class TaskCommands {
    *
    * Fail-closed: the output must pass {@link evaluateSliceOutput} (completed,
    * `schedulable`, no blocker) or promotion is refused. The file is not pushed to the
-   * printer here (no such transport exists) — its on-device identity is matched by
-   * the dispatch pre-flight (name + size), which refuses if it is absent or different.
+   * printer here — that is a separate, explicit step (`DeviceArtifactService.prepare`)
+   * whose result the dispatch pre-flight verifies before any start command.
+   *
+   * **Idempotent**: promoting the same variant twice does not create a second queue
+   * entry, a second task or a duplicate binding — the second call re-reads the same
+   * task, sees the binding already matches, and returns it unchanged. Promoting a
+   * *different* variant onto a task that already holds a live assignment or run is
+   * refused rather than silently re-pointed.
    */
   promoteSliceVariant(
     variantId: string,
@@ -387,6 +400,21 @@ export class TaskCommands {
         );
       }
 
+      // Re-pointing a task that is already bound to a *different* variant would
+      // invalidate any assignment/plan built on the old one behind the operator's
+      // back. Refuse while anything live still references it; the operator cancels
+      // the assignment (or the task) first.
+      if (task.sliceVariantId !== null && task.sliceVariantId !== variant.id) {
+        const live = repos.assignments
+          .listByTask(task.id)
+          .find((a) => a.state !== "CANCELLED" && a.state !== "RELEASED");
+        if (live) {
+          throw new JobError(
+            `Задание «${task.title}» уже назначено по варианту «${task.sliceVariantId}» (назначение ${live.id}) — снимите назначение перед сменой варианта`
+          );
+        }
+      }
+
       // The on-device path a dispatch will start: an explicit override, else the
       // output file's own name — validated as a safe, startable path.
       const rawFile = input.onDeviceFile?.trim() || output.name;
@@ -402,26 +430,45 @@ export class TaskCommands {
       const pinnedPrinterId = variant.targetPrinterId ?? task.pinnedPrinterId;
       if (pinnedPrinterId) this.ctx.assertPrinterConfigured(pinnedPrinterId);
 
+      // Idempotency: an identical repeat is a no-op. Everything below is a write,
+      // so bail out *before* it rather than re-auditing and re-versioning the row.
+      const alreadyBound =
+        task.state === "QUEUED" &&
+        task.sliceVariantId === variant.id &&
+        task.artifactId === output.id &&
+        task.onDeviceFile === onDeviceFile;
+      const existingEntry = repos.queue.findByTaskId(task.id);
+      if (alreadyBound && existingEntry?.state === "WAITING") {
+        return this.queries.getTaskDetail(task.id);
+      }
+
       // ── Atomic bind: the task's executable becomes the sliced output ──────────
       if (task.state !== "QUEUED") {
         assertTransition("задание", PRINT_TASK_TRANSITIONS, task.state, "QUEUED");
       }
-      const bound = repos.tasks.update({
+      repos.tasks.update({
         ...task,
+        // Typed binding (migration 009): the queue now references the exact slice,
+        // its source model and the on-device path — not a free-form metadata blob.
         artifactId: output.id,
+        sliceVariantId: variant.id,
+        sourceArtifactId: variant.sourceArtifactId,
+        onDeviceFile,
         state: "QUEUED",
         reason: null,
         targetPrinter: variant.targetPrinterId ?? task.targetPrinter,
         pinnedPrinterId,
         metadata: {
           ...task.metadata,
+          // Kept for the legacy queue projection, which still reads metadata.file.
           file: onDeviceFile,
-          sourceArtifactId: variant.sourceArtifactId,
-          sliceVariantId: variant.id,
           outputAnalysisId: analysis.id
         },
         updatedAt: iso
       });
+      if (task.sliceVariantId !== null && task.sliceVariantId !== variant.id) {
+        this.ctx.invalidatePlacementsFor(task.id, "задание пересобрано другим вариантом слайсинга", who);
+      }
       this.ctx.recordAudit({
         entityType: "print_task",
         entityId: task.id,
@@ -429,12 +476,18 @@ export class TaskCommands {
         from: task.state,
         to: "QUEUED",
         actor: who,
-        detail: { variantId: variant.id, outputArtifactId: output.id, file: onDeviceFile }
+        detail: {
+          variantId: variant.id,
+          outputArtifactId: output.id,
+          outputSha256: output.sha256,
+          profileSetId: variant.profileSetId,
+          file: onDeviceFile
+        }
       });
 
       // Ensure a WAITING queue entry: create one for a task that had none (an
       // upload draft), un-hold a held one, and leave an already-waiting one be.
-      const entry = repos.queue.findByTaskId(task.id);
+      const entry = existingEntry;
       if (!entry) {
         const created: QueueEntry = {
           id: newId(ID_PREFIX.queueEntry),
@@ -449,9 +502,12 @@ export class TaskCommands {
         this.ctx.recordAudit({ entityType: "queue_entry", entityId: created.id, action: "enqueued", to: "WAITING", actor: who });
       } else if (entry.state === "HELD") {
         this.ctx.transitionEntry(entry, "WAITING", who);
+      } else if (entry.state === "RELEASED") {
+        throw new JobError(
+          `Задание «${task.title}» уже покинуло очередь (запись ${entry.id} RELEASED) — создайте новое задание`
+        );
       }
 
-      void bound;
       return this.queries.getTaskDetail(task.id);
     });
   }
@@ -490,6 +546,8 @@ export class TaskCommands {
         updatedAt: this.ctx.nowIso()
       };
       const saved = this.store.repositories.tasks.update(next);
+      // Priority/deadline/window are exactly what the placement was computed from.
+      this.ctx.invalidatePlacementsFor(task.id, "изменены параметры планирования", actor);
       this.ctx.recordAudit({
         entityType: "print_task",
         entityId: task.id,

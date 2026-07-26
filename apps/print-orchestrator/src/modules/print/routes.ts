@@ -11,6 +11,7 @@ import type { PrintServices } from "../../bootstrap/createRuntime";
 import { ValidationError } from "../../core/errors";
 import type { DayNightPreference } from "../../domain/print/types";
 import { uploads } from "../../shared/env";
+import { registerAssignmentRoutes } from "./assignmentRoutes";
 import { registerSlicingRoutes } from "./slicingRoutes";
 
 /** The services + commands the print / scheduler / artifact routes need, passed explicitly. */
@@ -64,6 +65,7 @@ export async function registerPrintQueueRoutes(
 
   registerArtifactRoutes(app, services);
   registerSlicingRoutes(app, services);
+  registerAssignmentRoutes(app, services);
   registerSchedulerRoutes(app, services);
 
   app.get("/tasks", async () => ({ tasks: services.printQueue.listTasks() }));
@@ -105,12 +107,22 @@ export async function registerPrintQueueRoutes(
     })
   );
 
-  app.post<{ Params: { id: string }; Body: { printer?: unknown } }>(
+  // Manual placement: creates an EXECUTABLE assignment (see QueueCommands.assignTask).
+  // The follow-up steps live under /assignments/:id — prepare-file, then start.
+  app.post<{ Params: { id: string }; Body: { printer?: unknown; reason?: unknown } }>(
     "/tasks/:id/assign",
     async (request) => {
       const printer = optionalString(request.body?.printer);
       if (!printer) throw new ValidationError("Поле «printer» обязательно");
-      return { ok: true, assignment: services.printQueue.assignTask(request.params.id, printer) };
+      const reason = optionalString(request.body?.reason);
+      return {
+        ok: true,
+        assignment: services.printQueue.assignTask(
+          request.params.id,
+          printer,
+          reason ? { reason } : {}
+        )
+      };
     }
   );
 

@@ -133,6 +133,10 @@ function importOne(
   const task: PrintTask = {
     id: newId(ID_PREFIX.printTask),
     artifactId,
+    // A legacy job named a file already on the printer — no slice, no source model.
+    sliceVariantId: null,
+    sourceArtifactId: null,
+    onDeviceFile: file,
     title: job.title || "(без названия)",
     material: orNull(job.material),
     targetPrinter: orNull(job.printer),

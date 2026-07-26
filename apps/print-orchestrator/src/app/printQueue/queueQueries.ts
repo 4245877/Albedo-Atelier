@@ -82,6 +82,29 @@ export class QueueQueries {
     };
   }
 
+  getAssignment(id: string): Assignment {
+    const assignment = this.ctx.store.repositories.assignments.getById(id);
+    if (!assignment) throw new NotFoundError(`Назначение «${id}»`);
+    return assignment;
+  }
+
+  /**
+   * Every assignment still awaiting or holding execution — the execution view's
+   * source. Derived from the open queue (one indexed lookup per queued task)
+   * rather than a scan of the never-deleted assignment history.
+   */
+  listOpenAssignments(): Assignment[] {
+    const repos = this.ctx.store.repositories;
+    const out: Assignment[] = [];
+    for (const entry of repos.queue.listOpen()) {
+      for (const assignment of repos.assignments.listByTask(entry.taskId)) {
+        if (assignment.state === "RELEASED" || assignment.state === "CANCELLED") continue;
+        out.push(assignment);
+      }
+    }
+    return out;
+  }
+
   listAudit(limit?: number): AuditEvent[] {
     return this.ctx.store.repositories.audit.list(limit);
   }

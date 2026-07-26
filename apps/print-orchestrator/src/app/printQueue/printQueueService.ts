@@ -84,6 +84,14 @@ export class PrintQueueService {
     return this.queries.getTaskDetail(id);
   }
 
+  getAssignment(id: string): Assignment {
+    return this.queries.getAssignment(id);
+  }
+
+  listOpenAssignments(): Assignment[] {
+    return this.queries.listOpenAssignments();
+  }
+
   listAudit(limit?: number): AuditEvent[] {
     return this.queries.listAudit(limit);
   }
@@ -139,9 +147,13 @@ export class PrintQueueService {
   assignTask(
     taskId: string,
     printerId: string,
-    options: { planId?: string } = {},
+    options: { planId?: string; reason?: string } = {},
     actor?: string
   ): Assignment {
     return this.queue.assignTask(taskId, printerId, options, actor);
+  }
+
+  invalidateAssignment(assignmentId: string, reason: string, actor?: string): Assignment {
+    return this.queue.invalidateAssignment(assignmentId, reason, actor);
   }
 }

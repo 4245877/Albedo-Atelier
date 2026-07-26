@@ -1,13 +1,16 @@
-import type { PrintTask } from "../../domain/print/types";
+import type { DeviceArtifact, PrintTask } from "../../domain/print/types";
 import {
   evaluateDispatchEligibility,
+  type DeviceArtifactFacts,
   type DeviceFileIdentity,
   type DispatchEligibility,
   type DispatchFacts,
   type DispatchMode,
   type DispatchReservation
 } from "../../domain/dispatch/eligibility";
+import { supportsPrinterUpload } from "../../infra/printers/files";
 import { ANALYZER_VERSION } from "../artifacts/analyzers";
+import { profileRevisionIdsOf, resolveTaskBinding } from "../dispatch/binding";
 import type { SchedulerContext } from "./context";
 import type { EvidenceResolver } from "./evidence";
 import type { SchedulerPrinterRef } from "./types";
@@ -29,6 +32,10 @@ export interface EligibilityRequest {
   activeRun?: { id: string; state: string } | null;
   /** Whether the printer's verified auto-clearing hardware is enabled. */
   automaticContinuationAllowed?: boolean;
+  /** Override the protocol-derived "can this adapter upload files?" answer (tests/fakes). */
+  adapterUploadSupported?: boolean;
+  /** The tracked device file, when the caller already read it; `null` = untracked. */
+  deviceArtifact?: DeviceArtifactFacts | null;
 }
 
 /**
@@ -76,6 +83,8 @@ export class EligibilityQueries {
         ? request.activeRun
         : toRunRef(repos.printRuns.findActiveByPrinter(printer.id));
 
+    const file = request.file !== undefined ? request.file : readTaskFile(task, resolved.artifact);
+
     const facts: DispatchFacts = {
       mode: request.mode,
       taskState: task.state,
@@ -83,7 +92,7 @@ export class EligibilityQueries {
       night: task.night,
       unattendedAllowed: task.unattendedAllowed,
 
-      file: request.file !== undefined ? request.file : readTaskFile(task, resolved.artifact),
+      file,
       filePathValid: request.filePathValid ?? true,
       artifact: resolved.artifact
         ? {
@@ -124,6 +133,15 @@ export class EligibilityQueries {
       reservation: this.confirmedReservation(task.id, resolved.variant?.id ?? null),
       targetPrinterId: printer.id,
       sliceVariantId: resolved.variant?.id ?? null,
+      currentProfileRevisionIds: profileRevisionIdsOf(resolveTaskBinding(repos, task).binding),
+      adapterUploadSupported:
+        request.adapterUploadSupported ?? printerUploadSupported(printer.protocol),
+      deviceArtifact:
+        request.deviceArtifact !== undefined
+          ? request.deviceArtifact
+          : toDeviceArtifactFacts(
+              file !== null ? repos.deviceArtifacts.findBySlot(printer.id, file) : null
+            ),
 
       etaMinutes: etaMinutesOf(resolved.evidence.sliceEtaS, resolved.evidence.gcodeEtaS),
       nightWindow: this.ctx.config.nightWindow,
@@ -144,26 +162,47 @@ export class EligibilityQueries {
   }
 
   /**
-   * The confirmed (ACTIVE-plan) assignment this task must be executed under, if
-   * any. A `PROPOSED` assignment on a DRAFT plan is *not* a reservation — only a
-   * confirmed plan binds a dispatch to a printer.
+   * The **executable** assignment this task must be run under, if any.
+   *
+   * Two kinds count, and only these two: an assignment under a confirmed
+   * (`ACTIVE`) plan, and an explicit manual placement by an operator. A
+   * `PROPOSED` assignment on a *draft* plan is a recommendation, not a
+   * reservation — a draft binds nothing. An assignment marked invalidated is
+   * likewise not a reservation; it reports itself so the caller refuses rather
+   * than quietly falling back to the task's printer hints.
+   *
+   * The binding comes from typed columns (migration 009) written by plan
+   * confirmation and manual assignment. Previously these were read out of
+   * `assignment.metadata`, which nothing ever wrote — so every reservation rule
+   * below (slice, hash, expected path) was dead code.
    */
   private confirmedReservation(taskId: string, sliceVariantId: string | null): DispatchReservation | null {
     const repos = this.ctx.store.repositories;
     for (const assignment of repos.assignments.listByTask(taskId)) {
       if (assignment.state === "CANCELLED" || assignment.state === "RELEASED") continue;
-      if (!assignment.planId) continue;
-      const plan = repos.plans.getById(assignment.planId);
-      if (!plan || plan.state !== "ACTIVE") continue;
-      const meta = assignment.metadata as Record<string, unknown>;
+
+      let planId: string | null = null;
+      if (assignment.planId) {
+        const plan = repos.plans.getById(assignment.planId);
+        if (!plan || plan.state !== "ACTIVE") continue;
+        planId = plan.id;
+      } else if (assignment.source !== "manual") {
+        continue;
+      }
+
+      const b = assignment.binding;
       return {
-        planId: plan.id,
+        planId,
         assignmentId: assignment.id,
         printerId: assignment.printerId,
-        sliceVariantId: readString(meta, "sliceVariantId") ?? sliceVariantId,
-        artifactSha256: readString(meta, "artifactSha256"),
-        profileRevisionIds: readStringArray(meta, "profileRevisionIds"),
-        expectedRemotePath: readString(meta, "expectedRemotePath")
+        sliceVariantId: b.sliceVariantId ?? sliceVariantId,
+        artifactSha256: b.artifactSha256,
+        profileRevisionIds: [b.machineRevisionId, b.processRevisionId, b.filamentRevisionId].filter(
+          (id): id is string => typeof id === "string" && id.length > 0
+        ),
+        expectedRemotePath: b.expectedRemotePath,
+        stale: assignment.invalidatedAt !== null,
+        staleReason: assignment.invalidatedReason
       };
     }
     return null;
@@ -172,6 +211,23 @@ export class EligibilityQueries {
 
 function toRunRef(run: { id: string; state: string } | null): { id: string; state: string } | null {
   return run ? { id: run.id, state: run.state } : null;
+}
+
+/** Protocol → "can the orchestrator push a file to it?"; unknown protocols answer no. */
+function printerUploadSupported(protocol: string | null): boolean {
+  return supportsPrinterUpload(protocol);
+}
+
+function toDeviceArtifactFacts(record: DeviceArtifact | null): DeviceArtifactFacts | null {
+  return record
+    ? {
+        state: record.state,
+        transferMode: record.transferMode,
+        verification: record.verification,
+        remotePath: record.remotePath,
+        lastError: record.lastError
+      }
+    : null;
 }
 
 /** The on-device file a dispatch would start (task hint first, legacy artifact source second). */

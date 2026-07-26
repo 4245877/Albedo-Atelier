@@ -9,8 +9,11 @@ import { FarmStore } from "./farmStore";
 
 /*
  * The file-browser start (`POST /api/printers/:id/print` → `startPrinterFile`)
- * is the operator's "run this file" escape hatch. It creates no task and no run,
- * but it DOES reach a device — so it must not be a way around the bed model.
+ * is the operator's "run this file" escape hatch — and it must not be a second
+ * dispatch path. It now creates a managed task + a manual assignment + a device
+ * -file record and calls the SAME `DispatchService.startAssignment` everything
+ * else does, so every check (bed, file identity, DispatchEligibility, the start
+ * guard, idempotency, the audit trail) applies to it too.
  *
  * A Moonraker printer is configured with its HTTP mocked (file listing, status,
  * print start), so the whole path runs without a real device.
@@ -78,12 +81,53 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("the file browser can start a file while the bed is genuinely free", async () => {
+test("the file browser start goes through the canonical dispatch, not the driver", async () => {
   const store = new FarmStore(file);
   await store.start();
 
-  await store.commands.startPrinterFile("k2", "part.gcode");
+  const result = await store.commands.startPrinterFile("k2", "part.gcode");
   assert.equal(startCalls.length, 1, "the direct start reached the device");
+
+  // The escape hatch is now a *managed* start: task → assignment → run, all
+  // durable and traceable. Before this it produced none of them, which is exactly
+  // what made it a bypass of every check the canonical path performs.
+  const detail = store.printQueue.getTaskDetail(result.taskId);
+  assert.equal(detail.task.state, "PRINTING");
+  assert.equal(detail.task.onDeviceFile, "part.gcode");
+
+  const assignment = store.printQueue.getAssignment(result.assignmentId);
+  assert.equal(assignment.state, "ACTIVE");
+  assert.equal(assignment.source, "manual");
+  assert.match(assignment.reason ?? "", /файлового браузера/);
+  assert.equal(assignment.binding.expectedRemotePath, "part.gcode");
+
+  const run = detail.printRuns.find((r) => r.id === result.runId)!;
+  assert.equal(run.assignmentId, result.assignmentId, "the run traces to the assignment");
+  assert.equal(run.file, "part.gcode");
+
+  // The file that was found on the device is recorded as adopted, not as
+  // something the orchestrator delivered.
+  const device = store.deviceArtifacts.listForPrinter("k2").find((d) => d.remotePath === "part.gcode")!;
+  assert.equal(device.transferMode, "manual_file_transfer");
+  assert.equal(device.confirmedBy, "operator");
+
+  // …and the whole thing is journalled.
+  const audit = store.printQueue.listAudit(300);
+  assert.ok(audit.some((e) => e.entityType === "assignment" && e.action === "assigned_manually"));
+  assert.ok(audit.some((e) => e.entityType === "print_run" && e.action === "started"));
+
+  await store.stop();
+});
+
+test("the file browser refuses a file that is not actually on the printer", async () => {
+  const store = new FarmStore(file);
+  await store.start();
+
+  await assert.rejects(
+    async () => store.commands.startPrinterFile("k2", "ghost.gcode"),
+    (e: unknown) => e instanceof Error && /ghost\.gcode/.test(e.message)
+  );
+  assert.equal(startCalls.length, 0, "nothing reached the device");
 
   await store.stop();
 });

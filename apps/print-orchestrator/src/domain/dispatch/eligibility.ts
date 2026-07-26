@@ -73,6 +73,18 @@ export interface DispatchReservation {
   profileRevisionIds: string[];
   /** Path the file is expected to occupy on the device. */
   expectedRemotePath: string | null;
+  /** True when the binding stopped matching its task (re-sliced, re-queued, withdrawn). */
+  stale: boolean;
+  staleReason: string | null;
+}
+
+/** The tracked state of the file on the target device, as the caller resolved it. */
+export interface DeviceArtifactFacts {
+  state: string;
+  transferMode: string;
+  verification: string | null;
+  remotePath: string;
+  lastError: string | null;
 }
 
 export interface DispatchFacts {
@@ -139,6 +151,16 @@ export interface DispatchFacts {
   targetPrinterId: string;
   /** The slice variant this dispatch would send, when the work is sliced. */
   sliceVariantId: string | null;
+  /** Profile revisions the task's *current* executable resolves to (vs. the reservation's). */
+  currentProfileRevisionIds: string[];
+  /**
+   * Whether the adapter can push a file to the device at all. When it cannot, the
+   * bytes got there by hand and only an operator confirmation (a
+   * `DeviceArtifact` in `PRESENT_UNVERIFIED`/`VERIFIED`) may authorise a start.
+   */
+  adapterUploadSupported: boolean;
+  /** The tracked device file for the path this dispatch would start; null when untracked. */
+  deviceArtifact: DeviceArtifactFacts | null;
 
   // ── Night ─────────────────────────────────────────────────────────────────
   /** ETA in minutes from analysis/slice; null when genuinely unknown. */
@@ -369,6 +391,7 @@ function pushFileIdentity(f: DispatchFacts, push: (r: EligibilityReason) => void
   }
 
   pushDeviceFile(f, push);
+  pushDeviceDelivery(f, push);
 
   if (f.mode === "night") {
     if (!f.artifact) {
@@ -572,6 +595,68 @@ function pushDeviceFile(f: DispatchFacts, push: (r: EligibilityReason) => void):
   }
 }
 
+/**
+ * How the bytes reached the device — the half of file identity the listing check
+ * cannot answer.
+ *
+ * For an adapter with no upload API (Bambu, Creality WS) the orchestrator did not
+ * put the file there and cannot list it either, so *something* has to stand in
+ * for that evidence. The only honest substitute is a named operator saying "I
+ * copied it": a `DeviceArtifact` in `PRESENT_UNVERIFIED`/`VERIFIED`. Without one
+ * the start is refused instead of quietly trusting a path string. That refusal is
+ * non-overridable, and unattended mode has no confirmation path at all, so a
+ * manual-transfer printer can never be auto-started.
+ */
+function pushDeviceDelivery(f: DispatchFacts, push: (r: EligibilityReason) => void): void {
+  const tracked = f.deviceArtifact;
+
+  if (tracked && tracked.state === "INVALID") {
+    push(
+      reason(
+        REASON.DEVICE_FILE_INVALID,
+        "blocker",
+        `подготовка файла на принтере завершилась ошибкой${tracked.lastError ? `: ${tracked.lastError}` : ""} — повторите загрузку`,
+        tracked
+      )
+    );
+  }
+  if (tracked && (tracked.state === "UPLOADING" || tracked.state === "NOT_PRESENT")) {
+    push(
+      reason(
+        REASON.DEVICE_TRANSFER_NOT_CONFIRMED,
+        "blocker",
+        `файл на принтере в состоянии «${tracked.state}» — дождитесь завершения подготовки`,
+        tracked
+      )
+    );
+  }
+
+  if (f.adapterUploadSupported) return;
+
+  const confirmed =
+    tracked !== null && (tracked.state === "VERIFIED" || tracked.state === "PRESENT_UNVERIFIED");
+  if (!confirmed) {
+    push(
+      reason(
+        REASON.DEVICE_TRANSFER_NOT_CONFIRMED,
+        "blocker",
+        "адаптер принтера не умеет загружать файлы — оператор должен перенести файл вручную и подтвердить это",
+        { remotePath: f.file, transferMode: "manual_file_transfer" }
+      )
+    );
+    return;
+  }
+  if (f.mode === "night") {
+    push(
+      reason(
+        REASON.DEVICE_TRANSFER_NOT_CONFIRMED,
+        "blocker",
+        "файл перенесён вручную — автоматический (ночной) запуск для такого принтера запрещён"
+      )
+    );
+  }
+}
+
 function pushDeviceState(f: DispatchFacts, push: (r: EligibilityReason) => void): void {
   if (!f.remoteStartSupported) {
     push(reason(REASON.REMOTE_START_UNSUPPORTED, "blocker", "удалённый запуск для этого принтера не поддерживается"));
@@ -678,6 +763,35 @@ function pushBed(f: DispatchFacts, push: (r: EligibilityReason) => void): void {
 function pushReservation(f: DispatchFacts, push: (r: EligibilityReason) => void): void {
   const r = f.reservation;
   if (!r) return;
+
+  if (r.stale) {
+    push(
+      reason(
+        REASON.ASSIGNMENT_STALE,
+        "blocker",
+        `назначение помечено устаревшим${r.staleReason ? `: ${r.staleReason}` : ""} — требуется перепланирование`,
+        { assignmentId: r.assignmentId, planId: r.planId, staleReason: r.staleReason }
+      )
+    );
+  }
+
+  // The profile revisions the confirmed slice was produced with must still be the
+  // ones the task resolves to now. A re-import that quarantines a profile and
+  // re-points a set would otherwise print with settings nobody confirmed.
+  if (r.profileRevisionIds.length > 0) {
+    const current = new Set(f.currentProfileRevisionIds);
+    const drifted = r.profileRevisionIds.filter((id) => !current.has(id));
+    if (drifted.length > 0) {
+      push(
+        reason(
+          REASON.PROFILE_REVISION_MISMATCH,
+          "blocker",
+          "профили задания отличаются от подтверждённых в плане",
+          { confirmed: r.profileRevisionIds, actual: f.currentProfileRevisionIds, drifted }
+        )
+      );
+    }
+  }
 
   if (r.printerId !== f.targetPrinterId) {
     push(

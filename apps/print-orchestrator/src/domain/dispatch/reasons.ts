@@ -52,6 +52,10 @@ export const REASON = {
   ARTIFACT_HASH_MISMATCH: "ARTIFACT_HASH_MISMATCH",
   DEVICE_FILE_MISSING: "DEVICE_FILE_MISSING",
   DEVICE_FILE_NOT_VERIFIED: "DEVICE_FILE_NOT_VERIFIED",
+  /** The adapter cannot upload and no operator has confirmed the manual transfer. */
+  DEVICE_TRANSFER_NOT_CONFIRMED: "DEVICE_TRANSFER_NOT_CONFIRMED",
+  /** A tracked device file exists for this slot but is INVALID/failed. */
+  DEVICE_FILE_INVALID: "DEVICE_FILE_INVALID",
   NO_FILE: "NO_FILE",
   BAD_FILE_PATH: "BAD_FILE_PATH",
   FORMAT_UNKNOWN: "FORMAT_UNKNOWN",
@@ -67,6 +71,10 @@ export const REASON = {
   // ── Plan / assignment binding ─────────────────────────────────────────────
   ASSIGNMENT_PRINTER_MISMATCH: "ASSIGNMENT_PRINTER_MISMATCH",
   ASSIGNMENT_NOT_CONFIRMED: "ASSIGNMENT_NOT_CONFIRMED",
+  /** The assignment's binding no longer matches the task (re-queued, re-sliced, edited). */
+  ASSIGNMENT_STALE: "ASSIGNMENT_STALE",
+  /** A profile revision the confirmed slice was produced with is gone or changed. */
+  PROFILE_REVISION_MISMATCH: "PROFILE_REVISION_MISMATCH",
   PINNED_ELSEWHERE: "PINNED_ELSEWHERE",
 
   // ── Task / queue shape ────────────────────────────────────────────────────
@@ -120,6 +128,10 @@ export const NON_OVERRIDABLE: ReadonlySet<ReasonCode> = new Set<ReasonCode>([
   REASON.NOZZLE_MISMATCH,
   REASON.DEVICE_FILE_MISSING,
   REASON.DEVICE_FILE_NOT_VERIFIED,
+  REASON.DEVICE_TRANSFER_NOT_CONFIRMED,
+  REASON.DEVICE_FILE_INVALID,
+  REASON.ASSIGNMENT_STALE,
+  REASON.PROFILE_REVISION_MISMATCH,
   REASON.ARTIFACT_HASH_MISMATCH,
   REASON.ACTIVE_RUN_EXISTS,
   REASON.UNRESOLVED_DISPATCH,

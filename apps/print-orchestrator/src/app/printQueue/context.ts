@@ -173,6 +173,60 @@ export class PrintQueueContext {
     }
   }
 
+  /**
+   * A queue change under a placement invalidates that placement.
+   *
+   * Editing priority/deadline/order or parking a task changes the very inputs a
+   * plan was computed from, so any *not-yet-started* assignment for it stops
+   * being executable and its plan is flagged stale — the operator must replan.
+   * Exactly the scope the brief allows: only `PROPOSED` assignments are touched.
+   * A `RESERVED` one is a dispatch already in flight and an `ACTIVE` one is a
+   * live print — neither is ever rewritten from a queue edit.
+   */
+  invalidatePlacementsFor(taskId: string, reason: string, actor?: string): void {
+    const repos = this.store.repositories;
+    for (const assignment of repos.assignments.listByTask(taskId)) {
+      if (assignment.state !== "PROPOSED" || assignment.invalidatedAt) continue;
+      repos.assignments.update({
+        ...assignment,
+        invalidatedAt: this.nowIso(),
+        invalidatedReason: reason,
+        updatedAt: this.nowIso()
+      });
+      this.recordAudit({
+        entityType: "assignment",
+        entityId: assignment.id,
+        action: "invalidated",
+        actor,
+        detail: { reason, taskId, planId: assignment.planId }
+      });
+      if (assignment.planId) this.markPlanStale(assignment.planId, reason, actor);
+    }
+  }
+
+  /**
+   * Flags a confirmed plan as superseded-by-reality without cancelling it: the
+   * assignments already running must keep their plan, so the plan stays `ACTIVE`
+   * and carries a stale marker the UI surfaces as "требуется перепланирование".
+   */
+  private markPlanStale(planId: string, reason: string, actor?: string): void {
+    const repos = this.store.repositories;
+    const plan = repos.plans.getById(planId);
+    if (!plan || plan.state !== "ACTIVE" || plan.metadata.staleSince) return;
+    repos.plans.update({
+      ...plan,
+      metadata: { ...plan.metadata, staleSince: this.nowIso(), staleReason: reason },
+      updatedAt: this.nowIso()
+    });
+    this.recordAudit({
+      entityType: "plan",
+      entityId: planId,
+      action: "stale",
+      actor,
+      detail: { reason }
+    });
+  }
+
   holdEntryFor(taskId: string, actor?: string): void {
     const entry = this.store.repositories.queue.findByTaskId(taskId);
     if (entry && entry.state === "WAITING") {

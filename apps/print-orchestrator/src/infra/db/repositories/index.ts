@@ -7,6 +7,7 @@ import { SqliteArtifactRepository } from "./artifactRepository";
 import { SqliteAssignmentRepository } from "./assignmentRepository";
 import { SqliteAuditEventRepository } from "./auditEventRepository";
 import { SqliteBedCycleRepository } from "./bedCycleRepository";
+import { SqliteDeviceArtifactRepository } from "./deviceArtifactRepository";
 import { SqliteDispatchAttemptRepository } from "./dispatchAttemptRepository";
 import { SqliteMaterialOverrideRepository } from "./materialOverrideRepository";
 import { SqlitePlanRepository } from "./planRepository";
@@ -39,6 +40,7 @@ export class SqlitePrintQueueStore implements PrintQueueStore {
       bedCycles: new SqliteBedCycleRepository(db),
       dispatchAttempts: new SqliteDispatchAttemptRepository(db),
       printRuns: new SqlitePrintRunRepository(db),
+      deviceArtifacts: new SqliteDeviceArtifactRepository(db),
       materialOverrides: new SqliteMaterialOverrideRepository(db),
       audit: new SqliteAuditEventRepository(db),
       meta: new SqliteAppMetaRepository(db),

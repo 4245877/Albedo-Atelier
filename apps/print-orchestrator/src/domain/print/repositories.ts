@@ -10,6 +10,7 @@ import type {
   Assignment,
   AuditEvent,
   BedCycle,
+  DeviceArtifact,
   DispatchAttempt,
   MaterialOverride,
   Plan,
@@ -130,6 +131,15 @@ export interface PrintRunRepository extends WritableRepository<PrintRun> {
   listActive(): PrintRun[];
 }
 
+export interface DeviceArtifactRepository extends WritableRepository<DeviceArtifact> {
+  /** The tracked file occupying an exact device slot (printer + path), if any. */
+  findBySlot(printerId: string, remotePath: string): DeviceArtifact | null;
+  /** Deliveries prepared for one assignment, newest first. */
+  listByAssignment(assignmentId: string): DeviceArtifact[];
+  /** Every tracked file on a printer, newest first. */
+  listByPrinter(printerId: string): DeviceArtifact[];
+}
+
 export interface MaterialOverrideRepository extends WritableRepository<MaterialOverride> {
   /** Overrides for a printer, newest first. */
   listByPrinter(printerId: string): MaterialOverride[];
@@ -181,6 +191,7 @@ export interface Repositories {
   bedCycles: BedCycleRepository;
   dispatchAttempts: DispatchAttemptRepository;
   printRuns: PrintRunRepository;
+  deviceArtifacts: DeviceArtifactRepository;
   materialOverrides: MaterialOverrideRepository;
   audit: AuditEventRepository;
   meta: AppMetaRepository;

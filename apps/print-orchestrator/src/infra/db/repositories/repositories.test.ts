@@ -3,7 +3,14 @@ import { test } from "node:test";
 
 import { NotFoundError, VersionConflictError } from "../../../core/errors";
 import type { PrintQueueStore } from "../../../domain/print/repositories";
-import type { Assignment, Artifact, Plan, PrintTask, QueueEntry } from "../../../domain/print/types";
+import {
+  EMPTY_ASSIGNMENT_BINDING,
+  type Assignment,
+  type Artifact,
+  type Plan,
+  type PrintTask,
+  type QueueEntry
+} from "../../../domain/print/types";
 import { openPrintQueueStore } from "../store";
 
 function freshStore(): PrintQueueStore {
@@ -34,6 +41,9 @@ function task(id: string, over: Partial<PrintTask> = {}): PrintTask {
   return {
     id,
     artifactId: null,
+    sliceVariantId: null,
+    sourceArtifactId: null,
+    onDeviceFile: null,
     title: id,
     material: null,
     targetPrinter: null,
@@ -193,6 +203,12 @@ test("assignment listByPlan returns only a plan's assignments, oldest first", ()
     id,
     taskId,
     printerId: "K2",
+    source: "plan",
+    reason: null,
+    createdBy: null,
+    binding: { ...EMPTY_ASSIGNMENT_BINDING },
+    invalidatedAt: null,
+    invalidatedReason: null,
     planId,
     bedCycleId: null,
     state: "PROPOSED",
