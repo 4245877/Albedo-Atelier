@@ -122,17 +122,33 @@ export const ARTIFACT_ANALYSIS_TRANSITIONS: TransitionMap<ArtifactAnalysisState>
 
 /**
  * DeviceArtifact lifecycle — the file *on the printer*, tracked separately from
- * the task/assignment/run. A failed or superseded delivery goes `INVALID` and
- * may be retried from there (`INVALID → UPLOADING/NOT_PRESENT`); a `VERIFIED`
- * file can be invalidated (the device listing stopped matching) or re-uploaded,
- * but never silently downgraded to "present" without fresh evidence.
+ * the task/assignment/run.
+ *
+ *   NOT_PRESENT → UPLOADING → PRESENT_UNVERIFIED → VERIFIED
+ *
+ * with three distinct exits, deliberately not collapsed into one "bad" state
+ * (each means something different for a retry):
+ *
+ *   UPLOADING          → FAILED   the transfer itself did not complete
+ *   PRESENT_UNVERIFIED → INVALID  the bytes there are not the artifact's
+ *   VERIFIED           → STALE    the record no longer describes what we'd print
+ *
+ * `UPLOADING → VERIFIED` is deliberately **not** an edge: reaching `VERIFIED`
+ * always goes through `PRESENT_UNVERIFIED`, i.e. through an actual check against
+ * the device. Every non-happy state is recoverable — by re-uploading
+ * (`… → UPLOADING`) or by a *fresh* named operator confirmation
+ * (`… → PRESENT_UNVERIFIED`, which then still has to pass verification) — so
+ * nothing is a dead end for an operator. What no edge allows is jumping
+ * straight back to `VERIFIED` without new evidence.
  */
 export const DEVICE_ARTIFACT_TRANSITIONS: TransitionMap<DeviceArtifactState> = {
-  NOT_PRESENT: ["UPLOADING", "PRESENT_UNVERIFIED", "VERIFIED", "INVALID"],
-  UPLOADING: ["PRESENT_UNVERIFIED", "VERIFIED", "INVALID", "NOT_PRESENT"],
-  PRESENT_UNVERIFIED: ["VERIFIED", "INVALID", "UPLOADING", "NOT_PRESENT"],
-  VERIFIED: ["INVALID", "UPLOADING", "NOT_PRESENT"],
-  INVALID: ["UPLOADING", "NOT_PRESENT"]
+  NOT_PRESENT: ["UPLOADING", "PRESENT_UNVERIFIED", "INVALID", "FAILED", "STALE"],
+  UPLOADING: ["PRESENT_UNVERIFIED", "INVALID", "FAILED", "NOT_PRESENT"],
+  PRESENT_UNVERIFIED: ["VERIFIED", "INVALID", "FAILED", "UPLOADING", "NOT_PRESENT", "STALE"],
+  VERIFIED: ["STALE", "INVALID", "UPLOADING", "NOT_PRESENT"],
+  INVALID: ["UPLOADING", "PRESENT_UNVERIFIED", "NOT_PRESENT", "STALE"],
+  FAILED: ["UPLOADING", "PRESENT_UNVERIFIED", "NOT_PRESENT", "STALE"],
+  STALE: ["UPLOADING", "PRESENT_UNVERIFIED", "NOT_PRESENT"]
 };
 
 /** True when a state has no outgoing transitions (a launched task stays put). */

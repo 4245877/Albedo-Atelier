@@ -11,6 +11,7 @@ import { migration006 } from "./006_assignment_plan_index";
 import { migration007 } from "./007_start_guards";
 import { migration008 } from "./008_canonical_dispatch";
 import { migration009 } from "./009_executable_chain";
+import { migration010 } from "./010_device_artifact_states";
 
 /** Re-exported from `./types` so existing importers keep working. */
 export type { Migration } from "./types";
@@ -29,7 +30,8 @@ export const MIGRATIONS: readonly Migration[] = [
   migration006,
   migration007,
   migration008,
-  migration009
+  migration009,
+  migration010
 ];
 
 const MIGRATIONS_TABLE = "schema_migrations";

@@ -53,6 +53,8 @@ interface LightBody {
 
 interface PrintBody {
   file?: unknown;
+  /** Who is adopting this on-device file; recorded on the device-file record. */
+  operator?: unknown;
 }
 
 interface FilesQuery {
@@ -173,11 +175,17 @@ export async function registerPrinterRoutes(
   });
 
   app.post<{ Params: PrinterParams; Body: PrintBody }>("/:id/print", async (request) => {
-    const { file } = request.body ?? {};
+    const { file, operator } = request.body ?? {};
     if (typeof file !== "string" || !file.trim()) {
       throw new ValidationError('Поле «file» обязательно и должно быть непустой строкой');
     }
-    return { ok: true, printer: await commands.startPrinterFile(request.params.id, file) };
+    // The adoption of an on-device file is attributed to whoever pressed the
+    // button when the client names them; the audit trail keeps it either way.
+    const actor = typeof operator === "string" && operator.trim() ? operator.trim() : "operator";
+    return {
+      ok: true,
+      printer: await commands.startPrinterFile(request.params.id, file, actor)
+    };
   });
 
   /**

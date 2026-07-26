@@ -9,6 +9,7 @@ import {
 import type { Automation, NightCandidate, NightPrint, QueueJob } from "../domain/dashboard/types";
 import type { PrintQueueStore } from "../domain/print/repositories";
 import { env } from "../shared/env";
+import { requireCapability } from "../infra/printers/capabilities";
 import {
   fetchPrinterFiles,
   normalizeStartablePath,
@@ -312,20 +313,33 @@ export class FarmCommands {
    * the device as an operator-adopted {@link DeviceArtifact}, and then calls the
    * same {@link DispatchService.startAssignment} every other start goes through.
    * There is no convenience bypass left: a refusal here is a refusal everywhere.
+   *
+   * The adapter **must** be able to list files. Adopting a file we cannot see is
+   * taking a path string on faith and writing it into the ledger as a fact; for a
+   * Bambu/Creality printer the operator uses the tracked manual-transfer flow on a
+   * real assignment instead (`prepare-file` → `confirm-file`), which records who
+   * confirmed what.
    */
-  async startPrinterFile(id: string, file: string): Promise<{ runId: string; taskId: string; assignmentId: string; file: string }> {
+  async startPrinterFile(
+    id: string,
+    file: string,
+    actor = "operator"
+  ): Promise<{ runId: string; taskId: string; assignmentId: string; file: string }> {
     this.runtime.ensureQueue();
     const printer = this.runtime.configById(id);
     const target = normalizeStartablePath(file);
+    requireCapability(
+      printer,
+      "supportsFileListing",
+      "прямой запуск файла доступен только для адаптеров, которые видят файлы на устройстве"
+    );
 
     // The bytes must actually be there before anything is recorded — an adopted
     // device file that does not exist would be a lie in the ledger.
-    if (supportsPrinterFiles(printer)) {
-      const dir = target.includes("/") ? target.slice(0, target.lastIndexOf("/")) : "";
-      const listing = await runDriverOperation(printer.id, () => fetchPrinterFiles(printer, dir));
-      if (!listing.entries.some((e) => e.type === "file" && e.path === target)) {
-        throw new NotFoundError(`Файл «${target}» на принтере «${printer.name}»`);
-      }
+    const dir = target.includes("/") ? target.slice(0, target.lastIndexOf("/")) : "";
+    const listing = await runDriverOperation(printer.id, () => fetchPrinterFiles(printer, dir));
+    if (!listing.entries.some((e) => e.type === "file" && e.path === target)) {
+      throw new NotFoundError(`Файл «${target}» на принтере «${printer.name}»`);
     }
 
     // A managed task + a manual assignment: the run is traceable to an intent,
@@ -340,12 +354,13 @@ export class FarmCommands {
       reason: "прямой запуск файла из файлового браузера принтера"
     });
     // The file was not delivered by us — it was found on the device. Recorded as
-    // exactly that, then re-verified against the listing where the adapter allows.
-    await this.runtime.deviceArtifacts.confirmManualTransfer(assignment.id, "operator");
+    // exactly that (named actor, manual transfer mode), then verified against the
+    // device listing, which is the only evidence available for an adopted file.
+    await this.runtime.deviceArtifacts.confirmManualTransfer(assignment.id, actor);
 
     const result = await (this.runtime.dispatchService as DispatchService).startAssignment(
       assignment.id,
-      { mode: "manual", actor: "operator" }
+      { mode: "manual", actor }
     );
     this.runtime.deviceCommands.resolveStartGuard(result.printerId);
     return {

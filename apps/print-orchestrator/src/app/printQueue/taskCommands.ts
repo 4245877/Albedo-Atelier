@@ -10,7 +10,7 @@ import type {
 } from "../../domain/print/types";
 import type { PrintTaskState } from "../../domain/print/types";
 import { evaluateSliceOutput } from "../../domain/slicing/outputGate";
-import { normalizeStartablePath } from "../../infra/printers/files";
+import { buildDeviceFileName, normalizeStartablePath } from "../../infra/printers/files";
 import { isTaskTerminal, type PrintQueueContext } from "./context";
 import type { QueueQueries, TaskDetail } from "./queueQueries";
 
@@ -415,13 +415,23 @@ export class TaskCommands {
         }
       }
 
-      // The on-device path a dispatch will start: an explicit override, else the
-      // output file's own name — validated as a safe, startable path.
+      // The on-device path a dispatch will start.
+      //
+      // The *name* is always generated from the output artifact (sanitized stem +
+      // content hash), never taken verbatim: two tasks whose models share a name
+      // would otherwise share one device slot, and preparing the second would
+      // overwrite the first one's bytes while both records still read VERIFIED.
+      // An operator override may choose the directory (and influence the stem),
+      // but not defeat the content suffix.
       const rawFile = input.onDeviceFile?.trim() || output.name;
       let onDeviceFile: string;
       try {
-        onDeviceFile = normalizeStartablePath(rawFile);
-      } catch {
+        const slash = rawFile.replace(/\\/g, "/").lastIndexOf("/");
+        const dir = slash === -1 ? "" : rawFile.slice(0, slash);
+        const name = buildDeviceFileName({ name: rawFile, sha256: output.sha256 });
+        onDeviceFile = normalizeStartablePath(dir ? `${dir}/${name}` : name);
+      } catch (error) {
+        if (error instanceof ValidationError) throw error;
         throw new ValidationError(`Недопустимый путь файла на устройстве: «${rawFile}»`);
       }
 

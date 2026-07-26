@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { ValidationError } from "../../../core/errors";
-import { isPrintableFile, normalizePrinterPath, normalizeStartablePath } from "./path";
+import {
+  isPrintableFile,
+  MAX_DEVICE_SEGMENT_LENGTH,
+  normalizePrinterPath,
+  normalizeStartablePath
+} from "./path";
 
 /*
  * Path normalization is the security boundary of the file API: everything the
@@ -61,4 +66,24 @@ test("normalizeStartablePath refuses directories and non-printable files", () =>
   assert.throws(() => normalizeStartablePath("notes.txt"), ValidationError);
   assert.throws(() => normalizeStartablePath(""), ValidationError);
   assert.throws(() => normalizeStartablePath("../model.gcode"), ValidationError);
+});
+
+test("rejects an over-long segment or path instead of letting the device truncate it", () => {
+  const longName = `${"x".repeat(MAX_DEVICE_SEGMENT_LENGTH + 1)}.gcode`;
+  assert.throws(() => normalizePrinterPath(longName), ValidationError);
+
+  // Each segment fits, but the whole path does not.
+  const deep = Array.from({ length: 10 }, () => "x".repeat(50)).join("/");
+  assert.throws(() => normalizePrinterPath(`${deep}/part.gcode`), ValidationError);
+
+  // Multi-byte names are measured in BYTES, which is what the filesystem limits.
+  assert.throws(
+    () => normalizePrinterPath(`${"д".repeat(MAX_DEVICE_SEGMENT_LENGTH)}.gcode`),
+    ValidationError
+  );
+});
+
+test("rejects a Windows drive prefix — absolute on the device without a leading slash", () => {
+  assert.throws(() => normalizePrinterPath("C:part.gcode"), ValidationError);
+  assert.throws(() => normalizePrinterPath("dir/C:part.gcode"), ValidationError);
 });

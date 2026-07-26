@@ -10,6 +10,7 @@ import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { ProfileRevision, ProfileType } from "../../domain/slicing/types";
 import { openPrintQueueStore } from "../../infra/db/store";
 import { normalizePrinterConfig } from "../../infra/printers/config";
+import { buildDeviceFileName } from "../../infra/printers/files";
 import type { PrinterLiveStatus } from "../../infra/printers/status";
 import { ArtifactStorage } from "../../infra/storage/artifactStorage";
 import { ANALYZER_VERSION } from "../artifacts/analyzers";
@@ -190,10 +191,16 @@ test("handoff: a ready slice is promoted onto its task, which becomes dispatchab
   assert.equal(detail.task.artifactId, ready.outputArtifactId); // now the sliced G-code
   // Typed binding (migration 009): the queue references the exact slice, its
   // source model and the on-device path — not a free-form metadata blob.
-  assert.equal(detail.task.onDeviceFile, "cube.gcode"); // an on-device path to start
+  // The on-device name is generated from the output artifact: a sanitized stem
+  // plus its content hash, so two same-named models cannot share a device slot.
+  const expectedFile = buildDeviceFileName({
+    name: "cube.gcode",
+    sha256: printQueue.getTaskDetail(detail.task.id).artifact?.sha256 ?? null
+  });
+  assert.equal(detail.task.onDeviceFile, expectedFile); // an on-device path to start
   assert.equal(detail.task.sourceArtifactId, artifactId); // provenance preserved
   assert.equal(detail.task.sliceVariantId, ready.id);
-  assert.equal(detail.task.metadata.file, "cube.gcode"); // legacy projection field kept
+  assert.equal(detail.task.metadata.file, expectedFile); // legacy projection field kept
   assert.equal(detail.task.pinnedPrinterId, "creality-k2"); // pinned to the sliced-for printer
   assert.equal(detail.queueEntry?.state, "WAITING");
 

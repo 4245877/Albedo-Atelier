@@ -12,6 +12,15 @@ export function isPrintableFile(filePath: string): boolean {
   return PRINTABLE_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
+/**
+ * Length ceilings. A path component longer than 255 bytes is rejected by every
+ * common filesystem the printers use (ext4/FAT/exFAT), and an over-long whole
+ * path is how a crafted name gets silently truncated into a *different* file
+ * than the one we verified. Both are refused up front rather than repaired.
+ */
+export const MAX_DEVICE_SEGMENT_LENGTH = 200;
+export const MAX_DEVICE_PATH_LENGTH = 400;
+
 export interface NormalizePathOptions {
   /** Allow "" (the G-code root) — used for directory listing, never for start. */
   allowEmpty?: boolean;
@@ -45,6 +54,16 @@ export function normalizePrinterPath(raw: unknown, options: NormalizePathOptions
   if (value.startsWith("/")) {
     throw new ValidationError("Абсолютные пути запрещены — укажите путь относительно каталога G-code");
   }
+  // A Windows-style drive prefix ("C:name") is absolute on the device even
+  // without a leading slash, and ":" is not valid in a FAT/exFAT name anyway.
+  if (value.includes(":")) {
+    throw new ValidationError("Путь к файлу принтера не может содержать «:»");
+  }
+  if (Buffer.byteLength(value, "utf8") > MAX_DEVICE_PATH_LENGTH) {
+    throw new ValidationError(
+      `Путь к файлу принтера длиннее ${MAX_DEVICE_PATH_LENGTH} байт — укоротите имя`
+    );
+  }
 
   const segments = value.split("/");
   for (const segment of segments) {
@@ -53,6 +72,11 @@ export function normalizePrinterPath(raw: unknown, options: NormalizePathOptions
     }
     if (segment === "." || segment === "..") {
       throw new ValidationError("Путь к файлу принтера не может содержать «.» или «..»");
+    }
+    if (Buffer.byteLength(segment, "utf8") > MAX_DEVICE_SEGMENT_LENGTH) {
+      throw new ValidationError(
+        `Имя «${segment.slice(0, 40)}…» длиннее ${MAX_DEVICE_SEGMENT_LENGTH} байт — укоротите его`
+      );
     }
   }
 

@@ -24,7 +24,9 @@ const STATES: readonly DeviceArtifactState[] = [
   "UPLOADING",
   "PRESENT_UNVERIFIED",
   "VERIFIED",
-  "INVALID"
+  "INVALID",
+  "FAILED",
+  "STALE"
 ];
 
 const MODES: readonly DeviceTransferMode[] = ["adapter_upload", "manual_file_transfer"];
@@ -154,6 +156,17 @@ export class SqliteDeviceArtifactRepository
     return this.query(
       "SELECT * FROM device_artifacts WHERE printer_id = ? ORDER BY created_at DESC, id DESC",
       printerId
+    );
+  }
+
+  listByStates(states: readonly DeviceArtifactState[]): DeviceArtifact[] {
+    if (states.length === 0) return [];
+    // The placeholder list is built from the array *length* only; every value is
+    // bound, so no state string is ever interpolated into SQL.
+    const placeholders = states.map(() => "?").join(",");
+    return this.query(
+      `SELECT * FROM device_artifacts WHERE state IN (${placeholders}) ORDER BY created_at ASC, id ASC`,
+      ...states
     );
   }
 }

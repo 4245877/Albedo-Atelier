@@ -84,10 +84,24 @@ afterEach(async () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+/**
+ * The delivery step for a job whose file is *already* on the printer: an
+ * operator places it and confirms the transfer under their own name. A start
+ * requires a `VERIFIED` device file, and "the operator typed a path that happens
+ * to exist" is not that — this is the explicit, audited way to say it.
+ */
+async function adoptOnDeviceFile(store: FarmStore, taskId: string, printerId = "k2"): Promise<void> {
+  const assignment = store.printQueue.assignTask(taskId, printerId, {
+    reason: "файл уже лежит на принтере"
+  });
+  await store.deviceArtifacts.confirmManualTransfer(assignment.id, "operator-1");
+}
+
 test("starts the next ready job on its Moonraker printer and drops it from the queue", async () => {
   const store = new FarmStore(file);
   await store.start();
-  store.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
+  const job = store.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
+  await adoptOnDeviceFile(store, job.id);
 
   const result = await store.startNext();
   assert.equal(result.printer, "Creality K2");
@@ -138,7 +152,8 @@ test("an empty ready queue is an honest error", async () => {
 test("two concurrent start-next requests dispatch the single ready job exactly once", async () => {
   const store = new FarmStore(file);
   await store.start();
-  store.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
+  const job = store.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
+  await adoptOnDeviceFile(store, job.id);
 
   const results = await Promise.allSettled([store.startNext(), store.startNext()]);
   const fulfilled = results.filter((r) => r.status === "fulfilled");
@@ -196,7 +211,8 @@ test("a wedged first job can be removed so the rest of the queue runs", async ()
   const store = new FarmStore(file);
   await store.start();
   const wedged = store.addQueueJob({ title: "Base", printer: "k2" }); // no file → wedges
-  store.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
+  const next = store.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
+  await adoptOnDeviceFile(store, next.id);
 
   await assert.rejects(() => store.startNext(), /не задан файл/);
 
@@ -215,7 +231,8 @@ test("a wedged first job can be parked in review instead of deleted", async () =
   const store = new FarmStore(file);
   await store.start();
   const wedged = store.addQueueJob({ title: "Orphan", printer: "ghost-printer", file: "x.gcode" });
-  store.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
+  const next = store.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
+  await adoptOnDeviceFile(store, next.id);
 
   await assert.rejects(() => store.startNext(), /не найден/);
 

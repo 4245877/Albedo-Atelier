@@ -11,6 +11,7 @@ import type {
   AuditEvent,
   BedCycle,
   DeviceArtifact,
+  DeviceArtifactState,
   DispatchAttempt,
   MaterialOverride,
   Plan,
@@ -138,6 +139,11 @@ export interface DeviceArtifactRepository extends WritableRepository<DeviceArtif
   listByAssignment(assignmentId: string): DeviceArtifact[];
   /** Every tracked file on a printer, newest first. */
   listByPrinter(printerId: string): DeviceArtifact[];
+  /**
+   * Every tracked file in one of `states`, oldest first — the crash-recovery
+   * read (`UPLOADING` rows orphaned by a restart).
+   */
+  listByStates(states: readonly DeviceArtifactState[]): DeviceArtifact[];
 }
 
 export interface MaterialOverrideRepository extends WritableRepository<MaterialOverride> {

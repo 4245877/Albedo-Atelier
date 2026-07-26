@@ -14,6 +14,7 @@ import { EligibilityQueries } from "../scheduling/eligibility";
 import { EvidenceResolver } from "../scheduling/evidence";
 import type { SchedulerPrinterRef } from "../scheduling/types";
 import { DispatchService, type DispatchDeps } from "./dispatchService";
+import { seedDeviceFile } from "./testkit/deviceFiles";
 
 /*
  * §2.2 (a confirmed plan is executed verbatim) and §2.3 (the manual path cannot
@@ -156,34 +157,48 @@ function confirmPlan(
   return plan;
 }
 
-/** An operator-confirmed manual file transfer — the evidence a non-upload adapter needs. */
+/**
+ * An operator-confirmed manual file transfer — the evidence a non-upload adapter
+ * needs. For such an adapter the named confirmation *is* the verification (there
+ * is no listing to check it against), so the record it produces is `VERIFIED`
+ * with `operator_confirmed`, exactly like the real service writes.
+ */
 function confirmManualTransfer(h: Harness, printerId: string, remotePath: string): void {
-  const iso = new Date().toISOString();
-  h.store.repositories.deviceArtifacts.insert({
-    id: newId(ID_PREFIX.deviceArtifact),
+  seedDeviceFile(h.store, {
     printerId,
-    assignmentId: null,
-    sliceVariantId: null,
-    artifactId: null,
-    artifactSha256: null,
     remotePath,
     sizeBytes: 1000,
-    state: "PRESENT_UNVERIFIED",
     transferMode: "manual_file_transfer",
-    verification: "operator_confirmed",
-    uploadedAt: null,
-    verifiedAt: null,
-    confirmedBy: "operator",
-    lastError: null,
-    createdAt: iso,
-    updatedAt: iso,
-    version: 1,
-    metadata: {}
+    verification: "operator_confirmed"
   });
 }
 
-function addTask(h: Harness, printer: string): string {
-  return h.queue.createTask({ title: "Part", printer, material: "PLA", file: "part.gcode" }).task.id;
+/**
+ * A queued task whose file has already been delivered to `printer` and verified —
+ * `prepared: false` leaves the delivery step undone, which is itself a refusal.
+ */
+function addTask(h: Harness, printer: string, options: { prepared?: boolean } = {}): string {
+  const detail = h.queue.createTask({
+    title: "Part",
+    printer,
+    material: "PLA",
+    file: "part.gcode"
+  });
+  if (options.prepared !== false) {
+    seedDeviceFile(h.store, {
+      printerId: printer,
+      remotePath: "part.gcode",
+      artifactId: detail.task.artifactId,
+      // A Bambu-class printer has no upload API: the operator carried the file.
+      ...(printer === "k2"
+        ? {}
+        : {
+            transferMode: "manual_file_transfer" as const,
+            verification: "operator_confirmed" as const
+          })
+    });
+  }
+  return detail.task.id;
 }
 
 // ── §2.2 Executing a confirmed plan ─────────────────────────────────────────
@@ -219,7 +234,7 @@ test("a task re-pinned away from its confirmed assignment refuses instead of swi
 
 test("a superseded (CANCELLED) plan no longer binds the dispatch", async () => {
   const h = makeHarness();
-  const taskId = addTask(h, "x1c");
+  const taskId = addTask(h, "x1c", { prepared: false });
   const plan = confirmPlan(h, taskId, "k2");
   h.store.repositories.plans.update({ ...plan, state: "CANCELLED", updatedAt: new Date().toISOString() });
   // x1c has no upload adapter, so the manual transfer must be confirmed before a
@@ -233,7 +248,7 @@ test("a superseded (CANCELLED) plan no longer binds the dispatch", async () => {
 
 test("a DRAFT plan's proposal does not bind a dispatch (only a confirmed one does)", async () => {
   const h = makeHarness();
-  const taskId = addTask(h, "x1c");
+  const taskId = addTask(h, "x1c", { prepared: false });
   const plan = confirmPlan(h, taskId, "k2");
   h.store.repositories.plans.update({ ...plan, state: "DRAFT", confirmedAt: null, updatedAt: new Date().toISOString() });
   confirmManualTransfer(h, "x1c", "part.gcode");
@@ -244,7 +259,7 @@ test("a DRAFT plan's proposal does not bind a dispatch (only a confirmed one doe
 
 test("a printer whose adapter cannot upload refuses a start until the transfer is confirmed", async () => {
   const h = makeHarness();
-  const taskId = addTask(h, "x1c");
+  const taskId = addTask(h, "x1c", { prepared: false });
 
   await assert.rejects(
     h.dispatch.dispatch({ taskId, mode: "manual" }),
@@ -320,17 +335,12 @@ test("an override cannot be used on a night dispatch at all", async () => {
 
 test("an override clears an overridable warning and lands in the audit trail", async () => {
   const h = makeHarness();
-  // A legacy task with an on-device file: its model size is unknown (a `review`),
-  // which an attended operator may accept with a stated reason.
-  const detail = h.queue.createTask({
-    title: "Legacy",
-    printer: "k2",
-    material: "PLA",
-    file: "part.gcode"
-  });
+  // A legacy task with a delivered on-device file: its model size is unknown (a
+  // `review`), which an attended operator may accept with a stated reason.
+  const taskId = addTask(h, "k2");
 
   const result = await h.dispatch.dispatch({
-    taskId: detail.task.id,
+    taskId,
     mode: "manual",
     override: {
       codes: [REASON.DIMENSIONS_UNKNOWN, REASON.DEVICE_FILE_NOT_VERIFIED],

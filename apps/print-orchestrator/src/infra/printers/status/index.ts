@@ -1,3 +1,4 @@
+import { capabilitiesOf, requireCapability } from "../capabilities";
 import type { PrinterConfig } from "../config";
 import {
   getBambuStatus,
@@ -48,24 +49,23 @@ export async function sendPrinterCommand(
 }
 
 /**
- * Whether remote start of an on-device file is implemented for this protocol.
- * Only Moonraker exposes a simple, well-defined print-start endpoint; Bambu
- * local start needs a full 3mf/AMS mapping and Creality control is unimplemented,
- * so those are reported as unsupported rather than faked.
+ * Whether remote start of an on-device file is implemented for this printer's
+ * adapter — read from the single capability table, never re-derived here. Only
+ * Moonraker exposes a simple, well-defined print-start endpoint; Bambu local
+ * start needs a full 3mf/AMS mapping and Creality control is unimplemented, so
+ * those are reported as unsupported rather than faked.
  */
 export function supportsPrinterStart(printer: PrinterConfig): boolean {
-  return printer.protocol === "moonraker";
+  return capabilitiesOf(printer).supportsRemoteStart;
 }
 
 /**
  * Starts a print of a file already on the printer. Supported for Moonraker;
- * other protocols throw an honest {@link PrinterCommandError}.
+ * other protocols throw a structured {@link PrinterCapabilityError}.
  */
 export async function sendPrinterStart(printer: PrinterConfig, filename: string): Promise<void> {
-  if (printer.protocol === "moonraker") return sendMoonrakerStart(printer, filename);
-  throw new PrinterCommandError(
-    `Удалённый запуск печати для протокола «${printer.protocol}» пока не поддерживается — запустите файл на самом принтере`
-  );
+  requireCapability(printer, "supportsRemoteStart", "запустите файл на самом принтере");
+  return sendMoonrakerStart(printer, filename);
 }
 
 export function supportsPrinterLight(printer: PrinterConfig): boolean {

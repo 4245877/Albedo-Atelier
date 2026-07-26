@@ -381,12 +381,18 @@ export function executionHtml(state) {
     <ul class="slice-list" role="status" aria-live="polite">${items}</ul></div>`;
 }
 
+// Only VERIFIED is startable — every other state is shown as what it is, never
+// as "probably ready". FAILED (the transfer died), INVALID (the bytes there are
+// not the artifact's) and STALE (valid, for a job we would no longer print) are
+// deliberately distinct: they tell the operator what to do next.
 const DEVICE_STATE = {
   NOT_PRESENT: { label: "файла нет на принтере", cls: "warn" },
   UPLOADING: { label: "загрузка…", cls: "info", pulse: true },
   PRESENT_UNVERIFIED: { label: "файл есть, не сверен", cls: "warn" },
   VERIFIED: { label: "файл сверен", cls: "ok" },
-  INVALID: { label: "ошибка подготовки файла", cls: "error" }
+  INVALID: { label: "файл на принтере не совпал", cls: "error" },
+  FAILED: { label: "перенос не удался", cls: "error" },
+  STALE: { label: "файл устарел — подготовьте заново", cls: "warn" }
 };
 
 function assignmentRow(state, row) {

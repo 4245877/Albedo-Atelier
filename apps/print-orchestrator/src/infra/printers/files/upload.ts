@@ -1,4 +1,6 @@
+import { PayloadTooLargeError } from "../../../core/errors";
 import { fetchWithTimeout } from "../../../shared/fetchWithTimeout";
+import { capabilitiesOfProtocol, requireCapability } from "../capabilities";
 import type { PrinterConfig } from "../config";
 import { moonrakerBaseUrl, moonrakerHeaders } from "../status/moonraker";
 import { PrinterCommandError } from "../status/types";
@@ -17,9 +19,19 @@ import { normalizeStartablePath } from "./path";
 
 const MOONRAKER_UPLOAD_TIMEOUT_MS = 120_000;
 
-/** Whether the orchestrator can push a file over this protocol. */
+/**
+ * Hard ceiling on what may be pushed to a printer in one go. A sliced G-code for
+ * a full plate is single-digit MB; anything past this is a mistake or an attempt
+ * to fill the device's storage, and is refused before a byte leaves the host.
+ */
+export const MAX_DEVICE_UPLOAD_BYTES = 512 * 1024 * 1024;
+
+/**
+ * Whether the orchestrator can push a file over this protocol — read from the
+ * single capability table, never re-derived from a protocol string here.
+ */
 export function supportsPrinterUpload(protocol: string | null | undefined): boolean {
-  return protocol === "moonraker";
+  return capabilitiesOfProtocol(protocol).supportsUpload;
 }
 
 export interface UploadResult {
@@ -43,9 +55,15 @@ export async function uploadPrinterFile(
   remotePath: string,
   bytes: Uint8Array
 ): Promise<UploadResult> {
-  if (printer.protocol !== "moonraker") {
-    throw new PrinterCommandError(
-      `Загрузка файлов для протокола «${printer.protocol}» не реализована — перенесите файл вручную`
+  requireCapability(printer, "supportsUpload", "перенесите файл вручную и подтвердите перенос");
+
+  if (bytes.byteLength === 0) {
+    throw new PrinterCommandError("Пустой файл не загружается на принтер");
+  }
+  if (bytes.byteLength > MAX_DEVICE_UPLOAD_BYTES) {
+    throw new PayloadTooLargeError(
+      `Файл ${bytes.byteLength} байт превышает лимит загрузки на принтер (${MAX_DEVICE_UPLOAD_BYTES} байт)`,
+      { limitBytes: MAX_DEVICE_UPLOAD_BYTES, sizeBytes: bytes.byteLength }
     );
   }
 

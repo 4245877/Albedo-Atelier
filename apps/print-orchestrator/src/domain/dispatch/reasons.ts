@@ -56,6 +56,13 @@ export const REASON = {
   DEVICE_TRANSFER_NOT_CONFIRMED: "DEVICE_TRANSFER_NOT_CONFIRMED",
   /** A tracked device file exists for this slot but is INVALID/failed. */
   DEVICE_FILE_INVALID: "DEVICE_FILE_INVALID",
+  /**
+   * The prepared file no longer describes what would be printed now — the slice
+   * variant, artifact hash, printer, path, size, profiles or assignment moved
+   * under it. The bytes on the device may be intact; they are simply not this
+   * job's bytes, so the file must be prepared again.
+   */
+  DEVICE_FILE_STALE: "DEVICE_FILE_STALE",
   NO_FILE: "NO_FILE",
   BAD_FILE_PATH: "BAD_FILE_PATH",
   FORMAT_UNKNOWN: "FORMAT_UNKNOWN",
@@ -130,6 +137,7 @@ export const NON_OVERRIDABLE: ReadonlySet<ReasonCode> = new Set<ReasonCode>([
   REASON.DEVICE_FILE_NOT_VERIFIED,
   REASON.DEVICE_TRANSFER_NOT_CONFIRMED,
   REASON.DEVICE_FILE_INVALID,
+  REASON.DEVICE_FILE_STALE,
   REASON.ASSIGNMENT_STALE,
   REASON.PROFILE_REVISION_MISMATCH,
   REASON.ARTIFACT_HASH_MISMATCH,

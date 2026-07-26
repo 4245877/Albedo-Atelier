@@ -85,6 +85,14 @@ export interface DeviceArtifactFacts {
   verification: string | null;
   remotePath: string;
   lastError: string | null;
+  /**
+   * True when the record no longer describes what this dispatch would print
+   * (slice variant, artifact hash, printer, path, size, profiles or assignment
+   * changed). Resolved by the caller — see `stalenessOf` — exactly like
+   * {@link DispatchReservation.stale}.
+   */
+  stale: boolean;
+  staleReason: string | null;
 }
 
 export interface DispatchFacts {
@@ -599,54 +607,95 @@ function pushDeviceFile(f: DispatchFacts, push: (r: EligibilityReason) => void):
  * How the bytes reached the device — the half of file identity the listing check
  * cannot answer.
  *
+ * The listing pre-flight can say "a file with this name and size is there". It
+ * cannot say who put it there, which slice it came from, or whether it is still
+ * the file this job means. Only the tracked `DeviceArtifact` can, so **every**
+ * start requires one in `VERIFIED`:
+ *
+ *  - no record at all → nothing in this system delivered or checked that file.
+ *    An operator who copied it by hand says so explicitly (`confirmManualTransfer`),
+ *    which is auditable; a path string that merely happens to resolve is not.
+ *  - `UPLOADING` / `NOT_PRESENT` → the delivery has not finished.
+ *  - `PRESENT_UNVERIFIED` → something is there, but it has not been matched
+ *    against the artifact. "Probably fine" is not evidence.
+ *  - `FAILED` / `INVALID` → the delivery failed, or what is there is not it.
+ *  - `STALE` → it was valid, for a job we would no longer print.
+ *
  * For an adapter with no upload API (Bambu, Creality WS) the orchestrator did not
- * put the file there and cannot list it either, so *something* has to stand in
- * for that evidence. The only honest substitute is a named operator saying "I
- * copied it": a `DeviceArtifact` in `PRESENT_UNVERIFIED`/`VERIFIED`. Without one
- * the start is refused instead of quietly trusting a path string. That refusal is
- * non-overridable, and unattended mode has no confirmation path at all, so a
- * manual-transfer printer can never be auto-started.
+ * put the file there and cannot list it either, so the named operator confirmation
+ * *is* the verification — and unattended mode has no confirmation path at all, so
+ * a manual-transfer printer can never be auto-started. Every refusal here is
+ * non-overridable.
  */
 function pushDeviceDelivery(f: DispatchFacts, push: (r: EligibilityReason) => void): void {
   const tracked = f.deviceArtifact;
 
-  if (tracked && tracked.state === "INVALID") {
-    push(
-      reason(
-        REASON.DEVICE_FILE_INVALID,
-        "blocker",
-        `подготовка файла на принтере завершилась ошибкой${tracked.lastError ? `: ${tracked.lastError}` : ""} — повторите загрузку`,
-        tracked
-      )
-    );
-  }
-  if (tracked && (tracked.state === "UPLOADING" || tracked.state === "NOT_PRESENT")) {
+  if (!tracked) {
     push(
       reason(
         REASON.DEVICE_TRANSFER_NOT_CONFIRMED,
         "blocker",
-        `файл на принтере в состоянии «${tracked.state}» — дождитесь завершения подготовки`,
-        tracked
-      )
-    );
-  }
-
-  if (f.adapterUploadSupported) return;
-
-  const confirmed =
-    tracked !== null && (tracked.state === "VERIFIED" || tracked.state === "PRESENT_UNVERIFIED");
-  if (!confirmed) {
-    push(
-      reason(
-        REASON.DEVICE_TRANSFER_NOT_CONFIRMED,
-        "blocker",
-        "адаптер принтера не умеет загружать файлы — оператор должен перенести файл вручную и подтвердить это",
-        { remotePath: f.file, transferMode: "manual_file_transfer" }
+        f.adapterUploadSupported
+          ? "файл не подготовлен на принтере — выполните подготовку файла перед запуском"
+          : "адаптер принтера не умеет загружать файлы — оператор должен перенести файл вручную и подтвердить это",
+        { remotePath: f.file, adapterUploadSupported: f.adapterUploadSupported }
       )
     );
     return;
   }
-  if (f.mode === "night") {
+
+  if (tracked.stale || tracked.state === "STALE") {
+    push(
+      reason(
+        REASON.DEVICE_FILE_STALE,
+        "blocker",
+        `подготовленный файл устарел${tracked.staleReason ? `: ${tracked.staleReason}` : ""} — подготовьте файл заново`,
+        tracked
+      )
+    );
+    return;
+  }
+
+  switch (tracked.state) {
+    case "VERIFIED":
+      break;
+    case "INVALID":
+    case "FAILED":
+      push(
+        reason(
+          REASON.DEVICE_FILE_INVALID,
+          "blocker",
+          `подготовка файла на принтере завершилась ошибкой${tracked.lastError ? `: ${tracked.lastError}` : ""} — повторите загрузку`,
+          tracked
+        )
+      );
+      return;
+    case "UPLOADING":
+    case "NOT_PRESENT":
+      push(
+        reason(
+          REASON.DEVICE_TRANSFER_NOT_CONFIRMED,
+          "blocker",
+          `файл на принтере в состоянии «${tracked.state}» — дождитесь завершения подготовки`,
+          tracked
+        )
+      );
+      return;
+    default:
+      // PRESENT_UNVERIFIED and anything a future migration adds: unverified is
+      // a refusal, never a pass.
+      push(
+        reason(
+          REASON.DEVICE_FILE_NOT_VERIFIED,
+          "blocker",
+          `файл на принтере не проверен (${tracked.state})${tracked.lastError ? `: ${tracked.lastError}` : ""} — повторите подготовку`,
+          tracked
+        )
+      );
+      return;
+  }
+
+  if (tracked.transferMode === "manual_file_transfer" && f.mode === "night") {
     push(
       reason(
         REASON.DEVICE_TRANSFER_NOT_CONFIRMED,

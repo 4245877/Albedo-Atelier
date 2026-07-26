@@ -138,8 +138,9 @@ test("the file browser cannot start over a bed that still holds a finished part"
 
   // Run one queue job to completion so the printer's bed cycle ends up
   // AWAITING_CLEARANCE — the state the whole night model hinges on.
-  store.addQueueJob({ title: "First", printer: "k2", material: "PLA", file: "part.gcode" });
-  const { runId } = await store.startNext();
+  // One print run through the same file-browser path (which adopts and verifies
+  // the on-device file), so the bed ends up holding a finished part.
+  const { runId } = await store.commands.startPrinterFile("k2", "part.gcode");
   store.commands.resolveRun(runId, "SUCCEEDED");
   assert.equal(startCalls.length, 1, "only the queued print has started so far");
 
@@ -159,8 +160,9 @@ test("after an explicit clearance the file browser works again", async () => {
   const store = new FarmStore(file);
   await store.start();
 
-  store.addQueueJob({ title: "First", printer: "k2", material: "PLA", file: "part.gcode" });
-  const { runId } = await store.startNext();
+  // One print run through the same file-browser path (which adopts and verifies
+  // the on-device file), so the bed ends up holding a finished part.
+  const { runId } = await store.commands.startPrinterFile("k2", "part.gcode");
   store.commands.resolveRun(runId, "SUCCEEDED");
 
   const bed = store.commands.clearBed("k2", "part_removed", { actor: "operator-2" });
@@ -185,8 +187,9 @@ test("clearBed refuses an auto_cleared claim for a printer with no verified mech
   const store = new FarmStore(file);
   await store.start();
 
-  store.addQueueJob({ title: "First", printer: "k2", material: "PLA", file: "part.gcode" });
-  const { runId } = await store.startNext();
+  // One print run through the same file-browser path (which adopts and verifies
+  // the on-device file), so the bed ends up holding a finished part.
+  const { runId } = await store.commands.startPrinterFile("k2", "part.gcode");
   store.commands.resolveRun(runId, "SUCCEEDED");
 
   // The farm config declares no automatic continuation for this K2, so a driver

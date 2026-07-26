@@ -486,6 +486,9 @@ export class FarmRuntime implements PrintServices {
       uploadFile: uploadPrinterFile,
       logger
     });
+    // Resolve deliveries a previous process was in the middle of: an UPLOADING
+    // row is an unknown, and unknown must never read as ready.
+    this.deviceArtifactServiceRef.recover();
     this.artifactServiceRef = new ArtifactService(store, this.artifactStorageRef, {
       limits: {
         zipMaxEntries: uploads.zipMaxEntries,

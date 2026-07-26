@@ -1,4 +1,4 @@
-import type { DeviceArtifact, PrintTask } from "../../domain/print/types";
+import type { PrintTask } from "../../domain/print/types";
 import {
   evaluateDispatchEligibility,
   type DeviceArtifactFacts,
@@ -11,6 +11,7 @@ import {
 import { supportsPrinterUpload } from "../../infra/printers/files";
 import { ANALYZER_VERSION } from "../artifacts/analyzers";
 import { profileRevisionIdsOf, resolveTaskBinding } from "../dispatch/binding";
+import { stalenessOf } from "../dispatch/deviceFileIdentity";
 import type { SchedulerContext } from "./context";
 import type { EvidenceResolver } from "./evidence";
 import type { SchedulerPrinterRef } from "./types";
@@ -139,9 +140,7 @@ export class EligibilityQueries {
       deviceArtifact:
         request.deviceArtifact !== undefined
           ? request.deviceArtifact
-          : toDeviceArtifactFacts(
-              file !== null ? repos.deviceArtifacts.findBySlot(printer.id, file) : null
-            ),
+          : this.trackedDeviceFile(task, printer.id, file, resolved.variant?.id ?? null),
 
       etaMinutes: etaMinutesOf(resolved.evidence.sliceEtaS, resolved.evidence.gcodeEtaS),
       nightWindow: this.ctx.config.nightWindow,
@@ -159,6 +158,60 @@ export class EligibilityQueries {
       },
       facts
     });
+  }
+
+  /**
+   * The tracked device file for the slot this dispatch would start, with its
+   * staleness resolved against what the task *currently* resolves to.
+   *
+   * The staleness half is why this is not a plain repository read: a row can be
+   * `VERIFIED` and still describe a superseded slice, another printer or a
+   * profile set that has since been re-imported. Computing it here (rather than
+   * trusting the stored state) means a start is refused even if nothing got
+   * around to marking the row — the same fail-closed shape as
+   * {@link DispatchReservation.stale}.
+   */
+  private trackedDeviceFile(
+    task: PrintTask,
+    printerId: string,
+    file: string | null,
+    sliceVariantId: string | null
+  ): DeviceArtifactFacts | null {
+    if (file === null) return null;
+    const repos = this.ctx.store.repositories;
+    const record = repos.deviceArtifacts.findBySlot(printerId, file);
+    if (!record) return null;
+
+    const artifact = task.artifactId ? repos.artifacts.getById(task.artifactId) : null;
+    const reservation = repos.assignments
+      .listByTask(task.id)
+      .find(
+        (a) =>
+          a.state !== "CANCELLED" &&
+          a.state !== "RELEASED" &&
+          a.invalidatedAt === null &&
+          a.printerId === printerId
+      );
+    const staleReason = stalenessOf(record, {
+      printerId,
+      remotePath: file,
+      sliceVariantId,
+      artifactId: artifact?.id ?? null,
+      artifactSha256: artifact?.sha256 ?? null,
+      sizeBytes: artifact?.sizeBytes ?? null,
+      assignmentId: reservation?.id ?? null,
+      profileRevisionIds: profileRevisionIdsOf(resolveTaskBinding(repos, task).binding)
+    });
+
+    return {
+      state: record.state,
+      transferMode: record.transferMode,
+      verification: record.verification,
+      remotePath: record.remotePath,
+      lastError: record.lastError,
+      stale: staleReason !== null,
+      staleReason
+    };
   }
 
   /**
@@ -216,18 +269,6 @@ function toRunRef(run: { id: string; state: string } | null): { id: string; stat
 /** Protocol → "can the orchestrator push a file to it?"; unknown protocols answer no. */
 function printerUploadSupported(protocol: string | null): boolean {
   return supportsPrinterUpload(protocol);
-}
-
-function toDeviceArtifactFacts(record: DeviceArtifact | null): DeviceArtifactFacts | null {
-  return record
-    ? {
-        state: record.state,
-        transferMode: record.transferMode,
-        verification: record.verification,
-        remotePath: record.remotePath,
-        lastError: record.lastError
-      }
-    : null;
 }
 
 /** The on-device file a dispatch would start (task hint first, legacy artifact source second). */

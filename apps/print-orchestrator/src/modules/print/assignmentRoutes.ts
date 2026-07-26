@@ -111,8 +111,9 @@ export function registerAssignmentRoutes(
  * never talk the backend into skipping a step.
  */
 function view(assignment: Assignment, deviceArtifact: DeviceArtifact | null) {
-  const ready =
-    deviceArtifact?.state === "VERIFIED" || deviceArtifact?.state === "PRESENT_UNVERIFIED";
+  // Only a VERIFIED file is startable — "present but unmatched" is not evidence,
+  // and the server refuses it regardless of what this hint says.
+  const ready = deviceArtifact?.state === "VERIFIED";
   return {
     assignment,
     deviceArtifact,

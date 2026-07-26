@@ -77,7 +77,18 @@ function facts(mode: DispatchMode, over: Partial<DispatchFacts> = {}): DispatchF
     entryState: "WAITING",
     currentProfileRevisionIds: [],
     adapterUploadSupported: true,
-    deviceArtifact: null,
+    // The baseline is a *fully prepared* start: the file was delivered by the
+    // adapter and matched against the artifact. Every start now requires this —
+    // the tests below take it away one property at a time.
+    deviceArtifact: {
+      state: "VERIFIED",
+      transferMode: "adapter_upload",
+      verification: "name_and_size",
+      remotePath: "chalice.gcode",
+      lastError: null,
+      stale: false,
+      staleReason: null
+    },
     night: mode === "night",
     unattendedAllowed: mode === "night",
     file: "chalice.gcode",
@@ -339,6 +350,82 @@ test("an unverified upload blocks a night start and warns on a manual one", () =
   const manual = evaluate("manual", { facts: { deviceFileIdentity: "name-only" } });
   assert.equal(manual.status, "review");
   assert.ok(codes(manual).includes(REASON.DEVICE_FILE_NOT_VERIFIED));
+});
+
+test("a start with NO tracked device file is refused — nothing delivered or checked it", () => {
+  const result = evaluate("manual", { facts: { deviceArtifact: null } });
+  assert.equal(result.status, "blocked");
+  assert.ok(blockerCodes(result).includes(REASON.DEVICE_TRANSFER_NOT_CONFIRMED));
+});
+
+test("every non-VERIFIED device-file state refuses the start", () => {
+  const cases: [string, string][] = [
+    ["PRESENT_UNVERIFIED", REASON.DEVICE_FILE_NOT_VERIFIED],
+    ["UPLOADING", REASON.DEVICE_TRANSFER_NOT_CONFIRMED],
+    ["NOT_PRESENT", REASON.DEVICE_TRANSFER_NOT_CONFIRMED],
+    ["INVALID", REASON.DEVICE_FILE_INVALID],
+    ["FAILED", REASON.DEVICE_FILE_INVALID],
+    ["STALE", REASON.DEVICE_FILE_STALE]
+  ];
+  for (const [state, expected] of cases) {
+    const result = evaluate("manual", {
+      facts: {
+        deviceArtifact: {
+          state,
+          transferMode: "adapter_upload",
+          verification: null,
+          remotePath: "chalice.gcode",
+          lastError: null,
+          stale: false,
+          staleReason: null
+        }
+      }
+    });
+    assert.equal(result.status, "blocked", state);
+    assert.ok(blockerCodes(result).includes(expected as ReasonCode), `${state} → ${expected}`);
+  }
+});
+
+test("a VERIFIED file that no longer matches the job is STALE, not startable", () => {
+  const result = evaluate("manual", {
+    facts: {
+      deviceArtifact: {
+        state: "VERIFIED",
+        transferMode: "adapter_upload",
+        verification: "name_and_size",
+        remotePath: "chalice.gcode",
+        lastError: null,
+        stale: true,
+        staleReason: "слайс изменился"
+      }
+    }
+  });
+  assert.equal(result.status, "blocked");
+  assert.ok(blockerCodes(result).includes(REASON.DEVICE_FILE_STALE));
+});
+
+test("a manually transferred file is startable attended, never unattended", () => {
+  const manual = {
+    state: "VERIFIED",
+    transferMode: "manual_file_transfer",
+    verification: "operator_confirmed",
+    remotePath: "chalice.gcode",
+    lastError: null,
+    stale: false,
+    staleReason: null
+  };
+  const attended = evaluate("manual", {
+    facts: { adapterUploadSupported: false, deviceArtifact: manual }
+  });
+  assert.ok(
+    !blockerCodes(attended).includes(REASON.DEVICE_TRANSFER_NOT_CONFIRMED),
+    "a named confirmation is the evidence an attended start needs"
+  );
+
+  const unattended = evaluate("night", {
+    facts: { adapterUploadSupported: false, deviceArtifact: manual }
+  });
+  assert.ok(blockerCodes(unattended).includes(REASON.DEVICE_TRANSFER_NOT_CONFIRMED));
 });
 
 test("a file whose presence was never checked blocks — unchecked is not verified", () => {

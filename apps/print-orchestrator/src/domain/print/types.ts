@@ -483,15 +483,33 @@ export interface DispatchAttempt {
  * bytes are on that machine" are different facts and conflating them is how a
  * dispatch ends up starting a file that is absent or stale.
  *
+ * The happy path and the three distinct ways it can end:
+ *
  *   NOT_PRESENT → UPLOADING → PRESENT_UNVERIFIED → VERIFIED
- *                                   ↘ INVALID ↙
+ *                     ↓              ↓                ↓
+ *                  FAILED         INVALID          STALE
+ *
+ *  - `FAILED`  — the *transfer* did not complete (device refused, network died).
+ *    The bytes are not known to be there; a retry may simply re-upload.
+ *  - `INVALID` — the bytes *are* (or were) there but do not match the artifact:
+ *    missing after upload, wrong size. Never startable, retry re-uploads.
+ *  - `STALE`   — the record was valid for something that is no longer what we
+ *    would print: a new slice variant, a different content hash, another
+ *    printer/path, a changed profile set or a withdrawn assignment. The file on
+ *    the device may be perfectly intact — it is simply not *this* job's file.
+ *
+ * Only `VERIFIED` authorises a start. Everything else — including
+ * `PRESENT_UNVERIFIED`, which means "something is there but we have not matched
+ * it yet" — is a refusal.
  */
 export type DeviceArtifactState =
   | "NOT_PRESENT"
   | "UPLOADING"
   | "PRESENT_UNVERIFIED"
   | "VERIFIED"
-  | "INVALID";
+  | "INVALID"
+  | "FAILED"
+  | "STALE";
 
 /**
  * How the bytes got onto the device. `adapter_upload` — the orchestrator pushed
@@ -535,7 +553,7 @@ export interface DeviceArtifact {
   verifiedAt: IsoTimestamp | null;
   /** Operator who confirmed a manual transfer; null otherwise. */
   confirmedBy: string | null;
-  /** Failure detail when `state === "INVALID"` (or the last failed attempt). */
+  /** Failure/staleness detail for `FAILED`/`INVALID`/`STALE` (or the last failed attempt). */
   lastError: string | null;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;

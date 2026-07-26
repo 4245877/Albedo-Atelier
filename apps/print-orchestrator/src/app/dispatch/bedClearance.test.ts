@@ -13,6 +13,7 @@ import { EvidenceResolver } from "../scheduling/evidence";
 import type { SchedulerPrinterRef } from "../scheduling/types";
 import { DispatchService, type DispatchDeps } from "./dispatchService";
 import { RunLifecycleService } from "./runLifecycle";
+import { seedDeviceFile } from "./testkit/deviceFiles";
 
 /*
  * The night-safety half of the brief, end to end over a real (in-memory) SQLite
@@ -114,8 +115,18 @@ function makeHarness(): Harness {
   };
 }
 
+/**
+ * A queued task whose file is already prepared on the device — the delivery step
+ * every start now requires, so these bed-clearance tests keep testing the bed.
+ */
 function addTask(h: Harness, file: string): string {
-  return h.queue.createTask({ title: file, printer: "k2", material: "PLA", file }).task.id;
+  const detail = h.queue.createTask({ title: file, printer: "k2", material: "PLA", file });
+  seedDeviceFile(h.store, {
+    printerId: "k2",
+    remotePath: file,
+    artifactId: detail.task.artifactId
+  });
+  return detail.task.id;
 }
 
 /** Runs one print to completion and returns the printer holding a finished part. */
@@ -181,13 +192,8 @@ test("a manual (attended) start does not clear the bed and is refused", async ()
 test("unattendedAllowed does not clear the bed", async () => {
   const h = makeHarness();
   await printAndFinish(h);
-  const detail = h.queue.createTask({
-    title: "unattended",
-    printer: "k2",
-    material: "PLA",
-    file: "b.gcode"
-  });
-  const task = h.store.repositories.tasks.getById(detail.task.id)!;
+  const taskId = addTask(h, "b.gcode");
+  const task = h.store.repositories.tasks.getById(taskId)!;
   h.store.repositories.tasks.update({
     ...task,
     night: true,
@@ -195,7 +201,7 @@ test("unattendedAllowed does not clear the bed", async () => {
     updatedAt: new Date().toISOString()
   });
 
-  await assert.rejects(h.dispatch.dispatch({ taskId: detail.task.id, mode: "manual" }), JobError);
+  await assert.rejects(h.dispatch.dispatch({ taskId, mode: "manual" }), JobError);
   assert.equal(bedState(h), "AWAITING_CLEARANCE", "a permission on the task is not a cleared plate");
 });
 

@@ -13,7 +13,7 @@ import type { Artifact, ArtifactAnalysis, PrintTask } from "../../domain/print/t
 import type { ProfileRevision, ProfileSet, ProfileType, SliceVariant } from "../../domain/slicing/types";
 import { openPrintQueueStore } from "../../infra/db/store";
 import type { PrinterConfig } from "../../infra/printers/config";
-import type { PrinterFilesListing } from "../../infra/printers/files";
+import { buildDeviceFileName, type PrinterFilesListing } from "../../infra/printers/files";
 import { ArtifactStorage } from "../../infra/storage/artifactStorage";
 import { ANALYZER_VERSION } from "../artifacts/analyzers";
 import { PrintQueueService } from "../printQueue/printQueueService";
@@ -42,6 +42,8 @@ const GCODE = Buffer.from(
 );
 const GCODE_SHA = createHash("sha256").update(GCODE).digest("hex");
 const ISO = "2026-07-26T12:00:00.000Z";
+/** The on-device name promotion generates for that artifact (stem + content hash). */
+const DEVICE_FILE = buildDeviceFileName({ name: "cube.gcode", sha256: GCODE_SHA });
 
 /** k2 speaks Moonraker (upload + listing); x1c is a Bambu (neither). */
 const PRINTERS: PrinterConfig[] = [
@@ -406,7 +408,10 @@ test("promotion binds the queue to the EXACT slice, artifact hash and profile se
   assert.equal(detail.task.sliceVariantId, variant.id, "the exact slice, not a file name");
   assert.equal(detail.task.artifactId, output.id);
   assert.equal(detail.task.sourceArtifactId, task.sourceArtifactId);
-  assert.equal(detail.task.onDeviceFile, "cube.gcode");
+  // The device name carries the content identity: two models called "cube" can
+  // never collide on one printer slot and overwrite each other's bytes.
+  assert.equal(detail.task.onDeviceFile, DEVICE_FILE);
+  assert.ok(DEVICE_FILE.includes(GCODE_SHA.slice(0, 8)), "the name encodes the artifact hash");
   assert.equal(detail.task.pinnedPrinterId, "k2", "printer-scoped slice pins its printer");
   assert.equal(detail.queueEntry?.state, "WAITING");
 
@@ -479,7 +484,7 @@ test("a manually assigned task is startable by the canonical operation (no dead 
   assert.equal(result.printerId, "k2");
   assert.equal(result.assignmentId, assignmentId, "the SAME assignment was executed, not a new one");
   assert.equal(h.startCalls.length, 1);
-  assert.equal(h.startCalls[0].file, "cube.gcode");
+  assert.equal(h.startCalls[0].file, DEVICE_FILE);
 
   // Exactly one assignment ever existed for the task — the start consumed it.
   const assignments = h.store.repositories.assignments.listByTask(taskId);
@@ -603,14 +608,17 @@ test("preparing twice re-uploads nothing (idempotent delivery)", async () => {
   assert.equal(second.deviceArtifact.version, first.deviceArtifact.version);
 });
 
-test("a failed upload marks the file INVALID and leaves the assignment un-started", async () => {
+test("a failed upload marks the file FAILED and leaves the assignment un-started", async () => {
   const { variant } = seedReadySlice();
   const detail = h.queue.promoteSliceVariant(variant.id);
   const assignment = h.queue.assignTask(detail.task.id, "k2");
   h.failUpload = true;
 
   const prepared = await h.devices.prepare(assignment.id);
-  assert.equal(prepared.deviceArtifact.state, "INVALID");
+  // FAILED, not INVALID: the *transfer* did not complete (and the device listing
+  // confirmed the file is not there), which is a different retry story from
+  // "the bytes on the device are not the artifact's".
+  assert.equal(prepared.deviceArtifact.state, "FAILED");
   assert.match(prepared.deviceArtifact.lastError ?? "", /отклонило загрузку/);
   assert.equal(prepared.ready, false);
   assert.equal(
@@ -650,7 +658,9 @@ test("an adapter without upload demands a named manual transfer and blocks until
   );
 
   const confirmed = await h.devices.confirmManualTransfer(assignment.id, "Миха");
-  assert.equal(confirmed.deviceArtifact.state, "PRESENT_UNVERIFIED");
+  // No file API at all: the named confirmation IS the verification, and it is
+  // recorded as exactly that — never dressed up as a device-side check.
+  assert.equal(confirmed.deviceArtifact.state, "VERIFIED");
   assert.equal(confirmed.deviceArtifact.verification, "operator_confirmed");
   assert.equal(confirmed.deviceArtifact.confirmedBy, "Миха");
 

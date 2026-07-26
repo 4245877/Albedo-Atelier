@@ -16,6 +16,7 @@ import { EvidenceResolver } from "../scheduling/evidence";
 import type { SchedulerPrinterRef } from "../scheduling/types";
 import { DispatchService, type DispatchDeps } from "./dispatchService";
 import { RunLifecycleService } from "./runLifecycle";
+import { seedDeviceFile } from "./testkit/deviceFiles";
 
 /*
  * The canonical dispatch: the ONLY path that may physically start a print. The
@@ -184,14 +185,26 @@ function schedulerPrinter(knobs: Harness["knobs"]): SchedulerPrinterRef {
   };
 }
 
-/** A legacy-style manual task: on-printer file name, no registered bytes. */
-function addManualTask(h: Harness, over: { material?: string; file?: string } = {}): string {
+/**
+ * A legacy-style manual task: on-printer file name, no registered bytes — with
+ * its file already prepared on the device, since a start now requires a verified
+ * delivery (see {@link seedDeviceFile}).
+ */
+function addManualTask(h: Harness, over: { material?: string; file?: string; prepared?: boolean } = {}): string {
+  const file = over.file ?? "chalice.gcode";
   const detail = h.queue.createTask({
     title: "Chalice",
     printer: "k2",
     material: over.material ?? "PLA",
-    file: over.file ?? "chalice.gcode"
+    file
   });
+  if (over.prepared !== false) {
+    seedDeviceFile(h.store, {
+      printerId: "k2",
+      remotePath: file,
+      artifactId: detail.task.artifactId
+    });
+  }
   return detail.task.id;
 }
 
@@ -267,6 +280,14 @@ function addNightTask(
     ...task,
     metadata: { ...task.metadata, file: "chalice.gcode" },
     updatedAt: iso
+  });
+  // The delivery step: the file is on the device, uploaded and matched.
+  seedDeviceFile(h.store, {
+    printerId: "k2",
+    remotePath: "chalice.gcode",
+    artifactId,
+    sha256: over.sha === undefined ? "a".repeat(64) : over.sha,
+    sizeBytes: over.size === undefined ? 1000 : over.size
   });
   return { taskId: detail.task.id, artifactId };
 }
@@ -631,7 +652,7 @@ test("a completed run leaves the bed AWAITING_CLEARANCE and NO dispatch may pres
 
   // A manual (attended) start must NOT presume the bed clear — the operator being
   // present is not the same as the operator having emptied the plate.
-  const t2 = h.queue.createTask({ title: "B", printer: "k2", file: "b.gcode" }).task.id;
+  const t2 = addManualTask(h, { file: "b.gcode" });
   await assert.rejects(
     h.dispatch.dispatch({ taskId: t2, mode: "manual" }),
     /осталась готовая модель|не подтверждён свободным/
