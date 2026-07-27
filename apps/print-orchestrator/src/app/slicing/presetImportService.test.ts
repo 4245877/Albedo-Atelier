@@ -20,11 +20,11 @@ test("imports the real catalog: 3 active filaments, the rest quarantined on miss
     const service = new PresetImportService(store, new OrcaCatalogSource(REAL_CATALOG));
     const result = await service.import();
 
-    assert.equal(result.totalProfiles, 20);
+    assert.equal(result.totalProfiles, 21);
     assert.equal(result.counts.invalid, 0);
     assert.equal(result.counts.active, 3);
-    assert.equal(result.counts.quarantined, 17);
-    assert.equal(result.inserted, 20);
+    assert.equal(result.counts.quarantined, 18);
+    assert.equal(result.inserted, 21);
 
     // Source archives hash to what the catalog recorded (immutability).
     assert.equal(result.sourceIntegrity.ok, true);
@@ -33,9 +33,8 @@ test("imports the real catalog: 3 active filaments, the rest quarantined on miss
     const active = result.profiles.filter((p) => p.status === "active").map((p) => p.name).sort();
     assert.deepEqual(active, ["Creality", "Creality PLA", "ENYONE PLA"]);
 
-    // All seven OrcaSlicer system parents are reported missing. The K2 machine now
-    // inherits the 0.4 nozzle base (the 0.4/0.2 contradiction was corrected in the
-    // catalog), so the missing K2 machine parent is "…0.4 nozzle".
+    // All seven OrcaSlicer system parents are reported missing. The replacement
+    // bundle declares the K2 machine against its 0.2-nozzle parent.
     assert.deepEqual(result.missingParents, [
       "0.08mm SuperDetail @Creality K2 0.2 nozzle",
       "0.20mm Standard @BBL A1",
@@ -43,17 +42,17 @@ test("imports the real catalog: 3 active filaments, the rest quarantined on miss
       "Bambu Lab A1 0.4 nozzle",
       "Bambu PLA Basic @BBL A1",
       "Creality Generic PLA @K2-all",
-      "Creality K2 0.4 nozzle"
+      "Creality K2 0.2 nozzle"
     ]);
 
-    // The K2 machine is still quarantined — but now ONLY for its missing parent; the
-    // former 0.4-vs-0.2 nozzle contradiction is fixed (variant + inherits are 0.4).
+    // The replacement bundle is imported byte-for-byte. Its machine profile keeps
+    // the exported 0.4-nozzle vs 0.2-variant/parent contradiction and remains quarantined.
     const k2 = result.profiles.find((p) => p.name === "Creality K2 PETG 0.4 FAST");
     assert.ok(k2);
     assert.equal(k2.status, "quarantined");
     const codes = k2.blockers.map((b) => b.code);
     assert.ok(codes.includes("missing_parent"));
-    assert.ok(!codes.includes("nozzle_variant_mismatch"));
+    assert.ok(codes.includes("nozzle_variant_mismatch"));
     assert.ok(!codes.includes("nozzle_parent_mismatch"));
   } finally {
     store.close();
@@ -68,9 +67,9 @@ test("re-importing the real catalog is idempotent (no new revisions, nothing cha
     const second = await service.import();
     assert.equal(second.inserted, 0);
     assert.equal(second.updated, 0);
-    assert.equal(second.unchanged, 20);
-    // Still exactly 20 revisions in the table.
-    assert.equal(store.repositories.profileRevisions.list().length, 20);
+    assert.equal(second.unchanged, 21);
+    // Still exactly 21 revisions in the table.
+    assert.equal(store.repositories.profileRevisions.list().length, 21);
   } finally {
     store.close();
   }

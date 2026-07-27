@@ -19,8 +19,8 @@ records the warnings/blockers for an operator to review.
   "printer": "creality-k2",              // farm printer id (config/printers.json) or …
   "printerClass": null,                   // … a class label; one of the two
   "machine": "Creality K2 PETG 0.4 FAST", // profile names (type is implied by the field)
-  "process": "Creality K2 0.4 FAST",
-  "filament": "PETG @K2 FAST"
+  "process": "Creality K2 0.4 FAST1",
+  "filament": "PETG @K2 FAST1"
 }
 ```
 
