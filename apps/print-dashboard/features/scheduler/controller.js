@@ -238,10 +238,21 @@ function wireDelegates() {
       void run(`unpin:${taskId}`, () => apiPost(`/api/print/scheduler/tasks/${taskId}/unpin`), "Закрепление снято, Владыка", btn);
     } else if (action === "build-plan") {
       void run("build-plan", () => apiPost("/api/print/scheduler/plans", {}), "Черновик плана выстроен и ожидает вашего суда", btn);
+    } else if (action === "recompute-all") {
+      // Единственная команда пересчёта рекомендаций: пересчитывает живой план
+      // (или строит первый). Ничего не загружает и не запускает.
+      void run(
+        "recompute-all",
+        () => apiPost("/api/print/scheduler/recompute", { trigger: "manual" }),
+        "Рекомендации пересчитаны — это ещё не подтверждённый план",
+        btn
+      );
     } else if (action === "recompute") {
-      void run(`recompute:${id}`, () => apiPost(`/api/print/scheduler/plans/${id}/recompute`), "План пересчитан заново (новая ревизия)", btn);
+      void run(`recompute:${id}`, () => apiPost(`/api/print/scheduler/plans/${id}/recompute`, { trigger: "manual" }), "План пересчитан заново (новая ревизия)", btn);
     } else if (action === "confirm") {
-      void run(`confirm:${id}`, () => apiPost(`/api/print/scheduler/plans/${id}/confirm`), "План подтверждён — да исполнится ваша воля", btn);
+      // Ручное подтверждение рекомендации. Оно НЕ загружает файлы, не резервирует
+      // стол и не запускает принтер — только переводит черновик в план записи.
+      void run(`confirm:${id}`, () => apiPost(`/api/print/scheduler/plans/${id}/confirm`), "План подтверждён — да исполнится ваша воля (запуск по-прежнему только вручную)", btn);
     }
   });
 

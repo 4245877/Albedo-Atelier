@@ -1,4 +1,5 @@
 import { JobError, NotFoundError } from "../../core/errors";
+import { DEFAULT_OPERATION_MINUTES, OPERATION_LABELS } from "../../domain/operations/states";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
 import {
   ASSIGNMENT_TRANSITIONS,
@@ -19,26 +20,71 @@ import {
   type PlannerPrinterInput,
   type PlannerTaskInput
 } from "../../domain/scheduling/planner";
+import type { PrinterRelease } from "../../domain/scheduling/release";
 import type { SchedulerContext } from "./context";
-import { heldByActiveRun, type EvidenceResolver } from "./evidence";
-import type { PlanDetail, PlanExplanation, SchedulerPrinterRef } from "./types";
+import type { EvidenceResolver } from "./evidence";
+import {
+  buildTimeline,
+  etaConfidenceOf,
+  plannable,
+  readExplanation,
+  readString,
+  readStringArray,
+  readTimeline,
+  readUnplaced,
+  sameMaterialFamily,
+  unknownRelease
+} from "./planView";
+import { ReleaseProjector } from "./release";
+import type {
+  EtaConfidence,
+  PlanAssignmentView,
+  PlanDetail,
+  PlanExplanation,
+  PlannedManualOperation,
+  PlanStaleness,
+  PrinterTimeline,
+  SchedulerPrinterRef,
+  TimelineSegment,
+  UnplacedView
+} from "./types";
+
+/** Frozen horizon default: confirmed work starting within 2 h is not re-planned. */
+const DEFAULT_FROZEN_HORIZON_S = 2 * 60 * 60;
 
 /**
- * Plan lifecycle: revisioned drafts, manual confirmation, recompute-as-new-
- * revision, and the free-time projection feeding the placement heuristic.
+ * Plan lifecycle — **recommendations only**: revisioned drafts, manual
+ * confirmation, recompute-as-new-revision, and the real printer-release
+ * projection feeding the placement heuristic.
  *
  * Plans are revisioned and manually confirmed: {@link buildDraftPlan} /
  * {@link recomputePlan} always produce a fresh `DRAFT`; {@link confirmPlan} is
  * the only path to `ACTIVE`; and a recompute never edits a confirmed plan — it
  * supersedes it with a new revision. Draft assignments are `PROPOSED` (they hold
- * no bed and start no print — remote start is out of scope), each carrying its
- * full {@link PlanExplanation}.
+ * no bed and start no print), each carrying its full {@link PlanExplanation}.
+ *
+ * Three properties this module is responsible for:
+ *
+ *  1. **A finished print does not free a printer.** Free-time comes from
+ *     {@link ReleaseProjector} — machine occupancy *plus* the manual
+ *     interventions still owed on the bed *plus* the operator's sleep/absence
+ *     calendar, with one pair of hands shared across the farm.
+ *  2. **Nothing unknown is guessed into an executable plan.** An unknown release
+ *     or ETA leaves the task unplaced with a stable code; the only estimate that
+ *     survives is an explicitly-flagged ghost block on the timeline.
+ *  3. **Rolling horizon with a frozen head.** Running work and confirmed
+ *     placements inside {@link SchedulerConfig.frozenHorizonS} are carried
+ *     through a recompute untouched; everything later is free to move.
  */
 export class PlanningService {
+  private readonly release: ReleaseProjector;
+
   constructor(
     private readonly ctx: SchedulerContext,
     private readonly evidence: EvidenceResolver
-  ) {}
+  ) {
+    this.release = new ReleaseProjector(ctx);
+  }
 
   private get store() {
     return this.ctx.store;
@@ -54,9 +100,14 @@ export class PlanningService {
   }
 
   /** Builds a fresh DRAFT plan from the current queue + live evidence. */
-  buildDraftPlan(options: { name?: string; window?: string } = {}): PlanDetail {
+  buildDraftPlan(options: { name?: string; window?: string; trigger?: string } = {}): PlanDetail {
     return this.store.transaction(() =>
-      this.createDraft({ name: options.name ?? null, window: options.window ?? null, base: null })
+      this.createDraft({
+        name: options.name ?? null,
+        window: options.window ?? null,
+        base: null,
+        trigger: options.trigger ?? "manual"
+      })
     );
   }
 
@@ -64,9 +115,14 @@ export class PlanningService {
    * Recomputes a plan into a *new* DRAFT revision (never edits it in place). The
    * new draft is seeded with the source plan's placements for stability. A source
    * DRAFT is superseded (CANCELLED); a confirmed (ACTIVE) plan is left untouched —
-   * "подтверждённый план нельзя изменять автоматически".
+   * "подтверждённый план нельзя изменять автоматически" — and the placements it
+   * froze are carried through unchanged.
+   *
+   * `trigger` is the stable code of the event that prompted the recalculation
+   * (`task_added`, `print_finished`, `operation_completed`, …). It only ever
+   * reaches the audit trail: this call is explicit, and nothing schedules it.
    */
-  recomputePlan(planId: string): PlanDetail {
+  recomputePlan(planId: string, trigger?: string): PlanDetail {
     return this.store.transaction(() => {
       const base = this.requirePlan(planId);
       if (base.state === "COMPLETED" || base.state === "CANCELLED") {
@@ -76,8 +132,39 @@ export class PlanningService {
       // other DRAFT (including a DRAFT base) via {@link supersedeOtherDrafts}. A
       // confirmed (ACTIVE) base is deliberately left untouched — the new draft just
       // carries a higher revision and points back to it.
-      return this.createDraft({ name: base.name, window: base.window, base });
+      return this.createDraft({
+        name: base.name,
+        window: base.window,
+        base,
+        trigger: trigger ?? "manual"
+      });
     });
+  }
+
+  /**
+   * The single "recalculate the recommendations" entry point for every event the
+   * brief lists (a task added or removed, a priority or deadline change, a print
+   * finishing, an intervention appearing or being performed, a schedule or
+   * printer-state change, a new slice, an assignment change, a device error).
+   *
+   * It recomputes the freshest live plan, or builds the first one when there is
+   * none. It is **explicitly invoked** — there is no worker, no cron and no
+   * background trigger behind it — and it starts nothing: the result is a DRAFT
+   * a human still has to confirm.
+   */
+  recomputeLive(trigger: string): PlanDetail {
+    const live = this.livePlan();
+    return live ? this.recomputePlan(live.id, trigger) : this.buildDraftPlan({ trigger });
+  }
+
+  /** The plan a recompute would act on: the confirmed one, else the newest draft. */
+  livePlan(): Plan | null {
+    const plans = this.store.repositories.plans.list();
+    const active = plans.find((p) => p.state === "ACTIVE");
+    if (active) return active;
+    const drafts = plans.filter((p) => p.state === "DRAFT");
+    drafts.sort((a, b) => b.revision - a.revision || b.createdAt.localeCompare(a.createdAt));
+    return drafts[0] ?? null;
   }
 
   /**
@@ -305,12 +392,32 @@ export class PlanningService {
 
   // ── Internals: plan persistence ──────────────────────────────────────────────
 
-  private createDraft(input: { name: string | null; window: string | null; base: Plan | null }): PlanDetail {
+  private createDraft(input: {
+    name: string | null;
+    window: string | null;
+    base: Plan | null;
+    trigger: string;
+  }): PlanDetail {
     const printers = this.ctx.listPrinters();
-    const tasks = this.evidence.schedulableTasks();
     const now = this.ctx.config.now().getTime();
+    const frozenUntil = now + this.frozenHorizonS() * 1000;
 
-    const previousByTask = input.base ? this.previousPlacements(input.base.id) : new Map<string, string>();
+    // ── The frozen head of the rolling horizon ────────────────────────────────
+    // Confirmed placements that are already running, or due to start inside the
+    // frozen horizon, are NOT re-planned: they hold their printer and their task
+    // is taken out of the pool. Confirmed work further out is released back into
+    // the pool, which is exactly what makes the horizon *rolling*.
+    const { frozen, released } = this.partitionConfirmed(now, frozenUntil);
+    const frozenTaskIds = new Set(frozen.map((a) => a.taskId));
+
+    const tasks = this.evidence.schedulableTasks().filter((t) => !frozenTaskIds.has(t.id));
+
+    const previousByTask = new Map<string, string>(
+      input.base ? this.previousPlacements(input.base.id) : []
+    );
+    // A released confirmed placement still counts as "where it was", so the
+    // stability bonus keeps it put unless something better genuinely changed.
+    for (const a of released) previousByTask.set(a.taskId, a.printerId);
 
     // Compute compatibility once; feed only `compatible` printers to the planner.
     const compat = new Map<string, CompatibilityResult[]>();
@@ -322,7 +429,7 @@ export class PlanningService {
     // the operator's manual rank — feeding it to the planner makes a reorder move.
     const plannerTasks: PlannerTaskInput[] = tasks.map((task, index) => {
       const results = compat.get(task.id) ?? [];
-      const compatible = results.filter((r) => r.verdict === "compatible");
+      const compatible = results.filter(plannable);
       const eta = compatible.find((r) => r.eta.seconds !== null)?.eta ?? compatible[0]?.eta ?? null;
       return {
         taskId: task.id,
@@ -341,17 +448,41 @@ export class PlanningService {
       };
     });
 
+    // The real release of every printer: machine + interventions + operator, with
+    // one pair of hands shared across the farm.
+    const releases = this.release.project(now);
+    const frozenEnds = new Map<string, number>();
+    for (const a of frozen) {
+      const end = readExplanation(a.metadata)?.endMs ?? null;
+      if (end !== null) frozenEnds.set(a.printerId, Math.max(frozenEnds.get(a.printerId) ?? 0, end));
+      else frozenEnds.set(a.printerId, Number.NaN); // an end nobody knows poisons the printer
+    }
+
     const plannerPrinters: PlannerPrinterInput[] = printers.map((p) => {
-      const { freeAtMs, estimated } = this.printerFreeAt(p, now);
+      const release = releases.get(p.id) ?? unknownRelease(p.id);
+      const frozenEnd = frozenEnds.get(p.id);
+      const freeAtMs =
+        release.releaseAtMs === null || (frozenEnd !== undefined && Number.isNaN(frozenEnd))
+          ? null
+          : Math.max(release.releaseAtMs, frozenEnd ?? 0);
       return {
         printerId: p.id,
         name: p.name,
         freeAtMs,
-        freeAtEstimated: estimated,
+        releaseCode:
+          frozenEnd !== undefined && !Number.isNaN(frozenEnd) && (frozenEnd > (release.releaseAtMs ?? 0))
+            ? "FROZEN_ASSIGNMENT"
+            : release.code,
+        releaseReason:
+          freeAtMs === null && release.releaseAtMs !== null
+            ? "подтверждённое назначение без известного времени окончания"
+            : release.reason,
         currentMaterial: p.material,
-        currentNozzleMm: p.nozzleMm
+        currentNozzleMm: p.nozzleMm,
+        remoteStartSupported: p.remoteStartSupported
       };
     });
+    const printerById = new Map(plannerPrinters.map((p) => [p.printerId, p]));
 
     const planResult = buildPlan(plannerTasks, plannerPrinters, {
       nowMs: now,
@@ -360,10 +491,12 @@ export class PlanningService {
 
     const iso = this.ctx.nowIso();
     const revision = input.base ? input.base.revision + 1 : 1;
-    const unplaced = planResult.unplaced.map((u) => ({
+    const unplaced: UnplacedView[] = planResult.unplaced.map((u) => ({
       taskId: u.taskId,
       title: tasks.find((t) => t.id === u.taskId)?.title ?? u.taskId,
-      reason: u.reason
+      code: u.code,
+      reason: u.reason,
+      hint: u.hint
     }));
 
     const plan: Plan = {
@@ -378,7 +511,25 @@ export class PlanningService {
       createdAt: iso,
       updatedAt: iso,
       version: 1,
-      metadata: { unplaced }
+      metadata: {
+        unplaced: unplaced as unknown as Metadata[keyof Metadata],
+        generatedAt: iso,
+        trigger: input.trigger,
+        frozenUntil: frozen.length > 0 ? new Date(frozenUntil).toISOString() : null,
+        frozenAssignmentIds: frozen.map((a) => a.id),
+        // The recommendation is a *view of a moment*; storing it makes the plan
+        // readable verbatim after a restart instead of silently re-deriving a
+        // different one against a moved clock.
+        timeline: buildTimeline({
+          printers,
+          releases,
+          assignments: planResult.assignments,
+          frozen,
+          unplaced,
+          nowMs: now,
+          titleOf: (taskId) => this.store.repositories.tasks.getById(taskId)?.title ?? taskId
+        }) as unknown as Metadata[keyof Metadata]
+      } as Metadata
     };
     this.store.repositories.plans.insert(plan);
     this.ctx.recordAudit({
@@ -386,11 +537,21 @@ export class PlanningService {
       entityId: plan.id,
       action: "drafted",
       to: "DRAFT",
-      detail: { revision, assignments: planResult.assignments.length, unplaced: unplaced.length }
+      detail: {
+        revision,
+        trigger: input.trigger,
+        assignments: planResult.assignments.length,
+        unplaced: unplaced.length,
+        frozen: frozen.length,
+        released: released.length
+      }
     });
 
     for (const a of planResult.assignments) {
       const result = (compat.get(a.taskId) ?? []).find((r) => r.printerId === a.printerId);
+      const printerRef = printers.find((p) => p.id === a.printerId) ?? null;
+      const placedTaskForOps = tasks.find((t) => t.id === a.taskId) ?? null;
+      const bed = this.projectBedRelease(a.endMs);
       const explanation: PlanExplanation = {
         printerId: a.printerId,
         reason: a.reason,
@@ -398,11 +559,23 @@ export class PlanningService {
         scoreBreakdown: a.scoreBreakdown,
         alternatives: a.alternatives,
         warnings: a.warnings,
+        blockers: [],
         startMs: a.startMs,
         endMs: a.endMs,
         etaSeconds: a.etaSeconds,
         etaSource: result?.eta.source ?? "unknown",
-        etaPreliminary: result?.eta.preliminary ?? true
+        etaPreliminary: result?.eta.preliminary ?? true,
+        etaConfidence: etaConfidenceOf(a.etaSeconds, result?.eta.preliminary ?? true),
+        releaseCode: printerById.get(a.printerId)?.releaseCode ?? "FREE",
+        releaseReason: printerById.get(a.printerId)?.releaseReason ?? "",
+        bedReleaseMs: bed.releaseMs,
+        bedReleaseEstimated: bed.estimated,
+        manualOperations: placedTaskForOps
+          ? this.plannedOperations(placedTaskForOps, printerRef)
+          : [],
+        requiresUpload: placedTaskForOps ? this.requiresUpload(placedTaskForOps, a.printerId) : true,
+        manualStartRequired: printerRef ? printerRef.remoteStartSupported !== true : true,
+        frozen: false
       };
       // The placement is executable data from the moment it is drafted: the exact
       // slice, artifact hash and profile revisions the compatibility answer was
@@ -455,89 +628,146 @@ export class PlanningService {
     return this.buildPlanDetail(plan);
   }
 
-  /** Cancels every DRAFT plan except `keepId` (they are superseded by the new draft). */
+  /**
+   * Marks every plan the new draft overtakes as **stale**, so no stored
+   * recommendation can be read as current after a recalculation:
+   *
+   *  - outstanding DRAFTs are stamped and cancelled (a pile of orphan drafts
+   *    competing to be "the plan" is worse than none);
+   *  - the confirmed (ACTIVE) plan is stamped but **left ACTIVE** — it is still
+   *    the plan of record and the only thing anything may be started from. Only
+   *    an explicit confirmation of the new draft replaces it.
+   */
   private supersedeOtherDrafts(keepId: string): void {
     for (const other of this.store.repositories.plans.list()) {
-      if (other.id !== keepId && other.state === "DRAFT") {
-        this.cancelDraft(other, "superseded");
+      if (other.id === keepId) continue;
+      if (other.state === "DRAFT") {
+        this.cancelDraft(this.markStale(other, "superseded", keepId), "superseded");
+      } else if (other.state === "ACTIVE") {
+        this.markStale(other, `пересчитан: есть новая рекомендация ${keepId}`, keepId);
       }
     }
   }
 
-  /**
-   * When a printer becomes free, from live telemetry and confirmed work. A printer
-   * that is printing pushes free-time out by its reported remaining time; if it is
-   * printing but reports no remaining time, the free-time is *estimated* (flagged so
-   * placements warn) rather than pretended to be now. Assignments already committed
-   * by a confirmed (ACTIVE) plan push it out further still.
-   */
-  private printerFreeAt(printer: SchedulerPrinterRef, nowMs: number): { freeAtMs: number; estimated: boolean } {
-    let freeAtMs = nowMs;
-    let estimated = false;
-
-    if (printer.status === "printing" || printer.status === "paused") {
-      if (printer.printingTimeLeftMs !== null && printer.printingTimeLeftMs > 0) {
-        freeAtMs = Math.max(freeAtMs, nowMs + printer.printingTimeLeftMs);
-      } else {
-        // Busy, but no remaining estimate — advance by the disclosed assumption and
-        // mark it estimated so a task placed here is warned, not promised.
-        freeAtMs = Math.max(freeAtMs, nowMs + this.ctx.config.unknownEtaAssumptionS * 1000);
-        estimated = true;
-      }
-    } else if (heldByActiveRun(printer.activeRunState)) {
-      // Live telemetry does not (yet) show a print, but a canonical run still holds
-      // the printer — a PENDING dispatch reservation, or a fail-closed UNKNOWN outcome
-      // that must never be released without device evidence. We have no remaining-time
-      // estimate for it, so advance by the disclosed assumption and mark it estimated:
-      // the printer is never treated as free-now while a run holds it.
-      freeAtMs = Math.max(freeAtMs, nowMs + this.ctx.config.unknownEtaAssumptionS * 1000);
-      estimated = true;
-    } else if (this.bedBlocksPrinter(printer.id)) {
-      // The device reports idle, but a finished part is still on the plate. This is
-      // the 03:00–08:00 case from the brief: the printer is NOT available, it is in
-      // forced downtime waiting for an operator. How long that lasts is genuinely
-      // unknown (it depends on a human arriving), so the free-time is pushed out by
-      // the disclosed assumption and flagged estimated — the planner may show the
-      // gap, but it can no longer promise a start into it.
-      freeAtMs = Math.max(freeAtMs, nowMs + this.ctx.config.unknownEtaAssumptionS * 1000);
-      estimated = true;
-    }
-
-    for (const assignment of this.activeAssignmentsForPrinter(printer.id)) {
-      const endMs = readExplanation(assignment.metadata)?.endMs ?? null;
-      if (endMs !== null) freeAtMs = Math.max(freeAtMs, endMs);
-      else estimated = true; // a committed assignment with unknown end is an estimate too
-    }
-
-    return { freeAtMs, estimated };
+  private frozenHorizonS(): number {
+    const configured = this.ctx.config.frozenHorizonS;
+    return typeof configured === "number" && Number.isFinite(configured) && configured >= 0
+      ? configured
+      : DEFAULT_FROZEN_HORIZON_S;
   }
 
   /**
-   * True when the printer's bed still holds a part (or its state is unknown), so
-   * nothing may be planned onto it until an operator confirms clearance. A printer
-   * with no tracked cycle at all is not blocked — it simply has no history yet.
+   * Splits the confirmed plan's open placements into the **frozen head** and the
+   * **rebuildable tail** of the rolling horizon.
+   *
+   * Frozen: anything already started (`RESERVED`/`ACTIVE`) and anything whose
+   * confirmed start falls inside the horizon — the operator has committed to it,
+   * files may already be staged for it, and moving it under their feet is exactly
+   * what "подтверждённый ближайший assignment остаётся замороженным" forbids. A
+   * confirmed placement with no readable start is frozen too: an unknown is never
+   * resolved in favour of moving something.
+   *
+   * Released: still-`PROPOSED` placements starting beyond the horizon. They go
+   * back into the pool, which is what makes the horizon roll.
    */
-  private bedBlocksPrinter(printerId: string): boolean {
-    const bed = this.store.repositories.bedCycles.findOpenByPrinter(printerId);
-    return bed !== null && bed.state !== "CLEAR";
-  }
-
-  /** Open assignments (not released/cancelled) a confirmed ACTIVE plan holds on a printer. */
-  private activeAssignmentsForPrinter(printerId: string): Assignment[] {
-    const out: Assignment[] = [];
+  private partitionConfirmed(
+    nowMs: number,
+    frozenUntilMs: number
+  ): { frozen: Assignment[]; released: Assignment[] } {
+    const frozen: Assignment[] = [];
+    const released: Assignment[] = [];
     for (const plan of this.store.repositories.plans.list()) {
       if (plan.state !== "ACTIVE") continue;
       for (const a of this.assignmentsOf(plan.id)) {
-        if (
-          a.printerId === printerId &&
-          (a.state === "PROPOSED" || a.state === "RESERVED" || a.state === "ACTIVE")
-        ) {
-          out.push(a);
+        if (a.state !== "PROPOSED" && a.state !== "RESERVED" && a.state !== "ACTIVE") continue;
+        if (a.state !== "PROPOSED") {
+          frozen.push(a); // already reserved/running — never re-planned
+          continue;
         }
+        const startMs = a.binding.plannedStartAt ? Date.parse(a.binding.plannedStartAt) : NaN;
+        if (!Number.isFinite(startMs) || startMs <= frozenUntilMs) frozen.push(a);
+        else released.push(a);
       }
     }
+    // Deterministic order regardless of how the store returned them.
+    const byId = (x: Assignment, y: Assignment): number => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0);
+    frozen.sort(byId);
+    released.sort(byId);
+    void nowMs;
+    return { frozen, released };
+  }
+
+  /**
+   * When the *bed* is expected to be free after a print ends: the clearance an
+   * operator still has to perform, resolved against their calendar.
+   *
+   * This is deliberately an **estimate** and is flagged as one — the clearance
+   * operation does not exist yet (it is opened when the print actually finishes),
+   * so its duration is the type default rather than a stored value. It never
+   * feeds placement; it exists so the plan can answer "when is the plate free
+   * again?" without pretending the answer is a fact.
+   */
+  private projectBedRelease(endMs: number): { releaseMs: number | null; estimated: boolean } {
+    const slot = this.release.nextOperatorSlot(endMs);
+    if (slot === null) return { releaseMs: null, estimated: true };
+    return {
+      releaseMs: slot + DEFAULT_OPERATION_MINUTES.PART_REMOVAL * 60_000,
+      estimated: true
+    };
+  }
+
+  /** The interventions a placement implies, before the print and after it. */
+  private plannedOperations(
+    task: PrintTask,
+    printer: SchedulerPrinterRef | null
+  ): PlannedManualOperation[] {
+    const out: PlannedManualOperation[] = [];
+    const add = (type: keyof typeof DEFAULT_OPERATION_MINUTES, when: "before" | "after"): void => {
+      out.push({
+        type,
+        label: OPERATION_LABELS[type],
+        minutes: DEFAULT_OPERATION_MINUTES[type] ?? null,
+        when
+      });
+    };
+    if (printer && task.material && printer.material && !sameMaterialFamily(task.material, printer.material)) {
+      add("MATERIAL_CHANGE", "before");
+    }
+    const requiredNozzle = this.evidence.taskRequiredNozzleMm(task);
+    if (
+      printer &&
+      requiredNozzle !== null &&
+      printer.nozzleMm !== null &&
+      Math.abs(requiredNozzle - printer.nozzleMm) > 0.001
+    ) {
+      add("NOZZLE_CHANGE", "before");
+    }
+    if (printer && printer.remoteStartSupported !== true) add("FILE_TRANSFER_CONFIRM", "before");
+    // Every print ends with a part on a plate. This is the operation the whole
+    // release projection is about, so the plan names it up front.
+    add("PART_REMOVAL", "after");
     return out;
   }
+
+  /**
+   * Whether the executable file still has to reach the printer. True unless a
+   * tracked device artifact for this exact remote path is present *and* its
+   * content hash matches the binding — a file with a different hash in the slot
+   * is not "already uploaded", it is the wrong file.
+   */
+  private requiresUpload(task: PrintTask, printerId: string): boolean {
+    const { binding } = resolveTaskBinding(this.store.repositories, task);
+    const path = binding.expectedRemotePath ?? task.onDeviceFile;
+    if (!path) return true;
+    const record = this.store.repositories.deviceArtifacts.findBySlot(printerId, path);
+    if (!record) return true;
+    if (record.state !== "VERIFIED" && record.state !== "PRESENT_UNVERIFIED") return true;
+    if (binding.artifactSha256 !== null && record.artifactSha256 !== null) {
+      return record.artifactSha256 !== binding.artifactSha256;
+    }
+    return false;
+  }
+
 
   /** Cancels a draft plan and its still-proposed assignments (used when superseded). */
   private cancelDraft(plan: Plan, reason: string): void {
@@ -560,15 +790,89 @@ export class PlanningService {
     });
   }
 
+  /**
+   * Reads a stored plan back in full — the same shape whether it was just built
+   * or is being re-read after a restart. Everything a recommendation asserts
+   * (placements, timeline, unplaced codes, frozen head) is persisted, so nothing
+   * here is silently re-derived against a moved clock.
+   */
   private buildPlanDetail(plan: Plan): PlanDetail {
     const repos = this.store.repositories;
+    const frozenIds = new Set(readStringArray(plan.metadata.frozenAssignmentIds));
     const assignments = this.assignmentsOf(plan.id).map((assignment) => ({
       assignment,
       task: repos.tasks.getById(assignment.taskId),
       explanation: readExplanation(assignment.metadata)
     }));
-    const unplaced = readUnplaced(plan.metadata);
-    return { plan, assignments, unplaced };
+
+    // The frozen head lives on the CONFIRMED plan, not on this draft: it is
+    // referenced, never copied, so one placement can never exist twice.
+    const frozen: PlanAssignmentView[] = [];
+    for (const id of frozenIds) {
+      const assignment = repos.assignments.getById(id);
+      if (!assignment) continue;
+      const explanation = readExplanation(assignment.metadata);
+      frozen.push({
+        assignment,
+        task: repos.tasks.getById(assignment.taskId),
+        explanation: explanation ? { ...explanation, frozen: true } : null
+      });
+    }
+
+    return {
+      plan,
+      assignments,
+      unplaced: readUnplaced(plan.metadata),
+      frozen,
+      timeline: readTimeline(plan.metadata),
+      staleness: this.stalenessOf(plan),
+      generatedAt: readString(plan.metadata.generatedAt) ?? plan.createdAt,
+      frozenUntil: readString(plan.metadata.frozenUntil)
+    };
+  }
+
+  /**
+   * Whether this plan's recommendation has been overtaken.
+   *
+   * Two sources, both explicit: a `stale` marker written when the plan was
+   * superseded, and the live existence of a newer revision. The second matters
+   * for a *confirmed* plan — it stays ACTIVE and executable (a draft does not
+   * cancel it), but the operator must be able to see that a newer recommendation
+   * disagrees with it.
+   */
+  private stalenessOf(plan: Plan): PlanStaleness {
+    const marker = plan.metadata.stale;
+    if (marker && typeof marker === "object" && !Array.isArray(marker)) {
+      const m = marker as Record<string, unknown>;
+      return {
+        stale: true,
+        reason: typeof m.reason === "string" ? m.reason : "план устарел",
+        supersededByPlanId: typeof m.by === "string" ? m.by : null
+      };
+    }
+    if (plan.state === "CANCELLED" || plan.state === "COMPLETED") {
+      return { stale: true, reason: `план в состоянии «${plan.state}»`, supersededByPlanId: null };
+    }
+    const newer = this.store.repositories.plans
+      .list()
+      .find((p) => p.id !== plan.id && p.state === "DRAFT" && p.revision > plan.revision);
+    if (newer) {
+      return {
+        stale: true,
+        reason: `есть более новая рекомендация (ревизия ${newer.revision})`,
+        supersededByPlanId: newer.id
+      };
+    }
+    return { stale: false, reason: null, supersededByPlanId: null };
+  }
+
+  /** Stamps a plan as superseded by `byPlanId` (a marker, not a state change). */
+  private markStale(plan: Plan, reason: string, byPlanId: string): Plan {
+    return this.store.repositories.plans.update({
+      ...plan,
+      metadata: { ...plan.metadata, stale: { reason, by: byPlanId, at: this.ctx.nowIso() } },
+      updatedAt: this.ctx.nowIso()
+    });
   }
 
   private assignmentsOf(planId: string): Assignment[] {
@@ -592,32 +896,4 @@ export class PlanningService {
     if (!plan) throw new NotFoundError(`План «${id}»`);
     return plan;
   }
-}
-
-// ── Free helpers ────────────────────────────────────────────────────────────────
-
-function readExplanation(metadata: Metadata): PlanExplanation | null {
-  const raw = metadata.explanation;
-  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-    return raw as unknown as PlanExplanation;
-  }
-  return null;
-}
-
-function readUnplaced(metadata: Metadata): PlanDetail["unplaced"] {
-  const raw = metadata.unplaced;
-  if (!Array.isArray(raw)) return [];
-  return raw.flatMap((item) => {
-    if (item && typeof item === "object") {
-      const r = item as Record<string, unknown>;
-      if (typeof r.taskId === "string") {
-        return [{
-          taskId: r.taskId,
-          title: typeof r.title === "string" ? r.title : r.taskId,
-          reason: typeof r.reason === "string" ? r.reason : ""
-        }];
-      }
-    }
-    return [];
-  });
 }

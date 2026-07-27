@@ -112,79 +112,210 @@ export function compatibilityHtml(state) {
     `<span class="slice-hint">неизвестное критичное значение → «проверить», не «совместимо»</span>`);
 }
 
-export function planHtml(state) {
-  const controls = `
-    <button type="button" class="btn btn-primary btn-sm" data-sch-action="build-plan">Построить черновик</button>
-    ${state.plan ? `<button type="button" class="btn btn-sm" data-sch-action="recompute" data-id="${esc(state.plan.plan.id)}">↻ Пересчитать</button>` : ""}
-    ${state.plan && state.plan.plan.state === "DRAFT" ? `<button type="button" class="btn btn-ok btn-sm" data-sch-action="confirm" data-id="${esc(state.plan.plan.id)}">✓ Подтвердить</button>` : ""}`;
+/* ── План = РЕКОМЕНДАЦИЯ ────────────────────────────────────────
+   Раздел честно разделяет пять разных вещей, которые легко спутать:
+     1) рекомендация      — что советует планировщик (черновик);
+     2) подтверждённый план — что оператор утвердил (ACTIVE);
+     3) подготовленный файл — байты доехали до принтера;
+     4) DispatchEligibility — разрешение «можно стартовать сейчас»;
+     5) фактический запуск  — печать реально идёт.
+   Ни одна кнопка здесь не делает 3–5: это только 1 и 2. */
 
-  if (!state.plan) {
-    return panel("План печати", `<div class="slice-empty">Плана ещё нет, Владыка. Повелите — и я выстрою черновик из текущей очереди.</div>`, controls);
+const RELEASE_LABEL = {
+  FREE: "свободен",
+  PRINTING: "печатает",
+  MACHINE_BUSY_UNKNOWN: "занят, остаток времени неизвестен",
+  AWAITING_OPERATOR: "ждёт оператора",
+  OPERATION_IN_PROGRESS: "идёт ручная операция",
+  RELEASE_UNKNOWN_SCHEDULE: "срок неизвестен: нет расписания оператора",
+  RELEASE_UNKNOWN_DURATION: "срок неизвестен: нет длительности операции",
+  FROZEN_ASSIGNMENT: "занят замороженным назначением"
+};
+
+const UNPLACED_LABEL = {
+  NO_COMPATIBLE_PRINTER: "нет совместимых принтеров",
+  PINNED_PRINTER_UNAVAILABLE: "закреплённый принтер недоступен",
+  PRINTER_RELEASE_UNKNOWN: "неизвестно время освобождения принтера",
+  ETA_UNKNOWN: "неизвестна длительность печати",
+  UNKNOWN: "причина не записана"
+};
+
+const SEGMENT = {
+  printing: { cls: "print", label: "печать" },
+  operator_wait: { cls: "wait", label: "простой в ожидании оператора" },
+  operation: { cls: "op", label: "ручная операция" },
+  unknown: { cls: "unknown", label: "срок неизвестен" },
+  frozen_print: { cls: "frozen", label: "заморожено" },
+  planned_print: { cls: "planned", label: "рекомендация" },
+  approx_print: { cls: "approx", label: "оценка, не план" }
+};
+
+export function planHtml(state) {
+  const plan = state.plan;
+  const controls = `
+    <button type="button" class="btn btn-primary btn-sm" data-sch-action="recompute-all">↻ Пересчитать рекомендации</button>
+    ${plan && plan.plan.state === "DRAFT"
+      ? `<button type="button" class="btn btn-ok btn-sm" data-sch-action="confirm" data-id="${esc(plan.plan.id)}">✓ Подтвердить план вручную</button>`
+      : ""}`;
+
+  if (!plan) {
+    return panel("Рекомендации планировщика",
+      `<div class="slice-empty">Рекомендаций ещё нет, Владыка. Повелите пересчитать — и я выстрою их из текущей очереди.</div>`,
+      controls);
   }
 
-  const plan = state.plan.plan;
-  const stateChip = plan.state === "ACTIVE"
-    ? chip(`подтверждён · ревизия ${plan.revision}`, "ok")
-    : plan.state === "DRAFT"
-      ? chip(`черновик · ревизия ${plan.revision}`, "warn")
-      : chip(`${esc(plan.state)} · ревизия ${plan.revision}`, "info");
-  const confirmed = plan.confirmedAt ? `<span class="slice-hint">подтверждён ${fmtDate(plan.confirmedAt)}</span>` : "";
-
-  const byPrinter = groupByPrinter(state.plan.assignments);
-  const timeline = state.matrix.printers.length
-    ? state.matrix.printers.map((p) => timelineLane(p, byPrinter.get(p.id) || [])).join("")
-    : [...byPrinter.keys()].map((id) => timelineLane({ id, name: id }, byPrinter.get(id))).join("");
-
-  const unplaced = (state.plan.unplaced || []).length
-    ? `<div class="sch-unplaced"><b>Не размещены:</b><ul class="slice-findings">
-        ${state.plan.unplaced.map((u) => `<li class="slice-warn">⚠ ${esc(u.title)} — ${esc(u.reason)}</li>`).join("")}
-       </ul></div>`
+  const p = plan.plan;
+  const stateChip = p.state === "ACTIVE"
+    ? chip(`подтверждённый план · ревизия ${p.revision}`, "ok")
+    : p.state === "DRAFT"
+      ? chip(`рекомендация (не подтверждена) · ревизия ${p.revision}`, "warn")
+      : chip(`${esc(p.state)} · ревизия ${p.revision}`, "info");
+  const confirmed = p.confirmedAt ? `<span class="slice-hint">подтверждён ${fmtDate(p.confirmedAt)}</span>` : "";
+  const stale = plan.staleness && plan.staleness.stale
+    ? `<div class="slice-warn sch-stale-plan">⚠ План устарел: ${esc(plan.staleness.reason || "есть более новая рекомендация")} — пересчитайте, прежде чем подтверждать.</div>`
+    : "";
+  const generated = plan.generatedAt
+    ? `<span class="slice-hint">рассчитан ${fmtDate(plan.generatedAt)}</span>`
+    : "";
+  const frozenUntil = plan.frozenUntil
+    ? `<span class="slice-hint">заморожено до ${fmtTime(plan.frozenUntil)}</span>`
     : "";
 
-  // The state chip is HTML — it belongs in the (unescaped) panel body, not the
-  // title (panel() esc()-escapes the title, which would show raw <span> markup).
-  return panel("План печати",
-    `<div class="sch-plan-status">${stateChip}${confirmed}</div><div class="sch-lanes">${timeline || `<div class="slice-empty">Ни одно задание не нашло себе места — я доложила причины ниже.</div>`}</div>${unplaced}`,
+  const explanations = new Map();
+  for (const a of [...(plan.assignments || []), ...(plan.frozen || [])]) {
+    explanations.set(a.assignment.taskId, a);
+  }
+
+  const lanes = (plan.timeline || []).map((lane) => timelineLane(lane, explanations)).join("");
+  const cards = (plan.assignments || []).map(assignmentCard).join("");
+
+  return panel("Рекомендации планировщика",
+    `<div class="sch-plan-status">${stateChip}${confirmed}${generated}${frozenUntil}</div>
+     ${stale}
+     ${legendHtml()}
+     <div class="sch-lanes">${lanes || `<div class="slice-empty">В конфигурации фермы нет принтеров — линии строить не из чего.</div>`}</div>
+     ${cards ? `<div class="sch-cards">${cards}</div>` : ""}
+     ${unplacedHtml(plan.unplaced)}`,
     controls);
 }
 
-function timelineLane(printer, assignments) {
-  const cards = assignments.map(assignmentCard).join("") ||
-    `<span class="slice-empty">свободен</span>`;
+function legendHtml() {
+  const items = [
+    ["planned", "рекомендация"],
+    ["frozen", "подтверждено и заморожено"],
+    ["print", "печать идёт"],
+    ["wait", "вынужденный простой (сон/отсутствие оператора)"],
+    ["op", "ручная операция"],
+    ["approx", "оценка, не план"],
+    ["unknown", "срок неизвестен"]
+  ];
+  return `<div class="sch-legend">
+    ${items.map(([cls, label]) => `<span class="sch-legend-item"><i class="sch-seg-dot sch-seg-${cls}"></i>${esc(label)}</span>`).join("")}
+    <span class="slice-hint">Рекомендация ≠ подтверждённый план ≠ подготовленный файл ≠ разрешение DispatchEligibility ≠ фактический запуск. Здесь только первые два — ни один файл не загружается и ни один принтер не запускается.</span>
+  </div>`;
+}
+
+function timelineLane(lane, explanations) {
+  const release = lane.releaseAtMs != null
+    ? chip(`свободен с ${fmtTime(lane.releaseAtMs)}`, lane.waitingForOperator ? "warn" : "ok")
+    : chip("время освобождения неизвестно", "error");
+  const code = chip(esc(RELEASE_LABEL[lane.releaseCode] || lane.releaseCode || "—"), "info");
+  const segments = (lane.segments || []).map((s) => segmentHtml(s, explanations)).join("") ||
+    `<span class="slice-empty">ничего не запланировано</span>`;
   return `
     <div class="sch-lane">
-      <div class="sch-lane-head">${esc(printer.name)}</div>
-      <div class="sch-lane-body">${cards}</div>
+      <div class="sch-lane-head">${esc(lane.name || lane.printerId)}</div>
+      <div class="sch-lane-meta">${release}${code}</div>
+      <div class="sch-lane-reason slice-hint">${esc(lane.releaseReason || "")}</div>
+      <div class="sch-lane-body">${segments}</div>
+    </div>`;
+}
+
+function segmentHtml(seg, explanations) {
+  const meta = SEGMENT[seg.kind] || { cls: "unknown", label: seg.kind };
+  const window = seg.endMs != null
+    ? `${fmtTime(seg.startMs)}–${fmtTime(seg.endMs)}`
+    : `${fmtTime(seg.startMs)} — конец неизвестен`;
+  const view = seg.taskId ? explanations.get(seg.taskId) : null;
+  const ex = view?.explanation || null;
+  const flags = [];
+  if (ex?.manualStartRequired) flags.push(chip("старт вручную", "warn"));
+  if (ex?.requiresUpload) flags.push(chip("файл не подготовлен", "warn"));
+  if (seg.approximate) flags.push(chip("оценка", "warn"));
+  return `
+    <div class="sch-seg sch-seg-${meta.cls}">
+      <div class="sch-seg-head"><span class="sch-seg-time">${esc(window)}</span><span class="sch-seg-kind">${esc(meta.label)}</span></div>
+      <div class="sch-seg-label">${esc(seg.label || "")}</div>
+      ${flags.length ? `<div class="sch-tags">${flags.join("")}</div>` : ""}
     </div>`;
 }
 
 function assignmentCard(view) {
   const ex = view.explanation || {};
   const task = view.task || {};
+  const binding = view.assignment?.binding || {};
   const eta = ex.etaSeconds != null
-    ? `${fmtDuration(ex.etaSeconds)}${ex.etaPreliminary ? " (предв.)" : ""} · ${etaSourceLabel(ex.etaSource)}`
+    ? `${fmtDuration(ex.etaSeconds)} · ${etaConfidenceLabel(ex.etaConfidence)} · ${etaSourceLabel(ex.etaSource)}`
     : "ETA неизвестна";
   const window = ex.startMs
     ? `${fmtTime(ex.startMs)}${ex.endMs ? "–" + fmtTime(ex.endMs) : ""}`
     : "";
+  const bed = ex.bedReleaseMs != null
+    ? `стол освободится ≈ ${fmtTime(ex.bedReleaseMs)}${ex.bedReleaseEstimated ? " (оценка)" : ""}`
+    : "время освобождения стола неизвестно";
+  const revisions = [
+    binding.sliceVariantId ? `слайс ${binding.sliceVariantId}` : null,
+    binding.machineRevisionId ? `machine ${binding.machineRevisionId}` : null,
+    binding.processRevisionId ? `process ${binding.processRevisionId}` : null,
+    binding.filamentRevisionId ? `filament ${binding.filamentRevisionId}` : null
+  ].filter(Boolean);
+  const ops = Array.isArray(ex.manualOperations) && ex.manualOperations.length
+    ? `<div class="slice-hint">ручные операции: ${ex.manualOperations
+        .map((op) => `${esc(op.label)} (${op.when === "before" ? "до" : "после"}${op.minutes != null ? `, ~${op.minutes} мин` : ""})`)
+        .join("; ")}</div>`
+    : "";
   const score = Array.isArray(ex.scoreBreakdown) && ex.scoreBreakdown.length
-    ? `<details class="slice-details"><summary>score ${ex.score ?? 0}</summary>
+    ? `<details class="slice-details"><summary>почему этот принтер (score ${ex.score ?? 0})</summary>
         <ul class="slice-findings">${ex.scoreBreakdown.map((c) => `<li>${esc(c.label)}: ${c.value > 0 ? "+" : ""}${c.value}</li>`).join("")}</ul>
        </details>`
     : "";
   const alts = Array.isArray(ex.alternatives) && ex.alternatives.length
     ? `<div class="slice-hint">альтернативы: ${ex.alternatives.map((a) => `${esc(a.printerId)} (${a.score})`).join(", ")}</div>`
     : "";
+  const blockers = Array.isArray(ex.blockers) && ex.blockers.length
+    ? `<ul class="slice-findings">${ex.blockers.map((b) => `<li class="slice-error">✖ ${esc(b)}</li>`).join("")}</ul>`
+    : "";
   const warns = Array.isArray(ex.warnings) && ex.warnings.length
     ? `<ul class="slice-findings">${ex.warnings.map((w) => `<li class="slice-warn">⚠ ${esc(w)}</li>`).join("")}</ul>`
     : "";
   return `
-    <div class="sch-assign">
-      <div class="sch-assign-head"><span class="slice-name">${esc(task.title || view.assignment.taskId)}</span>${window ? `<span class="slice-tag">${window}</span>` : ""}</div>
-      <div class="sch-assign-meta">${esc(eta)}</div>
+    <div class="sch-assign${ex.frozen ? " sch-assign-frozen" : ""}">
+      <div class="sch-assign-head">
+        <span class="slice-name">${esc(task.title || view.assignment.taskId)}</span>
+        ${chip(esc(ex.printerId || view.assignment.printerId), "info")}
+        ${window ? `<span class="slice-tag">${window}</span>` : ""}
+        ${ex.frozen ? chip("заморожено", "ok") : chip("рекомендация", "warn")}
+      </div>
+      <div class="sch-assign-meta">${esc(eta)} · ${esc(bed)}</div>
       <div class="slice-hint">${esc(ex.reason || "")}</div>
-      ${score}${alts}${warns}
+      ${revisions.length ? `<div class="slice-hint">ревизии: ${esc(revisions.join(" · "))}</div>` : ""}
+      ${ops}${score}${alts}${blockers}${warns}
     </div>`;
+}
+
+function unplacedHtml(unplaced) {
+  if (!Array.isArray(unplaced) || !unplaced.length) return "";
+  return `<div class="sch-unplaced"><b>Не поставлены в план:</b><ul class="slice-findings">
+      ${unplaced.map((u) => `<li class="slice-warn">⚠ ${esc(u.title)} — <code>${esc(u.code || "UNKNOWN")}</code> ${esc(UNPLACED_LABEL[u.code] || "")}: ${esc(u.reason)}${
+        u.hint ? ` <span class="slice-hint">(${esc(u.hint.note)}: ${esc(u.hint.printerId)} ${fmtTime(u.hint.startMs)}–${fmtTime(u.hint.endMs)})</span>` : ""
+      }</li>`).join("")}
+     </ul></div>`;
+}
+
+function etaConfidenceLabel(confidence) {
+  return confidence === "exact" ? "точная ETA"
+    : confidence === "preliminary" ? "предварительная ETA"
+    : "достоверность ETA неизвестна";
 }
 
 export function nightHtml(state) {
@@ -210,16 +341,6 @@ export function nightHtml(state) {
 }
 
 /* ── Мелочи ─────────────────────────────────────────────────── */
-
-function groupByPrinter(assignments) {
-  const map = new Map();
-  for (const a of assignments || []) {
-    const id = a.assignment.printerId;
-    if (!map.has(id)) map.set(id, []);
-    map.get(id).push(a);
-  }
-  return map;
-}
 
 function etaSourceLabel(source) {
   return source === "slice_variant" ? "слайс"

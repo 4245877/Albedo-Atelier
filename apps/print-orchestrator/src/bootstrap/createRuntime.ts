@@ -377,6 +377,8 @@ export class FarmRuntime implements PrintServices {
   get scheduler(): SchedulerService {
     this.ensureQueue();
     const store = this.printQueueStoreRef as PrintQueueStore;
+    const operations = this.manualOperationServiceRef as ManualOperationService;
+    const schedule = this.operatorScheduleServiceRef as OperatorScheduleService;
     return new SchedulerService(store, () => this.schedulerPrinters(), {
       now: () => new Date(),
       runtimeAvailable: this.sliceRuntimeAvailableFlag,
@@ -384,7 +386,13 @@ export class FarmRuntime implements PrintServices {
       nightWindow: env.nightWindow,
       farmTimeZone: env.farmTimezone,
       compatibility: { telemetryStaleMs: env.schedulerTelemetryStaleMs },
-      unknownEtaAssumptionS: 4 * 60 * 60
+      unknownEtaAssumptionS: 4 * 60 * 60,
+      // The two inputs that make "when is this printer really free?" answerable:
+      // the interventions still owed on it, and whether a human is awake. Both are
+      // read live, and both fail closed — an unresolvable schedule leaves the
+      // release unknown rather than defaulting the printer to available.
+      manualOperations: (printerId) => operations.openFor(printerId),
+      operatorAvailabilityAt: (at) => schedule.availability(at)
     });
   }
 

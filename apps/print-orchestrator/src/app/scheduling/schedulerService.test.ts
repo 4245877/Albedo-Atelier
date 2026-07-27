@@ -698,12 +698,18 @@ test("a printer currently printing pushes the task start past its remaining time
   assert.ok(ex.startMs >= NOW.getTime() + 2 * 3600 * 1000 - 1000, "starts after the current print finishes");
 });
 
-test("a printing printer with unknown remaining time warns that free-time is estimated", () => {
+test("a printing printer with unknown remaining time takes nothing (release is unknown, not estimated)", () => {
   const db = store();
   insertGcodeTask(db, "t1", { durationS: 3600 });
   const svc = makeService(db, [printer("p1", { status: "printing", printingTimeLeftMs: null })]);
-  const ex = svc.buildDraftPlan().assignments[0].explanation!;
-  assert.ok(ex.warnings.some((w) => /оценено приблизительно/.test(w)));
+  const plan = svc.buildDraftPlan();
+  // The old behaviour advanced free-time by a 4-hour assumption and warned. That
+  // assumption is a promise nothing can keep, so the work now stays unplaced with
+  // a stable code instead.
+  assert.equal(plan.assignments.length, 0);
+  assert.equal(plan.unplaced[0].code, "PRINTER_RELEASE_UNKNOWN");
+  assert.equal(plan.timeline[0].releaseAtMs, null);
+  assert.equal(plan.timeline[0].releaseCode, "MACHINE_BUSY_UNKNOWN");
 });
 
 test("night gate: a printer physically printing with no bed cycle is not a clear bed", () => {
@@ -730,14 +736,16 @@ test("a printer held by an UNKNOWN canonical run is never a night candidate (fai
   assert.ok(report.rejected.some((r) => r.reasons.some((x) => /стол не свободен/.test(x))));
 });
 
-test("a printer held by a PENDING run is not planned as free-now (start pushed out + estimated)", () => {
+test("a printer held by a PENDING run is never planned as free-now", () => {
   const db = store();
   insertGcodeTask(db, "t1", { durationS: 3600 });
   // Telemetry idle, but a canonical PENDING run (a dispatch reservation) holds it.
+  // Nothing knows when that ends, so the printer takes no work at all.
   const svc = makeService(db, [printer("p1", { status: "idle", activeRunState: "PENDING" })]);
-  const ex = svc.buildDraftPlan().assignments[0].explanation!;
-  assert.ok(ex.startMs > NOW.getTime() + 60_000, "start is pushed past now, not free-now");
-  assert.ok(ex.warnings.some((w) => /оценено приблизительно/.test(w)));
+  const plan = svc.buildDraftPlan();
+  assert.equal(plan.assignments.length, 0, "not planned as free-now");
+  assert.equal(plan.unplaced[0].code, "PRINTER_RELEASE_UNKNOWN");
+  assert.equal(plan.timeline[0].releaseCode, "MACHINE_BUSY_UNKNOWN");
 });
 
 // ── night gate ETA goes through the same resolver as the compatibility matrix ────

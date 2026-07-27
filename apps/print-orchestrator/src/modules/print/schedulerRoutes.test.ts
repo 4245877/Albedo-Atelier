@@ -159,6 +159,42 @@ test("GET /scheduler/compatibility and the plan lifecycle respond over HTTP", as
   assert.equal(confirm.json().plan.plan.state, "ACTIVE");
 });
 
+test("POST /scheduler/recompute recalculates the recommendations and only that", async () => {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/print/scheduler/recompute",
+    headers: auth,
+    payload: { trigger: "print_finished" }
+  });
+  assert.equal(res.statusCode, 200);
+  const plan = res.json().plan;
+  // The result of a recompute is always an unconfirmed recommendation, carrying
+  // the timeline and the frozen/unplaced sections the operator UI renders.
+  assert.equal(plan.plan.state, "DRAFT");
+  assert.ok(Array.isArray(plan.timeline));
+  assert.ok(Array.isArray(plan.frozen));
+  assert.ok(Array.isArray(plan.unplaced));
+  assert.ok(plan.staleness && typeof plan.staleness.stale === "boolean");
+});
+
+test("POST /scheduler/recompute rejects an unknown trigger by falling back to `manual`", async () => {
+  // The trigger is a closed vocabulary so the audit trail groups by a real code;
+  // an unrecognised one must not be stored verbatim, and must not 500 either.
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/print/scheduler/recompute",
+    headers: auth,
+    payload: { trigger: "<script>whatever</script>" }
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().plan.plan.metadata.trigger, "manual");
+});
+
+test("recompute needs the token, like every other mutation", async () => {
+  const res = await app.inject({ method: "POST", url: "/api/print/scheduler/recompute" });
+  assert.equal(res.statusCode, 401);
+});
+
 test("GET /scheduler/night reports candidates with the configured buffer", async () => {
   const res = await app.inject({ method: "GET", url: "/api/print/scheduler/night" });
   assert.equal(res.statusCode, 200);

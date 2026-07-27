@@ -290,9 +290,15 @@ function registerArtifactRoutes(
  *   GET  /scheduler/plans                all plans (revisions/history)
  *   GET  /scheduler/plans/:id            one plan with assignments + explanations + unplaced
  *   POST /scheduler/plans                build a fresh DRAFT plan   body: { name?, window? }
- *   POST /scheduler/plans/:id/recompute  recompute into a new DRAFT revision
+ *   POST /scheduler/plans/:id/recompute  recompute into a new DRAFT revision   body: { trigger? }
+ *   POST /scheduler/recompute            recompute the live plan (or build the first) body: { trigger? }
  *   POST /scheduler/plans/:id/confirm    confirm a DRAFT (→ ACTIVE)
  *   GET  /scheduler/night                night (unattended) candidates + rejections
+ *
+ * Everything here is a **recommendation**: a plan names a printer, a slice and a
+ * window, and stops there. No handler uploads a file, reserves a bed or sends a
+ * printer command — those live behind the dispatch API and its `DispatchEligibility`
+ * gate, and they always need a separate, explicit operator action.
  */
 function registerSchedulerRoutes(
   app: FastifyInstance,
@@ -359,9 +365,20 @@ function registerSchedulerRoutes(
     })
   }));
 
-  app.post<{ Params: { id: string } }>("/scheduler/plans/:id/recompute", async (request) => ({
+  app.post<{ Params: { id: string }; Body: { trigger?: unknown } }>(
+    "/scheduler/plans/:id/recompute",
+    async (request) => ({
+      ok: true,
+      plan: services.scheduler.recomputePlan(request.params.id, shapeTrigger(request.body?.trigger))
+    })
+  );
+
+  // The single "recalculate the recommendations" command, for every event the
+  // brief lists. Explicit on purpose: nothing schedules it, and it produces a
+  // DRAFT — no upload, no reservation, no printer command.
+  app.post<{ Body: { trigger?: unknown } }>("/scheduler/recompute", async (request) => ({
     ok: true,
-    plan: services.scheduler.recomputePlan(request.params.id)
+    plan: services.scheduler.recomputeRecommendations(shapeTrigger(request.body?.trigger))
   }));
 
   app.post<{ Params: { id: string }; Body: { expectedVersion?: unknown } }>(
@@ -396,6 +413,31 @@ function registerSchedulerRoutes(
       override: services.scheduler.setMaterialOverride(request.params.id, shapeMaterialOverride(request.body))
     })
   );
+}
+
+/**
+ * The stable vocabulary of events that may prompt a recalculation. It is a
+ * closed list so the audit trail groups by a real code instead of by whatever
+ * free text a caller sent; anything unrecognised becomes `manual`.
+ */
+const RECOMPUTE_TRIGGERS = new Set([
+  "manual",
+  "task_added",
+  "task_removed",
+  "priority_changed",
+  "deadline_changed",
+  "print_finished",
+  "operation_opened",
+  "operation_completed",
+  "schedule_changed",
+  "printer_state_changed",
+  "slice_ready",
+  "assignment_changed",
+  "device_error"
+]);
+
+function shapeTrigger(raw: unknown): string {
+  return typeof raw === "string" && RECOMPUTE_TRIGGERS.has(raw) ? raw : "manual";
 }
 
 /** Narrows an untrusted body into the material-override input; only present fields are set. */

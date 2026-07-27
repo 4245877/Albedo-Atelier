@@ -34,6 +34,8 @@ function printer(id: string, over: Partial<PlannerPrinterInput> = {}): PlannerPr
     printerId: id,
     name: id.toUpperCase(),
     freeAtMs: NOW,
+    releaseCode: "FREE",
+    releaseReason: "принтер свободен",
     currentMaterial: "PLA",
     currentNozzleMm: 0.4,
     ...over
@@ -115,12 +117,44 @@ test("two tasks are serialised onto the same single printer (free-time advances)
   assert.ok(second.startMs >= (first.endMs ?? 0), "second task starts after the first ends");
 });
 
-test("an unknown ETA still places the task but keeps end/eta null and warns", () => {
+test("an unknown ETA leaves the task unplaced with a stable code and an approximate hint", () => {
   const result = buildPlan([task({ etaSeconds: null })], [printer("p1")], config);
-  const a = result.assignments[0];
-  assert.equal(a.etaSeconds, null);
-  assert.equal(a.endMs, null);
-  assert.ok(a.warnings.some((w) => /ETA неизвестна/.test(w)));
+  assert.equal(result.assignments.length, 0, "no executable placement is invented");
+  assert.equal(result.unplaced.length, 1);
+  const u = result.unplaced[0];
+  assert.equal(u.code, "ETA_UNKNOWN");
+  // The estimate is offered only as an explicitly-flagged visual hint.
+  assert.equal(u.hint?.approximate, true);
+  assert.equal(u.hint?.printerId, "p1");
+  assert.equal(u.hint?.endMs, (u.hint?.startMs ?? 0) + config.unknownEtaAssumptionS * 1000);
+});
+
+test("a printer with an unknown release takes nothing (PRINTER_RELEASE_UNKNOWN)", () => {
+  const result = buildPlan(
+    [task({ compatiblePrinterIds: ["p1"] })],
+    [
+      printer("p1", {
+        freeAtMs: null,
+        releaseCode: "RELEASE_UNKNOWN_DURATION",
+        releaseReason: "не задана длительность операции «снятие готовой модели»"
+      })
+    ],
+    config
+  );
+  assert.equal(result.assignments.length, 0);
+  assert.equal(result.unplaced[0].code, "PRINTER_RELEASE_UNKNOWN");
+  assert.match(result.unplaced[0].reason, /длительность/);
+  assert.equal(result.unplaced[0].hint, null, "no ghost block is drawn against an unknown release");
+});
+
+test("a manual-start-only printer is planned onto, with an honest warning", () => {
+  const result = buildPlan(
+    [task({ compatiblePrinterIds: ["p1"] })],
+    [printer("p1", { remoteStartSupported: false })],
+    config
+  );
+  assert.equal(result.assignments.length, 1);
+  assert.ok(result.assignments[0].warnings.some((w) => /вручную/.test(w)));
 });
 
 test("stability: a task keeps its previous-plan printer when scores are otherwise equal", () => {
@@ -153,15 +187,25 @@ test("manual queue order breaks a tie: a lower queueRank is planned first", () =
   assert.ok(frontA.startMs <= backA.startMs, "front-of-queue task is scheduled first");
 });
 
-test("a printer whose free-time is only estimated warns the waiting task", () => {
+test("a task waiting on a held printer is told why, in the warning", () => {
   const result = buildPlan(
     [task({ compatiblePrinterIds: ["p1"], etaSeconds: 3600 })],
-    [printer("p1", { freeAtMs: NOW + 3 * 3600 * 1000, freeAtEstimated: true })],
+    [
+      printer("p1", {
+        freeAtMs: NOW + 3 * 3600 * 1000,
+        releaseCode: "AWAITING_OPERATOR",
+        releaseReason: "принтер занят до выполнения операции «снятие готовой модели» оператором"
+      })
+    ],
     config
   );
   assert.ok(
-    result.assignments[0].warnings.some((w) => /оценено приблизительно/.test(w)),
-    "an estimated free-time is disclosed as a warning"
+    result.assignments[0].warnings.some((w) => /Старт после освобождения принтера/.test(w)),
+    "the wait is disclosed"
+  );
+  assert.ok(
+    result.assignments[0].warnings.some((w) => /снятие готовой модели/.test(w)),
+    "and the reason for it is quoted verbatim, not paraphrased as an estimate"
   );
 });
 

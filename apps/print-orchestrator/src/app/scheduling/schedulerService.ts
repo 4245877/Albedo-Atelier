@@ -18,12 +18,18 @@ export type { EligibilityRequest } from "./eligibility";
 export type {
   CompatibilityMatrix,
   CompatibilityRow,
+  EtaConfidence,
   NightCandidatesReport,
   PlanAssignmentView,
   PlanDetail,
   PlanExplanation,
+  PlannedManualOperation,
+  PlanStaleness,
+  PrinterTimeline,
   SchedulerConfig,
-  SchedulerPrinterRef
+  SchedulerPrinterRef,
+  TimelineSegment,
+  UnplacedView
 } from "./types";
 
 /**
@@ -88,12 +94,24 @@ export class SchedulerService {
     return this.planning.getPlan(id);
   }
 
-  buildDraftPlan(options: { name?: string; window?: string } = {}): PlanDetail {
+  buildDraftPlan(options: { name?: string; window?: string; trigger?: string } = {}): PlanDetail {
     return this.planning.buildDraftPlan(options);
   }
 
-  recomputePlan(planId: string): PlanDetail {
-    return this.planning.recomputePlan(planId);
+  recomputePlan(planId: string, trigger?: string): PlanDetail {
+    return this.planning.recomputePlan(planId, trigger);
+  }
+
+  /**
+   * Recalculate the recommendations after a change (a task added, a print
+   * finished, an intervention performed, the operator's schedule edited, …).
+   *
+   * Explicit by design: it is invoked by an operator or an API call, never by a
+   * worker or a timer, and it produces a DRAFT — it uploads nothing, reserves
+   * nothing and starts nothing.
+   */
+  recomputeRecommendations(trigger: string): PlanDetail {
+    return this.planning.recomputeLive(trigger);
   }
 
   confirmPlan(planId: string, actor?: string, expectedVersion?: number): PlanDetail {
