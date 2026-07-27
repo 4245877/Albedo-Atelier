@@ -49,10 +49,36 @@ function sameFile(a: string | null, b: string | null): boolean {
  *    so it unwinds and re-queues; a `PENDING`/`UNKNOWN` run WITH a guard is
  *    held untouched until device evidence or the operator resolves it.
  */
+/**
+ * The manual-operations collaborator, injected as a narrow port so the run
+ * lifecycle does not depend on the whole service (and so tests can drive the bed
+ * cycle without one). Wired by the composition root to
+ * {@link file://../operations/manualOperationService.ts ManualOperationService}.
+ */
+export interface BedOperationsPort {
+  /** Opens (idempotently) the clearance operation a finished print leaves behind. */
+  openClearanceFor(input: {
+    printerId: string;
+    bedCycleId: string;
+    assignmentId?: string | null;
+    taskId?: string | null;
+    reason?: string;
+  }): { id: string };
+  /** The still-open clearance operations holding a printer. */
+  openClearanceOperations(printerId: string): { id: string; bedCycleId: string | null }[];
+  /** Confirms one, recording the actor — the same call the operator UI makes. */
+  complete(operationId: string, options: { actor?: string; note?: string | null }): unknown;
+}
+
 export class RunLifecycleService {
   constructor(
     private readonly store: PrintQueueStore,
-    private readonly options: { now?: () => Date; logger?: StoreLogger } = {}
+    private readonly options: {
+      now?: () => Date;
+      logger?: StoreLogger;
+      /** Opened/closed alongside the bed cycle when wired; optional for tests. */
+      operations?: BedOperationsPort;
+    } = {}
   ) {}
 
   private get logger(): StoreLogger {
@@ -242,6 +268,12 @@ export class RunLifecycleService {
    * `auto_cleared` is refused unless the caller passes
    * `automaticContinuationAllowed` (the farm config's verified capability), so a
    * driver cannot claim an automation the hardware does not have.
+   *
+   * When the operations model is wired, this path and
+   * `ManualOperationService.complete` are two doors into the *same* room: an
+   * operator confirming here also closes the tracked `PART_REMOVAL` operation,
+   * so the operator queue cannot keep asking for work that has already been done
+   * and the printer's hold cannot outlive the clearance that lifted it.
    */
   clearBed(
     printerId: string,
@@ -294,8 +326,40 @@ export class RunLifecycleService {
           ...(options.note ? { note: options.note } : {})
         }
       });
+      this.closeClearanceOperations(printerId, bed.id, options.actor, options.note);
       return saved;
     });
+  }
+
+  /**
+   * Closes the tracked clearance operations this bed clearance satisfied.
+   *
+   * Scoped to *this* bed cycle (plus any clearance operation left without one by
+   * an older record), so confirming one printer's plate never silently completes
+   * an intervention queued for a different cycle. Failures are logged, never
+   * thrown: the bed is already legitimately clear, and refusing the whole
+   * transaction over a bookkeeping mismatch would leave the operator unable to
+   * clear a plate they are holding in their hand.
+   */
+  private closeClearanceOperations(
+    printerId: string,
+    bedCycleId: string,
+    actor?: string,
+    note?: string
+  ): void {
+    const operations = this.options.operations;
+    if (!operations) return;
+    try {
+      for (const op of operations.openClearanceOperations(printerId)) {
+        if (op.bedCycleId !== null && op.bedCycleId !== bedCycleId) continue;
+        operations.complete(op.id, { actor: actor ?? "operator", note: note ?? null });
+      }
+    } catch (error) {
+      this.logger.warn?.(
+        { err: error, printer: printerId, bedCycle: bedCycleId },
+        "bed cleared, but its manual operation could not be closed"
+      );
+    }
   }
 
   // ── State movers (each wraps its own transaction) ─────────────────────────
@@ -451,6 +515,19 @@ export class RunLifecycleService {
             clearedAt: to === "CLEAR" ? iso : bed.clearedAt,
             updatedAt: iso
           });
+          // A bed that ran now holds a part. Open the typed intervention that
+          // has to happen before this printer is usable again — in the same
+          // transaction as the completion, so there is no window in which a
+          // finished print leaves an occupied plate with nothing tracking it.
+          if (to === "AWAITING_CLEARANCE") {
+            this.options.operations?.openClearanceFor({
+              printerId: run.printerId,
+              bedCycleId: bed.id,
+              assignmentId: run.assignmentId,
+              taskId: run.taskId,
+              reason: `печать ${run.id} завершена (${outcome}) — снимите модель и подтвердите очистку стола`
+            });
+          }
         }
       }
 

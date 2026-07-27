@@ -15,6 +15,7 @@ export const isSectionVisible = (id) => !HIDDEN_SECTIONS.has(id);
 const NAV = [
   ["summary", "Статус"], ["printers", "Принтеры"], ["queue", "Очередь"], ["night", "Ночь"],
   ["uploads", "Загрузка"], ["slicing", "Слайсинг"], ["scheduler", "Планировщик"],
+  ["operations", "Оператор"],
   ["critical", "События"], ["materials", "Материалы"], ["today", "Сегодня"], ["performance", "Показатели"],
   ["automations", "Автоматизации"], ["cameras", "Камеры"], ["maintenance", "Обслуживание"],
   ["actions", "Действия"], ["system", "Система"], ["feed", "Лента"], ["warnings", "Внимание"], ["plan", "План"],

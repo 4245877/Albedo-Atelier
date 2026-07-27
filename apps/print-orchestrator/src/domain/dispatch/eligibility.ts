@@ -153,6 +153,31 @@ export interface DispatchFacts {
    */
   automaticContinuationAllowed: boolean;
 
+  // ── Operator / manual operations ──────────────────────────────────────────
+  /**
+   * The blocking manual operations still open on this printer (part removal,
+   * nozzle change, …). A non-empty list means the machine is physically held.
+   * Resolved by the caller from `ManualOperationService.openBlockingFor`.
+   */
+  blockingOperations: {
+    id: string;
+    type: string;
+    state: string;
+    label: string;
+    /** Expected hands-on minutes; null when nobody has estimated it (fail-closed). */
+    minutes: number | null;
+  }[];
+  /**
+   * Where the operator is right now: `AVAILABLE` | `ASLEEP` | `AWAY` | `OFF` |
+   * `UNKNOWN`. `UNKNOWN` is the absence of a schedule, not a schedule that says
+   * no — only the former is a fail-closed stop.
+   */
+  operatorPresence: string;
+  /** False when the schedule/timezone could not be resolved at all. */
+  operatorScheduleResolved: boolean;
+  /** Why the operator is (un)available — operator-facing text for the refusal. */
+  operatorReason: string;
+
   // ── Plan binding ──────────────────────────────────────────────────────────
   reservation: DispatchReservation | null;
   /** The printer this dispatch is actually about to start on. */
@@ -294,6 +319,7 @@ export function evaluateDispatchEligibility(
   pushFileIdentity(facts, push);
   pushDeviceState(facts, push);
   pushBed(facts, push);
+  pushManualOperations(facts, push);
   pushReservation(facts, push);
   const nightWindowFit = facts.mode === "night" ? pushNight(facts, push) : null;
 
@@ -801,6 +827,79 @@ function pushBed(f: DispatchFacts, push: (r: EligibilityReason) => void): void {
   push(
     reason(REASON.BED_NOT_CLEAR, "blocker", `стол не свободен (${state})`, { bedState: state })
   );
+}
+
+/**
+ * Outstanding physical interventions — the human half of "is this printer free?".
+ *
+ * Two separate facts, deliberately not merged:
+ *
+ *  1. **A blocking operation holds the machine.** Part removal, a plate swap, a
+ *     nozzle change: until one of these is *confirmed done by a named person*,
+ *     the printer cannot run the next job, whoever asks and however they ask.
+ *     The refusal is non-overridable and applies in `manual` mode exactly as in
+ *     `night` mode — "ручной запуск не обходит обязательную операцию".
+ *  2. **Whether an operator can even do it** is a different question, and only
+ *     matters for automation. An asleep operator does not make a *manual* start
+ *     illegal — the person pressing the button is evidently awake. It makes an
+ *     *unattended* continuation impossible, because the intervention it depends
+ *     on cannot happen. Hence: presence is a blocker at night, context at day.
+ *
+ * The fail-closed edge is the third case: when the schedule cannot be resolved
+ * at all (no timezone, no rules, no operator) *and* an intervention is pending,
+ * the automatic continuation is refused outright. An unknown schedule is not an
+ * available operator, and "the queue will carry on once somebody, at some point,
+ * clears that plate" is not a plan.
+ *
+ * Note the scoping: operator facts only ever escalate to a blocker when an
+ * intervention is actually outstanding. A night start onto an already-clear bed
+ * needs no human, so a sleeping operator is context for it, not a refusal — the
+ * night window, `unattendedAllowed` and the bed rules already govern that case.
+ */
+function pushManualOperations(f: DispatchFacts, push: (r: EligibilityReason) => void): void {
+  for (const op of f.blockingOperations) {
+    push(
+      reason(
+        REASON.MANUAL_OPERATION_REQUIRED,
+        "blocker",
+        `требуется ручная операция: ${op.label} (${op.state}) — подтвердите выполнение перед запуском`,
+        op
+      )
+    );
+  }
+
+  // "Continuing automatically" is what the operator's presence gates. Nothing to
+  // continue past ⇒ nothing for a schedule to decide.
+  const needsOperator = f.blockingOperations.length > 0;
+  const automatic = f.mode === "night";
+
+  if (!f.operatorScheduleResolved) {
+    push(
+      reason(
+        REASON.OPERATOR_SCHEDULE_UNKNOWN,
+        automatic && needsOperator ? "blocker" : "warning",
+        `расписание оператора не разобрано (${f.operatorReason}) — автоматическое продолжение очереди запрещено`,
+        { presence: f.operatorPresence, pendingOperations: f.blockingOperations.length }
+      )
+    );
+    return;
+  }
+
+  if (f.operatorPresence !== "AVAILABLE") {
+    push(
+      reason(
+        REASON.OPERATOR_UNAVAILABLE,
+        // An operator standing at the machine at 23:00 may start a print by hand
+        // even though the schedule says they should be asleep; an *unattended*
+        // continuation that depends on them cannot.
+        automatic && needsOperator ? "blocker" : "warning",
+        needsOperator
+          ? `${f.operatorReason} — обязательные операции не могут быть выполнены сейчас`
+          : f.operatorReason,
+        { presence: f.operatorPresence, pendingOperations: f.blockingOperations.length }
+      )
+    );
+  }
 }
 
 /**

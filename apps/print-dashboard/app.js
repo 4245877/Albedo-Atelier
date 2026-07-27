@@ -21,6 +21,7 @@ import { ensureReveal, renderNav, setupNav, setupStickyOffsets } from "./nav.js"
 import { renderBoard } from "./render/board.js";
 import { syncModals } from "./render/modals.js";
 import { renderTopbar } from "./render/sections.js";
+import { setupOperations } from "./features/operations/controller.js";
 import { setupScheduler } from "./features/scheduler/controller.js";
 import { setupSlicing } from "./features/slicing/controller.js";
 import { setupUploads } from "./features/uploads/controller.js";
@@ -159,6 +160,8 @@ setupUploads();
 setupSlicing();
 // Раздел планировщика (ручная очередь, совместимость, план, ночь) — независим.
 setupScheduler();
+// Раздел оператора (расписание, сон, ручные операции, вынужденный простой).
+setupOperations();
 tickClock();
 setInterval(tickClock, 1000);
 

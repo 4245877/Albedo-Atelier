@@ -63,6 +63,29 @@ const API = {
   "/api/print/scheduler/compatibility": { printers: [], rows: [] },
   "/api/print/scheduler/plans": { plans: [] },
   "/api/print/scheduler/night": null,
+  // Оператор и ручные операции. Расписание намеренно «пустое» (таймзона не
+  // задана, presence UNKNOWN) — это и есть штатное начальное состояние фермы,
+  // в котором автопродолжение заблокировано fail-closed.
+  "/api/print/schedule": {
+    schedule: {
+      operator: { id: "op_default", name: "Оператор фермы", timeZone: null, active: true },
+      available: [],
+      sleep: [],
+      exceptions: [],
+      absences: [],
+      availability: {
+        presence: "UNKNOWN",
+        reason: "таймзона оператора не задана",
+        resolved: false,
+        nextAvailableAt: null,
+        availableUntil: null
+      }
+    },
+    operators: [{ id: "op_default", name: "Оператор фермы", timeZone: null, active: true }],
+    localToday: null
+  },
+  "/api/print/operations": { operations: [], holds: [] },
+  "/api/print/operations/types": { types: [] },
   "/api/monitoring/lease": { ok: true }
 };
 

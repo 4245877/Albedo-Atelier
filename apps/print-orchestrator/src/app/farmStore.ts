@@ -58,6 +58,14 @@ export class FarmStore implements PrintServices {
   get deviceArtifacts() {
     return this.runtime.deviceArtifacts;
   }
+  /** The operator availability calendar (timezone, weekly windows, sleep), lazy. */
+  get operatorSchedule() {
+    return this.runtime.operatorSchedule;
+  }
+  /** The typed manual interventions that hold printers until confirmed, lazy. */
+  get manualOperations() {
+    return this.runtime.manualOperations;
+  }
   /** The single physical-start service; null before the queue store is opened. */
   get dispatchService() {
     return this.runtime.dispatchService;

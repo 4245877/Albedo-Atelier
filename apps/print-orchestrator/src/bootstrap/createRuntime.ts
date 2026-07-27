@@ -37,6 +37,8 @@ import { EventFeed } from "../app/eventFeed";
 import { FilamentConsumption } from "../app/filamentConsumption";
 import { FilamentSync } from "../app/filamentSync";
 import { MonitoringLease } from "../app/monitoringLease";
+import { ManualOperationService } from "../app/operations/manualOperationService";
+import { OperatorScheduleService } from "../app/operations/operatorScheduleService";
 import { PrinterPoller } from "../app/printerPoller";
 import { PrintQueueService } from "../app/printQueue/printQueueService";
 import { buildNightGateInfo, type NightGateDeps } from "../app/readModels/buildNightGateInfo";
@@ -70,6 +72,10 @@ export interface PrintServices {
   readonly scheduler: SchedulerService;
   /** File delivery to a printer (upload + verify, or a tracked manual transfer). */
   readonly deviceArtifacts: DeviceArtifactService;
+  /** The operator availability calendar (timezone, weekly windows, sleep, exceptions). */
+  readonly operatorSchedule: OperatorScheduleService;
+  /** The typed physical interventions that hold printers until they are confirmed. */
+  readonly manualOperations: ManualOperationService;
   /** The single physical-start service; null until the queue store is opened. */
   readonly dispatchService: DispatchService | null;
   readonly slicing: {
@@ -123,6 +129,8 @@ export class FarmRuntime implements PrintServices {
 
   private printQueueStoreRef: PrintQueueStore | null = null;
   private printQueueServiceRef: PrintQueueService | null = null;
+  private operatorScheduleServiceRef: OperatorScheduleService | null = null;
+  private manualOperationServiceRef: ManualOperationService | null = null;
   private dispatchServiceRef: DispatchService | null = null;
   private deviceArtifactServiceRef: DeviceArtifactService | null = null;
   private runLifecycleRef: RunLifecycleService | null = null;
@@ -336,6 +344,18 @@ export class FarmRuntime implements PrintServices {
     return this.deviceArtifactServiceRef as DeviceArtifactService;
   }
 
+  /** The operator availability calendar (SQLite-backed), lazy. */
+  get operatorSchedule(): OperatorScheduleService {
+    this.ensureQueue();
+    return this.operatorScheduleServiceRef as OperatorScheduleService;
+  }
+
+  /** The typed manual interventions that hold printers (SQLite-backed), lazy. */
+  get manualOperations(): ManualOperationService {
+    this.ensureQueue();
+    return this.manualOperationServiceRef as ManualOperationService;
+  }
+
   /** The OrcaSlicer preset/profile/slice services (SQLite-backed), lazy. */
   get slicing(): {
     presets: PresetImportService;
@@ -449,12 +469,25 @@ export class FarmRuntime implements PrintServices {
     // ongoing dual-write between the JSON store and SQLite.
     importLegacyQueue(store, this.legacyQueueState.jobs, { logger });
     this.printQueueStoreRef = store;
+    // The operator calendar and the interventions it gates are built first: the
+    // queue's cancel cascade and the run lifecycle's bed clearance both depend on
+    // them, and both are constructed below.
+    this.operatorScheduleServiceRef = new OperatorScheduleService(store);
+    this.manualOperationServiceRef = new ManualOperationService(
+      store,
+      this.operatorScheduleServiceRef,
+      { logger }
+    );
     this.printQueueServiceRef = new PrintQueueService(store, {
       // Refuse a pin to a printer the farm does not know (evaluated lazily, so the
       // config loaded in start() is in place by the time an operator pins).
-      isPrinterConfigured: (id) => this.isPrinterConfigured(id)
+      isPrinterConfigured: (id) => this.isPrinterConfigured(id),
+      operations: this.manualOperationServiceRef
     });
-    this.runLifecycleRef = new RunLifecycleService(store, { logger });
+    this.runLifecycleRef = new RunLifecycleService(store, {
+      logger,
+      operations: this.manualOperationServiceRef
+    });
     this.dispatchServiceRef = new DispatchService({
       store,
       resolvePrinter: (reference) => {
@@ -489,6 +522,10 @@ export class FarmRuntime implements PrintServices {
     // Resolve deliveries a previous process was in the middle of: an UPLOADING
     // row is an unknown, and unknown must never read as ready.
     this.deviceArtifactServiceRef.recover();
+    // Unfinished interventions survive in SQLite; what does not is their
+    // *readiness*, which depends on the clock and the schedule. Re-derive it so a
+    // printer held overnight is correctly READY (or still PENDING) after a boot.
+    this.manualOperationServiceRef.recover();
     this.artifactServiceRef = new ArtifactService(store, this.artifactStorageRef, {
       limits: {
         zipMaxEntries: uploads.zipMaxEntries,
@@ -582,6 +619,8 @@ export class FarmRuntime implements PrintServices {
     this.printQueueStoreRef?.close();
     this.printQueueStoreRef = null;
     this.printQueueServiceRef = null;
+    this.operatorScheduleServiceRef = null;
+    this.manualOperationServiceRef = null;
     this.dispatchServiceRef = null;
     this.deviceArtifactServiceRef = null;
     this.runLifecycleRef = null;

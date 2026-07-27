@@ -19,10 +19,22 @@ export const POSITION_STEP = 10;
  * transitions so every module moves entities through the same domain-checked,
  * audit-appending path. Not exported outside `app/printQueue`.
  */
+/**
+ * The narrow slice of the manual-operations service the queue needs: when an
+ * assignment is withdrawn, the interventions opened *for* it stop being work
+ * anyone should do. Injected as a port so `app/printQueue` keeps no dependency
+ * on `app/operations`, and so a store built without the operations model still
+ * behaves (the cascade is simply absent).
+ */
+export interface AssignmentOperationsPort {
+  cancelForAssignment(assignmentId: string, reason: string, actor?: string): unknown;
+}
+
 export class PrintQueueContext {
   readonly now: () => Date;
   readonly defaultActor: string;
   private readonly isPrinterConfiguredFn: ((printerId: string) => boolean) | null;
+  private readonly operations: AssignmentOperationsPort | null;
 
   constructor(
     readonly store: PrintQueueStore,
@@ -30,11 +42,13 @@ export class PrintQueueContext {
       now?: () => Date;
       actor?: string;
       isPrinterConfigured?: (printerId: string) => boolean;
+      operations?: AssignmentOperationsPort;
     } = {}
   ) {
     this.now = options.now ?? (() => new Date());
     this.defaultActor = options.actor ?? "operator";
     this.isPrinterConfiguredFn = options.isPrinterConfigured ?? null;
+    this.operations = options.operations ?? null;
   }
 
   nowIso(): string {
@@ -162,6 +176,18 @@ export class PrintQueueContext {
       }
     }
     this.transitionAssignment(assignment, to, actor);
+
+    // Interventions queued *for this assignment* (a nozzle change it needed, a
+    // material swap) are no longer anybody's work — cancelled so the printer is
+    // not held for a job that is gone. A bed-clearance operation is deliberately
+    // NOT cancelled by this cascade: withdrawing an assignment does not take the
+    // part off the plate (see `cancelForAssignment`).
+    this.operations?.cancelForAssignment(
+      assignment.id,
+      to === "CANCELLED" ? "назначение отменено" : "назначение закрыто",
+      actor
+    );
+
     if (assignment.bedCycleId) {
       const bed = repos.bedCycles.getById(assignment.bedCycleId);
       if (bed) {

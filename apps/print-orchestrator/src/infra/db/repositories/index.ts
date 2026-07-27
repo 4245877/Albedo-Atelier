@@ -9,7 +9,14 @@ import { SqliteAuditEventRepository } from "./auditEventRepository";
 import { SqliteBedCycleRepository } from "./bedCycleRepository";
 import { SqliteDeviceArtifactRepository } from "./deviceArtifactRepository";
 import { SqliteDispatchAttemptRepository } from "./dispatchAttemptRepository";
+import { SqliteManualOperationRepository } from "./manualOperationRepository";
 import { SqliteMaterialOverrideRepository } from "./materialOverrideRepository";
+import {
+  SqliteOperatorAbsenceRepository,
+  SqliteOperatorRepository,
+  SqliteScheduleExceptionRepository,
+  SqliteScheduleRuleRepository
+} from "./operatorRepository";
 import { SqlitePlanRepository } from "./planRepository";
 import { SqlitePrintRunRepository } from "./printRunRepository";
 import { SqlitePrintTaskRepository } from "./printTaskRepository";
@@ -47,7 +54,13 @@ export class SqlitePrintQueueStore implements PrintQueueStore {
       startGuards: new SqliteStartGuardRepository(db),
       profileRevisions: new SqliteProfileRevisionRepository(db),
       profileSets: new SqliteProfileSetRepository(db),
-      sliceVariants: new SqliteSliceVariantRepository(db)
+      sliceVariants: new SqliteSliceVariantRepository(db),
+      // operations domain (domain/operations)
+      operators: new SqliteOperatorRepository(db),
+      scheduleRules: new SqliteScheduleRuleRepository(db),
+      scheduleExceptions: new SqliteScheduleExceptionRepository(db),
+      operatorAbsences: new SqliteOperatorAbsenceRepository(db),
+      manualOperations: new SqliteManualOperationRepository(db)
     };
   }
 

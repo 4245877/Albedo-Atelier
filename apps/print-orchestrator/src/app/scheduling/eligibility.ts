@@ -1,3 +1,7 @@
+import { operationMinutes } from "../../domain/operations/planning";
+import { resolveFarmAvailability, type OperatorScheduleInput } from "../../domain/operations/schedule";
+import { OPERATION_LABELS } from "../../domain/operations/states";
+import { OPEN_OPERATION_STATES } from "../../domain/operations/types";
 import type { PrintTask } from "../../domain/print/types";
 import {
   evaluateDispatchEligibility,
@@ -131,6 +135,8 @@ export class EligibilityQueries {
       bedState: resolved.evidence.bedCycle,
       automaticContinuationAllowed: request.automaticContinuationAllowed ?? false,
 
+      ...this.operatorFacts(printer.id),
+
       reservation: this.confirmedReservation(task.id, resolved.variant?.id ?? null),
       targetPrinterId: printer.id,
       sliceVariantId: resolved.variant?.id ?? null,
@@ -158,6 +164,49 @@ export class EligibilityQueries {
       },
       facts
     });
+  }
+
+  /**
+   * The operator half of the facts: the blocking interventions still open on
+   * this printer, and where the operator is right now.
+   *
+   * Read straight from the store rather than injected through the config, on
+   * purpose: the eligibility check has exactly one implementation and three call
+   * sites (preview, plan confirmation, physical dispatch), and a fact resolved
+   * from a *different* source in one of them is precisely the divergence this
+   * module was built to remove. A farm with no schedule filled in resolves to
+   * `UNKNOWN`, which is the correct, fail-closed initial state.
+   */
+  private operatorFacts(printerId: string): Pick<
+    DispatchFacts,
+    "blockingOperations" | "operatorPresence" | "operatorScheduleResolved" | "operatorReason"
+  > {
+    const repos = this.ctx.store.repositories;
+    const blockingOperations = repos.manualOperations
+      .listByPrinter(printerId, OPEN_OPERATION_STATES)
+      .filter((op) => op.blocking)
+      .map((op) => ({
+        id: op.id,
+        type: op.type,
+        state: op.state,
+        label: OPERATION_LABELS[op.type],
+        minutes: operationMinutes(op)
+      }));
+
+    const inputs: OperatorScheduleInput[] = repos.operators.listActive().map((operator) => ({
+      operator,
+      rules: repos.scheduleRules.listByOperator(operator.id),
+      exceptions: repos.scheduleExceptions.listByOperator(operator.id),
+      absences: repos.operatorAbsences.listByOperator(operator.id)
+    }));
+    const availability = resolveFarmAvailability(inputs, this.ctx.config.now());
+
+    return {
+      blockingOperations,
+      operatorPresence: availability.presence,
+      operatorScheduleResolved: availability.resolved,
+      operatorReason: availability.reason
+    };
   }
 
   /**

@@ -69,6 +69,67 @@ Layering (the domain layer never imports `node:sqlite`):
   the legacy-format projection.
 - `src/modules/print/` — the `/api/print` HTTP surface.
 
+## Operator schedule & manual operations
+
+The queue model above answers "is the machine ready?". It cannot answer the
+question a farm actually runs on: *the print finished at 03:00, so when is that
+printer usable again?* The answer is not 03:00 — it is "once a human is awake,
+present, and has taken the part off the plate". That is modelled explicitly
+(`src/domain/operations/`, migration `011`).
+
+**Schedule.** One or more `Operator` rows (multi-operator from the start — the
+two rules that matter, "cannot do two things at once" and "is asleep", are
+per person), each with:
+
+- an **IANA timezone** — `null` means *unknown*, never the container's `TZ`;
+- **recurring weekly windows** on two separate tracks, `available` and `sleep`,
+  stored as **local minutes since midnight** so they survive DST unchanged
+  (`08:00` stays `08:00` on both sides of a transition). A window whose end is
+  ≤ its start wraps past midnight — the normal shape of a sleep schedule;
+- **date exceptions** (`available` / `sleep` / `off`) that *replace* that local
+  date's recurring rules, so an exception can narrow a day and not only widen it;
+- **absences** over UTC instant ranges, which beat everything else.
+
+Precedence is *absence → sleep → availability*. Resolution is pure and
+fail-closed (`resolveAvailability`): an unknown zone, no operator or an inactive
+one yields `UNKNOWN`, which is **not** the same fact as `OFF` — only the former
+blocks automation.
+
+**Manual operations.** Eight typed physical interventions — `PART_REMOVAL`,
+`PLATE_SERVICE`, `MATERIAL_CHANGE`, `SPOOL_CHANGE`, `NOZZLE_CHANGE`,
+`CALIBRATION`, `VISUAL_INSPECTION`, `FILE_TRANSFER_CONFIRM` — each with its own
+duration (a nozzle change is not a spool swap), an allowed window, a confirming
+actor, an actual duration and a full audit trail:
+
+```
+PENDING → READY → IN_PROGRESS → COMPLETED
+                     ↘ FAILED | CANCELLED
+```
+
+`PENDING ⇄ READY` is **derived**, not guessed: an operation becomes performable
+only when the schedule says somebody is available and its window has opened, and
+falls back to `PENDING` when they go to sleep. `COMPLETED` is terminal.
+
+**What this changes for dispatch.** A finished run opens the clearance operation
+in the same transaction that moves the bed to `AWAITING_CLEARANCE`. While a
+`blocking` operation is open the printer is **busy**: `DispatchEligibility`
+raises `MANUAL_OPERATION_REQUIRED`, which is non-overridable and applies in
+`manual` mode exactly as in `night` mode — a manual start cannot walk past a full
+plate. Confirming the operation (a named human, never telemetry) is what moves
+the bed to `CLEAR`.
+
+Two things the brief keeps apart and so does this model: **a print may run
+unattended** (`unattendedAllowed`) and **the queue may continue automatically**
+(`automaticContinuationAllowed`, plus an operator who can actually perform the
+intervention). The first never implies the second. Night auto-start and
+automatic continuation remain **off**; when the schedule, the timezone, an
+operation's duration or the operator's state is unknown, the projection reports
+`null` and automation is refused rather than guessed.
+
+API: `/api/print/schedule` (+ `/exceptions`, `/absences`) and
+`/api/print/operations` (+ `/types`, `/:id/claim`, `/:id/complete`, `/:id/fail`,
+`/:id/cancel`). Dashboard section: **Оператор**.
+
 ### Migration from the JSON queue
 
 The queue was originally a flat array in `state.json`. It now lives entirely in

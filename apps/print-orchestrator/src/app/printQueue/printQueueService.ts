@@ -1,7 +1,7 @@
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { Assignment, AuditEvent, PrintTask, QueueEntry } from "../../domain/print/types";
 import type { QueueJob } from "../../domain/dashboard/types";
-import { PrintQueueContext } from "./context";
+import { PrintQueueContext, type AssignmentOperationsPort } from "./context";
 import type { QueueProjectionRow } from "./projection";
 import { QueueCommands } from "./queueCommands";
 import { QueueQueries, type TaskDetail } from "./queueQueries";
@@ -54,6 +54,8 @@ export class PrintQueueService {
       actor?: string;
       /** Farm-config check for a printer id; when set, pins to unknown printers are refused. */
       isPrinterConfigured?: (printerId: string) => boolean;
+      /** Manual-operations cascade for a withdrawn assignment; absent = no cascade. */
+      operations?: AssignmentOperationsPort;
     } = {}
   ) {
     const ctx = new PrintQueueContext(store, options);

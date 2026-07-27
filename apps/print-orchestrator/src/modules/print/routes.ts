@@ -12,6 +12,7 @@ import { ValidationError } from "../../core/errors";
 import type { DayNightPreference } from "../../domain/print/types";
 import { uploads } from "../../shared/env";
 import { registerAssignmentRoutes } from "./assignmentRoutes";
+import { registerOperationsRoutes } from "./operationsRoutes";
 import { registerSlicingRoutes } from "./slicingRoutes";
 
 /** The services + commands the print / scheduler / artifact routes need, passed explicitly. */
@@ -66,6 +67,7 @@ export async function registerPrintQueueRoutes(
   registerArtifactRoutes(app, services);
   registerSlicingRoutes(app, services);
   registerAssignmentRoutes(app, services);
+  registerOperationsRoutes(app, services);
   registerSchedulerRoutes(app, services);
 
   app.get("/tasks", async () => ({ tasks: services.printQueue.listTasks() }));

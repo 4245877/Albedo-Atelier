@@ -1,3 +1,4 @@
+import type { OperationsRepositories } from "../operations/repositories";
 import type { WritableRepository } from "../shared/repository";
 import type {
   ProfileRevisionRepository,
@@ -186,8 +187,13 @@ export interface StartGuardRepository {
   list(): StartGuard[];
 }
 
-/** The full set of repositories, all bound to one database connection. */
-export interface Repositories {
+/**
+ * The full set of repositories, all bound to one database connection.
+ * Extends {@link OperationsRepositories} so the operator schedule and the manual
+ * operations share the store — and therefore the transaction — with the print
+ * model they gate.
+ */
+export interface Repositories extends OperationsRepositories {
   artifacts: ArtifactRepository;
   artifactAnalyses: ArtifactAnalysisRepository;
   tasks: PrintTaskRepository;

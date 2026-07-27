@@ -116,6 +116,12 @@ function facts(mode: DispatchMode, over: Partial<DispatchFacts> = {}): DispatchF
     startGuard: null,
     bedState: "CLEAR",
     automaticContinuationAllowed: false,
+    // Baseline: no intervention pending and an operator at the bench. The
+    // operator-schedule tests below take each of those away in turn.
+    blockingOperations: [],
+    operatorPresence: "AVAILABLE",
+    operatorScheduleResolved: true,
+    operatorReason: "оператор доступен",
     reservation: null,
     targetPrinterId: "k2",
     sliceVariantId: "sv1",

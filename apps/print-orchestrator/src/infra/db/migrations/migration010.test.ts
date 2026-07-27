@@ -138,7 +138,14 @@ test("an existing 009 database keeps every device-artifact row through the rebui
       db.close();
     }
   })();
-  assert.deepEqual(applied, ["010_device_artifact_states"], "only the pending migration ran");
+  // The already-recorded migrations (001–009) must not re-run, and 010 must be
+  // the first of the pending ones. Asserted as a prefix rather than as the whole
+  // list so appending a later migration does not falsify a claim about 010.
+  assert.equal(applied[0], "010_device_artifact_states", "010 ran, and ran first");
+  assert.ok(
+    applied.every((name) => Number.parseInt(name.slice(0, 3), 10) >= 10),
+    "no already-applied migration re-ran"
+  );
 
   const db = new DatabaseSync(file);
   try {

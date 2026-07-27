@@ -92,6 +92,26 @@ export async function apiPost(path, body, { signal, timeoutMs = 15000 } = {}) {
 }
 
 /*
+ * DELETE — тот же дедлайн и та же обработка ошибок, что у apiPost. Токен
+ * управления подставляет nginx-прокси; серверный guard мутаций (см.
+ * http/security.ts) считает DELETE мутацией наравне с POST.
+ */
+export async function apiDelete(path, { signal, timeoutMs = 15000 } = {}) {
+  const deadline = withDeadline(signal, timeoutMs);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "DELETE",
+      headers: { Accept: "application/json" },
+      signal: deadline.signal
+    });
+    if (!res.ok) throw await apiError(res);
+    return await res.json().catch(() => ({}));
+  } finally {
+    deadline.cleanup();
+  }
+}
+
+/*
  * Загрузка одного файла через multipart с честным прогрессом. fetch() не
  * отдаёт прогресс отправки, поэтому используем XHR: каждый файл — отдельный
  * запрос POST /api/print/artifacts, что и даёт точный процент по каждому файлу.

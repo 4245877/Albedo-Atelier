@@ -718,7 +718,12 @@ export type AuditEntityType =
   | "profile_revision"
   | "profile_set"
   | "slice_variant"
-  | "device_artifact";
+  | "device_artifact"
+  | "operator"
+  | "schedule_rule"
+  | "schedule_exception"
+  | "operator_absence"
+  | "manual_operation";
 
 /**
  * An append-only record of a domain change — every state transition and

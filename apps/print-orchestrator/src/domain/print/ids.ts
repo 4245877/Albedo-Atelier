@@ -21,7 +21,13 @@ export const ID_PREFIX = {
   // slicing domain (domain/slicing)
   profileRevision: "prof",
   profileSet: "pset",
-  sliceVariant: "slc"
+  sliceVariant: "slc",
+  // operations domain (domain/operations)
+  operator: "op",
+  scheduleRule: "shr",
+  scheduleException: "shx",
+  operatorAbsence: "abs",
+  manualOperation: "mop"
 } as const;
 
 export type IdPrefix = (typeof ID_PREFIX)[keyof typeof ID_PREFIX];

@@ -14,6 +14,22 @@ export const REASON = {
   OPERATOR_INTERVENTION_REQUIRED: "OPERATOR_INTERVENTION_REQUIRED",
   AUTOMATIC_CONTINUATION_NOT_SUPPORTED: "AUTOMATIC_CONTINUATION_NOT_SUPPORTED",
 
+  // ── Operator schedule / manual operations ─────────────────────────────────
+  /**
+   * A typed physical intervention (part removal, nozzle change, …) is still
+   * open on this printer. The machine is held until it is confirmed done — this
+   * is the "планировщик считает принтер занятым до завершения обязательной
+   * операции" rule, and it is never overridable: a full plate is not a policy.
+   */
+  MANUAL_OPERATION_REQUIRED: "MANUAL_OPERATION_REQUIRED",
+  /** Nobody is available (asleep/away/off) to perform the required intervention. */
+  OPERATOR_UNAVAILABLE: "OPERATOR_UNAVAILABLE",
+  /**
+   * The operator schedule, its timezone, or an operation's duration could not be
+   * resolved. Fail-closed: automatic continuation is blocked rather than guessed.
+   */
+  OPERATOR_SCHEDULE_UNKNOWN: "OPERATOR_SCHEDULE_UNKNOWN",
+
   // ── Device state ──────────────────────────────────────────────────────────
   PRINTER_OFFLINE: "PRINTER_OFFLINE",
   PRINTER_BUSY: "PRINTER_BUSY",
@@ -129,6 +145,9 @@ export interface EligibilityResult {
 export const NON_OVERRIDABLE: ReadonlySet<ReasonCode> = new Set<ReasonCode>([
   REASON.BED_NOT_CLEAR,
   REASON.BED_STATE_UNKNOWN,
+  // A pending physical intervention is a fact about the hardware, not a warning
+  // about it: no operator tick makes the part come off the plate by itself.
+  REASON.MANUAL_OPERATION_REQUIRED,
   REASON.BUILD_VOLUME_EXCEEDED,
   REASON.GCODE_FLAVOR_MISMATCH,
   REASON.TARGET_PRINTER_MISMATCH,
