@@ -723,7 +723,8 @@ export type AuditEntityType =
   | "schedule_rule"
   | "schedule_exception"
   | "operator_absence"
-  | "manual_operation";
+  | "manual_operation"
+  | "printer";
 
 /**
  * An append-only record of a domain change — every state transition and

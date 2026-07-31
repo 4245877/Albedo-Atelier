@@ -22,6 +22,7 @@ import { renderBoard } from "./render/board.js";
 import { syncModals } from "./render/modals.js";
 import { renderTopbar } from "./render/sections.js";
 import { setupOperations } from "./features/operations/controller.js";
+import { setupPrinterConfig } from "./features/printers/controller.js";
 import { setupScheduler } from "./features/scheduler/controller.js";
 import { setupSlicing } from "./features/slicing/controller.js";
 import { setupUploads } from "./features/uploads/controller.js";
@@ -162,6 +163,9 @@ setupSlicing();
 setupScheduler();
 // Раздел оператора (расписание, сон, ручные операции, вынужденный простой).
 setupOperations();
+// Раздел оборудования (подключение принтеров, настройки, коды доступа) —
+// независим от опроса доски: его данные живут в отдельном разделе API.
+setupPrinterConfig();
 tickClock();
 setInterval(tickClock, 1000);
 

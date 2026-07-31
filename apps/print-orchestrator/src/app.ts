@@ -14,6 +14,7 @@ import { registerAutomationRoutes } from "./modules/automation/routes";
 import { registerDashboardRoutes } from "./modules/dashboard/routes";
 import { registerMonitoringRoutes } from "./modules/monitoring/routes";
 import { registerPrintQueueRoutes } from "./modules/print/routes";
+import { registerPrinterConfigRoutes } from "./modules/printers/configRoutes";
 import { registerPrinterRoutes } from "./modules/printers/routes";
 import { registerQueueRoutes } from "./modules/queue/routes";
 import { env } from "./shared/env";
@@ -118,6 +119,14 @@ export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
   const reads = farmStore.reads;
   const commands = farmStore.commands;
   app.register(registerDashboardRoutes, { prefix: "/api", reads });
+  // The editable printer inventory. Registered before the printer routes so the
+  // literal `/config` path wins over their `/:id`, matching the `/active`
+  // convention there. Handed a getter, not the service: it is SQLite-backed and
+  // must not force the database open while the app is merely being built.
+  app.register(registerPrinterConfigRoutes, {
+    prefix: "/api/printers/config",
+    printerConfig: () => farmStore.printerConfig
+  });
   app.register(registerPrinterRoutes, { prefix: "/api/printers", reads, commands });
   app.register(registerQueueRoutes, { prefix: "/api/queue", reads, commands });
   // Persistent print-queue model (SQLite) — the durable successor to /api/queue.

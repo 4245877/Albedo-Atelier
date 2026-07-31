@@ -31,7 +31,7 @@ export function targetOptions(coverage) {
  */
 export function createSetBlockReason(coverage, missingActive) {
   if (!(coverage && coverage.length)) {
-    return "Нет доступных принтеров: добавьте принтер в конфигурацию фермы (config/printers.json) и импортируйте пресеты — без цели набор не создать.";
+    return "Нет доступных принтеров: добавьте принтер в разделе «Оборудование фермы» и импортируйте пресеты — без цели набор не создать.";
   }
   if (missingActive && missingActive.length) {
     return `Нет активных профилей: ${missingActive.join(", ")}. Набор собирается только из active-профилей — импортируйте/почините пресеты.`;

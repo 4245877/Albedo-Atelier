@@ -367,11 +367,13 @@ export class DashboardReadModel {
     const camsOnline = enabled.filter((p) => this.cameras.getEntry(p.id)?.state === "online").length;
 
     const configVal =
-      source.kind === "file"
-        ? `${source.path ?? "файл"} · ${enabled.length} принтеров`
-        : source.kind === "env"
-          ? `PRINTERS_CONFIG_JSON · ${enabled.length} принтеров`
-          : "не настроена";
+      source.kind === "db"
+        ? `база данных · ${enabled.length} принтеров · правится в панели`
+        : source.kind === "file"
+          ? `${source.path ?? "файл"} · ${enabled.length} принтеров`
+          : source.kind === "env"
+            ? `PRINTERS_CONFIG_JSON · ${enabled.length} принтеров`
+            : "не настроена";
 
     return [
       { name: "Версия сервиса", val: `${env.serviceVersion} · ${env.nodeEnv}`, ok: "ok" },

@@ -2,7 +2,7 @@ import type { FarmRuntime } from "../bootstrap/createRuntime";
 import { env, slicing } from "../shared/env";
 import { warnIfPermsTooOpen } from "../shared/filePerms";
 import type { StoreLogger } from "../shared/logger";
-import { loadPrintersConfig } from "../infra/printers/config";
+import { importPrintersConfig } from "../infra/db/printersImport";
 import { shutdownPrinterConnections } from "../infra/printers/status";
 
 /**
@@ -116,19 +116,28 @@ export class FarmLifecycle {
       }
     }
 
-    const { printers, source } = await loadPrintersConfig();
-    runtime.setConfig(printers, source);
+    // The printer inventory lives in SQLite and is edited from the dashboard.
+    // On the first boot after that cutover it is seeded from the old
+    // config/printers.json (or PRINTERS_CONFIG_JSON); afterwards the file is
+    // never read again, so an operator's edit cannot be reverted by a stale file.
+    const store = runtime.printQueueStore;
+    if (store) {
+      const seed = await importPrintersConfig(store, { logger });
+      if (seed.source.warning) {
+        logger.warn?.({ warning: seed.source.warning }, "printers config seed problem");
+      }
+    }
+    const printers = runtime.reloadPrinterConfig();
 
     // Advisory: the printer config carries device secrets (API keys, access
-    // codes). Warn if it is group/world-readable — never fatal (see helper).
+    // codes). Warn if either the seed file or the database that replaced it is
+    // group/world-readable — never fatal (see helper).
     warnIfPermsTooOpen(process.env.PRINTERS_CONFIG_PATH ?? "", logger);
+    warnIfPermsTooOpen(env.queueDbPath, logger);
 
-    if (source.warning) {
-      logger.warn?.({ warning: source.warning }, "printers config problem");
-    }
     logger.info?.(
-      { printers: printers.length, source: source.kind },
-      "farm store started with real printer config"
+      { printers: printers.length, enabled: printers.filter((p) => p.enabled).length, source: "db" },
+      "farm store started with the printer config from the database"
     );
     logger.info?.(
       { enabled: runtime.inventory.enabled },

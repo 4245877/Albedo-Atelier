@@ -114,11 +114,29 @@ both test suites pass. The contract (and a test) also guarantees the payload
 carries no connection parameters or credentials (`host`, `serial`,
 `accessCode`, `apiKey`, `snapshotUrl`, …).
 
-**Printer config & secrets.** `apps/print-orchestrator/config/printers.json`
-holds LAN hosts and the Bambu serial + access code, so it is **untracked**
-(`.gitignore`) and lives only on this host; start from
-`config/printers.example.json`. It used to be committed — treat the Bambu
-LAN access code from any old history as burned and rotate it on the printer.
+**Printer config & secrets.** Printers are configured **from the dashboard**
+(section «Оборудование фермы» → `/api/printers/config`): add a printer, change
+its address, rotate a Bambu access code after a reset, disable it for repairs,
+probe the connection. Changes apply from the next poll — no file edit, no
+rebuild, no restart. The inventory (hosts, serial, access code) lives in the
+orchestrator's SQLite database on the `orchestrator-data` volume, so it must be
+protected like a secret file (`600`, never copied into an image) and it is what
+a backup has to include.
+
+`apps/print-orchestrator/config/printers.json` is now only a **one-time seed**:
+on the first boot after this cutover it is imported into the database and never
+read again (guarded by an `app_meta` marker, so a stale file can never revert an
+edit made in the panel). It stays **untracked** (`.gitignore`); start from
+`config/printers.example.json` only when provisioning a brand-new host. Values
+are imported verbatim, so `${BAMBU_A1_ACCESS_CODE}`-style references keep
+resolving from `.env` until an operator types a literal value in the panel. The
+old file was once committed — treat the Bambu LAN access code from any such
+history as burned and rotate it on the printer (now a 20-second job in the UI).
+
+Credentials only ever travel *inbound*: every read returns whether a credential
+is set and, for an env reference, which variable it names — never the value. An
+edit that omits a credential keeps the stored one, so the form can be submitted
+whole without the browser ever holding a secret.
 
 **Restart cost.** Recreating the orchestrator container keeps the queue,
 event feed and today's counters (`orchestrator-data` volume), but in-memory

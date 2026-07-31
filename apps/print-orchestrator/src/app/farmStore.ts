@@ -66,6 +66,10 @@ export class FarmStore implements PrintServices {
   get manualOperations() {
     return this.runtime.manualOperations;
   }
+  /** The editable printer inventory (add/edit/re-credential at runtime), lazy. */
+  get printerConfig() {
+    return this.runtime.printerConfig;
+  }
   /** The single physical-start service; null before the queue store is opened. */
   get dispatchService() {
     return this.runtime.dispatchService;

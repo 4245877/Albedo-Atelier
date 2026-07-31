@@ -653,3 +653,69 @@
 @media (max-width: 720px) {
   .ops-edit-row { grid-template-columns: 40px repeat(2, minmax(0, 1fr)); }
 }
+
+/* ═══ Оборудование фермы (#hardware) ════════════════════════════
+   Раздел, заменивший правку config/printers.json с пересборкой. Визуально
+   наследует язык workflow-разделов (.slice-panel / .slice-form / чипы), но
+   строка принтера — самостоятельная карточка: у неё своя шапка с действиями
+   и раскрывающаяся панель настроек, чтобы список из десятка машин читался
+   без прокрутки сквозь формы. */
+
+.prn-row {
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-top: 10px;
+  background: color-mix(in srgb, var(--card-bg) 60%, transparent);
+}
+.prn-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.prn-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.prn-title b { font-size: 15px; }
+.prn-title code {
+  font-size: 12px;
+  color: var(--ink-faint);
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--card-edge) 40%, transparent);
+}
+.prn-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.prn-details { margin-top: 10px; }
+.prn-form { margin-top: 10px; }
+
+/* Учётные данные держим в отдельной рамке: поле всегда пустое, и подпись под
+   ним — единственное место, где видно, задан ли секрет и откуда он берётся. */
+.prn-secrets { display: grid; gap: 12px; }
+.prn-secret { display: grid; gap: 4px; }
+.prn-secret label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-faint); }
+.prn-secret input {
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--btn-edge);
+  background: var(--btn-bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  transition: border-color 0.18s, box-shadow 0.18s;
+}
+.prn-secret input:focus {
+  outline: none;
+  border-color: var(--gold-line);
+  box-shadow: 0 0 0 3px var(--gold-soft);
+}
+/* «Стереть» — сознательно мелкая и отдельная от поля: обычное сохранение
+   формы не должно ни при каких обстоятельствах выглядеть как стирание. */
+.prn-secret .prn-clear { font-size: 12px; color: var(--ink-faint); }
+
+@media (max-width: 720px) {
+  .prn-head { align-items: flex-start; flex-direction: column; }
+}
+
+/* Подсказки внутри полей формы принтера — компактнее обычных: иначе одна
+   длинная подсказка растягивает всю строку грид-сетки. */
+.prn-form label .slice-hint { font-size: 11px; line-height: 1.35; }

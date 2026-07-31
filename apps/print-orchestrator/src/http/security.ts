@@ -203,7 +203,10 @@ function applyCors(request: FastifyRequest, reply: FastifyReply): void {
   }
 
   reply.header("Access-Control-Allow-Origin", origin);
-  reply.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  // Every method the API actually accepts: the schedule/printer resources are
+  // edited with PATCH and DELETE, so advertising only GET/POST would make a
+  // cross-origin consumer's preflight refuse calls the server itself allows.
+  reply.header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
   reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Token");
   reply.header("Access-Control-Max-Age", "600");
 }

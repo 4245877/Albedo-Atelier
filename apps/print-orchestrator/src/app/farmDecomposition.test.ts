@@ -81,7 +81,10 @@ function orderedRuntime(): OrderedRuntime {
     printQueueStore: {
       repositories: {
         startGuards: { list: () => [] },
-        artifactAnalyses: { listUnfinished: () => [] }
+        artifactAnalyses: { listUnfinished: () => [] },
+        // A set marker → the one-time printers.json import is already done, so
+        // start() goes straight to reading the config from the database.
+        meta: { get: () => "2026-07-01T00:00:00.000Z", set: () => {} }
       }
     },
     runLifecycle: {
@@ -95,6 +98,10 @@ function orderedRuntime(): OrderedRuntime {
     presetImportService: null,
     profileService: null,
     setConfig: () => order.push("setConfig"),
+    reloadPrinterConfig: () => {
+      order.push("reloadPrinterConfig");
+      return [];
+    },
     inventory: { enabled: false, hasServiceToken: false },
     deviceCommands: { useLogger: () => {} },
     poller: {
@@ -133,8 +140,8 @@ test("FarmLifecycle.start recovers durable state BEFORE starting the poll loop",
     "recovery completes before any background process runs"
   );
   assert.ok(
-    order.indexOf("setConfig") < order.indexOf("poller.start"),
-    "the printer config is installed before the poll loop starts"
+    order.indexOf("reloadPrinterConfig") < order.indexOf("poller.start"),
+    "the printer config is read from the database and installed before the poll loop starts"
   );
 });
 

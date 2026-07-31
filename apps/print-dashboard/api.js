@@ -92,6 +92,27 @@ export async function apiPost(path, body, { signal, timeoutMs = 15000 } = {}) {
 }
 
 /*
+ * PATCH — частичное изменение ресурса (настройки принтера). Тот же дедлайн и
+ * та же обработка ошибок, что у apiPost; серверный guard мутаций (см.
+ * http/security.ts) считает PATCH мутацией наравне с POST.
+ */
+export async function apiPatch(path, body, { signal, timeoutMs = 15000 } = {}) {
+  const deadline = withDeadline(signal, timeoutMs);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "PATCH",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+      signal: deadline.signal
+    });
+    if (!res.ok) throw await apiError(res);
+    return await res.json().catch(() => ({}));
+  } finally {
+    deadline.cleanup();
+  }
+}
+
+/*
  * DELETE — тот же дедлайн и та же обработка ошибок, что у apiPost. Токен
  * управления подставляет nginx-прокси; серверный guard мутаций (см.
  * http/security.ts) считает DELETE мутацией наравне с POST.

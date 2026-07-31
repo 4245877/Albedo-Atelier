@@ -368,6 +368,34 @@ export async function sendBambuLightCommand(printer: PrinterConfig, on: boolean)
   }).catch(() => {});
 }
 
+/**
+ * Closes the MQTT connection to ONE printer and forgets its cached state.
+ *
+ * Called when a printer's credentials or endpoint change: the client is
+ * authenticated with the old access code and keeps publishing a plausible
+ * status, so leaving it open would make a fixed printer look broken (or, worse,
+ * a broken one look fine) until the service restarts. The next poll re-opens the
+ * connection from the current config.
+ */
+export function dropBambuConnection(printerId: string): void {
+  const client = bambuClients.get(printerId);
+  if (client) {
+    try {
+      client.end(true);
+    } catch {
+      // ignore — the socket is being discarded either way
+    }
+    bambuClients.delete(printerId);
+  }
+  const timer = bambuPushTimers.get(printerId);
+  if (timer) {
+    clearInterval(timer);
+    bambuPushTimers.delete(printerId);
+  }
+  bambuCache.delete(printerId);
+  bambuRawPrint.delete(printerId);
+}
+
 /** Closes all persistent Bambu MQTT connections and clears cached state. */
 export function shutdownBambuConnections(): void {
   for (const [printerId, client] of bambuClients) {

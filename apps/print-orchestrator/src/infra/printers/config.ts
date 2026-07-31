@@ -1,11 +1,34 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import {
+  DEFAULT_LIGHT_SETTINGS,
+  NO_AUTOMATIC_CONTINUATION,
+  PRINTER_ID_RE,
+  type AutomaticContinuationConfig,
+  type PrinterLightSettings,
+  type PrinterProtocol,
+  type PrinterRecord
+} from "../../domain/printers/config";
 import type { PrinterTechnology } from "../../domain/printers/types";
 import { isObject } from "../../shared/isObject";
+import { expandEnvRefs, materializePrinter } from "./materialize";
 
-export type PrinterProtocol = "moonraker" | "bambu" | "creality";
+/**
+ * Re-exported from the domain so the many existing importers of this module keep
+ * working; the vocabulary itself lives in `domain/printers/config.ts`.
+ */
+export {
+  automaticContinuationEnabled,
+  NO_AUTOMATIC_CONTINUATION
+} from "../../domain/printers/config";
+export type {
+  AutomaticContinuationConfig,
+  PrinterProtocol,
+  PrinterRecord
+} from "../../domain/printers/config";
 
+/** Executable light configuration — the record's settings after defaults. */
 export interface PrinterLightConfig {
   enabled: boolean;
   /** Moonraker output pin name; produces SET_PIN commands when present. */
@@ -32,9 +55,9 @@ export interface PrinterLightConfig {
 }
 
 /**
- * Static config for one real printer. Same shape as apps/fulfillment's
- * `PrinterConfig` (data/printers.json), extended with the dashboard-only
- * presentation fields `type` (FDM/Resin) and `swatch` (material colour).
+ * Runtime config for one real printer — a {@link PrinterRecord} with `${ENV}`
+ * references expanded and light defaults applied. This is what the drivers, the
+ * poller and the read models consume; nothing downstream sees the stored shape.
  */
 export interface PrinterConfig {
   id: string;
@@ -48,8 +71,7 @@ export interface PrinterConfig {
    * how a slice made "for the K2 class" is matched to a concrete K2 at schedule
    * time. Absent/empty when the printer belongs to no class: a class-scoped variant
    * then matches it only if it, too, has no class — never "any printer"
-   * (fail-closed). Optional on the type (like `nozzleDiameterMm`), but the loader
-   * always populates it (""/value), so a loaded config never leaves it undefined.
+   * (fail-closed).
    */
   printerClass?: string;
 
@@ -118,50 +140,12 @@ export interface PrinterConfig {
   light: PrinterLightConfig;
 }
 
-/** Verified hardware that leaves the bed clear without an operator. */
-export interface AutomaticContinuationConfig {
-  /** Master switch. False (the default) → the bed always needs a human. */
-  allowed: boolean;
-  /** What the hardware is, for the audit trail; free text from the config. */
-  mechanism: string;
-  /**
-   * ISO date the mechanism was last *physically verified* by an operator. An
-   * unverified mechanism does not count as one: `allowed` alone never clears a
-   * bed — {@link automaticContinuationEnabled} requires both.
-   */
-  verifiedAt: string | null;
-}
-
-export const NO_AUTOMATIC_CONTINUATION: AutomaticContinuationConfig = {
-  allowed: false,
-  mechanism: "",
-  verifiedAt: null
-};
-
 /**
- * Whether a printer may clear its own bed. Requires an explicit opt-in **and** a
- * recorded physical verification — the fail-closed reading of "явно настроена и
- * подтверждена соответствующая аппаратная возможность".
+ * Where the live printer config came from. `db` is the normal answer since the
+ * configuration moved into SQLite (editable from the dashboard); `file`/`env`
+ * describe the one-time seed and stay for the import path and older fixtures.
  */
-export function automaticContinuationEnabled(printer: {
-  automaticContinuation?: AutomaticContinuationConfig;
-}): boolean {
-  const c = printer.automaticContinuation;
-  return c?.allowed === true && typeof c.verifiedAt === "string" && c.verifiedAt.trim().length > 0;
-}
-
-function normalizeAutomaticContinuation(value: unknown): AutomaticContinuationConfig {
-  if (!isObject(value)) return NO_AUTOMATIC_CONTINUATION;
-  const verifiedAt = asString(value.verifiedAt);
-  return {
-    // Opt-in only: anything other than a literal `true` stays false.
-    allowed: value.allowed === true,
-    mechanism: asString(value.mechanism),
-    verifiedAt: verifiedAt && Number.isFinite(Date.parse(verifiedAt)) ? verifiedAt : null
-  };
-}
-
-export type PrinterConfigSourceKind = "file" | "env" | "none";
+export type PrinterConfigSourceKind = "db" | "file" | "env" | "none";
 
 export interface PrinterConfigSource {
   kind: PrinterConfigSourceKind;
@@ -176,34 +160,19 @@ export interface PrintersConfigResult {
   source: PrinterConfigSource;
 }
 
-const DEFAULT_CONFIG_PATH = path.resolve(process.cwd(), "config", "printers.json");
-
-/**
- * Allowed printer id shape. The id is used verbatim as a filesystem path
- * segment (camera snapshots: `<snapshotsDir>/<id>/<day>/…`) and as a URL path
- * segment, so it is restricted to characters that cannot traverse a directory
- * or need escaping — letters, digits, underscore and hyphen. An id with any
- * other character (a slash, a dot, `..`, whitespace) is rejected, dropping the
- * whole printer rather than trusting an unsafe key downstream.
- */
-const PRINTER_ID_RE = /^[A-Za-z0-9_-]+$/;
-
-/**
- * Expands `${ENV_VAR}` references in config strings so secrets (e.g. the Bambu
- * LAN access code) can live in the environment instead of the committed JSON.
- * An unset variable expands to "" — the driver then reports the printer as
- * "not configured" instead of silently using the literal placeholder.
- */
-function expandEnv(value: string): string {
-  return value.replace(/\$\{([A-Z0-9_]+)\}/gi, (_, name: string) => process.env[name] ?? "");
+export interface PrinterRecordsResult {
+  records: PrinterRecord[];
+  source: PrinterConfigSource;
 }
 
-function asString(value: unknown): string {
-  return expandEnv(String(value ?? "").trim());
+const DEFAULT_CONFIG_PATH = path.resolve(process.cwd(), "config", "printers.json");
+
+function asRaw(value: unknown): string {
+  return String(value ?? "").trim();
 }
 
 function normalizeProtocol(value: unknown): PrinterProtocol {
-  const protocol = String(value ?? "moonraker").trim().toLowerCase();
+  const protocol = asRaw(value).toLowerCase();
   if (protocol === "bambu") return "bambu";
   if (protocol === "creality") return "creality";
   return "moonraker";
@@ -215,12 +184,13 @@ function normalizeProtocol(value: unknown): PrinterProtocol {
  * "no interface configured") rather than passed through to the browser.
  */
 function normalizeInterfaceUrl(value: unknown): string {
-  const url = asString(value);
-  return /^https?:\/\//i.test(url) ? url : "";
+  const url = asRaw(value);
+  // A `${VAR}` reference is judged on what it expands to, not on its own text.
+  return /^https?:\/\//i.test(expandEnvRefs(url)) ? url : "";
 }
 
 function normalizeType(value: unknown): PrinterTechnology {
-  return String(value ?? "").trim().toLowerCase() === "resin" ? "Resin" : "FDM";
+  return asRaw(value).toLowerCase() === "resin" ? "Resin" : "FDM";
 }
 
 /**
@@ -238,71 +208,96 @@ function normalizeBuildVolume(value: unknown): { x: number; y: number; z: number
   return null;
 }
 
-function normalizeLightConfig(value: unknown, protocol: PrinterProtocol): PrinterLightConfig {
-  const object = isObject(value) ? value : {};
-  const pin = asString(object.pin);
-  const invert = object.invert === true;
-  // Active-low pins light the fixture at VALUE=0, so swap the pin-derived VALUEs.
-  const onValue = invert ? 0 : 1;
-  const offValue = invert ? 1 : 0;
-  const onGcode = asString(object.onGcode) || (pin ? `SET_PIN PIN=${pin} VALUE=${onValue}` : "");
-  const offGcode = asString(object.offGcode) || (pin ? `SET_PIN PIN=${pin} VALUE=${offValue}` : "");
-  const statusObject = asString(object.statusObject) || (pin ? `output_pin ${pin}` : "");
-  const statusField = asString(object.statusField) || "value";
-  const bambuNode = asString(object.bambuNode) || "chamber_light";
-
-  const explicitEnabled = object.enabled;
-  const enabled =
-    typeof explicitEnabled === "boolean"
-      ? explicitEnabled
-      : protocol === "bambu" || (protocol === "moonraker" && Boolean(onGcode && offGcode));
-
-  return { enabled, pin, invert, onGcode, offGcode, statusObject, statusField, bambuNode };
+function normalizeAutomaticContinuation(value: unknown): AutomaticContinuationConfig {
+  if (!isObject(value)) return { ...NO_AUTOMATIC_CONTINUATION };
+  const verifiedAt = asRaw(value.verifiedAt);
+  return {
+    // Opt-in only: anything other than a literal `true` stays false.
+    allowed: value.allowed === true,
+    mechanism: asRaw(value.mechanism),
+    verifiedAt: verifiedAt && Number.isFinite(Date.parse(verifiedAt)) ? verifiedAt : null
+  };
 }
 
-export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
+function normalizeLightSettings(value: unknown): PrinterLightSettings {
+  const object = isObject(value) ? value : {};
+  return {
+    enabled: typeof object.enabled === "boolean" ? object.enabled : null,
+    pin: asRaw(object.pin),
+    invert: object.invert === true,
+    onGcode: asRaw(object.onGcode),
+    offGcode: asRaw(object.offGcode),
+    statusObject: asRaw(object.statusObject),
+    statusField: asRaw(object.statusField),
+    bambuNode: asRaw(object.bambuNode)
+  };
+}
+
+/**
+ * Lenient normalization of one hand-written JSON entry into a stored record.
+ * Strings are kept **verbatim** (including `${VAR}` references) — expansion is
+ * the materializer's job. Returns null when the entry cannot describe a printer
+ * at all, so one bad row cannot take the rest of the file down.
+ *
+ * The strict counterpart, used for input arriving from the UI, is
+ * `domain/printers/validation.ts` — it answers with a 400 naming the field
+ * instead of dropping the row.
+ */
+export function normalizePrinterRecord(value: unknown, position = 0): PrinterRecord | null {
   if (!isObject(value)) return null;
 
-  const id = asString(value.id);
-  const name = asString(value.name);
-  const host = asString(value.host);
+  const id = asRaw(value.id);
+  const name = asRaw(value.name);
+  const host = asRaw(value.host);
   if (!id || !name || !host) return null;
   // An unsafe id would become a traversable snapshot path / URL segment.
   if (!PRINTER_ID_RE.test(id)) return null;
 
   const portValue = Number(value.port);
-  const protocol = normalizeProtocol(value.protocol);
   const nozzleDiameterValue = Number(value.nozzleDiameterMm);
+  const now = new Date().toISOString();
 
   return {
     id,
     name,
-    model: asString(value.model),
+    model: asRaw(value.model),
     type: normalizeType(value.type),
-    printerClass: asString(value.printerClass ?? value.class),
+    printerClass: asRaw(value.printerClass ?? value.class),
 
-    protocol,
+    protocol: normalizeProtocol(value.protocol),
     host,
-    port: Number.isFinite(portValue) && portValue > 0 ? portValue : undefined,
+    port: Number.isFinite(portValue) && portValue > 0 ? portValue : null,
 
-    material: asString(value.material),
+    material: asRaw(value.material),
     nozzleDiameterMm:
       Number.isFinite(nozzleDiameterValue) && nozzleDiameterValue > 0 ? nozzleDiameterValue : null,
-    nozzleType: asString(value.nozzleType),
+    nozzleType: asRaw(value.nozzleType),
     buildVolume: normalizeBuildVolume(value.buildVolume),
-    swatch: asString(value.swatch),
-    snapshotUrl: asString(value.snapshotUrl),
-    streamUrl: asString(value.streamUrl),
+    swatch: asRaw(value.swatch),
+    snapshotUrl: asRaw(value.snapshotUrl),
+    streamUrl: asRaw(value.streamUrl),
     interfaceUrl: normalizeInterfaceUrl(value.interfaceUrl),
 
     enabled: value.enabled !== false,
-    apiKey: asString(value.apiKey),
-    serial: asString(value.serial),
-    accessCode: asString(value.accessCode),
+    apiKey: asRaw(value.apiKey),
+    serial: asRaw(value.serial),
+    accessCode: asRaw(value.accessCode),
     allowInsecureTls: value.allowInsecureTls === true,
     automaticContinuation: normalizeAutomaticContinuation(value.automaticContinuation),
-    light: normalizeLightConfig(value.light, protocol)
+    light: normalizeLightSettings(value.light),
+
+    position,
+    createdAt: now,
+    updatedAt: now,
+    version: 1,
+    metadata: {}
   };
+}
+
+/** Backwards-compatible helper: normalize one JSON entry straight to runtime config. */
+export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
+  const record = normalizePrinterRecord(value);
+  return record ? materializePrinter(record) : null;
 }
 
 /**
@@ -310,58 +305,61 @@ export function normalizePrinterConfig(value: unknown): PrinterConfig | null {
  * an id wins and later duplicates are dropped. Duplicate ids are dangerous
  * downstream — the poller keys live status by id, so a second device under the
  * same id would overwrite the first's status, and a command resolved by id
- * could hit the wrong printer. Returns the accepted printers plus a warning
+ * could hit the wrong printer. Returns the accepted records plus a warning
  * when any duplicate was dropped.
  */
-function parsePrinters(raw: unknown): { printers: PrinterConfig[]; warning?: string } {
-  if (!Array.isArray(raw)) return { printers: [] };
-  const normalized = raw
-    .map(normalizePrinterConfig)
-    .filter((printer): printer is PrinterConfig => Boolean(printer));
+function parsePrinters(raw: unknown): { records: PrinterRecord[]; warning?: string } {
+  if (!Array.isArray(raw)) return { records: [] };
 
   const seen = new Set<string>();
-  const printers: PrinterConfig[] = [];
+  const records: PrinterRecord[] = [];
   const duplicates = new Set<string>();
-  for (const printer of normalized) {
-    if (seen.has(printer.id)) {
-      duplicates.add(printer.id);
+  for (const entry of raw) {
+    const record = normalizePrinterRecord(entry, (records.length + 1) * 10);
+    if (!record) continue;
+    if (seen.has(record.id)) {
+      duplicates.add(record.id);
       continue;
     }
-    seen.add(printer.id);
-    printers.push(printer);
+    seen.add(record.id);
+    records.push(record);
   }
 
   const warning =
     duplicates.size > 0
       ? `Повторяющиеся id принтеров пропущены (первый выигрывает): ${[...duplicates].join(", ")}`
       : undefined;
-  return { printers, warning };
+  return { records, warning };
 }
 
-function readFromEnv(): PrintersConfigResult {
+function readFromEnv(): PrinterRecordsResult {
   const raw = process.env.PRINTERS_CONFIG_JSON;
   if (!raw) {
-    return { printers: [], source: { kind: "none" } };
+    return { records: [], source: { kind: "none" } };
   }
   try {
-    const { printers, warning } = parsePrinters(JSON.parse(raw));
-    return { printers, source: { kind: "env", warning } };
+    const { records, warning } = parsePrinters(JSON.parse(raw));
+    return { records, source: { kind: "env", warning } };
   } catch {
     return {
-      printers: [],
+      records: [],
       source: { kind: "none", warning: "PRINTERS_CONFIG_JSON не является валидным JSON" }
     };
   }
 }
 
 /**
- * Loads the real printer configuration. Order (same policy as fulfillment):
- * the `PRINTERS_CONFIG_PATH` file (default `config/printers.json`), falling
- * back to the `PRINTERS_CONFIG_JSON` env variable when the file is missing or
- * corrupt. Never invents printers: with no usable source the farm is empty and
- * the dashboard says so.
+ * Loads the printer configuration **seed** — the hand-written source that is
+ * imported into SQLite once, on the first boot after the configuration moved
+ * into the database (see `infra/db/printersImport.ts`). After that import the
+ * database is authoritative and this file is no longer read.
+ *
+ * Order (unchanged): the `PRINTERS_CONFIG_PATH` file (default
+ * `config/printers.json`), falling back to the `PRINTERS_CONFIG_JSON` env
+ * variable when the file is missing or corrupt. Never invents printers: with no
+ * usable source the farm is empty and the dashboard says so.
  */
-export async function loadPrintersConfig(): Promise<PrintersConfigResult> {
+export async function loadPrinterRecords(): Promise<PrinterRecordsResult> {
   const configPath = process.env.PRINTERS_CONFIG_PATH || DEFAULT_CONFIG_PATH;
 
   let raw: string;
@@ -385,8 +383,8 @@ export async function loadPrintersConfig(): Promise<PrintersConfigResult> {
     };
   }
 
-  const { printers, warning } = parsePrinters(parsed);
-  if (printers.length === 0 && Array.isArray(parsed) && parsed.length > 0) {
+  const { records, warning } = parsePrinters(parsed);
+  if (records.length === 0 && Array.isArray(parsed) && parsed.length > 0) {
     const fallback = readFromEnv();
     return {
       ...fallback,
@@ -397,5 +395,11 @@ export async function loadPrintersConfig(): Promise<PrintersConfigResult> {
     };
   }
 
-  return { printers, source: { kind: "file", path: configPath, warning } };
+  return { records, source: { kind: "file", path: configPath, warning } };
+}
+
+/** {@link loadPrinterRecords} materialized into runtime configs. */
+export async function loadPrintersConfig(): Promise<PrintersConfigResult> {
+  const { records, source } = await loadPrinterRecords();
+  return { printers: records.map(materializePrinter), source };
 }

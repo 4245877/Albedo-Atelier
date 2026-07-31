@@ -1,4 +1,5 @@
 import type { OperationsRepositories } from "../operations/repositories";
+import type { PrinterRepository } from "../printers/repositories";
 import type { WritableRepository } from "../shared/repository";
 import type {
   ProfileRevisionRepository,
@@ -208,6 +209,8 @@ export interface Repositories extends OperationsRepositories {
   audit: AuditEventRepository;
   meta: AppMetaRepository;
   startGuards: StartGuardRepository;
+  // printers domain (domain/printers) — the farm's own hardware configuration
+  printers: PrinterRepository;
   // slicing domain (domain/slicing)
   profileRevisions: ProfileRevisionRepository;
   profileSets: ProfileSetRepository;

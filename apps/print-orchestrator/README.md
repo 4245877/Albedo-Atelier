@@ -4,8 +4,11 @@ Fastify service that backs the Albedo Atelier dashboard: printers, print jobs,
 queue, materials, cameras, automations, maintenance, events, warnings and
 system status.
 
-Data is real, never seeded. Printer configs come from `config/printers.json`
-(or `PRINTERS_CONFIG_JSON`); live telemetry is polled from the devices —
+Data is real, never seeded. Printers are configured **at runtime from the
+dashboard** and stored in SQLite (see
+[Printer inventory](#printer-inventory-configured-from-the-dashboard));
+`config/printers.json` / `PRINTERS_CONFIG_JSON` is only the one-time seed.
+Live telemetry is polled from the devices —
 Moonraker over HTTP, Bambu over local MQTT, Creality over WebSocket (see
 `src/infra/printers/status/`, adapted from `apps/fulfillment`); camera frames are
 real snapshots (`src/infra/printers/camera/`). Anything the farm genuinely does
@@ -36,6 +39,55 @@ manual light override are re-derived on the next poll, and persisting statuses
 would make a restart re-announce pre-existing conditions. Material stock,
 maintenance history and automations are still honest stubs with no runtime state
 yet; the persistence layer is structured to hold them once they are implemented.
+
+## Printer inventory (configured from the dashboard)
+
+The farm's hardware lives in the `printers` table (migration 012) and is edited
+at runtime from the dashboard section **«Оборудование фермы»**. Adding a printer,
+correcting an address, rotating a Bambu LAN access code after a reset, disabling
+one for repairs — all take effect **from the next poll**: no file edit, no image
+rebuild, no restart. Before this, a rotated access code meant editing a file in
+the repository and redeploying.
+
+**How a change lands.** A committed write re-materializes the config into the
+live runtime (`FarmRuntime.reloadPrinterConfig`) and **drops that printer's
+device connection**. The last part matters for Bambu: its MQTT client is
+long-lived and authenticated with the *old* access code, so leaving it open would
+keep reporting a plausible status for credentials that no longer work. Moonraker
+(request/response) and Creality (a fresh WebSocket per poll) hold nothing, so for
+them the disconnect is correctly a no-op.
+
+**Credentials.** `apiKey`, `serial` and `accessCode` go **in but never out**:
+every read returns a status — `set` / not set / read from which `${ENV_VAR}` (and
+whether that variable resolves) — never the value. An update that *omits* a
+credential keeps the stored one, so the edit form is submitted whole without the
+browser ever holding a secret; an explicit `null` is the only way to clear one.
+Audit rows record which credential *fields* changed, never their values. The
+values themselves are stored in `queue.db` exactly as the JSON file stored them,
+so that database file now carries the farm's device secrets — keep it `600` and
+out of images.
+
+**Seed & cutover.** On the first boot after this change, `config/printers.json`
+(or `PRINTERS_CONFIG_JSON`) is imported once, guarded by an `app_meta` marker
+exactly like the legacy queue import, and then never read again — a stale file
+can never revert an edit made in the panel. Strings are imported **verbatim**, so
+`${BAMBU_A1_ACCESS_CODE}` references keep resolving from `.env` until an operator
+types a literal value. An *empty* seed still marks the import done, so a farm that
+starts with no printers can add its first one from the UI without the old file
+resurrecting on the next boot.
+
+**Validation** is strict on this path (`domain/printers/validation.ts`): the
+operator gets a `400` naming the offending field rather than a silently dropped
+value. The lenient loader (`infra/printers/config.ts`, which drops a bad row so
+one typo cannot take the farm down) is kept for the hand-written seed file only.
+An enabled Bambu printer without a serial + access code is refused outright — it
+could never connect — but the same printer may be saved **disabled** as a draft
+and completed later, which is the intended "add a printer step by step" flow.
+
+The printer `id` is immutable: it is already the key of every snapshot directory,
+API path and `printer_id` reference in the queue, so renaming it would be a data
+migration, not an edit. Removing a printer leaves its run history intact —
+deleting a printer must not erase what it printed.
 
 ## Persistent print-queue model (SQLite)
 
@@ -543,6 +595,11 @@ the guard is disabled and a startup warning is logged. CORS is closed by default
 - `GET /api/status` — overall service status
 - `GET /api/printers` · `GET /api/printers/active` · `GET /api/printers/:id`
 - `GET /api/printers/:id/camera.jpg` · `GET /api/printers/:id/camera.mp4`
+- `GET /api/printers/config` · `GET /api/printers/config/:id` — the editable
+  inventory ([above](#printer-inventory-configured-from-the-dashboard)); credentials
+  come back as a `secrets: { accessCode: { set, source, envVar, resolved }, … }`
+  status, never as values
+- `GET /api/printers/config/options` — the protocol vocabulary the add/edit form is built from
 - `GET /api/queue` · `GET /api/queue/night`
 - `GET /api/print/tasks` · `GET /api/print/tasks/:id` (task + full chain + audit) · `GET /api/print/queue` (legacy-shape projection of the SQLite model) · `GET /api/print/audit`
 - `GET /api/print/artifacts` (uploads + latest analysis + draft task) · `GET /api/print/artifacts/:id` (artifact + analyses + audit) · `GET /api/print/artifacts/config` (upload limits for the dashboard)
@@ -564,6 +621,9 @@ Bambu local MQTT); unsupported combinations fail honestly rather than pretending
 Queue/night/automation features that have no engine yet return a clear error
 instead of fabricating a result.
 
+- `POST /api/printers/config` — add a printer · `PATCH /api/printers/config/:id` — change settings and/or credentials (a field you omit keeps its stored value; `null` clears it; `id` is immutable) · `DELETE /api/printers/config/:id`
+- `POST /api/printers/config/:id/enabled` — body `{ "enabled": boolean }` · `POST /api/printers/config/reorder` — body `{ "ids": [...] }`
+- `POST /api/printers/config/:id/test` — probe the real device with the stored settings; drops the printer's connection first, so a client authenticated with superseded credentials can never answer for the new ones
 - `POST /api/printers/:id/pause` · `.../resume` · `.../cancel` · `.../snapshot`
 - `POST /api/printers/:id/light` — body `{ "on": boolean }`; manual state is kept for 5 minutes (in memory; ±one poll tick), then the solar light policy takes over again
 - `POST /api/monitoring/lease` — create/extend the farm-wide "operator is watching" lease (no body; idempotent, ~90 s TTL, expires on its own — there is no release endpoint). The dashboard renews it every ~30 s while its tab is visible; deliberately **not** a side effect of any camera read (`camera.jpg?ensureLight=1` stays blocked by the dashboard nginx)

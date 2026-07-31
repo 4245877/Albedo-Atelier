@@ -114,7 +114,9 @@ services:
     env_file:
       - .env
     volumes:
-      # Real printer config; edit on the host, restart the service to apply.
+      # Slicer profiles + the printers.json SEED. Printers themselves are edited
+      # in the dashboard and stored in the database on the volume below; this
+      # file is imported once, on the first boot, and then never read again.
       - ./apps/print-orchestrator/config:/app/config:ro
       # Persisted runtime state — must be writable and outlive the container.
       - orchestrator-data:/app/data
@@ -192,7 +194,9 @@ services:
     restart: unless-stopped
 
 volumes:
-  # Durable orchestrator state (queue, events, today counters) as a JSON file.
+  # Durable orchestrator state: queue.db (print queue, runs, slicing AND the
+  # printer inventory with its device credentials) plus state.json (events,
+  # today counters). It now holds secrets — back it up, and keep it off images.
   orchestrator-data:
 
 networks:

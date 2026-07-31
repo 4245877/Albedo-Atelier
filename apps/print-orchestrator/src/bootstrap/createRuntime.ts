@@ -39,6 +39,7 @@ import { FilamentSync } from "../app/filamentSync";
 import { MonitoringLease } from "../app/monitoringLease";
 import { ManualOperationService } from "../app/operations/manualOperationService";
 import { OperatorScheduleService } from "../app/operations/operatorScheduleService";
+import { PrinterConfigService } from "../app/printers/printerConfigService";
 import { PrinterPoller } from "../app/printerPoller";
 import { PrintQueueService } from "../app/printQueue/printQueueService";
 import { buildNightGateInfo, type NightGateDeps } from "../app/readModels/buildNightGateInfo";
@@ -76,6 +77,8 @@ export interface PrintServices {
   readonly operatorSchedule: OperatorScheduleService;
   /** The typed physical interventions that hold printers until they are confirmed. */
   readonly manualOperations: ManualOperationService;
+  /** The farm's hardware inventory — add/edit/re-credential a printer at runtime. */
+  readonly printerConfig: PrinterConfigService;
   /** The single physical-start service; null until the queue store is opened. */
   readonly dispatchService: DispatchService | null;
   readonly slicing: {
@@ -131,6 +134,7 @@ export class FarmRuntime implements PrintServices {
   private printQueueServiceRef: PrintQueueService | null = null;
   private operatorScheduleServiceRef: OperatorScheduleService | null = null;
   private manualOperationServiceRef: ManualOperationService | null = null;
+  private printerConfigServiceRef: PrinterConfigService | null = null;
   private dispatchServiceRef: DispatchService | null = null;
   private deviceArtifactServiceRef: DeviceArtifactService | null = null;
   private runLifecycleRef: RunLifecycleService | null = null;
@@ -297,10 +301,26 @@ export class FarmRuntime implements PrintServices {
     return config ? automaticContinuationEnabled(config) : false;
   }
 
-  /** Installs the loaded printer config; called once by the lifecycle on start. */
+  /**
+   * Installs a printer config. Called by the lifecycle on start and again on
+   * every operator edit — the config is no longer frozen at boot.
+   */
   setConfig(printers: PrinterConfig[], source: PrinterConfigSource): void {
     this.configs = printers;
     this.configSource = source;
+  }
+
+  /**
+   * Re-reads the printer config from the database and installs it live. This is
+   * what makes an edit in the dashboard take effect without a restart: the poll
+   * loop reads `enabledConfigs()` on every tick, and the command/camera paths
+   * resolve a printer by id per request, so the next of each already sees the
+   * new settings.
+   */
+  reloadPrinterConfig(): PrinterConfig[] {
+    const printers = this.printerConfig.materialize();
+    this.setConfig(printers, { kind: "db" });
+    return printers;
   }
 
   // ── Ephemeral shared state ─────────────────────────────────────────────────
@@ -354,6 +374,12 @@ export class FarmRuntime implements PrintServices {
   get manualOperations(): ManualOperationService {
     this.ensureQueue();
     return this.manualOperationServiceRef as ManualOperationService;
+  }
+
+  /** The editable printer inventory (SQLite-backed), lazy. */
+  get printerConfig(): PrinterConfigService {
+    this.ensureQueue();
+    return this.printerConfigServiceRef as PrinterConfigService;
   }
 
   /** The OrcaSlicer preset/profile/slice services (SQLite-backed), lazy. */
@@ -486,6 +512,15 @@ export class FarmRuntime implements PrintServices {
       this.operatorScheduleServiceRef,
       { logger }
     );
+    // The hardware inventory. Every committed edit re-materializes the config
+    // into the live runtime — the poll loop reads it per tick, so a rotated
+    // Bambu access code takes effect on the next poll instead of on the next
+    // deployment. Dropping the stale device connection is the service's own
+    // job (it knows *what* changed); this callback only reinstalls the config.
+    this.printerConfigServiceRef = new PrinterConfigService(store, {
+      logger,
+      onChanged: () => this.reloadPrinterConfig()
+    });
     this.printQueueServiceRef = new PrintQueueService(store, {
       // Refuse a pin to a printer the farm does not know (evaluated lazily, so the
       // config loaded in start() is in place by the time an operator pins).
@@ -629,6 +664,7 @@ export class FarmRuntime implements PrintServices {
     this.printQueueServiceRef = null;
     this.operatorScheduleServiceRef = null;
     this.manualOperationServiceRef = null;
+    this.printerConfigServiceRef = null;
     this.dispatchServiceRef = null;
     this.deviceArtifactServiceRef = null;
     this.runLifecycleRef = null;

@@ -86,6 +86,53 @@ const API = {
   },
   "/api/print/operations": { operations: [], holds: [] },
   "/api/print/operations/types": { types: [] },
+  // Оборудование фермы. Учётные данные приходят СТАТУСОМ, а не значением —
+  // ровно так, как их отдаёт настоящий backend; мок с настоящим кодом доступа
+  // маскировал бы регресс, при котором секрет утёк бы в браузер.
+  "/api/printers/config": {
+    printers: [
+      {
+        id: "k2", name: "Creality K2", model: "Creality K2", type: "FDM", printerClass: "k2",
+        protocol: "moonraker", host: "192.168.0.132", port: 4408,
+        material: "PETG", nozzleDiameterMm: 0.4, nozzleType: "", buildVolume: null,
+        swatch: "#4c4f55", snapshotUrl: "", streamUrl: "", interfaceUrl: "http://192.168.0.132:4408",
+        enabled: true, allowInsecureTls: false,
+        automaticContinuation: { allowed: false, mechanism: "", verifiedAt: null },
+        light: { enabled: null, pin: "LED", invert: false, onGcode: "", offGcode: "", statusObject: "", statusField: "", bambuNode: "" },
+        position: 10, createdAt: "2026-07-01T00:00:00.000Z", updatedAt: "2026-07-01T00:00:00.000Z",
+        version: 1, metadata: {},
+        secrets: {
+          apiKey: { set: false, source: "none", envVar: null, resolved: false },
+          serial: { set: false, source: "none", envVar: null, resolved: false },
+          accessCode: { set: false, source: "none", envVar: null, resolved: false }
+        }
+      },
+      {
+        id: "bambu-a1", name: "Bambu A1", model: "Bambu Lab A1", type: "FDM", printerClass: "",
+        protocol: "bambu", host: "192.168.0.187", port: 8883,
+        material: "PLA", nozzleDiameterMm: 0.4, nozzleType: "", buildVolume: null,
+        swatch: "#efe8d8", snapshotUrl: "", streamUrl: "", interfaceUrl: "",
+        enabled: true, allowInsecureTls: true,
+        automaticContinuation: { allowed: false, mechanism: "", verifiedAt: null },
+        light: { enabled: null, pin: "", invert: false, onGcode: "", offGcode: "", statusObject: "", statusField: "", bambuNode: "chamber_light" },
+        position: 20, createdAt: "2026-07-01T00:00:00.000Z", updatedAt: "2026-07-01T00:00:00.000Z",
+        version: 1, metadata: {},
+        secrets: {
+          apiKey: { set: false, source: "none", envVar: null, resolved: false },
+          serial: { set: true, source: "literal", envVar: null, resolved: true },
+          accessCode: { set: true, source: "env", envVar: "BAMBU_A1_ACCESS_CODE", resolved: true }
+        }
+      }
+    ]
+  },
+  "/api/printers/config/options": {
+    protocols: [
+      { id: "moonraker", label: "Moonraker", hint: "", credentials: ["apiKey"] },
+      { id: "bambu", label: "Bambu Lab", hint: "", credentials: ["serial", "accessCode"] },
+      { id: "creality", label: "Creality", hint: "", credentials: [] }
+    ],
+    types: [{ id: "FDM", label: "FDM" }, { id: "Resin", label: "Фотополимер" }]
+  },
   "/api/monitoring/lease": { ok: true }
 };
 

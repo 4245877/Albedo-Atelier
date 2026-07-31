@@ -1,6 +1,7 @@
 import { capabilitiesOf, requireCapability } from "../capabilities";
 import type { PrinterConfig } from "../config";
 import {
+  dropBambuConnection,
   getBambuStatus,
   sendBambuCommand,
   sendBambuLightCommand,
@@ -85,6 +86,17 @@ export async function sendPrinterLight(printer: PrinterConfig, on: boolean): Pro
   }
   if (printer.protocol === "moonraker") return sendMoonrakerLightCommand(printer, on);
   if (printer.protocol === "bambu") return sendBambuLightCommand(printer, on);
+}
+
+/**
+ * Drops any persistent connection held for ONE printer, so the next poll
+ * reconnects from the current configuration. Called after its settings or
+ * credentials change and when it is removed from the farm. Only Bambu keeps a
+ * long-lived client — Moonraker is request/response and Creality opens a fresh
+ * WebSocket per poll, so for those this is correctly a no-op.
+ */
+export function disconnectPrinter(printerId: string): void {
+  dropBambuConnection(printerId);
 }
 
 /** Closes all persistent device connections (Bambu MQTT clients, timers). */
