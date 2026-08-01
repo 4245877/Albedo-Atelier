@@ -600,6 +600,11 @@ the guard is disabled and a startup warning is logged. CORS is closed by default
   come back as a `secrets: { accessCode: { set, source, envVar, resolved }, … }`
   status, never as values
 - `GET /api/printers/config/options` — the protocol vocabulary the add/edit form is built from
+- `GET /api/printers/inventory` — the read-only **inter-service** view of the
+  same inventory (apps/fulfillment reads it): configuration only, disabled
+  printers included and flagged, no host, port, credential status or camera URL.
+  Carries a `revision` fingerprint of the whole set, so a consumer detects an
+  add/edit/delete without diffing every field
 - `GET /api/queue` · `GET /api/queue/night`
 - `GET /api/print/tasks` · `GET /api/print/tasks/:id` (task + full chain + audit) · `GET /api/print/queue` (legacy-shape projection of the SQLite model) · `GET /api/print/audit`
 - `GET /api/print/artifacts` (uploads + latest analysis + draft task) · `GET /api/print/artifacts/:id` (artifact + analyses + audit) · `GET /api/print/artifacts/config` (upload limits for the dashboard)

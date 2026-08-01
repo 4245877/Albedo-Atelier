@@ -15,6 +15,7 @@ import { registerDashboardRoutes } from "./modules/dashboard/routes";
 import { registerMonitoringRoutes } from "./modules/monitoring/routes";
 import { registerPrintQueueRoutes } from "./modules/print/routes";
 import { registerPrinterConfigRoutes } from "./modules/printers/configRoutes";
+import { registerPrinterInventoryRoutes } from "./modules/printers/inventoryRoutes";
 import { registerPrinterRoutes } from "./modules/printers/routes";
 import { registerQueueRoutes } from "./modules/queue/routes";
 import { env } from "./shared/env";
@@ -125,6 +126,13 @@ export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
   // must not force the database open while the app is merely being built.
   app.register(registerPrinterConfigRoutes, {
     prefix: "/api/printers/config",
+    printerConfig: () => farmStore.printerConfig
+  });
+  // The read-only inter-service view of the same inventory (apps/fulfillment
+  // reads it): configuration without connection parameters or credentials, and
+  // WITH the disabled printers, which `/api/printers` deliberately omits.
+  app.register(registerPrinterInventoryRoutes, {
+    prefix: "/api/printers/inventory",
     printerConfig: () => farmStore.printerConfig
   });
   app.register(registerPrinterRoutes, { prefix: "/api/printers", reads, commands });

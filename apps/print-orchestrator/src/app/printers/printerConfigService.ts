@@ -6,6 +6,10 @@ import {
   type PrinterRecord,
   type PrinterSecretField
 } from "../../domain/printers/config";
+import {
+  buildPrinterInventory,
+  type PrinterInventorySnapshot
+} from "../../domain/printers/inventory";
 import { buildPrinterRecord, type PrinterInput } from "../../domain/printers/validation";
 import type { PrinterConfig } from "../../infra/printers/config";
 import { materializePrinter } from "../../infra/printers/materialize";
@@ -116,6 +120,16 @@ export class PrinterConfigService {
 
   get(id: string): PrinterConfigView {
     return toView(this.require(id));
+  }
+
+  /**
+   * The inter-service inventory snapshot (`GET /api/printers/inventory`):
+   * configuration only, disabled printers included and flagged, no connection
+   * parameters and no credentials. Kept here rather than in the route so the
+   * projection has exactly one implementation — see `domain/printers/inventory`.
+   */
+  inventory(): PrinterInventorySnapshot {
+    return buildPrinterInventory(this.store.repositories.printers.list());
   }
 
   /** The runtime configs the poller/drivers consume (`${ENV}` expanded). */

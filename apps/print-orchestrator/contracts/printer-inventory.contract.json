@@ -1,0 +1,69 @@
+{
+  "revision": "c176a6e9a232af7b",
+  "updatedAt": "2026-07-12T12:00:00.000Z",
+  "count": 3,
+  "printers": [
+    {
+      "id": "contract-printer",
+      "name": "Contract Printer",
+      "model": "Contract 3000",
+      "type": "FDM",
+      "printerClass": "contract-class",
+      "protocol": "moonraker",
+      "enabled": true,
+      "position": 10,
+      "material": "PETG",
+      "swatch": "#4c4f55",
+      "nozzleDiameterMm": 0.4,
+      "nozzleType": "hardened_steel",
+      "buildVolume": {
+        "x": 220,
+        "y": 220,
+        "z": 250
+      },
+      "createdAt": "2026-07-12T12:00:00.000Z",
+      "updatedAt": "2026-07-12T12:00:00.000Z",
+      "version": 3
+    },
+    {
+      "id": "contract-disabled",
+      "name": "Contract Disabled",
+      "model": "Contract 3000",
+      "type": "FDM",
+      "printerClass": null,
+      "protocol": "bambu",
+      "enabled": false,
+      "position": 20,
+      "material": "PETG",
+      "swatch": "#4c4f55",
+      "nozzleDiameterMm": 0.4,
+      "nozzleType": "hardened_steel",
+      "buildVolume": {
+        "x": 220,
+        "y": 220,
+        "z": 250
+      },
+      "createdAt": "2026-07-12T12:00:00.000Z",
+      "updatedAt": "2026-07-12T12:00:00.000Z",
+      "version": 1
+    },
+    {
+      "id": "contract-minimal",
+      "name": "Contract Minimal",
+      "model": null,
+      "type": "Resin",
+      "printerClass": null,
+      "protocol": "creality",
+      "enabled": true,
+      "position": 30,
+      "material": null,
+      "swatch": null,
+      "nozzleDiameterMm": null,
+      "nozzleType": null,
+      "buildVolume": null,
+      "createdAt": "2026-07-12T12:00:00.000Z",
+      "updatedAt": "2026-07-12T12:00:00.000Z",
+      "version": 1
+    }
+  ]
+}
