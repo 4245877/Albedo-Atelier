@@ -18,6 +18,7 @@ import {
   SqliteScheduleRuleRepository
 } from "./operatorRepository";
 import { SqlitePlanRepository } from "./planRepository";
+import { SqlitePrinterDiscoveryRepository } from "./printerDiscoveryRepository";
 import { SqlitePrinterRepository } from "./printerRepository";
 import { SqlitePrintRunRepository } from "./printRunRepository";
 import { SqlitePrintTaskRepository } from "./printTaskRepository";
@@ -55,6 +56,7 @@ export class SqlitePrintQueueStore implements PrintQueueStore {
       startGuards: new SqliteStartGuardRepository(db),
       // printers domain (domain/printers)
       printers: new SqlitePrinterRepository(db),
+      printerDiscovery: new SqlitePrinterDiscoveryRepository(db),
       profileRevisions: new SqliteProfileRevisionRepository(db),
       profileSets: new SqliteProfileSetRepository(db),
       sliceVariants: new SqliteSliceVariantRepository(db),

@@ -23,6 +23,16 @@ const VARS = {
     readPositiveInt(n, raw, 10000)
   ),
   /**
+   * How often the farm re-asks each printer what hardware it is (model, bed size,
+   * nozzle, AMS). Far rarer than the status poll because the answer barely
+   * changes — and cheap when it runs: Bambu answers from the MQTT cache with no
+   * I/O, Moonraker costs three small LAN requests. Positive for the same reason
+   * the status interval is.
+   */
+  printerDiscoveryIntervalMs: envVar("PRINTER_DISCOVERY_INTERVAL_MS", "server", (n, raw) =>
+    readPositiveInt(n, raw, 300_000)
+  ),
+  /**
    * How long shutdown waits for in-flight analysis/slice jobs to settle before
    * closing SQLite anyway. Whatever is still unfinished at the deadline is
    * reported explicitly and recovered as `pending` on the next boot.
@@ -47,6 +57,7 @@ export function buildServerConfig(source: EnvSource) {
     logLevel: VARS.logLevel.read(source),
     startupTimeoutMs: VARS.startupTimeoutMs.read(source),
     printerPollIntervalMs: VARS.printerPollIntervalMs.read(source),
+    printerDiscoveryIntervalMs: VARS.printerDiscoveryIntervalMs.read(source),
     shutdownDrainTimeoutMs: VARS.shutdownDrainTimeoutMs.read(source),
     shutdownTimeoutMs: VARS.shutdownTimeoutMs.read(source)
   };

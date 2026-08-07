@@ -111,6 +111,15 @@ export class PrinterPoller {
         prev: PrinterLiveStatus | undefined,
         next: PrinterLiveStatus
       ) => void;
+    },
+    /**
+     * Hardware-profile discovery, driven on the poll cadence. Optional and
+     * appended last on purpose: without it the farm polls telemetry exactly as
+     * before and the printer cards fall back to whatever the operator typed.
+     */
+    private readonly discovery?: {
+      refreshDue(printers: readonly PrinterConfig[]): Promise<void>;
+      useLogger(logger: StoreLogger): void;
     }
   ) {
     this.runObserver = lightPolicy?.runObserver;
@@ -133,6 +142,7 @@ export class PrinterPoller {
     this.lights.useLogger(logger);
     this.filament.useLogger(logger);
     this.filamentSync.useLogger(logger);
+    this.discovery?.useLogger(logger);
     await this.pollOnce();
     this.pollTimer = setInterval(() => {
       void this.pollOnce();
@@ -202,6 +212,10 @@ export class PrinterPoller {
       // Redeliver queued stock deductions in the poll cadence. Fire-and-forget:
       // it is self-guarded and must never delay or fail the poll loop.
       void this.filament.retryPending();
+      // Re-ask printers what hardware they are, for the ones whose profile has
+      // gone stale. Same contract as above — self-guarded, never awaited — so a
+      // device that is slow to describe itself cannot hold up telemetry.
+      void this.discovery?.refreshDue(enabled);
       this.lastPollAt = Date.now();
     } catch (error) {
       this.logger.error?.({ err: error }, "printer poll failed");

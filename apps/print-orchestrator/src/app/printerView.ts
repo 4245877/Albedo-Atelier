@@ -1,3 +1,9 @@
+import type { PrinterDiscoveryRecord } from "../domain/printers/discovery";
+import {
+  resolvePrinterSpecs,
+  withLiveReading,
+  type ResolvedPrinterSpecs
+} from "../domain/printers/specs";
 import type { PrinterView } from "../domain/printers/types";
 import {
   canCaptureSnapshot,
@@ -27,7 +33,13 @@ export function buildPrinterView(
   printer: PrinterConfig,
   status: PrinterLiveStatus | undefined,
   camera: CameraEntry | undefined,
-  latestSnapshotUrl: string | null = null
+  latestSnapshotUrl: string | null = null,
+  /**
+   * The printer's resolved hardware specification. Optional so a caller that has
+   * not wired discovery still gets the previous behaviour — the manual config as
+   * the only fallback behind live telemetry.
+   */
+  specs: ResolvedPrinterSpecs = resolvePrinterSpecs(printer, null)
 ): PrinterView {
   const viewStatus: PrinterView["status"] = !status
     ? "unknown"
@@ -41,34 +53,41 @@ export function buildPrinterView(
   const cameraOnline = cameraState === "online";
   const webrtcSource = resolveWebrtcSource(printer);
 
-  // Prefer live filament telemetry from the device; fall back to the configured
-  // material. Only "printer" is authoritative — config is a declared default.
+  // Every hardware characteristic is resolved by one shared rule
+  // (`domain/printers/specs.ts`), then overlaid with this poll's live reading
+  // where the device sent one — the freshest thing it said wins, but the
+  // priority between device, operator and catalogue is decided in exactly one
+  // place, so this view can never disagree with the hardware card.
+  const observedAt = status?.updatedAt ?? null;
+  const nozzleDiameterSpec = withLiveReading(
+    specs.nozzleDiameterMm,
+    status?.nozzleDiameterMm ?? null,
+    "телеметрия принтера",
+    observedAt
+  );
+  const nozzleTypeSpec = withLiveReading(
+    specs.nozzleType,
+    status?.nozzleType ?? null,
+    "телеметрия принтера",
+    observedAt
+  );
+
+  // Live filament is a different question from the loaded-material spec — "what
+  // is feeding right now" — so it keeps its own telemetry-first resolution.
   const activeFilament = status?.activeFilament ?? null;
-  const liveMaterial = activeFilament?.material ?? null;
-  const liveMaterialSource: PrinterView["liveMaterialSource"] = liveMaterial
-    ? "printer"
-    : printer.material
-      ? "config"
-      : "unknown";
-
-  // Same rule for the nozzle: prefer the live setting from the device (Bambu, or
-  // the K2's Klipper config), else the configured fallback, tagged honestly so
-  // the dashboard never shows a config value as live telemetry.
-  const liveNozzleDiameter = status?.nozzleDiameterMm ?? null;
-  const nozzleDiameter = liveNozzleDiameter ?? printer.nozzleDiameterMm ?? null;
-  const nozzleDiameterSource: PrinterView["nozzleDiameterSource"] =
-    liveNozzleDiameter !== null ? "printer" : printer.nozzleDiameterMm != null ? "config" : "unknown";
-
-  const liveNozzleType = status?.nozzleType ?? null;
-  const configNozzleType = printer.nozzleType || null;
-  const nozzleType = liveNozzleType ?? configNozzleType;
-  const nozzleTypeSource: PrinterView["nozzleTypeSource"] =
-    liveNozzleType ? "printer" : configNozzleType ? "config" : "unknown";
+  const materialSpec = withLiveReading(
+    specs.material,
+    activeFilament?.material ?? null,
+    "телеметрия принтера",
+    observedAt
+  );
 
   return {
     id: printer.id,
     name: printer.name,
-    model: printer.model || null,
+    model: specs.model.value,
+    modelSource: specs.model.source,
+    firmware: specs.firmware.value,
     type: printer.type,
     status: viewStatus,
     online: status?.online ?? false,
@@ -83,14 +102,22 @@ export function buildPrinterView(
     minutesLeft: status?.remainingMinutes ?? null,
     material: printer.material || null,
     swatch: printer.swatch || null,
-    nozzleDiameter,
-    nozzleDiameterSource,
-    nozzleType,
-    nozzleTypeSource,
-    liveMaterial,
+    nozzleDiameter: nozzleDiameterSpec.value,
+    nozzleDiameterSource: nozzleDiameterSpec.source,
+    nozzleType: nozzleTypeSpec.value,
+    nozzleTypeSource: nozzleTypeSpec.source,
+    // Strictly what a DEVICE said is loaded — null when none did, so the
+    // long-standing `liveMaterial ?? material` fallback in consumers keeps
+    // meaning what it says. The source tag below still describes the resolution
+    // as a whole, which is how the dashboard labels the material it displays.
+    liveMaterial: materialSpec.source === "printer" ? materialSpec.value : null,
     liveMaterialColor: activeFilament?.color ?? null,
-    liveMaterialSource,
+    liveMaterialSource: materialSpec.source,
     activeTray: activeFilament?.tray ?? null,
+    buildVolume: specs.buildVolume.value,
+    buildVolumeSource: specs.buildVolume.source,
+    ams: specs.ams.value?.present ?? null,
+    amsKind: specs.ams.value?.kind ?? null,
     camera: cameraState,
     cameraStream: cameraOnline && hasCameraStream(printer),
     cameraSrc: cameraOnline ? webrtcSource : null,

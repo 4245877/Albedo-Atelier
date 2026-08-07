@@ -18,6 +18,31 @@ const MIME = {
   ".svg": "image/svg+xml"
 };
 
+/**
+ * One resolved hardware characteristic, in the shape `/api/printers/config`
+ * returns. `source` is the point of the whole structure — the card renders a
+ * device-reported value differently from an operator-typed one — so the mock
+ * carries real sources rather than a single placeholder.
+ */
+const spec = (value, source, via = null, observedAt = "2026-07-12T11:59:00.000Z") => ({
+  value,
+  source,
+  via,
+  observedAt,
+  overriddenManual: null,
+  catalogHint: null
+});
+
+/** Every characteristic unknown; spread first, then override the known ones. */
+const unknownSpecs = () =>
+  Object.fromEntries(
+    [
+      "model", "firmware", "deviceName", "technology", "buildVolume", "nozzleDiameterMm",
+      "nozzleType", "material", "extruderCount", "ams", "materials", "chamberSensor",
+      "heatedChamber", "filamentSensor", "kinematics"
+    ].map((key) => [key, spec(null, "unknown", null, null)])
+  );
+
 /** Minimal but shape-correct payloads for the routes the dashboard fetches. */
 const state = {
   service: { status: "ok", version: "v0.1.0", backend: "mock" },
@@ -105,6 +130,22 @@ const API = {
           apiKey: { set: false, source: "none", envVar: null, resolved: false },
           serial: { set: false, source: "none", envVar: null, resolved: false },
           accessCode: { set: false, source: "none", envVar: null, resolved: false }
+        },
+        // Klipper публикует собственный конфиг, поэтому габариты и сопло тут
+        // действительно прочитаны с устройства, а модель остаётся ручной —
+        // протокол её не сообщает.
+        discovery: { probedAt: "2026-07-12T11:59:00.000Z", succeeded: true, error: null },
+        specs: {
+          ...unknownSpecs(),
+          model: spec("Creality K2", "manual", null, "2026-07-01T00:00:00.000Z"),
+          buildVolume: spec(
+            { x: 350, y: 350, z: 345 },
+            "printer",
+            "configfile.settings.stepper_{x,y,z}.position_max"
+          ),
+          nozzleDiameterMm: spec(0.4, "printer", "configfile.settings.extruder.nozzle_diameter"),
+          material: spec("PETG", "manual", null, "2026-07-01T00:00:00.000Z"),
+          kinematics: spec("corexy", "printer", "configfile.settings.printer.kinematics")
         }
       },
       {
@@ -121,15 +162,49 @@ const API = {
           apiKey: { set: false, source: "none", envVar: null, resolved: false },
           serial: { set: true, source: "literal", envVar: null, resolved: true },
           accessCode: { set: true, source: "env", envVar: "BAMBU_A1_ACCESS_CODE", resolved: true }
+        },
+        // Пример из постановки задачи: A1 Combo с закалённым соплом 0,4. Всё,
+        // кроме габаритов, прочитано с устройства; габариты MQTT не передаёт,
+        // поэтому они «по модели» — и это видно по бейджу.
+        discovery: { probedAt: "2026-07-12T11:59:30.000Z", succeeded: true, error: null },
+        specs: {
+          ...unknownSpecs(),
+          model: spec("Bambu Lab A1", "printer", "MQTT info.get_version → ota.sn (серийный номер)"),
+          firmware: spec("01.04.00.00", "printer", "MQTT info.get_version → ota.sw_ver"),
+          buildVolume: spec({ x: 256, y: 256, z: 256 }, "catalog", "справочник моделей"),
+          nozzleDiameterMm: spec(0.4, "printer", "MQTT print.nozzle_diameter"),
+          nozzleType: spec("hardened_steel", "printer", "MQTT print.nozzle_type"),
+          material: spec("PLA", "printer", "MQTT print.ams"),
+          ams: spec({ present: true, kind: "AMS Lite", units: 1, slots: 4 }, "printer", "MQTT print.ams"),
+          materials: spec(
+            [
+              { slot: 0, material: "PLA", color: "#EFE8D8", remainPct: 92, active: true },
+              { slot: 1, material: "PETG", color: "#1A2B3C", remainPct: 40, active: false }
+            ],
+            "printer",
+            "MQTT print.ams / vt_tray"
+          )
         }
       }
     ]
   },
   "/api/printers/config/options": {
     protocols: [
-      { id: "moonraker", label: "Moonraker", hint: "", credentials: ["apiKey"] },
-      { id: "bambu", label: "Bambu Lab", hint: "", credentials: ["serial", "accessCode"] },
-      { id: "creality", label: "Creality", hint: "", credentials: [] }
+      {
+        id: "moonraker",
+        label: "Moonraker",
+        hint: "",
+        credentials: ["apiKey"],
+        autoFields: ["buildVolume", "nozzleDiameterMm"]
+      },
+      {
+        id: "bambu",
+        label: "Bambu Lab",
+        hint: "",
+        credentials: ["serial", "accessCode"],
+        autoFields: ["model", "buildVolume", "nozzleDiameterMm", "nozzleType", "material"]
+      },
+      { id: "creality", label: "Creality", hint: "", credentials: [], autoFields: ["model"] }
     ],
     types: [{ id: "FDM", label: "FDM" }, { id: "Resin", label: "Фотополимер" }]
   },

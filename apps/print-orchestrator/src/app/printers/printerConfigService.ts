@@ -6,10 +6,15 @@ import {
   type PrinterRecord,
   type PrinterSecretField
 } from "../../domain/printers/config";
+import type { PrinterDiscoveryRecord } from "../../domain/printers/discovery";
 import {
   buildPrinterInventory,
   type PrinterInventorySnapshot
 } from "../../domain/printers/inventory";
+import {
+  resolvePrinterSpecs,
+  type ResolvedPrinterSpecs
+} from "../../domain/printers/specs";
 import { buildPrinterRecord, type PrinterInput } from "../../domain/printers/validation";
 import type { PrinterConfig } from "../../infra/printers/config";
 import { materializePrinter } from "../../infra/printers/materialize";
@@ -35,10 +40,29 @@ export interface SecretStatus {
   resolved: boolean;
 }
 
-/** One printer's settings as the API returns them — credentials replaced by status. */
+/** What the last hardware probe did, without the facts themselves. */
+export interface DiscoveryStatus {
+  probedAt: string;
+  succeeded: boolean;
+  error: string | null;
+}
+
+/**
+ * One printer's settings as the API returns them — credentials replaced by
+ * status, and every hardware characteristic resolved against what the device
+ * itself reported.
+ *
+ * The record fields stay exactly as stored (they are what the edit form writes
+ * back), while {@link specs} carries the *resolved* answer plus its source. That
+ * separation is what lets the card show «0.4 мм · с принтера» over an empty
+ * input without the empty input ever being mistaken for a cleared value.
+ */
 export interface PrinterConfigView
   extends Omit<PrinterRecord, "apiKey" | "serial" | "accessCode"> {
   secrets: Record<PrinterSecretField, SecretStatus>;
+  specs: ResolvedPrinterSpecs;
+  /** Null when the printer has never been probed. */
+  discovery: DiscoveryStatus | null;
 }
 
 export interface PrinterConnectionTest {
@@ -64,6 +88,23 @@ export interface PrinterConfigServiceOptions {
   probe?: (printer: PrinterConfig) => Promise<{ online: boolean; status: string; error: string | null }>;
   /** Drops a printer's live device connection; the real adapter by default. */
   disconnect?: (printerId: string) => void;
+  /**
+   * Hardware-profile discovery. Optional so this service keeps working (and
+   * stays testable) without one — the card then shows only manual values.
+   */
+  discovery?: PrinterDiscoveryPort;
+}
+
+/**
+ * The slice of {@link PrinterDiscoveryService} this service needs. Narrow on
+ * purpose: config management asks for a profile and asks for one to be
+ * refreshed, and must not grow the ability to write facts itself.
+ */
+export interface PrinterDiscoveryPort {
+  get(printerId: string): PrinterDiscoveryRecord | null;
+  all(): Map<string, PrinterDiscoveryRecord>;
+  refresh(printer: PrinterConfig): Promise<PrinterDiscoveryRecord | null>;
+  forget(printerId: string): void;
 }
 
 /** How long a Bambu probe waits for the first MQTT report before giving up. */
@@ -98,6 +139,7 @@ export class PrinterConfigService {
   private readonly onChanged?: (changedPrinterId: string | null) => void;
   private readonly probeFn?: PrinterConfigServiceOptions["probe"];
   private readonly disconnect: (printerId: string) => void;
+  private readonly discovery?: PrinterDiscoveryPort;
 
   constructor(
     private readonly store: PrintQueueStore,
@@ -106,6 +148,7 @@ export class PrinterConfigService {
     this.nowFn = options.now ?? (() => new Date());
     this.actor = options.actor ?? "operator";
     this.logger = options.logger ?? {};
+    this.discovery = options.discovery;
     this.onChanged = options.onChanged;
     this.probeFn = options.probe;
     this.disconnect = options.disconnect ?? disconnectPrinter;
@@ -115,11 +158,14 @@ export class PrinterConfigService {
 
   /** Every configured printer in operator order, credentials masked. */
   list(): PrinterConfigView[] {
-    return this.store.repositories.printers.list().map((record) => toView(record));
+    const discovery = this.discoveryByPrinter();
+    return this.store.repositories.printers
+      .list()
+      .map((record) => toView(record, discovery.get(record.id) ?? null));
   }
 
   get(id: string): PrinterConfigView {
-    return toView(this.require(id));
+    return toView(this.require(id), this.discoveryOf(id));
   }
 
   /**
@@ -129,7 +175,10 @@ export class PrinterConfigService {
    * projection has exactly one implementation — see `domain/printers/inventory`.
    */
   inventory(): PrinterInventorySnapshot {
-    return buildPrinterInventory(this.store.repositories.printers.list());
+    return buildPrinterInventory(
+      this.store.repositories.printers.list(),
+      this.discoveryByPrinter()
+    );
   }
 
   /** The runtime configs the poller/drivers consume (`${ENV}` expanded). */
@@ -173,7 +222,11 @@ export class PrinterConfigService {
       { printer: record.id, protocol: record.protocol, enabled: record.enabled },
       "printer added from the dashboard"
     );
-    return toView(record);
+    // A brand-new printer has nothing but what the operator typed. Ask the
+    // device to describe itself right away, so the card fills in while they are
+    // still looking at it rather than at the next discovery interval.
+    this.scheduleDiscovery(record);
+    return toView(record, this.discoveryOf(record.id));
   }
 
   /**
@@ -217,7 +270,9 @@ export class PrinterConfigService {
     // poll loop stops visiting it, so nothing would ever close its client or its
     // keep-alive timer — a disabled Bambu would hold an MQTT session open until
     // the service restarts.
-    if (secretsChanged.length > 0 || disabled || this.connectionAffecting(input)) {
+    const reconnected =
+      secretsChanged.length > 0 || disabled || this.connectionAffecting(input);
+    if (reconnected) {
       this.disconnect(id);
     }
     this.notify(id);
@@ -225,7 +280,12 @@ export class PrinterConfigService {
       { printer: id, secretsChanged: secretsChanged.length > 0 },
       "printer settings updated from the dashboard"
     );
-    return toView(record);
+    // Re-pointed at a different address, or re-credentialed: the stored profile
+    // may describe a different machine entirely, so it is re-learned rather than
+    // left to age out. A still-disabled printer is not probed — nothing is
+    // listening for it on the poll loop either.
+    if (reconnected && record.enabled) this.scheduleDiscovery(record);
+    return toView(record, this.discoveryOf(id));
   }
 
   /**
@@ -254,6 +314,9 @@ export class PrinterConfigService {
       });
     });
     this.disconnect(id);
+    // The discovery row goes with the printer through the FK cascade; this only
+    // clears the in-memory in-flight marker so a re-created id starts clean.
+    this.discovery?.forget(id);
     this.notify(id);
     this.logger.warn?.({ printer: id }, "printer removed from the farm config");
   }
@@ -317,7 +380,37 @@ export class PrinterConfigService {
         detail: { online: result.online, status: result.status, error: result.error }
       });
     });
+    // A reachable printer is also a printer that can describe itself, and the
+    // operator pressing «проверить связь» is exactly the moment they want the
+    // card populated. Best-effort: the connection answer is what they asked for.
+    if (result.online) await this.discoverNow(id, actor).catch(() => {});
     return { printerId: id, ...result, checkedAt };
+  }
+
+  /**
+   * Re-asks the device what hardware it is, now. Backs the «Опросить принтер»
+   * button; the same probe otherwise runs on its own interval from the poll loop.
+   *
+   * Read-only against the device — it requests a description and sends no
+   * command — so it is safe on a printer that is mid-print.
+   */
+  async discoverNow(id: string, actor?: string): Promise<PrinterConfigView> {
+    const record = this.require(id);
+    if (!this.discovery) {
+      throw new ValidationError("Опрос характеристик недоступен: сервис обнаружения не настроен");
+    }
+
+    const result = await this.discovery.refresh(materializePrinter(record));
+    this.store.transaction(() => {
+      this.audit({
+        entityType: "printer",
+        entityId: id,
+        action: "hardware_discovered",
+        actor,
+        detail: { succeeded: result?.succeeded ?? false, error: result?.error ?? null }
+      });
+    });
+    return toView(record, result ?? null);
   }
 
   private async probeDevice(
@@ -368,6 +461,30 @@ export class PrinterConfigService {
     this.onChanged?.(changedPrinterId);
   }
 
+  private discoveryOf(printerId: string): PrinterDiscoveryRecord | null {
+    return this.discovery?.get(printerId) ?? null;
+  }
+
+  private discoveryByPrinter(): Map<string, PrinterDiscoveryRecord> {
+    return this.discovery?.all() ?? new Map();
+  }
+
+  /**
+   * Kicks off a probe without making the caller wait for it. A create or a
+   * re-address must answer the HTTP request immediately — the probe can take
+   * seconds on a Bambu that has to establish MQTT first — and its result reaches
+   * the operator through the card's own 15-second refresh.
+   */
+  private scheduleDiscovery(record: PrinterRecord): void {
+    if (!this.discovery) return;
+    void this.discovery.refresh(materializePrinter(record)).catch((error: unknown) => {
+      this.logger.warn?.(
+        { err: error, printer: record.id },
+        "printer hardware discovery failed after a config change"
+      );
+    });
+  }
+
   private audit(input: AuditInput): void {
     recordAuditEvent(this.store, () => this.nowIso(), this.actor, input);
   }
@@ -377,8 +494,14 @@ export class PrinterConfigService {
   }
 }
 
-/** Strips the credentials and replaces them with their configuration status. */
-export function toView(record: PrinterRecord): PrinterConfigView {
+/**
+ * Strips the credentials, replaces them with their configuration status, and
+ * resolves the hardware characteristics against the last device probe.
+ */
+export function toView(
+  record: PrinterRecord,
+  discovery: PrinterDiscoveryRecord | null = null
+): PrinterConfigView {
   const { apiKey, serial, accessCode, ...rest } = record;
   return {
     ...rest,
@@ -386,7 +509,11 @@ export function toView(record: PrinterRecord): PrinterConfigView {
       apiKey: secretStatus(apiKey),
       serial: secretStatus(serial),
       accessCode: secretStatus(accessCode)
-    }
+    },
+    specs: resolvePrinterSpecs(record, discovery),
+    discovery: discovery
+      ? { probedAt: discovery.probedAt, succeeded: discovery.succeeded, error: discovery.error }
+      : null
   };
 }
 

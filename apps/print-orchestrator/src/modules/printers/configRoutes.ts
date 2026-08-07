@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 
 import { ValidationError } from "../../core/errors";
 import { PRINTER_PROTOCOLS } from "../../domain/printers/config";
+import { autoDiscoveredFields } from "../../infra/printers/discovery";
 import type { PrinterConfigService } from "../../app/printers/printerConfigService";
 
 /** The one capability these routes need, passed explicitly at registration. */
@@ -24,6 +25,7 @@ interface IdParams {
  *   PATCH  /:id              change settings and/or credentials (partial)
  *   POST   /:id/enabled      body: { enabled: boolean }
  *   POST   /:id/test         probe the real device with the current settings
+ *   POST   /:id/discover     re-ask the device what hardware it is
  *   POST   /reorder          body: { ids: string[] }
  *   DELETE /:id              remove it from the farm
  *
@@ -32,6 +34,12 @@ interface IdParams {
  * instead of the value, and a PATCH that omits a credential keeps the stored
  * one. So the edit form can be submitted whole without the browser ever having
  * received an access code, and rotating one is a PATCH carrying just that field.
+ *
+ * **Hardware characteristics come back resolved.** Alongside the stored columns
+ * (which are what the edit form writes back), every read carries `specs`: per
+ * characteristic, the value in force plus who supplied it — the device, the
+ * operator, or the model catalogue. That is what lets the card fill itself in
+ * from the printer while still showing the operator which fields are their own.
  *
  * All of these are state-changing except the GETs, so the shared mutation guard
  * (`http/security.ts`) already requires the API token on them.
@@ -54,7 +62,15 @@ export async function registerPrinterConfigRoutes(
       label: PROTOCOL_LABELS[id],
       hint: PROTOCOL_HINTS[id],
       /** Credential fields that actually matter for this protocol (UI hint only). */
-      credentials: PROTOCOL_CREDENTIALS[id]
+      credentials: PROTOCOL_CREDENTIALS[id],
+      /**
+       * Characteristics this protocol can determine on its own, so the form can
+       * mark a field «заполняется автоматически» — or say plainly that the
+       * printer does not report it — without the browser hard-coding protocol
+       * knowledge. A listed field can still resolve to unknown; what it promises
+       * is that leaving it blank is reasonable.
+       */
+      autoFields: autoDiscoveredFields(id)
     })),
     types: [
       { id: "FDM", label: "FDM" },
@@ -99,6 +115,17 @@ export async function registerPrinterConfigRoutes(
   app.post<{ Params: IdParams; Body: unknown }>("/:id/test", async (request) => ({
     ok: true,
     result: await service().testConnection(request.params.id, actorOf(request.body))
+  }));
+
+  /**
+   * Re-asks the device what hardware it is, now, instead of waiting for the
+   * background interval. A POST because it talks to the device and records an
+   * audit event — though the conversation itself is read-only, so this is safe
+   * on a printer that is mid-print.
+   */
+  app.post<{ Params: IdParams; Body: unknown }>("/:id/discover", async (request) => ({
+    ok: true,
+    printer: await service().discoverNow(request.params.id, actorOf(request.body))
   }));
 
   app.post<{ Body: { ids?: unknown; operator?: unknown } }>("/reorder", async (request) => {

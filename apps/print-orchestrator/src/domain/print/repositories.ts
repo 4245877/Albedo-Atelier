@@ -1,4 +1,5 @@
 import type { OperationsRepositories } from "../operations/repositories";
+import type { PrinterDiscoveryRepository } from "../printers/discovery";
 import type { PrinterRepository } from "../printers/repositories";
 import type { WritableRepository } from "../shared/repository";
 import type {
@@ -211,6 +212,8 @@ export interface Repositories extends OperationsRepositories {
   startGuards: StartGuardRepository;
   // printers domain (domain/printers) — the farm's own hardware configuration
   printers: PrinterRepository;
+  /** What each printer reported about itself; written only by the discovery probe. */
+  printerDiscovery: PrinterDiscoveryRepository;
   // slicing domain (domain/slicing)
   profileRevisions: ProfileRevisionRepository;
   profileSets: ProfileSetRepository;

@@ -154,6 +154,7 @@ function wireDelegates() {
     e.preventDefault();
     const id = btn.dataset.id;
     if (btn.dataset.prnAction === "test") void testConnection(id);
+    else if (btn.dataset.prnAction === "discover") void discoverHardware(id);
     else if (btn.dataset.prnAction === "toggle") void toggleEnabled(id, btn.dataset.enabled !== "1");
     else if (btn.dataset.prnAction === "remove") void removePrinter(id);
   });
@@ -234,6 +235,31 @@ async function testConnection(id) {
   delete state.busy[id];
   if (!skipped) await poller.refresh({ fromPoll: false });
   else render();
+}
+
+/**
+ * Внеочередной опрос характеристик. Обычно этого делать не нужно — сервис
+ * переспрашивает принтеры сам, — но после физической замены сопла или катушки
+ * ждать интервал незачем.
+ *
+ * Опрос не меняет на принтере ничего: он только просит устройство рассказать о
+ * себе, поэтому безопасен и во время печати.
+ */
+function discoverHardware(id) {
+  // Сообщение отдаём сами, а не через okMessage: «запрос прошёл» и «принтер
+  // ответил» — разные вещи, и неудачный опрос не должен рапортовать об успехе.
+  return run(id, "discover", async () => {
+    const res = await apiPost(`${BASE}/${encodeURIComponent(id)}/discover`, {});
+    const discovery = res.printer?.discovery;
+    if (discovery && !discovery.succeeded) {
+      toast(
+        `Принтер не ответил на опрос${discovery.error ? `: ${esc(discovery.error)}` : ""} — прежние характеристики сохранены`,
+        "toast-danger"
+      );
+      return;
+    }
+    toast("Характеристики обновлены с принтера", "toast-ok");
+  });
 }
 
 /* Удаление — единственное необратимое действие раздела, поэтому подтверждение

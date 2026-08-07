@@ -1,5 +1,5 @@
 {
-  "revision": "c176a6e9a232af7b",
+  "revision": "65bc850927b6e0f0",
   "updatedAt": "2026-07-12T12:00:00.000Z",
   "count": 3,
   "printers": [
@@ -20,6 +20,15 @@
         "x": 220,
         "y": 220,
         "z": 250
+      },
+      "ams": null,
+      "specSources": {
+        "model": "manual",
+        "material": "manual",
+        "nozzleDiameterMm": "manual",
+        "nozzleType": "manual",
+        "buildVolume": "manual",
+        "ams": "unknown"
       },
       "createdAt": "2026-07-12T12:00:00.000Z",
       "updatedAt": "2026-07-12T12:00:00.000Z",
@@ -43,6 +52,15 @@
         "y": 220,
         "z": 250
       },
+      "ams": null,
+      "specSources": {
+        "model": "manual",
+        "material": "manual",
+        "nozzleDiameterMm": "manual",
+        "nozzleType": "manual",
+        "buildVolume": "manual",
+        "ams": "unknown"
+      },
       "createdAt": "2026-07-12T12:00:00.000Z",
       "updatedAt": "2026-07-12T12:00:00.000Z",
       "version": 1
@@ -61,6 +79,15 @@
       "nozzleDiameterMm": null,
       "nozzleType": null,
       "buildVolume": null,
+      "ams": null,
+      "specSources": {
+        "model": "unknown",
+        "material": "unknown",
+        "nozzleDiameterMm": "unknown",
+        "nozzleType": "unknown",
+        "buildVolume": "unknown",
+        "ams": "unknown"
+      },
       "createdAt": "2026-07-12T12:00:00.000Z",
       "updatedAt": "2026-07-12T12:00:00.000Z",
       "version": 1

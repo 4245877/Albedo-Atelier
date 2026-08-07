@@ -14,6 +14,7 @@ import { migration009 } from "./009_executable_chain";
 import { migration010 } from "./010_device_artifact_states";
 import { migration011 } from "./011_operator_schedule";
 import { migration012 } from "./012_printers";
+import { migration013 } from "./013_printer_discovery";
 
 /** Re-exported from `./types` so existing importers keep working. */
 export type { Migration } from "./types";
@@ -35,7 +36,8 @@ export const MIGRATIONS: readonly Migration[] = [
   migration009,
   migration010,
   migration011,
-  migration012
+  migration012,
+  migration013
 ];
 
 const MIGRATIONS_TABLE = "schema_migrations";

@@ -61,7 +61,11 @@ test("buildSchedulerPrinters joins live views + config + active run into the sch
     liveMaterial: "PETG",
     material: "PLA",
     nozzleDiameter: 0.4,
-    remoteStartSupported: true
+    remoteStartSupported: true,
+    // Resolved on the view from the device's own report; the scheduler no longer
+    // reads the build volume off the config or hardcodes `ams: null`.
+    buildVolume: { x: 350, y: 350, z: 350 },
+    ams: true
   } as unknown as PrinterView;
 
   const refs = buildSchedulerPrinters({
@@ -80,7 +84,40 @@ test("buildSchedulerPrinters joins live views + config + active run into the sch
   assert.equal(ref.telemetryAgeMs, 60_000, "age = now − updatedAt");
   assert.equal(ref.activeRunState, "RUNNING", "the canonical run state decorates the ref");
   assert.equal(ref.materialRemainingSufficient, null);
+  assert.deepEqual(
+    ref.buildVolume,
+    { x: 350, y: 350, z: 350 },
+    "the resolved build volume from the view wins over the stale config one"
+  );
+  assert.equal(ref.ams, true, "AMS presence comes from what the device reported");
+});
+
+test("buildSchedulerPrinters collapses an unreported AMS/build volume to null, never undefined", () => {
+  // A view built before the printer was ever probed carries neither. The
+  // scheduler ref contract is that a missing optional is null — `undefined`
+  // would serialize away entirely and read as "field absent" downstream.
+  const view = {
+    id: "k2",
+    name: "K2",
+    model: "K2",
+    status: "idle",
+    online: true,
+    updatedAt: null,
+    minutesLeft: null,
+    liveMaterial: null,
+    material: "PLA",
+    nozzleDiameter: 0.4,
+    remoteStartSupported: true
+  } as unknown as PrinterView;
+
+  const [ref] = buildSchedulerPrinters({
+    printers: [view],
+    configs: [config({})],
+    activeRun: () => null
+  });
+
   assert.equal(ref.ams, null);
+  assert.equal(ref.buildVolume, null);
 });
 
 test("buildSchedulerPrinters leaves remaining time null when the printer is idle", () => {

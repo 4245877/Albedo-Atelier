@@ -40,6 +40,11 @@ import { MonitoringLease } from "../app/monitoringLease";
 import { ManualOperationService } from "../app/operations/manualOperationService";
 import { OperatorScheduleService } from "../app/operations/operatorScheduleService";
 import { PrinterConfigService } from "../app/printers/printerConfigService";
+import { PrinterDiscoveryService } from "../app/printers/printerDiscoveryService";
+import {
+  resolvePrinterSpecs,
+  type ResolvedPrinterSpecs
+} from "../domain/printers/specs";
 import { PrinterPoller } from "../app/printerPoller";
 import { PrintQueueService } from "../app/printQueue/printQueueService";
 import { buildNightGateInfo, type NightGateDeps } from "../app/readModels/buildNightGateInfo";
@@ -135,6 +140,7 @@ export class FarmRuntime implements PrintServices {
   private operatorScheduleServiceRef: OperatorScheduleService | null = null;
   private manualOperationServiceRef: ManualOperationService | null = null;
   private printerConfigServiceRef: PrinterConfigService | null = null;
+  private printerDiscoveryServiceRef: PrinterDiscoveryService | null = null;
   private dispatchServiceRef: DispatchService | null = null;
   private deviceArtifactServiceRef: DeviceArtifactService | null = null;
   private runLifecycleRef: RunLifecycleService | null = null;
@@ -213,6 +219,16 @@ export class FarmRuntime implements PrintServices {
         runObserver: (id, prev, next) => {
           if (this.printQueueStoreRef) this.runLifecycleRef?.observe(id, prev, next);
         }
+      },
+      // Hardware discovery on the poll cadence. Like the run observer, it only
+      // acts once the store is open — the poll loop must never force a lazy
+      // database open — and it is fire-and-forget inside the poller.
+      {
+        refreshDue: async (printers) => {
+          if (!this.printQueueStoreRef) return;
+          await this.printerDiscoveryServiceRef?.refreshDue(printers);
+        },
+        useLogger: (logger) => this.printerDiscoveryServiceRef?.useLogger(logger)
       }
     );
     this.deviceCommands = new PrinterCommandService(
@@ -229,7 +245,8 @@ export class FarmRuntime implements PrintServices {
       () => {
         this.ensureQueue();
         return this.printQueueStoreRef?.repositories.startGuards ?? null;
-      }
+      },
+      (printer) => this.specsFor(printer)
     );
     this.reads = new DashboardReadModel(
       () => this.enabledConfigs(),
@@ -249,7 +266,8 @@ export class FarmRuntime implements PrintServices {
       () => this.nightPickIndex,
       this.snapshots,
       (job) => buildNightGateInfo(this.nightGateDeps(), job.id),
-      (printerId) => this.activeRunForPrinter(printerId)?.id ?? null
+      (printerId) => this.activeRunForPrinter(printerId)?.id ?? null,
+      (printer) => this.specsFor(printer)
     );
 
     // Snapshot the whole durable state on every save. The queue section is no
@@ -380,6 +398,27 @@ export class FarmRuntime implements PrintServices {
   get printerConfig(): PrinterConfigService {
     this.ensureQueue();
     return this.printerConfigServiceRef as PrinterConfigService;
+  }
+
+  /** Hardware profiles discovered from the printers themselves (SQLite-backed), lazy. */
+  get printerDiscovery(): PrinterDiscoveryService {
+    this.ensureQueue();
+    return this.printerDiscoveryServiceRef as PrinterDiscoveryService;
+  }
+
+  /**
+   * A printer's resolved hardware characteristics, for the views.
+   *
+   * Deliberately tolerant of a closed store: this runs on the poll path and from
+   * the read model, and neither may force a lazy database open (or fail) merely
+   * to decorate a view. With no discovery yet, the resolution falls back to the
+   * declared config — exactly the behaviour that existed before.
+   */
+  private specsFor(printer: PrinterConfig): ResolvedPrinterSpecs {
+    const discovery = this.printQueueStoreRef
+      ? this.printerDiscoveryServiceRef?.get(printer.id) ?? null
+      : null;
+    return resolvePrinterSpecs(printer, discovery);
   }
 
   /** The OrcaSlicer preset/profile/slice services (SQLite-backed), lazy. */
@@ -517,9 +556,17 @@ export class FarmRuntime implements PrintServices {
     // Bambu access code takes effect on the next poll instead of on the next
     // deployment. Dropping the stale device connection is the service's own
     // job (it knows *what* changed); this callback only reinstalls the config.
+    // What each printer says it is, kept current from the device. Built before
+    // the config service so the hardware card can resolve its characteristics
+    // against a real probe from the very first request.
+    this.printerDiscoveryServiceRef = new PrinterDiscoveryService(store, {
+      logger,
+      intervalMs: env.printerDiscoveryIntervalMs
+    });
     this.printerConfigServiceRef = new PrinterConfigService(store, {
       logger,
-      onChanged: () => this.reloadPrinterConfig()
+      onChanged: () => this.reloadPrinterConfig(),
+      discovery: this.printerDiscoveryServiceRef
     });
     this.printQueueServiceRef = new PrintQueueService(store, {
       // Refuse a pin to a printer the farm does not know (evaluated lazily, so the
@@ -665,6 +712,7 @@ export class FarmRuntime implements PrintServices {
     this.operatorScheduleServiceRef = null;
     this.manualOperationServiceRef = null;
     this.printerConfigServiceRef = null;
+    this.printerDiscoveryServiceRef = null;
     this.dispatchServiceRef = null;
     this.deviceArtifactServiceRef = null;
     this.runLifecycleRef = null;

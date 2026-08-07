@@ -17,6 +17,7 @@ import type {
   TodaySection,
   Warning
 } from "../domain/dashboard/types";
+import { resolvePrinterSpecs, type ResolvedPrinterSpecs } from "../domain/printers/specs";
 import type { PrinterView } from "../domain/printers/types";
 import type { FarmMetrics, FarmReadiness } from "../domain/farm/types";
 import { env } from "../shared/env";
@@ -102,7 +103,14 @@ export class DashboardReadModel {
     private readonly snapshots: SnapshotStore,
     private readonly nightGate: NightGateFn | null = null,
     /** Canonical active-run lookup for a printer (identity of dangerous commands). */
-    private readonly activeRunId: ((printerId: string) => string | null) | null = null
+    private readonly activeRunId: ((printerId: string) => string | null) | null = null,
+    /**
+     * The printer's resolved hardware specification. Optional so the read model
+     * stays constructible without discovery; the fallback resolves from the
+     * declared config alone.
+     */
+    private readonly specsOf: (printer: PrinterConfig) => ResolvedPrinterSpecs = (printer) =>
+      resolvePrinterSpecs(printer, null)
   ) {}
 
   private view(printer: PrinterConfig): PrinterView {
@@ -110,7 +118,8 @@ export class DashboardReadModel {
       printer,
       this.poller.getStatus(printer.id),
       this.cameras.getEntry(printer.id),
-      this.snapshots.latest(printer.id)?.url ?? null
+      this.snapshots.latest(printer.id)?.url ?? null,
+      this.specsOf(printer)
     );
     view.activeRunId = this.activeRunId ? this.activeRunId(printer.id) : null;
     return view;

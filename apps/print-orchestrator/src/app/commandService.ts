@@ -1,4 +1,5 @@
 import { JobError, PrinterOfflineError, PrintIdentityConflictError } from "../core/errors";
+import { resolvePrinterSpecs, type ResolvedPrinterSpecs } from "../domain/printers/specs";
 import type { PrinterView } from "../domain/printers/types";
 import type { PrinterConfig } from "../infra/printers/config";
 import { normalizeStartablePath } from "../infra/printers/files";
@@ -72,7 +73,15 @@ export class PrinterCommandService {
      * this service is constructed). `null` disables durable guarding — used by
      * unit tests that exercise the in-memory fast-path only.
      */
-    private readonly guards: () => StartGuardStore | null = () => null
+    private readonly guards: () => StartGuardStore | null = () => null,
+    /**
+     * The printer's resolved hardware specification, for the views this service
+     * returns. Optional so tests keep constructing it without one; the fallback
+     * resolves from the declared config alone, which is what happened before
+     * discovery existed.
+     */
+    private readonly specsOf: (printer: PrinterConfig) => ResolvedPrinterSpecs = (printer) =>
+      resolvePrinterSpecs(printer, null)
   ) {}
 
   private runExclusive<T>(id: string, task: () => Promise<T>): Promise<T> {
@@ -240,7 +249,7 @@ export class PrinterCommandService {
           if (guards && existing.state !== "ACKED") {
             guards.upsert({ ...existing, state: "ACKED", updatedAt: nowIso() });
           }
-          return buildPrinterView(printer, status, this.cameras.getEntry(printer.id));
+          return buildPrinterView(printer, status, this.cameras.getEntry(printer.id), null, this.specsOf(printer));
         }
         if (decision === "busy-other") {
           // Something else is printing; our guarded start never ran. Drop the
@@ -359,7 +368,7 @@ export class PrinterCommandService {
       this.guards()?.delete(printer.id);
       this.recentStarts.delete(printer.id);
       this.events.push("⚑", `Оператор снял блокировку запуска на <b>${printer.name}</b>`, "info");
-      return buildPrinterView(printer, status, this.cameras.getEntry(printer.id));
+      return buildPrinterView(printer, status, this.cameras.getEntry(printer.id), null, this.specsOf(printer));
     });
   }
 
@@ -384,7 +393,7 @@ export class PrinterCommandService {
     const snapshot = await this.snapshots.save(printer.id, frame, { status: statusLabel });
     this.events.push("◉", `Снимок с камеры <b>${printer.name}</b> сохранён`, "info");
 
-    const view = buildPrinterView(printer, status, this.cameras.getEntry(id), snapshot.url);
+    const view = buildPrinterView(printer, status, this.cameras.getEntry(id), snapshot.url, this.specsOf(printer));
     return { printer: view, snapshot };
   }
 
@@ -405,7 +414,7 @@ export class PrinterCommandService {
   private async refresh(printer: PrinterConfig): Promise<PrinterView> {
     const status = await this.liveStatus(printer);
     this.poller.setStatus(printer.id, status);
-    return buildPrinterView(printer, status, this.cameras.getEntry(printer.id));
+    return buildPrinterView(printer, status, this.cameras.getEntry(printer.id), null, this.specsOf(printer));
   }
 }
 

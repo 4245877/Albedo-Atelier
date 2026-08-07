@@ -135,7 +135,18 @@ carries no connection parameters or credentials (`host`, `port`, `serial`,
 (section «Оборудование фермы» → `/api/printers/config`): add a printer, change
 its address, rotate a Bambu access code after a reset, disable it for repairs,
 probe the connection. Changes apply from the next poll — no file edit, no
-rebuild, no restart. The inventory (hosts, serial, access code) lives in the
+rebuild, no restart.
+
+The card's *technical* fields fill themselves in: the service asks each printer
+what hardware it is — model, build volume, nozzle diameter and type, AMS/AMS
+Lite, loaded materials — and keeps that current, so an operator types only what
+the device genuinely cannot report. Each value is shown with its source
+(**с принтера** / **по модели** / **вручную**), the device wins over a stale
+hand-typed value, and a disagreement between the two is surfaced rather than
+hidden. See
+[Hardware discovery](apps/print-orchestrator/README.md#hardware-discovery-what-a-printer-says-about-itself).
+
+The inventory (hosts, serial, access code) lives in the
 orchestrator's SQLite database on the `orchestrator-data` volume, so it must be
 protected like a secret file (`600`, never copied into an image) and it is what
 a backup has to include.

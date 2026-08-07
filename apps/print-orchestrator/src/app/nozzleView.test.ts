@@ -7,8 +7,12 @@ import { buildPrinterView } from "./printerView";
 
 /*
  * The nozzle diameter/type in the view must prefer live device telemetry, fall
- * back to the configured values, and tag the source honestly so the dashboard
- * never presents a config default as data read from the printer.
+ * back to the declared values, and tag the source honestly so the dashboard
+ * never presents an operator's default as data read from the printer.
+ *
+ * The source vocabulary is the shared one from `domain/printers/specs.ts`
+ * (`printer` / `manual` / `catalog` / `unknown`) — the same words the hardware
+ * card uses, so the two surfaces cannot describe the same value differently.
  */
 
 function k2(extra: Record<string, unknown> = {}) {
@@ -56,10 +60,10 @@ test("a live nozzle diameter from the device is tagged as from the printer", () 
   assert.equal(view.nozzleDiameterSource, "printer");
 });
 
-test("with no live value, the configured diameter is used and tagged as config", () => {
+test("with no live value, the configured diameter is used and tagged as manual", () => {
   const view = buildPrinterView(k2({ nozzleDiameterMm: 0.6 }), liveStatus({}), undefined);
   assert.equal(view.nozzleDiameter, 0.6);
-  assert.equal(view.nozzleDiameterSource, "config");
+  assert.equal(view.nozzleDiameterSource, "manual");
 });
 
 test("a live diameter wins over a configured one", () => {
@@ -74,10 +78,10 @@ test("no live and no configured diameter is unknown, never invented", () => {
   assert.equal(view.nozzleDiameterSource, "unknown");
 });
 
-test("nozzle type falls back to config and is tagged honestly", () => {
+test("nozzle type falls back to the declared value and is tagged honestly", () => {
   const printerView = buildPrinterView(k2({ nozzleType: "hardened_steel" }), liveStatus({}), undefined);
   assert.equal(printerView.nozzleType, "hardened_steel");
-  assert.equal(printerView.nozzleTypeSource, "config");
+  assert.equal(printerView.nozzleTypeSource, "manual");
 
   const liveView = buildPrinterView(k2(), liveStatus({ nozzleType: "brass" }), undefined);
   assert.equal(liveView.nozzleType, "brass");
@@ -88,10 +92,10 @@ test("nozzle type falls back to config and is tagged honestly", () => {
   assert.equal(noneView.nozzleTypeSource, "unknown");
 });
 
-test("an offline printer still shows the configured nozzle as a config fallback", () => {
+test("an offline printer still shows the configured nozzle as a manual fallback", () => {
   const view = buildPrinterView(k2({ nozzleDiameterMm: 0.4 }), undefined, undefined);
   assert.equal(view.nozzleDiameter, 0.4);
-  assert.equal(view.nozzleDiameterSource, "config");
+  assert.equal(view.nozzleDiameterSource, "manual");
 });
 
 test("live filament from the job wins over config and is tagged as from the printer", () => {
@@ -106,11 +110,11 @@ test("live filament from the job wins over config and is tagged as from the prin
   assert.equal(view.activeTray, null);
 });
 
-test("with no live filament, the configured material is used and tagged as config", () => {
+test("with no live filament, the configured material is used and tagged as manual", () => {
   const view = buildPrinterView(k2({ material: "PETG" }), liveStatus({}), undefined);
   assert.equal(view.liveMaterial, null);
   assert.equal(view.material, "PETG");
-  assert.equal(view.liveMaterialSource, "config");
+  assert.equal(view.liveMaterialSource, "manual");
 });
 
 test("no live filament and no configured material is unknown, never invented", () => {

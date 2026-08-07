@@ -89,6 +89,14 @@ API path and `printer_id` reference in the queue, so renaming it would be a data
 migration, not an edit. Removing a printer leaves its run history intact —
 deleting a printer must not erase what it printed.
 
+**Most of the card fills itself in.** The technical characteristics — model,
+build volume, nozzle diameter and type, AMS, loaded materials — are read from the
+device and returned on every printer as `specs`, each with the source that
+supplied it. An empty form field means «take it from the printer», not «no
+value»; only what the protocol cannot report is typed by hand, and the form says
+which fields those are (`GET /options` → `autoFields`). See
+[Hardware discovery](#hardware-discovery-what-a-printer-says-about-itself).
+
 ## Persistent print-queue model (SQLite)
 
 The print queue lives in a durable, relational model in **SQLite**
@@ -469,6 +477,70 @@ The consumed amount comes from whatever the device actually knows:
   3MF `Metadata/slice_info.config` (`used_g`/`used_m`) fetched over the
   printer's FTPS, pluggable behind the same completion → consume-items seam.
 
+## Hardware discovery: what a printer says about itself
+
+Connecting a printer fills its card in. The farm asks each device what it *is* —
+model, firmware, bed size, nozzle, AMS, loaded filament — and the operator types
+in only what the protocol genuinely cannot report.
+
+**Three sources, one rule.** `resolvePrinterSpecs()`
+(`src/domain/printers/specs.ts`) is the only place in the service that decides
+who wins, so the hardware card, the live view, the scheduler and the published
+inventory can never drift into different answers:
+
+`printer` → `manual` → `catalog` → `unknown`
+
+- **the device wins.** A stale hand-typed value silently overriding the machine
+  would put the manual transfer of specs straight back;
+- **the operator outranks the catalogue.** Both speak about this specific unit —
+  but the operator has seen it, and the catalogue only knows the model;
+- **nothing is invented.** With no source, the value is `null` and the source is
+  `unknown`, which the card renders as «принтер эту характеристику не передаёт».
+
+A manual value that loses is reported as `overriddenManual` and shown as a
+conflict, not dropped — that is how a physical nozzle swap gets noticed, since
+every device's nozzle field is a *setting* rather than a sensor.
+
+**What each protocol can actually tell us.** Nothing outside this table is read,
+and nothing missing from it is guessed:
+
+| Characteristic | Bambu (LAN MQTT) | Moonraker / Klipper (K2, Ender) | Creality WS |
+|---|---|---|---|
+| Firmware | `info.get_version` → `ota.sw_ver` | `/printer/info.software_version` | heartbeat, if present |
+| Device name | — | `/printer/info.hostname` | `DeviceName`, if present |
+| Model | `ota.sn` prefix → catalogue | not reported → manual | `model`, if present |
+| Build volume | ✗ not in the protocol → catalogue | ✓ `configfile.settings.stepper_{x,y,z}.position_max` | — |
+| Nozzle diameter | ✓ `print.nozzle_diameter` | ✓ `configfile.settings.extruder.nozzle_diameter` | — |
+| Nozzle type | ✓ `print.nozzle_type` | ✗ no Klipper field → manual | — |
+| AMS / AMS Lite / CFS | ✓ `print.ams` (kind from the catalogue) | presence of the `box` object only | — |
+| Loaded materials | ✓ `print.ams` / `vt_tray` | job metadata (see below) | — |
+| Extruders, chamber, filament sensor | chamber *sensor* only | ✓ `/printer/objects/list` | — |
+
+**The model catalogue** (`src/domain/printers/modelSpecs.ts`) exists for one gap:
+Bambu's LAN MQTT never states the build volume. The model is identified from the
+serial the *device* reports (`ota.sn`), and the bed size and AMS kind come from
+the table — tagged `catalog` («по модели»), never `printer`. An unrecognised
+serial yields `null` rather than the nearest-looking entry. The serial itself is
+a credential and never leaves the service; only the model it identifies does.
+
+**Cost and cadence.** `PRINTER_DISCOVERY_INTERVAL_MS` (default 300000) governs a
+background pass on the poll loop — fire-and-forget and self-guarded, so a slow
+device can never delay telemetry. Bambu costs **no I/O at all** (both payloads
+already arrive on the subscribed topic; the client just stopped discarding the
+`info` one); Moonraker costs three small LAN requests. A probe is also forced on
+create, on a re-address/re-credential, after a successful `POST /:id/test`, and
+by `POST /api/printers/config/:id/discover` («Опросить принтер»). Discovery is
+strictly read-only — it asks a device to describe itself and sends no command —
+so it is safe against a printer that is mid-print.
+
+**Storage** is the `printer_discovery` table (migration 013), one row per
+printer, FK-cascaded on delete. It is kept out of `printers` on purpose: a probe
+every few minutes would bump that row's `version` and collide with an operator
+editing the same record through the optimistic-locking `update`. A failed probe
+records the failure but **keeps the last known facts** — a printer that is
+briefly offline has not changed its bed size — and an unchanged probe writes
+nothing at all.
+
 ## Nozzle & active filament (live)
 
 Each printer view carries the nozzle and the currently loaded filament **live
@@ -490,19 +562,19 @@ the config's `material` field in sync by hand:
   *current job's sliced metadata* (`/server/files/metadata` → `filament_type` /
   `filament_colors`) while a print is loaded — see the K2 note below. `activeTray`
   is `null` on the K2 (no slot concept in metadata).
-- `liveMaterialSource` / `nozzleDiameterSource` / `nozzleTypeSource` — `"printer"`
-  when the value came from the device, `"config"` when it fell back to
-  `printers.json`, or `"unknown"` when neither is set. The dashboard shows a small
-  **с принтера** / **из конфигурации** tag on the material, and the `Сопло 0.4 мм`
-  chip renders muted/dashed when the diameter is a config fallback rather than live.
+- `liveMaterialSource` / `nozzleDiameterSource` / `nozzleTypeSource` — where the
+  shown value came from, in the shared vocabulary of
+  [Hardware discovery](#hardware-discovery-what-a-printer-says-about-itself):
+  `"printer"`, `"manual"`, `"catalog"` or `"unknown"`. The dashboard shows a small
+  **с принтера** / **вручную** tag on the material, and the `Сопло 0.4 мм` chip
+  renders muted/dashed when the diameter is a declared fallback rather than live.
   On the K2, a `"printer"` material tag means "the sliced material of the running
   job" (not an RFID/sensor read) — the honest live source Moonraker exposes there.
 
-**Config fallback.** Beyond the declared `material`, `printers.json` accepts
-optional `nozzleDiameterMm` and `nozzleType`. They are shown only as a labelled
-**из конфигурации** fallback when the device does not report a live value (a
-Creality-WebSocket printer, or any printer while offline) — never dressed up as
-telemetry.
+**Declared fallback.** Beyond `material`, a printer record carries optional
+`nozzleDiameterMm` and `nozzleType`. They are shown only as a labelled **вручную**
+fallback when the device does not report a live value (a Creality-WebSocket
+printer, or any printer while offline) — never dressed up as telemetry.
 
 Partial MQTT deltas that omit these fields keep the last known value (merge in
 `mergeBambuStatus`), so the chips do not flicker to "unknown" between reports.
@@ -629,6 +701,7 @@ instead of fabricating a result.
 - `POST /api/printers/config` — add a printer · `PATCH /api/printers/config/:id` — change settings and/or credentials (a field you omit keeps its stored value; `null` clears it; `id` is immutable) · `DELETE /api/printers/config/:id`
 - `POST /api/printers/config/:id/enabled` — body `{ "enabled": boolean }` · `POST /api/printers/config/reorder` — body `{ "ids": [...] }`
 - `POST /api/printers/config/:id/test` — probe the real device with the stored settings; drops the printer's connection first, so a client authenticated with superseded credentials can never answer for the new ones
+- `POST /api/printers/config/:id/discover` — re-ask the device what hardware it is, without waiting for the background interval. Read-only against the printer (it requests a description and sends no command), so it is safe mid-print; a device that does not answer is reported as a failed probe and the previously learned characteristics stay in force
 - `POST /api/printers/:id/pause` · `.../resume` · `.../cancel` · `.../snapshot`
 - `POST /api/printers/:id/light` — body `{ "on": boolean }`; manual state is kept for 5 minutes (in memory; ±one poll tick), then the solar light policy takes over again
 - `POST /api/monitoring/lease` — create/extend the farm-wide "operator is watching" lease (no body; idempotent, ~90 s TTL, expires on its own — there is no release endpoint). The dashboard renews it every ~30 s while its tab is visible; deliberately **not** a side effect of any camera read (`camera.jpg?ensureLight=1` stays blocked by the dashboard nginx)

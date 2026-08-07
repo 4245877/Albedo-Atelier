@@ -15,6 +15,8 @@ import { PrinterCommandError, type PrinterCommand, type PrinterLiveStatus } from
 const bambuCache = new Map<string, PrinterLiveStatus>();
 // Last known *raw* Bambu print payload, merged across partial MQTT reports.
 const bambuRawPrint = new Map<string, Record<string, unknown>>();
+// Last `info.get_version` reply — the device's own firmware/module report.
+const bambuDeviceInfo = new Map<string, Record<string, unknown>>();
 const bambuClients = new Map<string, mqtt.MqttClient>();
 const bambuPushTimers = new Map<string, ReturnType<typeof setInterval>>();
 
@@ -47,6 +49,30 @@ function getBambuPrintPayload(payload: unknown): Record<string, unknown> | null 
     return payload;
   }
   return null;
+}
+
+/**
+ * The `info.get_version` reply, if this message is one.
+ *
+ * Bambu answers the request on the same `report` topic the status arrives on,
+ * as `{"info":{"command":"get_version","module":[…]}}`. Until now every non-`print`
+ * message was dropped, so the device's firmware and module list — the only
+ * identity the LAN protocol offers — never reached the service.
+ */
+function getBambuInfoPayload(payload: unknown): Record<string, unknown> | null {
+  if (!isObject(payload) || !isObject(payload.info)) return null;
+  const info = payload.info;
+  return Array.isArray(info.module) ? info : null;
+}
+
+/** The cached `info.get_version` reply for a printer, or null before one arrives. */
+export function getBambuDeviceInfo(printerId: string): Record<string, unknown> | null {
+  return bambuDeviceInfo.get(printerId) ?? null;
+}
+
+/** The cached merged `print` payload — the source of the AMS/nozzle facts. */
+export function getBambuRawPrint(printerId: string): Record<string, unknown> | null {
+  return bambuRawPrint.get(printerId) ?? null;
 }
 
 function bambuPrintIdentity(print: Record<string, unknown>): string | null {
@@ -286,10 +312,20 @@ function ensureBambuClient(printer: PrinterConfig): void {
       JSON.stringify({ pushing: { sequence_id: String(Date.now()), command: "pushall" } })
     );
   };
+  // The device's identity (firmware, module list) never changes while the
+  // connection lives, so it is asked for once per connect rather than on the
+  // pushall timer. A firmware update reconnects the client, which re-asks.
+  const requestDeviceInfo = () => {
+    client.publish(
+      bambuRequestTopic(printer),
+      JSON.stringify({ info: { sequence_id: String(Date.now()), command: "get_version" } })
+    );
+  };
 
   client.on("connect", () => {
     client.subscribe(reportTopic);
     requestFullReport();
+    requestDeviceInfo();
   });
 
   const pushTimer = setInterval(() => {
@@ -301,6 +337,13 @@ function ensureBambuClient(printer: PrinterConfig): void {
   client.on("message", (_topic, payload) => {
     try {
       const json = JSON.parse(payload.toString());
+
+      const info = getBambuInfoPayload(json);
+      if (info) {
+        bambuDeviceInfo.set(printer.id, info);
+        return;
+      }
+
       const print = getBambuPrintPayload(json);
       if (!print) return;
 
@@ -394,6 +437,7 @@ export function dropBambuConnection(printerId: string): void {
   }
   bambuCache.delete(printerId);
   bambuRawPrint.delete(printerId);
+  bambuDeviceInfo.delete(printerId);
 }
 
 /** Closes all persistent Bambu MQTT connections and clears cached state. */
@@ -411,4 +455,5 @@ export function shutdownBambuConnections(): void {
   bambuPushTimers.clear();
   bambuCache.clear();
   bambuRawPrint.clear();
+  bambuDeviceInfo.clear();
 }

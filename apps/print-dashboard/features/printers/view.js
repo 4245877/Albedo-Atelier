@@ -10,7 +10,14 @@
    («задан», «берётся из ${VAR}», «не задан»). Поэтому поля учётных данных
    всегда пустые, а пустое поле означает «оставить как есть» — не «стереть».
    Стирание — отдельное явное действие. Так форму можно отправлять целиком,
-   ни разу не получив секрет в браузер. */
+   ни разу не получив секрет в браузер.
+
+   Про характеристики. Backend присылает `specs`: по каждой характеристике —
+   действующее значение и ИСТОЧНИК («с принтера», «по модели», «вручную»,
+   «неизвестно»). Правило приоритета живёт на backend, здесь его нет; задача
+   разметки — показать источник рядом со значением и не дать автоматически
+   полученному выглядеть так же, как введённому руками. Поле формы при этом
+   остаётся пустым: пустое поле означает «беру с принтера», а не «нет данных». */
 
 import { esc } from "../../util.js";
 import { chip, panel } from "../../shared/chips.js";
@@ -35,6 +42,24 @@ const CREDENTIAL_HINTS = {
   serial: "С экрана принтера: настройки → сеть. Меняется только при замене платы.",
   accessCode: "С экрана принтера: настройки → сеть → LAN. Меняется при каждом сбросе — обновите его здесь."
 };
+
+/* Как называется источник значения. Слова те же, что в live-карточке принтера:
+   одна характеристика не должна описываться в двух разделах по-разному. */
+const SOURCE_LABELS = {
+  printer: "с принтера",
+  catalog: "по модели",
+  manual: "вручную",
+  unknown: "неизвестно"
+};
+
+/** Бейдж источника рядом со значением — главное визуальное различие раздела. */
+function sourceBadge(spec) {
+  const source = spec?.source || "unknown";
+  const title = spec?.via ? ` title="${esc(spec.via)}"` : "";
+  return `<span class="prn-source prn-source--${esc(source)}"${title}>${esc(
+    SOURCE_LABELS[source] || source
+  )}</span>`;
+}
 
 export function errorBanner(state) {
   if (!state.error) return "";
@@ -89,6 +114,10 @@ function printerRow(printer, state) {
           <code>${esc(printer.id)}</code>
         </div>
         <div class="prn-actions">
+          <button type="button" class="btn btn-sm" data-prn-action="discover" data-id="${esc(printer.id)}"
+            ${busy === "discover" ? "disabled" : ""}>
+            ${busy === "discover" ? "Опрашиваю…" : "Опросить принтер"}
+          </button>
           <button type="button" class="btn btn-sm" data-prn-action="test" data-id="${esc(printer.id)}"
             ${busy === "test" ? "disabled" : ""}>
             ${busy === "test" ? "Проверяю…" : "Проверить связь"}
@@ -103,11 +132,162 @@ function printerRow(printer, state) {
       </div>
       <div class="sch-tags">${facts}</div>
       ${testDetail(test)}
+      ${discoveryPanel(printer)}
       <details class="ops-details prn-details">
         <summary>Настройки и учётные данные</summary>
         ${printerForm(printer, state)}
       </details>
     </div>`;
+}
+
+/* ── Что известно о самом принтере ─────────────────────────── */
+
+/**
+ * Характеристики, полученные от принтера. Это ответ на вопрос «что я вообще
+ * подключил» — раньше его давал только человек, вписавший всё руками.
+ *
+ * Пустая характеристика подписана явно («принтер не сообщает»), а не оставлена
+ * прочерком: разница между «нет данных» и «данные есть, но нулевые» — это
+ * разница между «нужно заполнить» и «всё в порядке».
+ */
+function discoveryPanel(printer) {
+  const specs = printer.specs;
+  if (!specs) return "";
+
+  const rows = [
+    specRow("Модель", specs.model, (v) => v),
+    specRow("Прошивка", specs.firmware, (v) => v),
+    specRow("Имя устройства", specs.deviceName, (v) => v),
+    specRow("Рабочая область", specs.buildVolume, (v) => `${v.x} × ${v.y} × ${v.z} мм`),
+    specRow("Диаметр сопла", specs.nozzleDiameterMm, (v) => `${v} мм`),
+    specRow("Тип сопла", specs.nozzleType, (v) => v),
+    specRow("Материал", specs.material, (v) => v),
+    specRow("Мультиматериал", specs.ams, amsLabel),
+    specRow("Экструдеров", specs.extruderCount, (v) => String(v)),
+    specRow("Датчик филамента", specs.filamentSensor, (v) => (v ? "есть" : "нет")),
+    specRow("Обогрев камеры", specs.heatedChamber, (v) => (v ? "есть" : "нет")),
+    specRow("Кинематика", specs.kinematics, (v) => v)
+  ]
+    .filter(Boolean)
+    .join("");
+
+  return `
+    <div class="prn-discovered">
+      <div class="prn-discovered-head">
+        <b>Характеристики с принтера</b>
+        ${discoveryStamp(printer.discovery)}
+      </div>
+      ${
+        rows ||
+        `<div class="slice-hint">Принтер ещё ничего о себе не сообщил — нажмите «Опросить принтер».</div>`
+      }
+      ${materialsList(specs.materials)}
+      ${conflictNotes(specs)}
+    </div>`;
+}
+
+/** Одна строка «характеристика — значение — источник». */
+function specRow(label, spec, format) {
+  if (!spec) return "";
+  const known = spec.value !== null && spec.value !== undefined;
+  // Неизвестное показываем только для того, что оператор обычно ищет глазами;
+  // остальное просто не занимает место.
+  if (!known && !ALWAYS_SHOWN.has(label)) return "";
+
+  return `
+    <div class="prn-spec">
+      <span class="prn-spec-label">${esc(label)}</span>
+      <span class="prn-spec-value">${
+        known ? esc(format(spec.value)) : `<i>принтер не сообщает</i>`
+      }</span>
+      ${sourceBadge(spec)}
+    </div>`;
+}
+
+/* Эти четыре нужны для планирования, поэтому их отсутствие — тоже факт,
+   который должен быть виден, а не подразумеваться пустым местом. */
+const ALWAYS_SHOWN = new Set(["Модель", "Рабочая область", "Диаметр сопла", "Тип сопла"]);
+
+function amsLabel(ams) {
+  if (!ams.present) return "нет";
+  const parts = [ams.kind || "мультиматериал"];
+  if (ams.slots) parts.push(`${ams.slots} слот(ов)`);
+  return parts.join(", ");
+}
+
+/** Загруженные катушки — то, что сейчас реально стоит в принтере. */
+function materialsList(spec) {
+  const materials = spec?.value;
+  if (!Array.isArray(materials) || !materials.length) return "";
+
+  const items = materials
+    .map((entry) => {
+      const slot = entry.slot === null ? "внешняя катушка" : `слот ${entry.slot + 1}`;
+      const swatch = entry.color
+        ? `<span class="prn-swatch" style="background:${esc(entry.color)}"></span>`
+        : "";
+      const remain = entry.remainPct === null ? "" : ` · ${entry.remainPct}%`;
+      return `<li${entry.active ? ' class="prn-material--active"' : ""}>${swatch}${esc(slot)}: ${esc(
+        entry.material || "пусто"
+      )}${esc(remain)}${entry.active ? " · печатает" : ""}</li>`;
+    })
+    .join("");
+
+  return `
+    <div class="prn-materials">
+      <span class="prn-spec-label">Загруженные материалы</span>
+      <ul>${items}</ul>
+      ${sourceBadge(spec)}
+    </div>`;
+}
+
+/**
+ * Расхождения между принтером и тем, что вписал оператор.
+ *
+ * Побеждает принтер, но ручное значение не выбрасывается молча: показать его —
+ * единственный способ заметить, что сопло поменяли физически, а в настройках
+ * самого принтера не поправили (или наоборот).
+ */
+function conflictNotes(specs) {
+  const notes = [
+    conflictNote("Диаметр сопла", specs.nozzleDiameterMm, (v) => `${v} мм`),
+    conflictNote("Тип сопла", specs.nozzleType, (v) => v),
+    conflictNote("Рабочая область", specs.buildVolume, (v) => `${v.x} × ${v.y} × ${v.z} мм`),
+    conflictNote("Материал", specs.material, (v) => v),
+    conflictNote("Модель", specs.model, (v) => v),
+    catalogNote("Рабочая область", specs.buildVolume, (v) => `${v.x} × ${v.y} × ${v.z} мм`)
+  ].filter(Boolean);
+
+  return notes.join("");
+}
+
+function conflictNote(label, spec, format) {
+  if (!spec?.overriddenManual) return "";
+  return `<div class="slice-warn">⚠ ${esc(label)}: вручную задано «${esc(
+    format(spec.overriddenManual)
+  )}», но принтер сообщает «${esc(
+    format(spec.value)
+  )}» — действует значение принтера. Очистите поле в настройках или поправьте настройку на самом принтере.</div>`;
+}
+
+function catalogNote(label, spec, format) {
+  if (!spec?.catalogHint) return "";
+  return `<div class="slice-meta">${esc(label)}: по модели принтера — «${esc(
+    format(spec.catalogHint)
+  )}», действует введённое вручную значение.</div>`;
+}
+
+function discoveryStamp(discovery) {
+  if (!discovery) return `<span class="slice-hint">опрос ещё не выполнялся</span>`;
+  const when = discovery.probedAt ? fmtDate(discovery.probedAt) : "";
+  if (discovery.succeeded) {
+    return `<span class="slice-hint">обновлено ${esc(when)}</span>`;
+  }
+  // Неудачный опрос НЕ стирает выученное: показываем прежние данные и честно
+  // помечаем, что они не свежие.
+  return `<span class="slice-hint">последний опрос не удался${when ? ` (${esc(when)})` : ""}${
+    discovery.error ? `: ${esc(discovery.error)}` : ""
+  } — показаны прежние данные</span>`;
 }
 
 function hostLabel(printer) {
@@ -161,15 +341,22 @@ function testDetail(test) {
 function printerForm(printer, state) {
   const fields = credentialFields(printer, state);
   const bv = printer.buildVolume || {};
+  const specs = printer.specs || {};
+  const auto = autoFields(printer, state);
 
   return `
     <form class="slice-form prn-form" data-prn-form="edit" data-id="${esc(printer.id)}">
+      <div class="slice-hint prn-form-note">
+        Пустое поле — значит «брать с принтера». Заполняйте только то, что принтер
+        сообщить не может: введённое вручную помечается отдельно, а при расхождении
+        действует значение принтера.
+      </div>
       <div class="slice-grid">
         ${textField("name", "Название", printer.name, { required: true })}
         ${selectField("protocol", "Протокол", printer.protocol, protocolOptions(state))}
         ${textField("host", "Адрес (IP или имя)", printer.host, { required: true })}
         ${numberField("port", "Порт", printer.port)}
-        ${textField("model", "Модель", printer.model)}
+        ${textField("model", "Модель", printer.model, specHints("model", specs, auto, (v) => v))}
         ${selectField("type", "Тип", printer.type, [
           { id: "FDM", label: "FDM" },
           { id: "Resin", label: "Фотополимер" }
@@ -178,20 +365,31 @@ function printerForm(printer, state) {
           placeholder: "k2",
           hint: "Ярлык взаимозаменяемых машин — цель нарезки «для класса»."
         })}
-        ${textField("material", "Материал (по конфигурации)", printer.material)}
+        ${textField(
+          "material",
+          "Материал",
+          printer.material,
+          specHints("material", specs, auto, (v) => v)
+        )}
         ${numberField("nozzleDiameterMm", "Диаметр сопла, мм", printer.nozzleDiameterMm, {
-          step: "0.01"
+          step: "0.01",
+          ...specHints("nozzleDiameterMm", specs, auto, (v) => String(v))
         })}
-        ${textField("nozzleType", "Тип сопла", printer.nozzleType)}
+        ${textField(
+          "nozzleType",
+          "Тип сопла",
+          printer.nozzleType,
+          specHints("nozzleType", specs, auto, (v) => v)
+        )}
         ${textField("swatch", "Цвет метки", printer.swatch, { placeholder: "#7fb3d8" })}
         ${textField("interfaceUrl", "Веб-интерфейс принтера", printer.interfaceUrl, {
           placeholder: "http://192.168.0.132:4408"
         })}
         ${textField("snapshotUrl", "URL кадра камеры", printer.snapshotUrl)}
         ${textField("streamUrl", "URL потока камеры", printer.streamUrl)}
-        ${numberField("buildVolume.x", "Стол X, мм", bv.x)}
-        ${numberField("buildVolume.y", "Стол Y, мм", bv.y)}
-        ${numberField("buildVolume.z", "Стол Z, мм", bv.z)}
+        ${numberField("buildVolume.x", "Стол X, мм", bv.x, axisHints("x", specs, auto))}
+        ${numberField("buildVolume.y", "Стол Y, мм", bv.y, axisHints("y", specs, auto))}
+        ${numberField("buildVolume.z", "Стол Z, мм", bv.z, axisHints("z", specs, auto))}
       </div>
 
       ${credentialsFieldset(printer, fields)}
@@ -343,6 +541,61 @@ export function addFormHtml(state) {
   );
 }
 
+/* ── Подсказки полей, зависящие от источника ───────────────── */
+
+/** Какие поля этот протокол умеет определять сам — приходит с backend. */
+function autoFields(printer, state) {
+  const protocol = (state.options?.protocols || []).find((p) => p.id === printer.protocol);
+  return new Set(protocol?.autoFields || []);
+}
+
+/**
+ * Подсказка и плейсхолдер для поля, которое может заполниться само.
+ *
+ * Три состояния, и различать их — весь смысл: принтер уже сказал (значение
+ * стоит плейсхолдером, поле можно не трогать); принтер умеет, но пока молчит;
+ * принтер такого не сообщает вовсе — тогда это поле и есть та ручная работа,
+ * которой не избежать.
+ */
+function specHints(field, specs, auto, format) {
+  const spec = specs[field];
+  const known = spec && spec.value !== null && spec.value !== undefined;
+  const fromDevice = known && spec.source !== "manual";
+
+  if (fromDevice) {
+    return {
+      placeholder: format(spec.value),
+      badge: sourceBadge(spec),
+      hint:
+        spec.source === "manual"
+          ? ""
+          : `Оставьте пустым — значение берётся ${
+              SOURCE_LABELS[spec.source]
+            }${spec.via ? ` (${spec.via})` : ""}.`
+    };
+  }
+  if (auto.has(field)) {
+    return { hint: "Заполнится автоматически, как только принтер сообщит это значение." };
+  }
+  return {
+    badge: known ? sourceBadge(spec) : "",
+    hint: "Принтер эту характеристику не передаёт — заполните вручную."
+  };
+}
+
+/** То же для одной оси стола: габариты приходят целиком, а поля три. */
+function axisHints(axis, specs, auto) {
+  const spec = specs.buildVolume;
+  const known = spec && spec.value;
+  if (known && spec.source !== "manual") {
+    return { placeholder: String(spec.value[axis]), badge: sourceBadge(spec) };
+  }
+  if (auto.has("buildVolume")) {
+    return { hint: axis === "x" ? "Заполнится автоматически с принтера." : "" };
+  }
+  return {};
+}
+
 /* ── Примитивы полей ───────────────────────────────────────── */
 
 function protocolOptions(state) {
@@ -355,10 +608,16 @@ function protocolOptions(state) {
   ];
 }
 
+/* Заголовок поля: подпись плюс, если значение может прийти с принтера, бейдж
+   источника. Бейдж — уже готовая разметка (sourceBadge), поэтому не экранируется. */
+function fieldLabel(label, opts) {
+  return `${esc(label)}${opts.required ? " *" : ""}${opts.badge || ""}`;
+}
+
 function textField(name, label, value, opts = {}) {
   return `
     <label>
-      ${esc(label)}${opts.required ? " *" : ""}
+      ${fieldLabel(label, opts)}
       <input type="text" name="${esc(name)}" value="${esc(value ?? "")}"
         ${opts.placeholder ? `placeholder="${esc(opts.placeholder)}"` : ""} />
       ${opts.hint ? `<span class="slice-hint">${esc(opts.hint)}</span>` : ""}
@@ -368,9 +627,11 @@ function textField(name, label, value, opts = {}) {
 function numberField(name, label, value, opts = {}) {
   return `
     <label>
-      ${esc(label)}
+      ${fieldLabel(label, opts)}
       <input type="number" name="${esc(name)}" value="${value ?? ""}"
+        ${opts.placeholder ? `placeholder="${esc(opts.placeholder)}"` : ""}
         ${opts.step ? `step="${esc(opts.step)}"` : ""} min="0" />
+      ${opts.hint ? `<span class="slice-hint">${esc(opts.hint)}</span>` : ""}
     </label>`;
 }
 

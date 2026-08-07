@@ -6,7 +6,7 @@ import type { SchedulerPrinterRef } from "../scheduling/schedulerService";
 export interface SchedulerPrintersDeps {
   /** Live printer views (telemetry joined with config) — from the read model. */
   printers: PrinterView[];
-  /** Full printer configs (protocol / class / build-volume the view omits). */
+  /** Full printer configs (protocol / interchangeability class the view omits). */
   configs: PrinterConfig[];
   /**
    * The canonical run holding a printer, from the same authoritative query the
@@ -41,13 +41,18 @@ export function buildSchedulerPrinters(deps: SchedulerPrintersDeps): SchedulerPr
       printerClass: config?.printerClass ?? null,
       material: view.liveMaterial ?? view.material,
       nozzleMm: view.nozzleDiameter,
-      // Explicit config build volume (priority); the scheduler otherwise reads the
-      // approved machine profile bound to this printer.
-      buildVolume: config?.buildVolume ?? null,
+      // Resolved build volume (priority): the device's own axis limits on Klipper,
+      // the model catalogue on Bambu, else what the operator declared. The
+      // scheduler falls back to the approved machine profile when it is unknown.
+      buildVolume: view.buildVolume ?? null,
       online: view.online,
       status: view.status,
       remoteStartSupported: view.remoteStartSupported,
-      ams: null,
+      // Whether the printer has a multi-material unit, as discovered from the
+      // device. Was hardcoded null — which made every AMS-requiring task resolve
+      // to `ams_unknown` and land in review, even on the A1 Combo whose AMS the
+      // service has been reading all along.
+      ams: view.ams ?? null,
       telemetryAgeMs: Number.isFinite(updatedMs) ? Math.max(0, now - updatedMs) : null,
       // Remaining-material telemetry does not exist; the scheduler resolves
       // sufficiency from operator material overrides instead.

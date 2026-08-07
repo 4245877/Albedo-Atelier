@@ -719,3 +719,75 @@
 /* Подсказки внутри полей формы принтера — компактнее обычных: иначе одна
    длинная подсказка растягивает всю строку грид-сетки. */
 .prn-form label .slice-hint { font-size: 11px; line-height: 1.35; }
+.prn-form-note { margin-bottom: 10px; }
+
+/* ── Характеристики, полученные от принтера ─────────────────────
+   Смысл блока: отличить то, что сервис узнал у машины, от того, что человек
+   вписал руками. Поэтому источник — не подпись мелким шрифтом где-то сбоку,
+   а бейдж вплотную к значению, и он же дублируется у соответствующего поля
+   формы. Цвета берутся из тем (--ok-*/--gold-*/--warn-*), так что светлая и
+   тёмная получаются сами. */
+
+.prn-discovered {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--card-bg) 45%, transparent);
+}
+.prn-discovered-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.prn-spec {
+  display: grid;
+  grid-template-columns: minmax(120px, 160px) 1fr auto;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+}
+.prn-spec-label { color: var(--ink-faint); font-size: 12px; }
+.prn-spec-value { font-variant-numeric: tabular-nums; }
+.prn-spec-value i { color: var(--ink-faint); font-size: 12px; }
+
+.prn-source {
+  font-size: 11px;
+  line-height: 1.6;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+/* Полученное от устройства — единственный «утвердительный» тон в наборе. */
+.prn-source--printer { color: var(--ok-ink); border-color: var(--ok); background: var(--ok-soft); }
+.prn-source--catalog { color: var(--gold-bright); border-color: var(--gold-line); background: var(--gold-soft); }
+.prn-source--manual { color: var(--warn-ink); border-color: var(--warn); background: var(--warn-soft); }
+.prn-source--unknown { color: var(--ink-faint); border-color: var(--card-edge); }
+
+/* В заголовке поля формы бейдж стоит после подписи и не должен утаскивать
+   ввод вниз, поэтому подпись становится строкой. */
+.prn-form label > .prn-source { margin-left: 6px; }
+
+.prn-materials { margin-top: 8px; font-size: 13px; }
+.prn-materials ul { margin: 4px 0 0; padding-left: 18px; }
+.prn-materials li { padding: 1px 0; }
+.prn-material--active { font-weight: 600; }
+.prn-swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  border-radius: 2px;
+  border: 1px solid var(--card-edge);
+  vertical-align: baseline;
+}
+
+@media (max-width: 720px) {
+  .prn-spec { grid-template-columns: 1fr auto; }
+  .prn-spec-label { grid-column: 1 / -1; }
+}

@@ -1,3 +1,6 @@
+import type { AmsKind } from "./modelSpecs";
+import type { SpecSource } from "./specs";
+
 export type PrinterTechnology = "FDM" | "Resin";
 
 export type PrinterState =
@@ -22,7 +25,12 @@ export type CameraState = "online" | "offline" | "none";
 export interface PrinterView {
   id: string;
   name: string;
+  /** Resolved model — from the device where it identifies itself, else declared. */
   model: string | null;
+  /** Where {@link model} came from. */
+  modelSource: SpecSource;
+  /** Device firmware version when the printer reports one; null otherwise. */
+  firmware: string | null;
   type: PrinterTechnology;
   status: PrinterState;
   /** Whether the device answered the last poll (false while offline/unreported). */
@@ -58,27 +66,36 @@ export interface PrinterView {
   /**
    * Nozzle diameter in mm. Live from the printer where it reports the setting
    * (Bambu `nozzle_diameter`, or Klipper/Moonraker `configfile` on the K2), else
-   * the configured `nozzleDiameterMm` fallback; null when neither is known. It is
+   * the declared `nozzleDiameterMm` fallback; null when neither is known. It is
    * a printer/slicer *setting*, not a physical sensor.
    */
   nozzleDiameter: number | null;
-  /** Where {@link nozzleDiameter} came from: `printer` (live), `config` (printers.json) or `unknown`. */
-  nozzleDiameterSource: "printer" | "config" | "unknown";
-  /** Nozzle hardware type (e.g. "hardened_steel"), live from the printer or the config fallback; null when unknown. */
+  /** Where {@link nozzleDiameter} came from. */
+  nozzleDiameterSource: SpecSource;
+  /** Nozzle hardware type (e.g. "hardened_steel"), from the printer or declared; null when unknown. */
   nozzleType: string | null;
-  /** Where {@link nozzleType} came from: `printer` (live), `config` (printers.json) or `unknown`. */
-  nozzleTypeSource: "printer" | "config" | "unknown";
+  /** Where {@link nozzleType} came from. */
+  nozzleTypeSource: SpecSource;
   /** Active filament material live from the printer (AMS tray or external spool); null when unreported. */
   liveMaterial: string | null;
   /** `#RRGGBB` of the active filament live from the printer; null when unreported. */
   liveMaterialColor: string | null;
-  /**
-   * Where the shown filament came from: `printer` (live telemetry), `config`
-   * (fallback from printers.json) or `unknown` (neither available).
-   */
-  liveMaterialSource: "printer" | "config" | "unknown";
+  /** Where the shown filament came from. */
+  liveMaterialSource: SpecSource;
   /** Global AMS tray index currently feeding; null for the external spool or when unknown. */
   activeTray: number | null;
+  /**
+   * Resolved build volume in mm. Read from the device on Klipper
+   * (`stepper_*.position_max`), from the model catalogue on Bambu (whose
+   * protocol does not carry it), else the declared value. Null when unknown.
+   */
+  buildVolume: { x: number; y: number; z: number } | null;
+  /** Where {@link buildVolume} came from. */
+  buildVolumeSource: SpecSource;
+  /** Whether a multi-material unit is attached; null when the printer cannot say. */
+  ams: boolean | null;
+  /** Which kind it is (AMS / AMS Lite / CFS) — a model property; null when unknown. */
+  amsKind: AmsKind | null;
   camera: CameraState;
   /** True when an online live browser-safe camera stream is available now. */
   cameraStream: boolean;

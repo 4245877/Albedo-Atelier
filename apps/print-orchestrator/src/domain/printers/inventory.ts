@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 
 import type { PrinterRecord } from "./config";
 import type { PrinterProtocol } from "./config";
+import type { PrinterDiscoveryRecord } from "./discovery";
+import { resolvePrinterSpecs, type SpecSource } from "./specs";
 import type { PrinterTechnology } from "./types";
 
 /**
@@ -26,6 +28,12 @@ import type { PrinterTechnology } from "./types";
  * `revision` is a fingerprint over (id, version) of every printer, so a consumer
  * can cheaply detect that the *set* changed — including a deletion, which no
  * per-record `updatedAt` can show.
+ *
+ * The hardware characteristics published here are **resolved**, not raw stored
+ * columns: a printer that reports its own nozzle and bed size now publishes what
+ * the device said, and `specSources` states, per field, who the answer came
+ * from. That is what stops a consumer from having to decide whether an empty
+ * `nozzleDiameterMm` means "0.4, nobody wrote it down" or "genuinely unknown".
  */
 export interface PrinterInventoryEntry {
   /** Permanent identifier — immutable by design; see PrinterConfigService.update. */
@@ -41,18 +49,39 @@ export interface PrinterInventoryEntry {
   enabled: boolean;
   /** Operator-facing ordering; consumers should sort by it, then by id. */
   position: number;
-  /** Declared loaded material (configuration, NOT live telemetry). */
+  /** Loaded material: the printer's active slot when it reports one, else declared. */
   material: string | null;
   /** UI colour for the material chip. */
   swatch: string | null;
   nozzleDiameterMm: number | null;
   nozzleType: string | null;
   buildVolume: { x: number; y: number; z: number } | null;
+  /** Whether a multi-material unit is attached; null when the printer cannot say. */
+  ams: boolean | null;
+  /**
+   * Where each resolved characteristic came from — `printer` (the device said
+   * it), `manual` (an operator typed it), `catalog` (derived from the identified
+   * model) or `unknown`. A consumer that must not act on an assumption can check
+   * this instead of trusting every field equally.
+   */
+  specSources: Record<InventorySpecField, SpecSource>;
   createdAt: string;
   updatedAt: string;
   /** Bumped on every stored change; part of the inventory revision. */
   version: number;
 }
+
+/** The characteristics whose provenance the contract publishes. */
+export const INVENTORY_SPEC_FIELDS = [
+  "model",
+  "material",
+  "nozzleDiameterMm",
+  "nozzleType",
+  "buildVolume",
+  "ams"
+] as const;
+
+export type InventorySpecField = (typeof INVENTORY_SPEC_FIELDS)[number];
 
 export interface PrinterInventorySnapshot {
   /** Fingerprint of the whole set (ids + versions); changes on any add/edit/delete. */
@@ -95,23 +124,36 @@ function orNull(value: string): string | null {
  * credential, an internal address — must be *opted in* here, never leak by
  * being added upstream.
  */
-export function toPrinterInventoryEntry(record: PrinterRecord): PrinterInventoryEntry {
+export function toPrinterInventoryEntry(
+  record: PrinterRecord,
+  discovery: PrinterDiscoveryRecord | null = null
+): PrinterInventoryEntry {
+  const specs = resolvePrinterSpecs(record, discovery);
+  const buildVolume = specs.buildVolume.value;
+
   return {
     id: record.id,
     name: record.name,
-    model: orNull(record.model),
+    model: specs.model.value,
     type: record.type,
     printerClass: orNull(record.printerClass),
     protocol: record.protocol,
     enabled: record.enabled,
     position: record.position,
-    material: orNull(record.material),
+    material: specs.material.value,
     swatch: orNull(record.swatch),
-    nozzleDiameterMm: record.nozzleDiameterMm,
-    nozzleType: orNull(record.nozzleType),
-    buildVolume: record.buildVolume
-      ? { x: record.buildVolume.x, y: record.buildVolume.y, z: record.buildVolume.z }
-      : null,
+    nozzleDiameterMm: specs.nozzleDiameterMm.value,
+    nozzleType: specs.nozzleType.value,
+    buildVolume: buildVolume ? { x: buildVolume.x, y: buildVolume.y, z: buildVolume.z } : null,
+    ams: specs.ams.value?.present ?? null,
+    specSources: {
+      model: specs.model.source,
+      material: specs.material.source,
+      nozzleDiameterMm: specs.nozzleDiameterMm.source,
+      nozzleType: specs.nozzleType.source,
+      buildVolume: specs.buildVolume.source,
+      ams: specs.ams.source
+    },
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     version: record.version
@@ -122,19 +164,31 @@ export function toPrinterInventoryEntry(record: PrinterRecord): PrinterInventory
  * Fingerprint of the printer set. Built from (id, version) pairs sorted by id,
  * so it is stable against ordering changes in storage yet changes whenever a
  * printer is added, edited (version bumps) or removed.
+ *
+ * The discovery version is folded in for the same reason. Now that a printer can
+ * report its own nozzle or bed size, the published entry changes without any
+ * operator edit — and a consumer that polls only the revision would never see
+ * it. A printer with no discovery row contributes `0`, so a farm that has never
+ * probed anything keeps the fingerprint it had before this existed.
  */
-export function printerInventoryRevision(entries: PrinterInventoryEntry[]): string {
+export function printerInventoryRevision(
+  entries: PrinterInventoryEntry[],
+  discovery: ReadonlyMap<string, PrinterDiscoveryRecord> = new Map()
+): string {
   const material = entries
-    .map((entry) => `${entry.id}:${entry.version}`)
+    .map((entry) => `${entry.id}:${entry.version}:${discovery.get(entry.id)?.version ?? 0}`)
     .sort()
     .join("|");
   return createHash("sha256").update(material).digest("hex").slice(0, 16);
 }
 
 /** The full snapshot served by `GET /api/printers/inventory`. */
-export function buildPrinterInventory(records: PrinterRecord[]): PrinterInventorySnapshot {
+export function buildPrinterInventory(
+  records: PrinterRecord[],
+  discovery: ReadonlyMap<string, PrinterDiscoveryRecord> = new Map()
+): PrinterInventorySnapshot {
   const printers = records
-    .map(toPrinterInventoryEntry)
+    .map((record) => toPrinterInventoryEntry(record, discovery.get(record.id) ?? null))
     .sort((a, b) => a.position - b.position || a.id.localeCompare(b.id));
 
   const updatedAt = printers.reduce<string | null>(
@@ -143,7 +197,7 @@ export function buildPrinterInventory(records: PrinterRecord[]): PrinterInventor
   );
 
   return {
-    revision: printerInventoryRevision(printers),
+    revision: printerInventoryRevision(printers, discovery),
     updatedAt,
     count: printers.length,
     printers

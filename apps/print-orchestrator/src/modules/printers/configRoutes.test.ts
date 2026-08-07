@@ -75,6 +75,7 @@ test("every change to the farm's hardware requires the API token", async () => {
     ["PATCH", "/api/printers/config/k2-test"],
     ["POST", "/api/printers/config/k2-test/enabled"],
     ["POST", "/api/printers/config/k2-test/test"],
+    ["POST", "/api/printers/config/k2-test/discover"],
     ["POST", "/api/printers/config/reorder"],
     ["DELETE", "/api/printers/config/k2-test"]
   ] as const) {
@@ -189,6 +190,69 @@ test("GET /options serves the protocol vocabulary the form is built from", async
     ["moonraker", "bambu", "creality"]
   );
   assert.deepEqual(protocols.find((p) => p.id === "bambu")?.credentials, ["serial", "accessCode"]);
+});
+
+test("GET /options states which fields each protocol can determine by itself", async () => {
+  const res = await app.inject({ method: "GET", url: "/api/printers/config/options" });
+  const protocols = body(res).protocols as { id: string; autoFields: string[] }[];
+
+  // Bambu reports its nozzle type; Klipper has no field for one, and the form
+  // must be able to say so rather than leaving the operator guessing.
+  assert.ok(protocols.find((p) => p.id === "bambu")?.autoFields.includes("nozzleType"));
+  assert.equal(protocols.find((p) => p.id === "moonraker")?.autoFields.includes("nozzleType"), false);
+  // Klipper publishes its axis limits, so the bed size fills itself in there.
+  assert.ok(protocols.find((p) => p.id === "moonraker")?.autoFields.includes("buildVolume"));
+});
+
+// ── Hardware characteristics ────────────────────────────────────────────────
+
+test("a printer comes back with its characteristics resolved and sourced", async () => {
+  const res = await app.inject({ method: "GET", url: "/api/printers/config/k2-test" });
+  const printer = body(res) as {
+    material: string;
+    specs: Record<string, { value: unknown; source: string }>;
+    discovery: unknown;
+  };
+
+  // The stored column is untouched — it is what the edit form writes back —
+  // while `specs` carries the resolved answer and who supplied it.
+  assert.equal(printer.material, "PETG");
+  assert.equal(printer.specs.material.value, "PETG");
+  assert.equal(printer.specs.material.source, "manual");
+  // Nothing was declared and nothing probed: honestly unknown, not a default.
+  assert.equal(printer.specs.nozzleType.value, null);
+  assert.equal(printer.specs.nozzleType.source, "unknown");
+});
+
+test("POST /:id/discover probes the device and reports an unreachable one honestly", async () => {
+  // The printer points at TEST-NET-1, which nothing answers on: the probe must
+  // record the failure rather than throw, and must not invent characteristics.
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/printers/config/k2-test/discover",
+    headers: auth,
+    payload: { operator: "миха" }
+  });
+
+  assert.equal(res.statusCode, 200);
+  const printer = body(res).printer as {
+    discovery: { succeeded: boolean; error: string | null; probedAt: string };
+    specs: Record<string, { source: string }>;
+  };
+  assert.equal(printer.discovery.succeeded, false);
+  assert.ok(printer.discovery.error, "a failed probe must say why");
+  assert.ok(Date.parse(printer.discovery.probedAt) > 0);
+  assert.equal(printer.specs.buildVolume.source, "unknown");
+});
+
+test("discovering an unknown printer is a 404", async () => {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/printers/config/ghost/discover",
+    headers: auth,
+    payload: {}
+  });
+  assert.equal(res.statusCode, 404);
 });
 
 test("an unknown printer is a 404 on read and on write alike", async () => {
