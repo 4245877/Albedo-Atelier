@@ -56,7 +56,9 @@ export function scheduleHtml(state) {
      явно: именно оно fail-closed блокирует автоматическое продолжение. */
   const unresolvedNote = a.resolved
     ? ""
-    : `<div class="slice-warn">⚠ ${esc(a.reason || "расписание не разобрано")} — автоматическое продолжение очереди заблокировано (fail-closed).</div>`;
+    : `<div class="ops-unresolved"><span aria-hidden="true">⚠</span><span>${esc(
+        a.reason || "расписание не разобрано"
+      )} — автоматическое продолжение очереди заблокировано (fail-closed).</span></div>`;
 
   const facts = [
     chip(presence.label, presence.cls),
@@ -71,8 +73,10 @@ export function scheduleHtml(state) {
     "Расписание оператора",
     `${unresolvedNote}
      <div class="sch-tags">${facts}</div>
-     ${weekTable("Рабочие окна", view.available)}
-     ${weekTable("Сон", view.sleep)}
+     <div class="ops-weeks">
+       ${weekTable("Рабочие окна", view.available)}
+       ${weekTable("Сон", view.sleep)}
+     </div>
      ${scheduleForm(view)}
      ${exceptionsHtml(state, view)}
      ${absencesHtml(view)}`,
@@ -82,7 +86,7 @@ export function scheduleHtml(state) {
 
 function weekTable(title, windows) {
   if (!windows || !windows.length) {
-    return `<div class="ops-week"><h4>${esc(title)}</h4><div class="slice-empty">не задано</div></div>`;
+    return `<div class="ops-week"><h4 class="panel-sub">${esc(title)}</h4><div class="slice-empty">не задано</div></div>`;
   }
   const byDay = new Map();
   for (const w of windows) {
@@ -95,37 +99,50 @@ function weekTable(title, windows) {
       spans ? esc(spans.join(", ")) : `<span class="slice-hint">—</span>`
     }</span></li>`;
   }).join("");
-  return `<div class="ops-week"><h4>${esc(title)}</h4><ul class="ops-week-list">${rows}</ul></div>`;
+  return `<div class="ops-week"><h4 class="panel-sub">${esc(title)}</h4><ul class="ops-week-list">${rows}</ul></div>`;
 }
 
 /* Недельное расписание правится целиком: частично применённая неделя
    выглядела бы как настоящее расписание, поэтому форма отправляет весь набор. */
 function scheduleForm(view) {
+  /* Подписи колонок стоят один раз в шапке; у полей они остаются в разметке
+     скрытыми (скринридер и узкий экран) — семь строк по четыре подписи были бы
+     шумом, а сами поля при этом сжимались до нечитаемой ширины. */
+  const cell = (day, name, label, value) => `
+        <label><span class="ops-edit-lbl">${esc(day)} · ${esc(label)}</span>
+          <input type="time" name="${name}" value="${esc(value || "")}" aria-label="${esc(day)} · ${esc(label)}" />
+        </label>`;
+
   const rows = WEEKDAYS.map((name, day) => {
     const av = (view.available || []).find((w) => w.weekday === day);
     const sl = (view.sleep || []).find((w) => w.weekday === day);
     return `
       <li class="ops-edit-row" data-weekday="${day}">
         <span class="ops-day">${name}</span>
-        <label>работа<input type="time" name="av-start" value="${esc(av?.start || "")}" /></label>
-        <label>–<input type="time" name="av-end" value="${esc(av?.end || "")}" /></label>
-        <label>сон<input type="time" name="sl-start" value="${esc(sl?.start || "")}" /></label>
-        <label>–<input type="time" name="sl-end" value="${esc(sl?.end || "")}" /></label>
+        ${cell(name, "av-start", "работа с", av?.start)}
+        ${cell(name, "av-end", "работа по", av?.end)}
+        ${cell(name, "sl-start", "сон с", sl?.start)}
+        ${cell(name, "sl-end", "сон по", sl?.end)}
       </li>`;
   }).join("");
 
   return `
     <details class="ops-details">
       <summary>Настроить недельное расписание и сон</summary>
-      <form class="sch-edit" data-ops-form="schedule">
-        <label>Таймзона (IANA)
+      <form class="sch-edit ops-schedule-form" data-ops-form="schedule">
+        <label class="ops-tz">Таймзона (IANA)
           <input type="text" name="timeZone" placeholder="Europe/Moscow"
                  value="${esc(view.operator?.timeZone || "")}" />
         </label>
-        <p class="slice-hint">Окно сна может пересекать полночь: 23:00 → 07:00 указывается как есть.</p>
-        <ul class="ops-edit-list">${rows}</ul>
+        <ul class="ops-edit-list">
+          <li class="ops-edit-head" aria-hidden="true">
+            <span>день</span><span>работа с</span><span>работа по</span><span>сон с</span><span>сон по</span>
+          </li>
+          ${rows}
+        </ul>
+        <p class="slice-hint">Окно сна может пересекать полночь: 23:00 → 07:00 указывается как есть. Пустая пара полей означает «в этот день окна нет».</p>
         <div class="ops-actions">
-          <button type="submit" class="btn btn-sm" data-ops-action="save-schedule">Сохранить расписание</button>
+          <button type="submit" class="btn btn-primary btn-sm" data-ops-action="save-schedule">Сохранить расписание</button>
         </div>
       </form>
     </details>`;
@@ -137,11 +154,14 @@ function exceptionsHtml(state, view) {
         .map(
           (e) => `
           <li class="slice-item" data-exception="${esc(e.id)}">
-            <span class="slice-name">${esc(e.date)}</span>
-            ${chip(exceptionLabel(e), e.kind === "off" ? "warn" : "info")}
-            ${e.note ? `<span class="slice-hint">${esc(e.note)}</span>` : ""}
-            <span class="slice-spacer"></span>
-            <button type="button" class="btn btn-sm" data-ops-action="drop-exception" data-id="${esc(e.id)}">✕</button>
+            <div class="slice-item-head">
+              <span class="slice-name">${esc(e.date)}</span>
+              ${chip(exceptionLabel(e), e.kind === "off" ? "warn" : "info")}
+              ${e.note ? `<span class="slice-hint">${esc(e.note)}</span>` : ""}
+              <span class="slice-spacer"></span>
+              <button type="button" class="btn btn-sm btn-icon" data-ops-action="drop-exception" data-id="${esc(e.id)}"
+                title="Снять исключение" aria-label="Снять исключение">✕</button>
+            </div>
           </li>`
         )
         .join("")
@@ -164,7 +184,7 @@ function exceptionsHtml(state, view) {
         <label>по<input type="time" name="end" /></label>
         <label>Примечание<input type="text" name="note" maxlength="200" /></label>
         <div class="ops-actions">
-          <button type="submit" class="btn btn-sm" data-ops-action="add-exception">Добавить исключение</button>
+          <button type="submit" class="btn btn-primary btn-sm" data-ops-action="add-exception">Добавить исключение</button>
         </div>
       </form>
     </details>`;
@@ -191,10 +211,13 @@ function absencesHtml(view) {
         .map(
           (a) => `
           <li class="slice-item" data-absence="${esc(a.id)}">
-            <span class="slice-name">${fmtDate(a.startsAt)} → ${a.endsAt ? fmtDate(a.endsAt) : "бессрочно"}</span>
-            ${a.reason ? `<span class="slice-hint">${esc(a.reason)}</span>` : ""}
-            <span class="slice-spacer"></span>
-            <button type="button" class="btn btn-sm" data-ops-action="drop-absence" data-id="${esc(a.id)}">✕</button>
+            <div class="slice-item-head">
+              <span class="slice-name">${fmtDate(a.startsAt)} → ${a.endsAt ? fmtDate(a.endsAt) : "бессрочно"}</span>
+              ${a.reason ? `<span class="slice-hint">${esc(a.reason)}</span>` : ""}
+              <span class="slice-spacer"></span>
+              <button type="button" class="btn btn-sm btn-icon" data-ops-action="drop-absence" data-id="${esc(a.id)}"
+                title="Снять отсутствие" aria-label="Снять отсутствие">✕</button>
+            </div>
           </li>`
         )
         .join("")
@@ -209,7 +232,7 @@ function absencesHtml(view) {
         <label>По<input type="datetime-local" name="endsAt" /></label>
         <label>Причина<input type="text" name="reason" maxlength="200" /></label>
         <div class="ops-actions">
-          <button type="submit" class="btn btn-sm" data-ops-action="add-absence">Записать отсутствие</button>
+          <button type="submit" class="btn btn-primary btn-sm" data-ops-action="add-absence">Записать отсутствие</button>
         </div>
       </form>
     </details>`;
@@ -217,19 +240,17 @@ function absencesHtml(view) {
 
 /* ── Ожидающие операции ────────────────────────────────────── */
 
+/* Форма создания операции всегда живёт в ТЕЛЕ панели: в шапке (там, где стоят
+   подписи) раскрывающийся блок ломал строку заголовка и вёл себя не так, как
+   в непустом состоянии раздела. */
 export function operationsHtml(state) {
   const rows = state.operations || [];
-  if (!rows.length) {
-    return panel(
-      "Ручные операции",
-      `<div class="slice-empty">Ожидающих операций нет — ни один принтер не удерживается.</div>`,
-      openOperationForm(state)
-    );
-  }
+  const body = rows.length
+    ? `<ul class="slice-list ops-list">${rows.map(operationRow).join("")}</ul>`
+    : `<div class="slice-empty">Ожидающих операций нет — ни один принтер не удерживается.</div>`;
   return panel(
     "Ручные операции",
-    `<ul class="slice-list ops-list">${rows.map(operationRow).join("")}</ul>
-     ${openOperationForm(state)}`,
+    `${body}${openOperationForm(state)}`,
     `<span class="slice-hint">подтверждение выполняет человек</span>`
   );
 }
@@ -239,8 +260,8 @@ function operationRow(row) {
   const st = OP_STATE[op.state] || OP_STATE.PENDING;
   const tags = [
     chip(st.label, st.cls),
-    chip(esc(op.printerId), "info"),
-    op.blocking ? chip("удерживает принтер", "warn") : chip("не блокирует", "info"),
+    chip(esc(op.printerId), "mute"),
+    op.blocking ? chip("удерживает принтер", "warn") : chip("не блокирует", "mute"),
     row.expectedMinutes != null
       ? chip(`≈ ${row.expectedMinutes} мин`, "info")
       : chip("длительность неизвестна", "error")
@@ -254,28 +275,38 @@ function operationRow(row) {
         row.earliestAt ? ` · можно с ${fmtDate(row.earliestAt)}` : " · срок неизвестен"
       }</div>`;
 
-  const actions = op.state === "IN_PROGRESS" || row.ready
-    ? `<button type="button" class="btn btn-sm" data-ops-action="complete" data-id="${esc(op.id)}">✓ выполнено</button>
+  /* Подтверждение выполнения — главное действие строки, поэтому оно
+     единственное выделено; отмена стоит последней и подписана. */
+  const actionable = op.state === "IN_PROGRESS" || row.ready;
+  const actions = actionable
+    ? `<button type="button" class="btn btn-ok btn-sm" data-ops-action="complete" data-id="${esc(op.id)}">✓ выполнено</button>
        <button type="button" class="btn btn-sm" data-ops-action="fail" data-id="${esc(op.id)}">не удалось</button>`
+    : "";
+
+  /* Поля подтверждения нужны только там, где есть что подтверждать: у
+     ожидающих операций они были тремя пустыми полями чистого шума. */
+  const confirmForm = actionable
+    ? `<form class="sch-edit ops-confirm" data-ops-form="complete" data-id="${esc(op.id)}">
+        <label>Фактическая длительность, мин<input type="number" name="actualMinutes" min="0" step="1" /></label>
+        <label>Кто подтвердил<input type="text" name="actor" maxlength="60" /></label>
+        <label>Примечание<input type="text" name="note" maxlength="200" /></label>
+      </form>`
     : "";
 
   return `
     <li class="slice-item ops-row" data-operation="${esc(op.id)}">
       <div class="slice-item-head">
-        <span class="slice-name">${esc(row.label)}</span>
+        <span class="slice-name ops-name">${esc(row.label)}</span>
         <span class="slice-spacer"></span>
         ${op.state === "READY" ? `<button type="button" class="btn btn-sm" data-ops-action="claim" data-id="${esc(op.id)}">взять в работу</button>` : ""}
         ${actions}
-        <button type="button" class="btn btn-sm" data-ops-action="cancel-op" data-id="${esc(op.id)}">✕</button>
+        <button type="button" class="btn btn-sm btn-icon btn-danger" data-ops-action="cancel-op" data-id="${esc(op.id)}"
+          title="Отменить операцию" aria-label="Отменить операцию">✕</button>
       </div>
       <div class="sch-tags">${tags}</div>
       ${op.reason ? `<div class="slice-hint">${esc(op.reason)}</div>` : ""}
       ${waiting}
-      <form class="sch-edit ops-confirm" data-ops-form="complete" data-id="${esc(op.id)}">
-        <label>Фактическая длительность, мин<input type="number" name="actualMinutes" min="0" step="1" /></label>
-        <label>Кто подтвердил<input type="text" name="actor" maxlength="60" /></label>
-        <label>Примечание<input type="text" name="note" maxlength="200" /></label>
-      </form>
+      ${confirmForm}
     </li>`;
 }
 
@@ -295,7 +326,7 @@ function openOperationForm(state) {
         <label>Длительность, мин<input type="number" name="estimatedMinutes" min="0" step="1" /></label>
         <label>Причина<input type="text" name="reason" maxlength="200" /></label>
         <div class="ops-actions">
-          <button type="submit" class="btn btn-sm" data-ops-action="open-op">Создать</button>
+          <button type="submit" class="btn btn-primary btn-sm" data-ops-action="open-op">Создать</button>
         </div>
       </form>
     </details>`;
@@ -308,8 +339,9 @@ export function holdsHtml(state) {
   if (!holds.length) return "";
   const rows = holds
     .map((h) => {
+      /* Идентификатор принтера уже стоит заголовком строки — вторым чипом он
+         был бы повтором, а не фактом. */
       const tags = [
-        chip(esc(h.printerId), "info"),
         h.waitingForOperator ? chip("ждёт оператора", "warn") : chip("операция выполняется", "info"),
         /* releaseAt = null означает «неизвестно», и это НЕ «скоро»: показываем
            честно, иначе цифра читается как обещание. */
@@ -320,7 +352,7 @@ export function holdsHtml(state) {
       ].join("");
       return `
         <li class="slice-item">
-          <div class="slice-item-head"><span class="slice-name">${esc(h.printerId)}</span></div>
+          <div class="slice-item-head"><span class="slice-name ops-name">${esc(h.printerId)}</span></div>
           <div class="sch-tags">${tags}</div>
           <div class="slice-hint">${esc(h.reason)}</div>
         </li>`;

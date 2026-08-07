@@ -34,7 +34,7 @@ function queueRow(state, row, index) {
   const entry = row.entry;
   const tags = [];
   if (t.priority) tags.push(chip(`приоритет ${t.priority}`, "info"));
-  if (t.pinnedPrinterId) tags.push(chip(`🔒 ${esc(t.pinnedPrinterId)}`, "info"));
+  if (t.pinnedPrinterId) tags.push(chip(`закреплён: ${esc(t.pinnedPrinterId)}`, "info"));
   if (t.dayNightPreference && t.dayNightPreference !== "any") tags.push(chip(esc(DAYNIGHT[t.dayNightPreference] || t.dayNightPreference), "warn"));
   if (t.unattendedAllowed) tags.push(chip("без присмотра", "warn"));
   if (t.deadline) tags.push(chip(`дедлайн ${fmtDate(t.deadline)}`, "info"));
@@ -44,32 +44,36 @@ function queueRow(state, row, index) {
     .map((p) => `<option value="${esc(p.id)}"${t.pinnedPrinterId === p.id ? " selected" : ""}>${esc(p.name)}</option>`)
     .join("");
 
+  /* Номер — отдельная колонка строки: заголовок, чипы и форма параметров
+     выстроены по одной левой границе, а не съезжают под номер. */
   return `
     <li class="slice-item sch-row" data-task="${esc(t.id)}" data-version="${entry.version}">
-      <div class="slice-item-head">
-        <span class="sch-ord">${index + 1}</span>
-        <span class="slice-name">${esc(t.title)}</span>
-        ${t.material ? chip(esc(t.material), "info") : ""}
-        <span class="slice-spacer"></span>
-        <button type="button" class="btn btn-sm" data-sch-action="up" title="выше">↑</button>
-        <button type="button" class="btn btn-sm" data-sch-action="down" title="ниже">↓</button>
-        <button type="button" class="btn btn-sm" data-sch-action="toggle-edit">✎ параметры</button>
-      </div>
-      <div class="sch-tags">${tags.join("") || `<span class="slice-hint">без ограничений</span>`}</div>
-      <form class="sch-edit" data-sch-form="params" hidden>
-        <label>Приоритет<input type="number" name="priority" value="${t.priority}" /></label>
-        <label>День/ночь<select name="dayNightPreference">
-          ${["any", "day", "night"].map((v) => `<option value="${v}"${t.dayNightPreference === v ? " selected" : ""}>${DAYNIGHT[v]}</option>`).join("")}
-        </select></label>
-        <label>Не ранее<input type="datetime-local" name="notBefore" value="${isoToInput(t.notBefore)}" /></label>
-        <label>Дедлайн<input type="datetime-local" name="deadline" value="${isoToInput(t.deadline)}" /></label>
-        <label class="sch-check"><input type="checkbox" name="unattended"${t.unattendedAllowed ? " checked" : ""} /> без присмотра (ночь)</label>
-        <label>Закрепить принтер<select name="pin"><option value="">— не закреплять —</option>${printerOpts}</select></label>
-        <div class="sch-edit-actions">
-          <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
-          ${t.pinnedPrinterId ? `<button type="button" class="btn btn-sm" data-sch-action="unpin">Снять закрепление</button>` : ""}
+      <span class="sch-ord">${index + 1}</span>
+      <div class="sch-row-main">
+        <div class="slice-item-head">
+          <span class="slice-name">${esc(t.title)}</span>
+          ${t.material ? chip(esc(t.material), "mute") : ""}
+          <span class="slice-spacer"></span>
+          <button type="button" class="btn btn-sm btn-icon" data-sch-action="up" title="Поднять в очереди" aria-label="Поднять в очереди">↑</button>
+          <button type="button" class="btn btn-sm btn-icon" data-sch-action="down" title="Опустить в очереди" aria-label="Опустить в очереди">↓</button>
+          <button type="button" class="btn btn-sm" data-sch-action="toggle-edit">✎ параметры</button>
         </div>
-      </form>
+        <div class="sch-tags">${tags.join("") || `<span class="slice-hint">без ограничений</span>`}</div>
+        <form class="sch-edit" data-sch-form="params" hidden>
+          <label>Приоритет<input type="number" name="priority" value="${t.priority}" /></label>
+          <label>День/ночь<select name="dayNightPreference">
+            ${["any", "day", "night"].map((v) => `<option value="${v}"${t.dayNightPreference === v ? " selected" : ""}>${DAYNIGHT[v]}</option>`).join("")}
+          </select></label>
+          <label>Не ранее<input type="datetime-local" name="notBefore" value="${isoToInput(t.notBefore)}" /></label>
+          <label>Дедлайн<input type="datetime-local" name="deadline" value="${isoToInput(t.deadline)}" /></label>
+          <label>Закрепить принтер<select name="pin"><option value="">— не закреплять —</option>${printerOpts}</select></label>
+          <label class="sch-check"><input type="checkbox" name="unattended"${t.unattendedAllowed ? " checked" : ""} /> без присмотра (ночь)</label>
+          <div class="sch-edit-actions">
+            <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
+            ${t.pinnedPrinterId ? `<button type="button" class="btn btn-sm" data-sch-action="unpin">Снять закрепление</button>` : ""}
+          </div>
+        </form>
+      </div>
     </li>`;
 }
 
@@ -219,7 +223,9 @@ function timelineLane(lane, explanations) {
   const release = lane.releaseAtMs != null
     ? chip(`свободен с ${fmtTime(lane.releaseAtMs)}`, lane.waitingForOperator ? "warn" : "ok")
     : chip("время освобождения неизвестно", "error");
-  const code = chip(esc(RELEASE_LABEL[lane.releaseCode] || lane.releaseCode || "—"), "info");
+  /* Код освобождения — пояснение к чипу времени слева, а не отдельный повод
+     для золота: цвет на линии несёт первый чип. */
+  const code = chip(esc(RELEASE_LABEL[lane.releaseCode] || lane.releaseCode || "—"), "mute");
   const segments = (lane.segments || []).map((s) => segmentHtml(s, explanations)).join("") ||
     `<span class="slice-empty">ничего не запланировано</span>`;
   return `
@@ -292,9 +298,9 @@ function assignmentCard(view) {
     <div class="sch-assign${ex.frozen ? " sch-assign-frozen" : ""}">
       <div class="sch-assign-head">
         <span class="slice-name">${esc(task.title || view.assignment.taskId)}</span>
-        ${chip(esc(ex.printerId || view.assignment.printerId), "info")}
+        ${chip(esc(ex.printerId || view.assignment.printerId), "mute")}
         ${window ? `<span class="slice-tag">${window}</span>` : ""}
-        ${ex.frozen ? chip("заморожено", "ok") : chip("рекомендация", "warn")}
+        ${ex.frozen ? chip("заморожено", "info") : chip("рекомендация", "plan")}
       </div>
       <div class="sch-assign-meta">${esc(eta)} · ${esc(bed)}</div>
       <div class="slice-hint">${esc(ex.reason || "")}</div>
@@ -305,7 +311,7 @@ function assignmentCard(view) {
 
 function unplacedHtml(unplaced) {
   if (!Array.isArray(unplaced) || !unplaced.length) return "";
-  return `<div class="sch-unplaced"><b>Не поставлены в план:</b><ul class="slice-findings">
+  return `<div class="sch-unplaced"><p class="panel-sub">Не поставлены в план</p><ul class="slice-findings">
       ${unplaced.map((u) => `<li class="slice-warn">⚠ ${esc(u.title)} — <code>${esc(u.code || "UNKNOWN")}</code> ${esc(UNPLACED_LABEL[u.code] || "")}: ${esc(u.reason)}${
         u.hint ? ` <span class="slice-hint">(${esc(u.hint.note)}: ${esc(u.hint.printerId)} ${fmtTime(u.hint.startMs)}–${fmtTime(u.hint.endMs)})</span>` : ""
       }</li>`).join("")}

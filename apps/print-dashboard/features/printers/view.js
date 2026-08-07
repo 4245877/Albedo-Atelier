@@ -96,9 +96,11 @@ function printerRow(printer, state) {
   const test = state.tests?.[printer.id];
   const busy = state.busy?.[printer.id];
 
+  /* Протокол и адрес — нейтральные факты: золото в этом разделе означает
+     «сюда стоит посмотреть» (учётные данные, состояние связи). */
   const facts = [
-    chip(esc(printer.protocol), "info"),
-    chip(esc(hostLabel(printer)), "info"),
+    chip(esc(printer.protocol), "mute"),
+    chip(esc(hostLabel(printer)), "mute"),
     printer.enabled ? chip("в работе", "ok") : chip("отключён", "warn"),
     ...credentialChips(printer, state),
     testChip(test, busy)
@@ -174,12 +176,13 @@ function discoveryPanel(printer) {
   return `
     <div class="prn-discovered">
       <div class="prn-discovered-head">
-        <b>Характеристики с принтера</b>
+        <p class="panel-sub">Характеристики с принтера</p>
         ${discoveryStamp(printer.discovery)}
       </div>
       ${
-        rows ||
-        `<div class="slice-hint">Принтер ещё ничего о себе не сообщил — нажмите «Опросить принтер».</div>`
+        rows
+          ? `<div class="prn-specs">${rows}</div>`
+          : `<div class="slice-hint">Принтер ещё ничего о себе не сообщил — нажмите «Опросить принтер».</div>`
       }
       ${materialsList(specs.materials)}
       ${conflictNotes(specs)}
@@ -225,19 +228,21 @@ function materialsList(spec) {
       const slot = entry.slot === null ? "внешняя катушка" : `слот ${entry.slot + 1}`;
       const swatch = entry.color
         ? `<span class="prn-swatch" style="background:${esc(entry.color)}"></span>`
-        : "";
+        : `<span class="prn-swatch prn-swatch--empty"></span>`;
       const remain = entry.remainPct === null ? "" : ` · ${entry.remainPct}%`;
-      return `<li${entry.active ? ' class="prn-material--active"' : ""}>${swatch}${esc(slot)}: ${esc(
+      return `<li${entry.active ? ' class="prn-material--active"' : ""}>${swatch}<span>${esc(slot)}: ${esc(
         entry.material || "пусто"
-      )}${esc(remain)}${entry.active ? " · печатает" : ""}</li>`;
+      )}${esc(remain)}${entry.active ? " · печатает" : ""}</span></li>`;
     })
     .join("");
 
   return `
     <div class="prn-materials">
-      <span class="prn-spec-label">Загруженные материалы</span>
+      <div class="prn-materials-head">
+        <p class="panel-sub">Загруженные материалы</p>
+        ${sourceBadge(spec)}
+      </div>
       <ul>${items}</ul>
-      ${sourceBadge(spec)}
     </div>`;
 }
 
@@ -263,11 +268,11 @@ function conflictNotes(specs) {
 
 function conflictNote(label, spec, format) {
   if (!spec?.overriddenManual) return "";
-  return `<div class="slice-warn">⚠ ${esc(label)}: вручную задано «${esc(
+  return `<div class="prn-conflict"><span aria-hidden="true">⚠</span><span>${esc(label)}: вручную задано «${esc(
     format(spec.overriddenManual)
   )}», но принтер сообщает «${esc(
     format(spec.value)
-  )}» — действует значение принтера. Очистите поле в настройках или поправьте настройку на самом принтере.</div>`;
+  )}» — действует значение принтера. Очистите поле в настройках или поправьте настройку на самом принтере.</span></div>`;
 }
 
 function catalogNote(label, spec, format) {
@@ -284,8 +289,8 @@ function discoveryStamp(discovery) {
     return `<span class="slice-hint">обновлено ${esc(when)}</span>`;
   }
   // Неудачный опрос НЕ стирает выученное: показываем прежние данные и честно
-  // помечаем, что они не свежие.
-  return `<span class="slice-hint">последний опрос не удался${when ? ` (${esc(when)})` : ""}${
+  // помечаем, что они не свежие — предупреждающим тоном, а не рядовой подписью.
+  return `<span class="slice-hint prn-stamp--failed">последний опрос не удался${when ? ` (${esc(when)})` : ""}${
     discovery.error ? `: ${esc(discovery.error)}` : ""
   } — показаны прежние данные</span>`;
 }
@@ -432,7 +437,7 @@ function credentialsFieldset(printer, fields) {
       return `
         <div class="prn-secret">
           <label>
-            ${esc(label)}
+            <span class="fld-head">${esc(label)}</span>
             <input type="password" name="secret:${esc(field)}" autocomplete="new-password"
               placeholder="оставьте пустым, чтобы не менять" />
           </label>
@@ -494,8 +499,9 @@ export function addFormHtml(state) {
     .map(
       (field) => `
       <label>
-        ${esc(CREDENTIAL_LABELS[field] || field)}
+        <span class="fld-head">${esc(CREDENTIAL_LABELS[field] || field)}</span>
         <input type="password" name="secret:${esc(field)}" autocomplete="new-password" />
+        <span></span>
       </label>`
     )
     .join("");
@@ -609,9 +615,16 @@ function protocolOptions(state) {
 }
 
 /* Заголовок поля: подпись плюс, если значение может прийти с принтера, бейдж
-   источника. Бейдж — уже готовая разметка (sourceBadge), поэтому не экранируется. */
+   источника. Бейдж — уже готовая разметка (sourceBadge), поэтому не экранируется.
+   Обёртка .fld-head обязательна: в колоночном <label> голый бейдж растягивался
+   во всю ширину поля отдельной цветной полосой над вводом. Она же держит поля
+   в ряду на одной высоте (см. subgrid в workflows.css). */
 function fieldLabel(label, opts) {
-  return `${esc(label)}${opts.required ? " *" : ""}${opts.badge || ""}`;
+  return `<span class="fld-head">${esc(label)}${opts.required ? " *" : ""}${opts.badge || ""}</span>`;
+}
+
+function fieldHint(opts) {
+  return opts.hint ? `<span class="slice-hint">${esc(opts.hint)}</span>` : `<span></span>`;
 }
 
 function textField(name, label, value, opts = {}) {
@@ -620,7 +633,7 @@ function textField(name, label, value, opts = {}) {
       ${fieldLabel(label, opts)}
       <input type="text" name="${esc(name)}" value="${esc(value ?? "")}"
         ${opts.placeholder ? `placeholder="${esc(opts.placeholder)}"` : ""} />
-      ${opts.hint ? `<span class="slice-hint">${esc(opts.hint)}</span>` : ""}
+      ${fieldHint(opts)}
     </label>`;
 }
 
@@ -631,7 +644,7 @@ function numberField(name, label, value, opts = {}) {
       <input type="number" name="${esc(name)}" value="${value ?? ""}"
         ${opts.placeholder ? `placeholder="${esc(opts.placeholder)}"` : ""}
         ${opts.step ? `step="${esc(opts.step)}"` : ""} min="0" />
-      ${opts.hint ? `<span class="slice-hint">${esc(opts.hint)}</span>` : ""}
+      ${fieldHint(opts)}
     </label>`;
 }
 
@@ -646,7 +659,8 @@ function selectField(name, label, value, options, opts = {}) {
     .join("");
   return `
     <label>
-      ${esc(label)}
+      ${fieldLabel(label, opts)}
       <select name="${esc(name)}" ${opts.extra || ""}>${items}</select>
+      ${fieldHint(opts)}
     </label>`;
 }

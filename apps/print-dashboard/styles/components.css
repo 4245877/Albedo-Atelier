@@ -161,6 +161,18 @@
 
 .btn-sm { padding: 6px 11px; font-size: 12.5px; border-radius: 8px; }
 
+/* Кнопка-глиф (↑ ↓ ✕): квадратная, чтобы ряд иконок не выглядел набором
+   разноширокой мелочи. Подпись для скринридера — в aria-label/title. */
+.btn-icon {
+  padding: 0;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  font-size: 14px;
+  line-height: 1;
+}
+.btn-icon.btn-sm { padding: 0; }
+
 .btn[disabled] { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; }
 
 /* ── Прогресс ───────────────────────────────────────────────── */

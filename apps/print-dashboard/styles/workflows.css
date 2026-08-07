@@ -134,6 +134,11 @@
 .chip-warn { color: var(--warn-ink); border-color: var(--warn); background: var(--warn-soft); }
 .chip-error { color: var(--danger-ink); border-color: var(--danger); background: var(--danger-soft); }
 .chip-info { color: var(--gold-bright); border-color: var(--gold-line); background: var(--gold-soft); }
+/* Аметист — «предложено, но ещё не утверждено»: тот же цвет, что у сегмента
+   рекомендации на линии принтера, и заведомо не спутать с золотом решения. */
+.chip-plan { color: var(--amethyst-ink); border-color: color-mix(in srgb, var(--amethyst) 55%, transparent); background: var(--amethyst-soft); }
+/* Нейтральный чип: факт без оценки (адрес, протокол, идентификатор). */
+.chip-mute { color: var(--ink-soft); border-color: var(--card-edge); background: var(--card-inner); }
 
 .upload-progress {
   margin-top: 10px;
@@ -226,9 +231,20 @@
 .slice-panel {
   border: 1px solid var(--card-edge);
   border-radius: 12px;
-  padding: 14px 16px;
-  margin-bottom: 14px;
+  padding: 16px 18px;
+  /* Вертикальный ритм между панелями задаёт flex-gap .card-body — собственный
+     margin давал бы двойной интервал (gap + margin) и лишний хвост снизу. */
+  margin-bottom: 0;
   background: color-mix(in srgb, var(--card-edge) 12%, transparent);
+}
+/* Рабочие разделы — длинные, панели в них крупные: интервал чуть шире общего
+   ритма доски, иначе соседние панели читаются как одна. */
+#uploads-body,
+#slicing-body,
+#scheduler-body,
+#operations-body,
+#hardware-body {
+  gap: 18px;
 }
 .slice-runtime {
   background: color-mix(in srgb, var(--gold-soft) 40%, transparent);
@@ -236,30 +252,46 @@
 .slice-panel-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px 12px;
   flex-wrap: wrap;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 /* Дисплейная антиква + волосяная золотая линия: заголовки рабочих под-панелей
    звучат в том же аристократическом регистре, что и заголовки секций
-   (.card-head h2), а не канцелярским гротеском. */
+   (.card-head h2), а не канцелярским гротеском. Линия висит на псевдоэлементе
+   НИЖЕ строки (bottom:-5px), а не на padding-bottom: иначе заголовок съезжал
+   вверх относительно подписи и кнопок в той же строке. */
 .slice-panel-head b {
   position: relative;
-  padding-bottom: 4px;
   font-family: var(--font-display);
-  font-size: 16.5px;
+  font-size: 17px;
   font-weight: 600;
   letter-spacing: 0.01em;
+  line-height: 1.25;
   color: var(--ink);
 }
 .slice-panel-head b::after {
   content: "";
   position: absolute;
   left: 0;
-  bottom: 0;
+  bottom: -5px;
   width: 28px;
   height: 1px;
   background: linear-gradient(90deg, var(--gold-line), transparent);
+}
+/* Действия панели (пересчёт, подтверждение) прижимаются к правому краю шапки —
+   заголовок и кнопка не слипаются, а главное действие всегда в одном месте. */
+.slice-panel-head > .btn:first-of-type { margin-left: auto; }
+
+/* Подпись под-блока внутри панели: одна микро-метка на все разделы
+   («Характеристики с принтера», «Рабочие окна», «Не поставлены в план»). */
+.panel-sub {
+  margin: 0 0 8px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
 }
 .slice-hint,
 .slice-count {
@@ -300,12 +332,12 @@
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 .slice-item {
   border: 1px solid var(--card-edge);
   border-radius: 10px;
-  padding: 9px 11px;
+  padding: 12px 14px;
   background: var(--card);
 }
 .slice-item-head {
@@ -315,9 +347,10 @@
   flex-wrap: wrap;
 }
 .slice-name {
-  font-size: 13px;
+  font-size: 13.5px;
   color: var(--ink);
-  font-weight: 500;
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 .slice-findings {
   list-style: none;
@@ -329,6 +362,9 @@
   font-size: 12.5px;
 }
 .slice-warn { color: var(--warn-ink); }
+/* Строка-препятствие в объяснении рекомендации: класс использовался разметкой
+   планировщика, но не имел стиля — препятствие читалось как обычный текст. */
+.slice-error { color: var(--danger-ink); }
 .slice-block-li { color: var(--danger-ink); }
 .slice-block {
   margin-top: 8px;
@@ -396,29 +432,79 @@
 .slice-details summary {
   cursor: pointer;
   color: var(--ink-soft);
+  border-radius: 6px;
+  transition: color 0.2s;
 }
+.slice-details summary:hover { color: var(--gold-bright); }
+.slice-details[open] summary { margin-bottom: 6px; }
 .slice-form .slice-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 10px;
-  margin-bottom: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px 12px;
+  align-items: start;
+  margin-bottom: 14px;
 }
-.slice-form label {
+/* Поля строки выстраиваются по общим дорожкам «подпись → контрол → подсказка».
+   Без этого поле с двухстрочной подписью или подсказкой сдвигало свой ввод
+   вниз, и в ряду инпуты стояли на разной высоте. Движки без subgrid получают
+   прежнее поведение (три автострочки), а не сломанную сетку. */
+@supports (grid-template-rows: subgrid) {
+  .slice-form .slice-grid > label {
+    grid-row: span 3;
+    display: grid;
+    grid-template-rows: subgrid;
+    row-gap: 5px;
+  }
+}
+
+/* ── Единые контролы рабочих форм ───────────────────────────────
+   Планировщик, оператор и оборудование используют один и тот же набор полей:
+   размеры, радиусы, фон и отклик задаются здесь один раз, иначе соседние
+   разделы расходились по высоте строк и цвету рамки. */
+.slice-form label,
+.sch-edit label,
+.prn-secret label {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
   font-size: 12px;
   color: var(--ink-faint);
 }
-.slice-form input,
-.slice-form select {
-  padding: 7px 9px;
+/* Заголовок поля: подпись и бейдж источника — одной строкой. В колоночном
+   label бейдж иначе растягивался во всю ширину поля отдельной полосой. */
+.fld-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  line-height: 1.3;
+}
+.slice-form input:not([type="checkbox"]),
+.slice-form select,
+.sch-edit input:not([type="checkbox"]),
+.sch-edit select,
+.prn-secret input {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
   border-radius: 8px;
   border: 1px solid var(--btn-edge);
   background: var(--btn-bg);
   color: var(--ink);
-  font-size: 13px;
-  transition: border-color 0.18s, box-shadow 0.18s;
+  font: 500 13px var(--font-body);
+  transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
+}
+.slice-form input:not([type="checkbox"]):hover,
+.slice-form select:hover,
+.sch-edit input:not([type="checkbox"]):hover,
+.sch-edit select:hover,
+.prn-secret input:hover {
+  border-color: var(--edge-strong);
+}
+.slice-form input::placeholder,
+.sch-edit input::placeholder,
+.prn-secret input::placeholder {
+  color: var(--ink-faint);
 }
 /* Переключатель цели набора: принтер ИЛИ класс. */
 .slice-target {
@@ -450,34 +536,43 @@
 /* ═══ Планировщик печати (#scheduler) ═══════════════════════════ */
 
 .sch-queue { list-style: none; margin: 0; padding: 0; }
-.sch-row { display: block; }
+/* Порядковый номер — отдельная колонка строки: заголовок, чипы и форма
+   параметров выстроены по одной левой границе, а не съезжают под номер. */
+.sch-row { display: flex; align-items: flex-start; gap: 10px; }
+.sch-row-main { flex: 1; min-width: 0; }
 .sch-ord {
+  flex: none;
   display: inline-flex; align-items: center; justify-content: center;
-  min-width: 22px; height: 22px; padding: 0 6px;
-  border-radius: 999px; font-size: 12px; font-weight: 600;
+  min-width: 24px; height: 24px; padding: 0 6px; margin-top: 2px;
+  border-radius: 999px; font-size: 12px; font-weight: 700;
+  font-variant-numeric: tabular-nums;
   color: var(--ink-faint);
   background: color-mix(in srgb, var(--card-edge) 40%, transparent);
 }
-.sch-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.sch-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+/* Чип с длинным текстом (имя переменной окружения, причина отказа) обязан
+   переноситься: в nowrap он уезжал за край карточки и тянул горизонтальную
+   прокрутку всей страницы на узком экране. */
+.sch-tags .upload-chip,
+.slice-item-head .upload-chip {
+  white-space: normal;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
 .sch-edit {
-  display: grid; gap: 10px 14px; margin-top: 12px;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  padding-top: 12px; border-top: 1px dashed var(--card-edge);
+  display: grid; gap: 12px; margin-top: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  align-items: start;
+  padding-top: 14px; border-top: 1px dashed var(--card-edge);
 }
 /* Собственный display:grid перебивает UA-правило [hidden]{display:none} —
    без этого «скрытая» форма параметров стояла бы раскрытой у каждой строки. */
 .sch-edit[hidden] { display: none; }
-.sch-edit label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-faint); }
-.sch-edit input, .sch-edit select {
-  padding: 7px 9px; border-radius: 8px;
-  border: 1px solid var(--btn-edge); background: var(--btn-bg); color: var(--ink);
-  font: inherit; font-size: 13px;
-  transition: border-color 0.18s, box-shadow 0.18s;
-}
 /* Фирменное золотое фокус-кольцо на полях рабочих форм — тот же «живой отклик»,
    что у модальных .input, а не дефолтный контур ОС. */
 .slice-form input:focus, .slice-form select:focus,
-.sch-edit input:focus, .sch-edit select:focus {
+.sch-edit input:focus, .sch-edit select:focus,
+.prn-secret input:focus {
   outline: none;
   border-color: var(--gold-line);
   box-shadow: 0 0 0 3px var(--gold-soft);
@@ -495,77 +590,138 @@
 }
 .slice-form input[type="datetime-local"]:hover::-webkit-calendar-picker-indicator,
 .sch-edit input[type="datetime-local"]:hover::-webkit-calendar-picker-indicator { opacity: 1; }
-/* Чекбокс «без присмотра» — собственный ряд во всю ширину грид-сетки и
-   выравнивание по верху, иначе он плавал по центру рядом с высокими label+input. */
-.sch-check { grid-column: 1 / -1; align-self: start; flex-direction: row !important; align-items: center; gap: 8px !important; }
-.sch-check input { width: auto; }
-.sch-edit-actions { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; }
+/* Чекбокс в строке полей: выравнивается по нижнему краю соседних инпутов
+   (собственной подписи у него нет), поэтому не «висит» посередине. */
+.sch-check {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 8px !important;
+  align-self: end;
+  min-height: 36px;
+  font-size: 13px;
+  color: var(--ink);
+}
+.sch-check input { width: auto; min-height: 0; flex: none; }
+/* Собственный ряд во всю ширину — там, где чекбокс не часть строки полей
+   (формы оборудования: TLS, инверсия пина). */
+.slice-form > .sch-check { grid-column: 1 / -1; align-self: start; }
+.sch-edit-actions { grid-column: 1 / -1; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 
-.sch-matrix-wrap { overflow-x: auto; }
+/* Таблица совместимости: те же правила, что у общей .table доски (микро-метки
+   в шапке, подсветка строки), плюс горизонтальная прокрутка «до края» карточки. */
+.sch-matrix-wrap { overflow-x: auto; margin: 0 -4px; padding: 0 4px; }
 .sch-matrix { border-collapse: collapse; width: 100%; font-size: 13px; }
 .sch-matrix th, .sch-matrix td {
-  padding: 7px 10px; text-align: left;
-  border-bottom: 1px solid var(--card-edge); white-space: nowrap;
+  padding: 9px 12px; text-align: left;
+  border-bottom: 1px solid var(--table-line); white-space: nowrap;
 }
-.sch-matrix th { color: var(--ink-faint); font-weight: 600; }
-.sch-cell-task { color: var(--ink); font-weight: 500; }
+.sch-matrix th {
+  color: var(--ink-faint);
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border-bottom-color: var(--card-edge);
+}
+.sch-matrix tbody tr:last-child td { border-bottom: none; }
+.sch-matrix tbody tr:hover td { background: var(--card-inner); }
+.sch-cell-task { color: var(--ink); font-weight: 600; white-space: normal; min-width: 200px; }
 
-.sch-lanes { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
-.sch-lane { border: 1px solid var(--card-edge); border-radius: 10px; overflow: hidden; }
-.sch-lane-head {
-  padding: 8px 12px; font-size: 13px; font-weight: 600; color: var(--ink);
-  background: color-mix(in srgb, var(--card-edge) 30%, transparent);
+.sch-lanes {
+  display: grid; gap: 12px; align-items: start;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
 }
-.sch-lane-body { padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
+/* Линия принтера — та же поверхность, что и строка списка (.slice-item):
+   вложенность разделов читается одинаково во всех трёх рабочих секциях. */
+.sch-lane {
+  border: 1px solid var(--card-edge); border-radius: 10px; overflow: hidden;
+  background: var(--card);
+}
+.sch-lane-head {
+  padding: 10px 12px; font-size: 13.5px; font-weight: 700; color: var(--ink);
+  background: color-mix(in srgb, var(--card-edge) 30%, transparent);
+  border-bottom: 1px solid var(--card-edge);
+  overflow-wrap: anywhere;
+}
+.sch-lane-body { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
 .sch-assign {
-  border: 1px solid var(--card-edge); border-radius: 8px; padding: 8px 10px;
-  background: color-mix(in srgb, var(--card-edge) 10%, transparent);
+  border: 1px solid var(--card-edge); border-radius: 10px; padding: 12px 14px;
+  background: var(--card);
+  display: flex; flex-direction: column; gap: 5px;
 }
 .sch-assign-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.sch-assign-meta { font-size: 12px; color: var(--ink-faint); margin: 4px 0; }
-.sch-unplaced { margin-top: 12px; }
-.sch-unplaced code { font-size: 11px; opacity: 0.8; }
+.sch-assign-head .slice-name { font-size: 13.5px; font-weight: 600; }
+.sch-assign-meta { font-size: 12px; color: var(--ink-faint); margin: 0; }
+/* Не поставленные в план — предупреждение, а не рядовой список: собственная
+   рамка отделяет его от рекомендаций выше. */
+.sch-unplaced {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--card-edge));
+  border-radius: 10px;
+  background: var(--warn-soft);
+}
+.sch-unplaced .slice-findings { font-size: 12.5px; }
+.sch-unplaced code {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--card-edge) 45%, transparent);
+  color: var(--ink-soft);
+}
 
 /* ── Таймлайн рекомендаций ───────────────────────────────────
    Печать, вынужденный простой и ручные операции — на одной линии принтера.
    Цвет несёт смысл, но не единственный: у каждого сегмента есть подпись вида
    («печать», «ожидание оператора», …), поэтому линия читается и без цвета. */
 
-.sch-lane-meta { display: flex; gap: 6px; flex-wrap: wrap; padding: 6px 12px 0; }
-.sch-lane-reason { padding: 0 12px; font-size: 11px; }
-.sch-cards { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
-.sch-plan-status { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
-.sch-stale-plan { margin-bottom: 8px; }
+/* Чипы линии могут быть длиннее самой линии («срок неизвестен: нет расписания
+   оператора»): в nowrap они уезжали за край и обрезались overflow-ом .sch-lane. */
+.sch-lane-meta { display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 12px 0; }
+.sch-lane-meta .upload-chip { white-space: normal; max-width: 100%; }
+.sch-lane-reason { padding: 6px 12px 0; font-size: 11.5px; line-height: 1.45; }
+.sch-lane-reason:empty { display: none; }
+.sch-cards { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.sch-plan-status { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.sch-stale-plan { margin-bottom: 10px; }
 
-.sch-legend { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; font-size: 11px; }
+/* Легенда: сначала образцы цветов одной строкой, затем оговорка отдельной
+   строкой — вперемешку они читались сплошной стеной мелкого текста. */
+.sch-legend { display: flex; gap: 8px 14px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; font-size: 11px; }
 .sch-legend-item { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-faint); }
-.sch-seg-dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.sch-legend > .slice-hint { flex-basis: 100%; max-width: 96ch; line-height: 1.5; }
+.sch-seg-dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
 
 .sch-seg {
   border-left: 4px solid var(--card-edge); border-radius: 6px;
-  padding: 6px 8px; background: color-mix(in srgb, var(--card-edge) 10%, transparent);
+  padding: 7px 10px; background: var(--card-inner);
 }
-.sch-seg-head { display: flex; gap: 8px; justify-content: space-between; font-size: 11px; color: var(--ink-faint); }
-.sch-seg-time { font-variant-numeric: tabular-nums; }
-.sch-seg-label { font-size: 12px; color: var(--ink); margin-top: 2px; }
+.sch-seg-head {
+  display: flex; gap: 4px 10px; flex-wrap: wrap; align-items: baseline;
+  font-size: 11px; color: var(--ink-faint);
+}
+.sch-seg-time { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sch-seg-kind { margin-left: auto; }
+.sch-seg-label { font-size: 12.5px; color: var(--ink); margin-top: 3px; line-height: 1.4; }
 
 /* Печать идёт. */
 .sch-seg-print, .sch-seg-dot.sch-seg-print { border-left-color: var(--ok); background: var(--ok-soft); }
-/* Рекомендация — ещё не подтверждена. */
-.sch-seg-planned, .sch-seg-dot.sch-seg-planned { border-left-color: var(--accent, var(--ink-faint)); }
-/* Подтверждено и заморожено — пересчёт его не тронет. */
-.sch-seg-frozen, .sch-seg-dot.sch-seg-frozen { border-left-color: var(--ok-ink, var(--ok)); background: var(--ok-soft); }
+/* Рекомендация — ещё не подтверждена: аметист, отдельный от «подтверждено». */
+.sch-seg-planned, .sch-seg-dot.sch-seg-planned { border-left-color: var(--amethyst); background: var(--amethyst-soft); }
+/* Подтверждено и заморожено — пересчёт его не тронет: родовое золото. */
+.sch-seg-frozen, .sch-seg-dot.sch-seg-frozen { border-left-color: var(--gold); background: var(--gold-soft); }
 /* Вынужденный простой: оператор спит или отсутствует. */
 .sch-seg-wait, .sch-seg-dot.sch-seg-wait {
-  border-left-color: var(--warn, #b98b3a);
+  border-left-color: var(--warn);
   background: repeating-linear-gradient(45deg,
     color-mix(in srgb, var(--card-edge) 16%, transparent) 0 6px,
     transparent 6px 12px);
 }
-/* Ручная операция. */
-.sch-seg-op, .sch-seg-dot.sch-seg-op { border-left-color: var(--warn-ink, #b98b3a); background: var(--warn-soft, transparent); }
+/* Ручная операция — работа человека, не машины. */
+.sch-seg-op, .sch-seg-dot.sch-seg-op { border-left-color: var(--slate); background: var(--slate-soft); }
 /* Срок неизвестен — ничего не обещаем. */
-.sch-seg-unknown, .sch-seg-dot.sch-seg-unknown { border-left-color: var(--error, #b4544f); border-left-style: dashed; }
+.sch-seg-unknown, .sch-seg-dot.sch-seg-unknown { border-left-color: var(--danger); border-left-style: dashed; }
 /* Явно приблизительная подсказка — не план. */
 .sch-seg-approx, .sch-seg-dot.sch-seg-approx { border-left-color: var(--ink-faint); border-left-style: dotted; opacity: 0.75; }
 
@@ -573,7 +729,12 @@
 .sch-seg-dot.sch-seg-wait, .sch-seg-dot.sch-seg-op, .sch-seg-dot.sch-seg-unknown,
 .sch-seg-dot.sch-seg-approx { border-left-width: 10px; border-left-style: solid; }
 
-.sch-assign-frozen { border-color: color-mix(in srgb, var(--ok) 45%, var(--card-edge)); }
+/* Подтверждённое назначение — золотая грань: тот же знак, что и у сегмента
+   «заморожено» на линии принтера. */
+.sch-assign-frozen {
+  border-color: var(--gold-line);
+  background: color-mix(in srgb, var(--gold) 6%, transparent);
+}
 
 .btn-ok {
   color: var(--ok-ink);
@@ -593,65 +754,138 @@
    операции. */
 
 .ops-details {
-  margin-top: 10px;
+  margin-top: 12px;
   border: 1px solid var(--card-edge);
   border-radius: 10px;
-  padding: 8px 12px;
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--card) 40%, transparent);
+  transition: border-color 0.2s, background 0.2s;
 }
+.ops-details[open] { padding-bottom: 14px; }
+.ops-details:hover { border-color: var(--gold-line); }
 .ops-details > summary {
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 13px;
   font-weight: 600;
-  color: var(--ink);
+  color: var(--ink-soft);
   list-style: none;
+  transition: color 0.2s;
+  border-radius: 6px;
 }
+.ops-details > summary:hover { color: var(--gold-bright); }
+.ops-details[open] > summary { color: var(--ink); }
 .ops-details > summary::-webkit-details-marker { display: none; }
-.ops-details > summary::before { content: "▸ "; color: var(--ink-faint); }
-.ops-details[open] > summary::before { content: "▾ "; }
-
-.ops-week { margin-top: 10px; }
-.ops-week h4 {
-  margin: 0 0 6px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--ink-faint);
-  text-transform: uppercase;
-  letter-spacing: .04em;
+/* Треугольник-маркер вместо системного: поворачивается при раскрытии, поэтому
+   состояние читается и без цвета. */
+.ops-details > summary::before {
+  content: "";
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  opacity: 0.7;
+  transition: transform 0.2s ease;
 }
+.ops-details[open] > summary::before { transform: rotate(90deg); }
+
+/* Недельное расписание: два окна (работа и сон) стоят рядом, а не в две
+   растянутые на всю карточку простыни друг под другом. */
+.ops-weeks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px 24px;
+  margin-top: 14px;
+}
+.ops-week { min-width: 0; }
 .ops-week-list, .ops-edit-list { list-style: none; margin: 0; padding: 0; }
 .ops-week-row {
   display: grid;
-  grid-template-columns: 40px 1fr;
-  gap: 8px;
-  padding: 3px 0;
+  grid-template-columns: 34px 1fr;
+  gap: 10px;
+  padding: 5px 0;
   font-size: 13px;
   color: var(--ink);
+  border-bottom: 1px solid var(--table-line);
 }
-.ops-day { color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+.ops-week-row:last-child { border-bottom: none; }
+.ops-day {
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.ops-week-row .ops-day { line-height: 1.5; }
 
+/* Редактор недели — таблица «день × четыре времени» с подписями колонок один
+   раз в шапке: подпись у каждого поля каждой из семи строк была шумом, а сами
+   поля при этом сжимались до нечитаемой ширины. */
+.ops-schedule-form { grid-template-columns: 1fr; }
+.ops-tz { max-width: 280px; }
+.ops-edit-list { display: flex; flex-direction: column; }
+/* Поля времени не растягиваем во всю карточку: четыре поля по 700 px читались
+   бы как форма ввода романа, а не как расписание. */
+.ops-edit-head,
 .ops-edit-row {
   display: grid;
-  grid-template-columns: 40px repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  align-items: end;
-  padding: 4px 0;
+  grid-template-columns: 40px repeat(4, minmax(96px, 168px));
+  gap: 8px 10px;
+  align-items: center;
+  justify-content: start;
 }
-.ops-edit-row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-faint); }
-.ops-edit-row input {
-  padding: 5px 8px;
-  border: 1px solid var(--card-edge);
-  border-radius: 7px;
-  background: var(--card-bg);
-  color: var(--ink);
-  font: inherit;
-  font-size: 13px;
+.ops-edit-head {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--card-edge);
+  margin-bottom: 8px;
 }
-.ops-actions { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.ops-edit-row { padding: 4px 0; }
+.ops-edit-row + .ops-edit-row { margin-top: 2px; }
+.ops-edit-row > label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+/* Подпись поля дублирует шапку колонок — нужна только там, где шапки нет
+   (узкий экран), но в разметке остаётся всегда: скринридер читает её всегда. */
+.ops-edit-lbl {
+  position: absolute;
+  width: 1px; height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.ops-actions { grid-column: 1 / -1; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
 
-.ops-row .ops-confirm { margin-top: 8px; }
+/* Форма подтверждения выполнения — вспомогательная: рисуется только у строк,
+   где есть что подтверждать, и звучит тише самой операции. */
+.ops-row .ops-confirm { margin-top: 10px; }
+.ops-row .ops-confirm label { font-size: 11.5px; }
+.ops-name { font-size: 14px; font-weight: 700; color: var(--ink); overflow-wrap: anywhere; }
 
 @media (max-width: 720px) {
-  .ops-edit-row { grid-template-columns: 40px repeat(2, minmax(0, 1fr)); }
+  /* На узком экране колонки «сон» уходят под колонки «работа» отдельной
+     строкой; шапка колонок теряет смысл — подписи возвращаются к полям. */
+  .ops-edit-head { display: none; }
+  .ops-edit-row {
+    grid-template-columns: 40px repeat(2, minmax(0, 1fr));
+    align-items: end;
+  }
+  .ops-edit-row .ops-day { grid-row: span 2; align-self: center; }
+  .ops-edit-lbl {
+    position: static;
+    width: auto; height: auto;
+    overflow: visible;
+    clip-path: none;
+    font-size: 11px;
+    color: var(--ink-faint);
+  }
 }
 
 /* ═══ Оборудование фермы (#hardware) ════════════════════════════
@@ -661,56 +895,72 @@
    и раскрывающаяся панель настроек, чтобы список из десятка машин читался
    без прокрутки сквозь формы. */
 
+/* Карточка машины — та же поверхность, что и строка списка (.slice-item);
+   прежний фон опирался на несуществующую переменную --card-bg, и правило
+   целиком отбрасывалось: карточки были прозрачными. */
 .prn-row {
   border: 1px solid var(--card-edge);
   border-radius: var(--radius);
-  padding: 12px 14px;
-  margin-top: 10px;
-  background: color-mix(in srgb, var(--card-bg) 60%, transparent);
+  padding: 14px 16px;
+  background: var(--card);
+  transition: border-color 0.2s, background 0.2s;
 }
+.prn-row { margin-top: 12px; }
+.prn-row:hover { border-color: var(--edge-strong); }
 .prn-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 10px 16px;
   flex-wrap: wrap;
+  margin-bottom: 10px;
 }
-.prn-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.prn-title b { font-size: 15px; }
+.prn-title { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; }
+/* Имя машины — заголовок карточки: та же антиква, что у заголовков панелей,
+   иначе принтер в списке читался слабее собственных кнопок. */
+.prn-title b {
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  /* В именах машин почти всегда есть цифры (K2, A1, S1): минускульные цифры
+     антиквы проваливались бы под строку. */
+  font-variant-numeric: proportional-nums lining-nums;
+  color: var(--ivory);
+  overflow-wrap: anywhere;
+}
 .prn-title code {
-  font-size: 12px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 11.5px;
   color: var(--ink-faint);
-  padding: 1px 6px;
+  padding: 2px 7px;
   border-radius: 6px;
   background: color-mix(in srgb, var(--card-edge) 40%, transparent);
 }
 .prn-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-.prn-details { margin-top: 10px; }
-.prn-form { margin-top: 10px; }
+.prn-details { margin-top: 12px; }
+.prn-form { margin-top: 12px; }
+/* Итог формы — отдельная строка под волосяной линией: «Сохранить» не липнет
+   к последнему чекбоксу и всегда стоит на одном месте. */
+.prn-form .sch-edit-actions {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--card-edge);
+}
+.prn-form > .sch-check { margin-top: 12px; }
 
 /* Учётные данные держим в отдельной рамке: поле всегда пустое, и подпись под
    ним — единственное место, где видно, задан ли секрет и откуда он берётся. */
-.prn-secrets { display: grid; gap: 12px; }
-.prn-secret { display: grid; gap: 4px; }
-.prn-secret label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-faint); }
-.prn-secret input {
-  padding: 7px 9px;
-  border-radius: 8px;
-  border: 1px solid var(--btn-edge);
-  background: var(--btn-bg);
-  color: var(--ink);
-  font: inherit;
-  font-size: 13px;
-  transition: border-color 0.18s, box-shadow 0.18s;
+.prn-secrets {
+  display: grid;
+  gap: 14px 16px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  align-items: start;
 }
-.prn-secret input:focus {
-  outline: none;
-  border-color: var(--gold-line);
-  box-shadow: 0 0 0 3px var(--gold-soft);
-}
+.prn-secret { display: grid; gap: 5px; max-width: 420px; }
 /* «Стереть» — сознательно мелкая и отдельная от поля: обычное сохранение
    формы не должно ни при каких обстоятельствах выглядеть как стирание. */
-.prn-secret .prn-clear { font-size: 12px; color: var(--ink-faint); }
+.prn-secret .prn-clear { font-size: 12px; color: var(--ink-faint); min-height: 0; align-self: start; }
 
 @media (max-width: 720px) {
   .prn-head { align-items: flex-start; flex-direction: column; }
@@ -728,31 +978,46 @@
    формы. Цвета берутся из тем (--ok-*/--gold-*/--warn-*), так что светлая и
    тёмная получаются сами. */
 
+/* Вложен в .prn-row, поэтому берёт «внутреннюю» поверхность, а не ту же самую:
+   иначе блок характеристик сливался с карточкой машины. */
 .prn-discovered {
-  margin-top: 10px;
-  padding: 10px 12px;
+  margin-top: 12px;
+  padding: 12px 14px;
   border: 1px solid var(--card-edge);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--card-bg) 45%, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--card-inner);
 }
 .prn-discovered-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 10px;
+  gap: 4px 12px;
   flex-wrap: wrap;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
+}
+.prn-discovered-head .panel-sub { margin: 0; }
+/* Неудачный опрос — не рядовая подпись: показанные данные не свежие. */
+.prn-stamp--failed { color: var(--warn-ink); }
+
+/* Характеристики — в несколько колонок: одна строка «подпись — значение —
+   источник» на всю ширину карточки уносила бейдж источника за километр от
+   значения, к которому он относится. */
+.prn-specs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 2px 24px;
 }
 .prn-spec {
   display: grid;
-  grid-template-columns: minmax(120px, 160px) 1fr auto;
+  grid-template-columns: minmax(110px, 140px) minmax(0, 1fr) auto;
   align-items: baseline;
   gap: 8px;
-  padding: 3px 0;
+  padding: 4px 0;
   font-size: 13px;
+  border-bottom: 1px solid var(--table-line);
 }
 .prn-spec-label { color: var(--ink-faint); font-size: 12px; }
-.prn-spec-value { font-variant-numeric: tabular-nums; }
+.prn-spec-value { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .prn-spec-value i { color: var(--ink-faint); font-size: 12px; }
 
 .prn-source {
@@ -769,23 +1034,42 @@
 .prn-source--manual { color: var(--warn-ink); border-color: var(--warn); background: var(--warn-soft); }
 .prn-source--unknown { color: var(--ink-faint); border-color: var(--card-edge); }
 
-/* В заголовке поля формы бейдж стоит после подписи и не должен утаскивать
-   ввод вниз, поэтому подпись становится строкой. */
-.prn-form label > .prn-source { margin-left: 6px; }
+/* Расхождение «вручную vs. принтер» — предупреждение в собственной рамке:
+   сплошным warn-текстом во всю карточку оно перекрикивало сами данные.
+   Той же рамкой оформлено нерешённое расписание оператора — оба случая
+   означают «данные противоречивы, автоматика остановлена». */
+.prn-conflict,
+.ops-unresolved {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--card-edge));
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft);
+  color: var(--warn-ink);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.ops-unresolved { margin: 0 0 12px; }
 
-.prn-materials { margin-top: 8px; font-size: 13px; }
-.prn-materials ul { margin: 4px 0 0; padding-left: 18px; }
-.prn-materials li { padding: 1px 0; }
-.prn-material--active { font-weight: 600; }
+.prn-materials { margin-top: 12px; font-size: 13px; }
+.prn-materials-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.prn-materials-head .panel-sub { margin: 0; }
+.prn-materials ul { list-style: none; margin: 6px 0 0; padding: 0; }
+.prn-materials li { padding: 3px 0; display: flex; align-items: center; gap: 8px; }
+.prn-material--active { font-weight: 700; }
 .prn-swatch {
   display: inline-block;
-  width: 9px;
-  height: 9px;
-  margin-right: 6px;
-  border-radius: 2px;
+  flex: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
   border: 1px solid var(--card-edge);
-  vertical-align: baseline;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 25%);
 }
+/* Пустой слот — только рамка: у него нет цвета, и «чёрный образец» врал бы. */
+.prn-swatch--empty { border-style: dashed; box-shadow: none; }
 
 @media (max-width: 720px) {
   .prn-spec { grid-template-columns: 1fr auto; }
