@@ -135,7 +135,13 @@ function syncStickyOffsets() {
   const topbar = $(".topbar");
   if (!topbar) return;
   const nav = $(".section-nav");
-  const topH = Math.ceil(topbar.getBoundingClientRect().height);
+  /* На телефоне шапка не липкая (см. styles/dashboard.css): она уезжает вверх,
+     и под навигацию резервировать её высоту нельзя — иначе вкладки повисли бы
+     на 160 px ниже верха экрана, а якорный скролл оставлял бы такую же дыру
+     над заголовком секции. Спрашиваем у стилей, а не у ширины окна: порог
+     живёт в одном месте — в media-запросе. */
+  const topSticky = getComputedStyle(topbar).position === "sticky";
+  const topH = topSticky ? Math.ceil(topbar.getBoundingClientRect().height) : 0;
   const navH = nav ? Math.ceil(nav.getBoundingClientRect().height) : 0;
   const root = document.documentElement.style;
   root.setProperty("--topbar-h", `${topH}px`);

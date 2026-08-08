@@ -45,7 +45,9 @@ function queueRow(state, row, index) {
     .join("");
 
   /* Номер — отдельная колонка строки: заголовок, чипы и форма параметров
-     выстроены по одной левой границе, а не съезжают под номер. */
+     выстроены по одной левой границе, а не съезжают под номер. Кнопки строки
+     лежат в .row-actions: группой они переезжают на новую строку целиком, а не
+     рассыпаются по краям, когда ширины на всё не хватает (узкий экран). */
   return `
     <li class="slice-item sch-row" data-task="${esc(t.id)}" data-version="${entry.version}">
       <span class="sch-ord">${index + 1}</span>
@@ -54,9 +56,11 @@ function queueRow(state, row, index) {
           <span class="slice-name">${esc(t.title)}</span>
           ${t.material ? chip(esc(t.material), "mute") : ""}
           <span class="slice-spacer"></span>
-          <button type="button" class="btn btn-sm btn-icon" data-sch-action="up" title="Поднять в очереди" aria-label="Поднять в очереди">↑</button>
-          <button type="button" class="btn btn-sm btn-icon" data-sch-action="down" title="Опустить в очереди" aria-label="Опустить в очереди">↓</button>
-          <button type="button" class="btn btn-sm" data-sch-action="toggle-edit">✎ параметры</button>
+          <div class="row-actions">
+            <button type="button" class="btn btn-sm btn-icon" data-sch-action="up" title="Поднять в очереди" aria-label="Поднять в очереди">↑</button>
+            <button type="button" class="btn btn-sm btn-icon" data-sch-action="down" title="Опустить в очереди" aria-label="Опустить в очереди">↓</button>
+            <button type="button" class="btn btn-sm" data-sch-action="toggle-edit">✎ параметры</button>
+          </div>
         </div>
         <div class="sch-tags">${tags.join("") || `<span class="slice-hint">без ограничений</span>`}</div>
         <form class="sch-edit" data-sch-form="params" hidden>

@@ -159,8 +159,10 @@ function exceptionsHtml(state, view) {
               ${chip(exceptionLabel(e), e.kind === "off" ? "warn" : "info")}
               ${e.note ? `<span class="slice-hint">${esc(e.note)}</span>` : ""}
               <span class="slice-spacer"></span>
-              <button type="button" class="btn btn-sm btn-icon" data-ops-action="drop-exception" data-id="${esc(e.id)}"
-                title="Снять исключение" aria-label="Снять исключение">✕</button>
+              <div class="row-actions">
+                <button type="button" class="btn btn-sm btn-icon" data-ops-action="drop-exception" data-id="${esc(e.id)}"
+                  title="Снять исключение" aria-label="Снять исключение">✕</button>
+              </div>
             </div>
           </li>`
         )
@@ -215,8 +217,10 @@ function absencesHtml(view) {
               <span class="slice-name">${fmtDate(a.startsAt)} → ${a.endsAt ? fmtDate(a.endsAt) : "бессрочно"}</span>
               ${a.reason ? `<span class="slice-hint">${esc(a.reason)}</span>` : ""}
               <span class="slice-spacer"></span>
-              <button type="button" class="btn btn-sm btn-icon" data-ops-action="drop-absence" data-id="${esc(a.id)}"
-                title="Снять отсутствие" aria-label="Снять отсутствие">✕</button>
+              <div class="row-actions">
+                <button type="button" class="btn btn-sm btn-icon" data-ops-action="drop-absence" data-id="${esc(a.id)}"
+                  title="Снять отсутствие" aria-label="Снять отсутствие">✕</button>
+              </div>
             </div>
           </li>`
         )
@@ -298,10 +302,12 @@ function operationRow(row) {
       <div class="slice-item-head">
         <span class="slice-name ops-name">${esc(row.label)}</span>
         <span class="slice-spacer"></span>
-        ${op.state === "READY" ? `<button type="button" class="btn btn-sm" data-ops-action="claim" data-id="${esc(op.id)}">взять в работу</button>` : ""}
-        ${actions}
-        <button type="button" class="btn btn-sm btn-icon btn-danger" data-ops-action="cancel-op" data-id="${esc(op.id)}"
-          title="Отменить операцию" aria-label="Отменить операцию">✕</button>
+        <div class="row-actions">
+          ${op.state === "READY" ? `<button type="button" class="btn btn-sm" data-ops-action="claim" data-id="${esc(op.id)}">взять в работу</button>` : ""}
+          ${actions}
+          <button type="button" class="btn btn-sm btn-icon btn-danger" data-ops-action="cancel-op" data-id="${esc(op.id)}"
+            title="Отменить операцию" aria-label="Отменить операцию">✕</button>
+        </div>
       </div>
       <div class="sch-tags">${tags}</div>
       ${op.reason ? `<div class="slice-hint">${esc(op.reason)}</div>` : ""}

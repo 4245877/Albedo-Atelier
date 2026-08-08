@@ -53,6 +53,12 @@
   font: inherit;
   padding: 0;
 }
+/* Ссылка-кнопка внутри фразы: увеличиваем область нажатия отступами и тут же
+   компенсируем их отрицательным margin — строка не разъезжается, а палец
+   попадает не в 20 px текста. */
+@media (pointer: coarse) {
+  .upload-pick { padding: 7px 4px; margin: -7px -4px; }
+}
 .upload-drop-hint {
   font-size: 12px;
   color: var(--ink-faint);
@@ -115,12 +121,19 @@
   padding: 2px 6px;
 }
 
+/* Текст чипа приходит с backend (имя переменной окружения, причина отказа,
+   состояние плана) и бывает длиннее узкого экрана. Поэтому чип переносится
+   по словам и никогда не шире своего контейнера: в nowrap такие чипы уезжали
+   за край карточки и тянули горизонтальную прокрутку всей страницы. На
+   просторном экране правило ничего не меняет — короткий чип и так в строку. */
 .upload-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  white-space: nowrap;
+  white-space: normal;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   padding: 3px 9px;
   border-radius: 999px;
   border: 1px solid var(--card-edge);
@@ -293,10 +306,14 @@
   text-transform: uppercase;
   color: var(--ink-faint);
 }
+/* В подсказках живут значения с backend — имена переменных окружения, пути,
+   идентификаторы ревизий. Такой неразрывный токен обязан переноситься, иначе
+   он задаёт минимальную ширину блока и распирает карточку на узком экране. */
 .slice-hint,
 .slice-count {
   font-size: 12px;
   color: var(--ink-faint);
+  overflow-wrap: anywhere;
 }
 .slice-spacer {
   flex: 1 1 auto;
@@ -345,6 +362,22 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+/* Кнопки строки — одна группа, а не россыпь: когда ширины на всё не хватает,
+   на новую строку переезжает вся группа целиком и порядок «главное действие →
+   второстепенные → разрушающее» сохраняется. До этого при переносе «↑» уходила
+   к правому краю, а «параметры» оставались одни строкой ниже. */
+.row-actions {
+  display: flex;
+  align-items: center;
+  /* Тот же интервал, что и у самой строки (.slice-item-head): собранные в
+     группу кнопки стоят ровно там же, где стояли врассыпную. */
+  gap: 8px;
+  flex-wrap: wrap;
+  /* Группа всегда у правого края строки — и когда стоит рядом с заголовком, и
+     когда целиком переехала на следующую строку: место действий на карточке
+     не «прыгает» от длины имени задания. */
+  margin-left: auto;
 }
 .slice-name {
   font-size: 13.5px;
@@ -439,7 +472,7 @@
 .slice-details[open] summary { margin-bottom: 6px; }
 .slice-form .slice-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
   gap: 14px 12px;
   align-items: start;
   margin-bottom: 14px;
@@ -506,7 +539,10 @@
 .prn-secret input::placeholder {
   color: var(--ink-faint);
 }
-/* Переключатель цели набора: принтер ИЛИ класс. */
+/* Переключатель цели набора: принтер ИЛИ класс. min-width:0 обязателен —
+   у <fieldset> минимальная ширина по умолчанию равна min-content, поэтому
+   одно длинное значение внутри (например ${BAMBU_X1C_ACCESS_CODE}) распирало
+   рамку шире карточки и давало горизонтальную прокрутку страницы. */
 .slice-target {
   border: 1px solid var(--card-edge);
   border-radius: 8px;
@@ -514,6 +550,7 @@
   margin-bottom: 12px;
   display: grid;
   gap: 10px;
+  min-width: 0;
 }
 .slice-target legend {
   font-size: 12px;
@@ -531,6 +568,53 @@
 .slice-target [data-target-input][hidden] { display: none; }
 @media (max-width: 720px) {
   .slice-cols { grid-template-columns: 1fr; }
+
+  /* Планшет и телефон: действия строки занимают собственный ряд и выравниваются
+     по правому краю — под большой палец, и подальше от заголовка строки. */
+  .slice-item-head .row-actions { flex: 1 0 100%; justify-content: flex-end; }
+  /* Кроме случая, когда действие одно и это иконка (✕ у исключения или
+     отсутствия): она помещается в строку заголовка на любой ширине, и
+     отдельный ряд ради неё был бы пустой тратой высоты. */
+  .slice-item-head .row-actions:has(> .btn-icon:only-child) { flex: 0 0 auto; }
+  /* Разрушающее действие отделено от подтверждающих: между «не удалось» и «✕»
+     остаётся зазор, а не соседство в один пиксель. */
+  .row-actions .btn-icon.btn-danger:last-child { margin-left: auto; }
+}
+
+/* ══ Телефон: общий строй рабочих разделов ═══════════════════════
+   «Загрузка», «Слайсинг», «Планировщик», «Оператор» и «Оборудование»
+   собраны из одних и тех же примитивов, поэтому и правила у них общие:
+   панели отдают воздух по бокам содержимому, строка списка перестраивается
+   сверху вниз (суть → чипы → собственный ряд действий), а главное действие
+   формы занимает всю ширину и потому всегда узнаётся первым. Ничего из
+   этого не выходит за пределы media-запроса — доска на большом экране
+   остаётся прежней. */
+@media (max-width: 560px) {
+  .slice-panel { padding: 14px 13px; }
+  .slice-item { padding: 11px 12px; }
+  #uploads-body,
+  #slicing-body,
+  #scheduler-body,
+  #operations-body,
+  #hardware-body { gap: 14px; }
+
+  /* Заголовок панели, подпись и её действие идут друг под другом: кнопка
+     раздела перестаёт «плавать» по правому краю строки заголовка. */
+  .slice-panel-head { gap: 6px 10px; margin-bottom: 10px; }
+  .slice-panel-head > .btn:first-of-type { margin-left: 0; }
+  .slice-panel-head > .btn { flex: 1 1 100%; }
+
+  /* Там, где группы .row-actions нет (панели слайсинга), собственный ряд для
+     кнопки создаёт распорка. Где группа есть — ряд создаёт она сама, и вторая
+     полная строка от распорки была бы лишней дырой. */
+  .slice-item-head { gap: 8px; }
+  .slice-item-head:not(:has(.row-actions)) > .slice-spacer { flex: 1 0 100%; height: 0; }
+
+  /* Итоговое действие формы — во всю ширину: на телефоне это главная
+     кнопка экрана, и она обязана читаться как главная. */
+  .sch-edit-actions .btn,
+  .ops-actions .btn,
+  .slice-form > .btn { width: 100%; flex: 1 1 100%; }
 }
 
 /* ═══ Планировщик печати (#scheduler) ═══════════════════════════ */
@@ -550,18 +634,9 @@
   background: color-mix(in srgb, var(--card-edge) 40%, transparent);
 }
 .sch-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
-/* Чип с длинным текстом (имя переменной окружения, причина отказа) обязан
-   переноситься: в nowrap он уезжал за край карточки и тянул горизонтальную
-   прокрутку всей страницы на узком экране. */
-.sch-tags .upload-chip,
-.slice-item-head .upload-chip {
-  white-space: normal;
-  max-width: 100%;
-  overflow-wrap: anywhere;
-}
 .sch-edit {
   display: grid; gap: 12px; margin-top: 14px;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
   align-items: start;
   padding-top: 14px; border-top: 1px dashed var(--card-edge);
 }
@@ -625,11 +700,45 @@
 }
 .sch-matrix tbody tr:last-child td { border-bottom: none; }
 .sch-matrix tbody tr:hover td { background: var(--card-inner); }
-.sch-cell-task { color: var(--ink); font-weight: 600; white-space: normal; min-width: 200px; }
+/* Селектор с .sch-matrix обязателен: у общего правила ячеек («.sch-matrix td»)
+   специфичность выше одиночного класса, и без него имя задания оставалось
+   nowrap — на узком экране оно вылезало из своей колонки поверх соседних
+   вердиктов. */
+.sch-matrix .sch-cell-task { color: var(--ink); font-weight: 600; white-space: normal; min-width: 200px; }
+
+/* Матрица на телефоне и планшете. Сводить её в карточки нельзя — смысл
+   таблицы именно в сравнении «одно задание × все принтеры», — поэтому
+   прокручивается сама таблица (страница по-прежнему неподвижна), а колонка
+   с заданием прилипает к левому краю: при любом сдвиге видно, о какой строке
+   идёт речь. Тень справа от колонки показывает, что за ней ещё есть данные. */
+/* Порог шире телефонного: на планшете 768 px четыре принтера в строку тоже не
+   помещаются, и прилипшая колонка нужна ровно так же. */
+@media (max-width: 1000px) {
+  .sch-matrix th:first-child,
+  .sch-matrix .sch-cell-task {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    /* Прилипшая ячейка обязана быть непрозрачной, иначе сквозь неё
+       просвечивают уезжающие колонки. Тон — панель поверх карточки. */
+    background: color-mix(in srgb, var(--card-edge) 12%, var(--card-bot));
+    box-shadow: 6px 0 8px -8px rgb(0 0 0 / 55%);
+  }
+  .sch-matrix tbody tr:hover .sch-cell-task {
+    background: color-mix(in srgb, var(--card-edge) 26%, var(--card-bot));
+  }
+}
+
+/* На телефоне колонка задания ужимается, чтобы рядом с ней помещался хотя бы
+   один вердикт: иначе прилипшая колонка занимала бы весь экран. */
+@media (max-width: 560px) {
+  .sch-matrix .sch-cell-task { min-width: 130px; max-width: 46vw; }
+  .sch-matrix th, .sch-matrix td { padding: 8px 10px; }
+}
 
 .sch-lanes {
   display: grid; gap: 12px; align-items: start;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
 }
 /* Линия принтера — та же поверхность, что и строка списка (.slice-item):
    вложенность разделов читается одинаково во всех трёх рабочих секциях. */
@@ -676,10 +785,9 @@
    Цвет несёт смысл, но не единственный: у каждого сегмента есть подпись вида
    («печать», «ожидание оператора», …), поэтому линия читается и без цвета. */
 
-/* Чипы линии могут быть длиннее самой линии («срок неизвестен: нет расписания
-   оператора»): в nowrap они уезжали за край и обрезались overflow-ом .sch-lane. */
+/* Чипы линии бывают длиннее самой линии («срок неизвестен: нет расписания
+   оператора») — перенос им даёт базовое правило .upload-chip. */
 .sch-lane-meta { display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 12px 0; }
-.sch-lane-meta .upload-chip { white-space: normal; max-width: 100%; }
 .sch-lane-reason { padding: 6px 12px 0; font-size: 11.5px; line-height: 1.45; }
 .sch-lane-reason:empty { display: none; }
 .sch-cards { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
@@ -747,6 +855,30 @@
   .sch-lanes { grid-template-columns: 1fr; }
 }
 
+/* Телефон: линия принтера и её сегменты. Вид сегмента («печать», «ручная
+   операция») больше не прижимается к правому краю — прижатая подпись при
+   переносе повисала посреди пустой строки; рядом со временем она читается
+   как продолжение той же мысли. */
+@media (max-width: 560px) {
+  .sch-seg-kind { margin-left: 0; }
+  .sch-seg { padding: 7px 9px; }
+  .sch-lane-body { padding: 10px; }
+  .sch-lane-meta { padding: 9px 10px 0; }
+  .sch-lane-reason { padding: 6px 10px 0; }
+  .sch-lane-head { padding: 9px 10px; }
+  .sch-assign { padding: 11px 12px; }
+  .sch-legend { gap: 6px 12px; }
+  /* Номер в очереди — не декор: он держит левую границу строки, но на
+     телефоне отдаёт ей несколько пикселей. */
+  .sch-row { gap: 8px; }
+  .sch-unplaced { padding: 11px 12px; }
+  .sch-unplaced code { overflow-wrap: anywhere; }
+  /* Подпись флажка на телефоне почти всегда в две-три строки: флажок держим
+     у первой строки, а не по центру абзаца. */
+  .sch-check { align-items: flex-start; }
+  .sch-check input { margin-top: 2px; }
+}
+
 
 /* ── Раздел «Оператор и ручные операции» ─────────────────────
    Переиспользует .slice-panel / .sch-tags / .sch-edit планировщика; здесь
@@ -797,7 +929,7 @@
    растянутые на всю карточку простыни друг под другом. */
 .ops-weeks {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   gap: 12px 24px;
   margin-top: 14px;
 }
@@ -886,6 +1018,36 @@
     font-size: 11px;
     color: var(--ink-faint);
   }
+  /* День и его четыре поля — уже не строка таблицы, а маленькая карточка дня:
+     без разделителя семь таких групп сливались в сплошную сетку полей. */
+  .ops-edit-row { padding: 8px 0; border-bottom: 1px solid var(--table-line); }
+  .ops-edit-row:last-child { border-bottom: none; }
+}
+
+/* Телефон: раздел оператора. */
+@media (max-width: 560px) {
+  .ops-details { padding: 10px 12px; }
+  .ops-details[open] { padding-bottom: 12px; }
+  .ops-weeks { gap: 10px 16px; margin-top: 12px; }
+  /* Между блоками строки операции нужен воздух: чипы, причина и срок
+     готовности — три разные мысли, а не абзац. */
+  .ops-row > .slice-hint { margin-top: 7px; }
+  /* Кнопки строки операции делят ряд поровну: «✓ выполнено» — главное
+     действие человека, и оно не должно быть уже соседних. Разрушающее «✕»
+     сохраняет свой размер и уходит к правому краю (правило .btn-icon выше). */
+  .ops-row .row-actions .btn { flex: 1 1 auto; }
+  .ops-row .row-actions .btn-icon { flex: 0 0 auto; }
+  /* Поля времени — самая узкая сетка раздела. На 320 px в поле помещается
+     либо значение, либо системная иконка часов: значение важнее (иконку на
+     телефоне и так заменяет нативный пикер по тапу), поэтому её убираем, а
+     «23:30» ставим по центру поля — иначе время обрезалось до «09:0». */
+  .ops-edit-row { grid-template-columns: 32px repeat(2, minmax(0, 1fr)); gap: 6px 8px; }
+  .ops-edit-row > label > input[type="time"] {
+    padding: 8px 4px;
+    text-align: center;
+  }
+  .ops-edit-row input[type="time"]::-webkit-calendar-picker-indicator { display: none; }
+  .ops-tz { max-width: none; }
 }
 
 /* ═══ Оборудование фермы (#hardware) ════════════════════════════
@@ -954,7 +1116,7 @@
 .prn-secrets {
   display: grid;
   gap: 14px 16px;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
   align-items: start;
 }
 .prn-secret { display: grid; gap: 5px; max-width: 420px; }
@@ -963,7 +1125,9 @@
 .prn-secret .prn-clear { font-size: 12px; color: var(--ink-faint); min-height: 0; align-self: start; }
 
 @media (max-width: 720px) {
-  .prn-head { align-items: flex-start; flex-direction: column; }
+  /* Имя машины и её действия — друг под другом; stretch нужен, чтобы ряд
+     кнопок занимал всю ширину карточки, а не жался к левому краю. */
+  .prn-head { align-items: stretch; flex-direction: column; }
 }
 
 /* Подсказки внутри полей формы принтера — компактнее обычных: иначе одна
@@ -975,8 +1139,12 @@
    Смысл блока: отличить то, что сервис узнал у машины, от того, что человек
    вписал руками. Поэтому источник — не подпись мелким шрифтом где-то сбоку,
    а бейдж вплотную к значению, и он же дублируется у соответствующего поля
-   формы. Цвета берутся из тем (--ok-*/--gold-*/--warn-*), так что светлая и
-   тёмная получаются сами. */
+   формы. Цвета берутся из тем (--ok, --gold, --warn и их мягкие варианты),
+   так что светлая и тёмная получаются сами.
+   ВНИМАНИЕ: перечисляя семейства переменных, не ставьте звёздочку перед
+   слешем — такая пара закрывает комментарий досрочно, и следующее за ним
+   правило (.prn-discovered) молча выпадает из стилей вместе с поверхностью
+   блока. Именно так этот блок и остался когда-то без рамки и отступов. */
 
 /* Вложен в .prn-row, поэтому берёт «внутреннюю» поверхность, а не ту же самую:
    иначе блок характеристик сливался с карточкой машины. */
@@ -1004,7 +1172,7 @@
    значения, к которому он относится. */
 .prn-specs {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
   gap: 2px 24px;
 }
 .prn-spec {
@@ -1074,4 +1242,42 @@
 @media (max-width: 720px) {
   .prn-spec { grid-template-columns: 1fr auto; }
   .prn-spec-label { grid-column: 1 / -1; }
+}
+
+/* ══ Телефон: карточка машины ═══════════════════════════════════
+   Четыре действия в строку не помещаются, поэтому строятся в сетку: опрос —
+   во всю ширину (с него начинается работа с новой машиной), связь и включение
+   парой, а удаление отдельной строкой у правого края и своего природного
+   размера: разрушающее действие не должно выглядеть как главное.
+   Блок стоит в конце файла намеренно — правила ниже базовых, иначе при равной
+   специфичности побеждали бы именно базовые. */
+@media (max-width: 560px) {
+  .prn-row { padding: 12px; margin-top: 10px; }
+  .prn-title { gap: 4px 8px; }
+  .prn-title b { font-size: 18px; }
+  .prn-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    width: 100%;
+  }
+  .prn-actions .btn { width: 100%; }
+  .prn-actions .btn:first-child { grid-column: 1 / -1; }
+  .prn-actions .btn-danger { grid-column: 1 / -1; justify-self: end; width: auto; }
+  .prn-discovered { padding: 11px 12px; }
+  .prn-secrets { gap: 12px; }
+  .prn-secret { max-width: none; }
+  .prn-materials li { padding: 4px 0; }
+  /* Рамки-предупреждения («расхождение с принтером», «расписание не разобрано») */
+  .prn-conflict,
+  .ops-unresolved { padding: 10px; }
+}
+
+/* Тач-цели рабочих форм. Правило живёт здесь, а не в dashboard.css: у
+   «.slice-form .slice-target-opt input { width: auto }» та же специфичность,
+   и побеждает тот, кто ниже по каскаду — то есть этот файл. */
+@media (pointer: coarse) {
+  .slice-form input[type="checkbox"],
+  .slice-form input[type="radio"],
+  .sch-check input[type="checkbox"] { width: 20px; height: 20px; }
 }

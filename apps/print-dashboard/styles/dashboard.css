@@ -184,6 +184,12 @@
   margin-top: 6px;
 }
 
+/* Секция не имеет права раздвигать колонки доски своим содержимым: у грид-
+   элемента min-width по умолчанию = auto, поэтому одна широкая таблица или
+   сетка с крупным минимумом растягивала ВСЕ 12 дорожек — и горизонтальная
+   прокрутка появлялась у страницы целиком, а не внутри виновника. */
+.board > * { min-width: 0; }
+
 .span-12 { grid-column: span 12; }
 .span-7  { grid-column: span 7; }
 .span-6  { grid-column: span 6; }
@@ -1323,6 +1329,19 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
   .nav-chip { padding: 9px 15px; }
   .quick { padding: 15px 14px; }
 
+  /* Раскрывающиеся блоки рабочих разделов («Настройки и учётные данные»,
+     «Создать операцию вручную», «почему этот принтер») — полноценные органы
+     управления, а не подпись: пальцем в строку 15 px не попасть. Высоту даём
+     отступами, а не display:flex, — иначе у .slice-details пропал бы
+     системный треугольник-маркер. */
+  .ops-details > summary { min-height: 44px; }
+  .slice-details summary { padding: 11px 0; }
+
+  /* Нативные флажки: 13 px по умолчанию — вдвое меньше любой другой цели
+     нажатия на этой доске. Флажки рабочих форм догоняются в workflows.css
+     (там же, где задана их ширина). */
+  .field-check input[type="checkbox"] { width: 20px; height: 20px; }
+
   .toggle { width: 46px; height: 28px; }
   .toggle::after { top: 4px; left: 4px; width: 20px; height: 20px; }
   .toggle.on::after { transform: translateX(18px); }
@@ -1339,11 +1358,42 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
 
 /* ── Мобильная раскладка шапки ───────────────────────────────── */
 
+/* Шапка на узком экране занимает три ряда (герб, пилюли состояния, часы) —
+   вместе с навигацией это 217 px, больше четверти телефонного экрана. Липкой
+   остаётся только навигация: она и нужна для переходов, а состояние сервиса
+   читается один раз наверху. Второе условие — маленький экран в альбомной
+   ориентации, где по высоте дорог каждый пиксель. Высоту стопки пересчитывает
+   nav.js: он спрашивает у стилей, липкая ли шапка, и не резервирует её высоту
+   под навигацией и якорным скроллом. */
+@media (max-width: 700px), (max-width: 900px) and (max-height: 560px) {
+  .topbar { position: static; }
+}
+
 @media (max-width: 560px) {
   .topbar { flex-wrap: wrap; gap: 8px 10px; }
   .topbar-side { width: 100%; justify-content: flex-start; }
   .pill { padding: 5px 11px; font-size: 12.5px; }
   .clock { margin-left: auto; }
   .card:not(.card-clear) { padding: 18px 16px; }
+
+  /* Шапка секции на телефоне: заголовок и его подпись всегда друг под другом
+     (align-items:baseline в одну строку рвал длинную подпись на обрывки), а
+     кегль чуть ниже — иначе «Оператор и ручные операции» съедает пол-экрана
+     ещё до первых данных. */
+  .card-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 14px;
+  }
+  .card-head h2 { font-size: 21px; gap: 8px; }
+  .card-meta { font-size: 11px; letter-spacing: 0.06em; }
+  .board { gap: 14px; }
+}
+
+/* Самые узкие корпуса (320–360 px): карточка отдаёт содержимому ещё немного
+   ширины — на этих экранах она дороже воздуха по краям. */
+@media (max-width: 380px) {
+  .card:not(.card-clear) { padding: 16px 12px; }
 }
 
