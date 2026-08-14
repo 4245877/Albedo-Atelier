@@ -54,6 +54,8 @@ const preview = (over = {}) => ({
   candidates: [candidate()],
   confirmations: [],
   activeRunId: null,
+  primaryProblem: null,
+  unresolvedRunId: null,
   ...over
 });
 
@@ -323,4 +325,102 @@ test("прочерки не попадают в подпись — пропус�
 test("совсем пустое задание говорит об этом словами", () => {
   const nothing = { id: "t", title: "x", printer: "—", material: "—", eta: "—", status: "ready" };
   assert.equal(queueJobSubtitle(nothing, PRINTERS), "данные готовятся");
+});
+
+/* ── Одна причина вместо четырёх ──────────────────────────────────
+
+   Реальный сбой: принтер не смог прочитать карту MicroSD, а окно показывало
+   «Принтер занят», «Принтер в ошибке», «Принтер недоступен» и «Неизвестно
+   сопло» одновременно. Три из четырёх — следствия первой, а настоящая причина
+   (код 0500-C010 на экране самого принтера) не показывалась вовсе. */
+
+const microSdProblem = {
+  code: "printer_fault",
+  kind: "blocker",
+  title: "Принтер сообщает об ошибке",
+  action:
+    "«Bambu Lab A1 Combo» не может начать печать: Ошибка чтения/записи карты MicroSD " +
+    "(0500-C010). Переустановите карту или замените её, затем повторите запуск.",
+  technical: "printer_fault: Ошибка чтения/записи карты MicroSD (0500-C010)"
+};
+
+const noisyProblems = [
+  microSdProblem,
+  {
+    code: "printer_error",
+    kind: "blocker",
+    title: "Принтер сообщает об ошибке",
+    action: "Посмотрите экран принтера и устраните ошибку.",
+    technical: "printer_error: Принтер «Bambu Lab A1 Combo» в ошибке"
+  },
+  {
+    code: "printer_nozzle_unknown",
+    kind: "confirmable",
+    title: "Диаметр сопла неизвестен",
+    action: "Укажите диаметр сопла в настройках принтера.",
+    technical: "printer_nozzle_unknown: Диаметр сопла неизвестен"
+  },
+  {
+    code: "printer_busy",
+    kind: "info",
+    title: "Принтер занят",
+    action: "Сейчас идёт другая печать.",
+    technical: "printer_busy: Принтер сейчас занят"
+  }
+];
+
+test("показывается ОДНА главная причина, выбранная сервером", () => {
+  const html = launchModalHtml(
+    preview({
+      state: "blocked",
+      primaryProblem: microSdProblem,
+      candidates: [candidate({ eligible: false, problems: noisyProblems })]
+    }),
+    ui()
+  );
+
+  assert.match(html, /0500-C010/, "код с экрана принтера — в основном тексте");
+  assert.match(html, /Переустановите карту/, "и что с этим делать");
+  assert.equal(ctaEnabled(html), false);
+
+  // Остальные причины не исчезли — они ушли в диагностику, ниже <details>.
+  const main = html.split("<details")[0];
+  assert.doesNotMatch(main, /Посмотрите экран принтера/, "следствие не спорит с причиной");
+  assert.doesNotMatch(main, /Диаметр сопла неизвестен/);
+  assert.match(html, /printer_nozzle_unknown/, "но остаётся доступной для разбора");
+});
+
+/* ── Неподтверждённый запуск ──────────────────────────────────── */
+
+test("неподтверждённый запуск не выдаётся за «печатается»", () => {
+  assert.equal(stateLabel("unconfirmed").text, "Запуск не подтверждён");
+  assert.notEqual(stateLabel("unconfirmed").text, stateLabel("running").text);
+});
+
+test("у неподтверждённого запуска есть выход прямо в окне", () => {
+  const html = launchModalHtml(
+    preview({
+      state: "unconfirmed",
+      activeRunId: "run_1",
+      unresolvedRunId: "run_1",
+      primaryProblem: {
+        code: "launch_unconfirmed",
+        kind: "blocker",
+        title: "Прошлый запуск не подтверждён",
+        action: "Посмотрите на принтер и отметьте, что произошло.",
+        technical: "launch_unconfirmed: предыдущий запуск не подтверждён"
+      },
+      candidates: [candidate({ eligible: false, problems: [] })]
+    }),
+    ui()
+  );
+
+  assert.match(html, /data-launch-resolve="FAILED"/, "«печать не началась»");
+  assert.match(html, /data-launch-resolve="SUCCEEDED"/, "«печать идёт / прошла»");
+  assert.match(html, /Запуск не подтверждён/);
+});
+
+test("без неподтверждённого запуска кнопок разрешения нет", () => {
+  const html = launchModalHtml(preview(), ui());
+  assert.doesNotMatch(html, /data-launch-resolve/);
 });

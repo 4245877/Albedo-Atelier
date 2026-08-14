@@ -144,6 +144,8 @@ function status(over: Partial<PrinterLiveStatus> = {}): PrinterLiveStatus {
     light: false,
     stateText: null,
     stateMessage: null,
+    faults: [],
+    mediaPresent: null,
     error: null,
     updatedAt: new Date().toISOString(),
     ...over

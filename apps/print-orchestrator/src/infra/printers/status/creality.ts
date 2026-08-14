@@ -88,6 +88,10 @@ export function getCrealityStatus(printer: PrinterConfig): Promise<PrinterLiveSt
           light: null,
           stateText: firstText(parsed.state) || null,
           stateMessage,
+          // The Creality WebSocket carries an error *string*, already surfaced as
+          // `stateMessage`; there is no coded fault register to decode.
+          faults: [],
+          mediaPresent: null,
           error: mappedStatus === "error" ? stateMessage || "Принтер сообщил об ошибке" : null,
           updatedAt: new Date().toISOString()
         });

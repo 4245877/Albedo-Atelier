@@ -15,6 +15,38 @@ export type PrinterState =
 export type CameraState = "online" | "offline" | "none";
 
 /**
+ * One fault the device is actively reporting, as distinct from what it is doing.
+ *
+ * Lives in the domain because the scheduling rules reason about it: a printer
+ * can be `idle` and still be unable to start, which is the state an A1 with an
+ * unreadable MicroSD card sits in — a job that never begins never leaves idle.
+ * Folding that into {@link PrinterState} would lose the code, and the code is
+ * the only thing the operator standing at the machine can match against its
+ * screen.
+ *
+ * The adapters decode it (Bambu's `print_error`/`hms` registers); nothing here
+ * knows about registers.
+ */
+export interface PrinterFault {
+  /** The code exactly as the device's own screen renders it (e.g. `0500-C010`). */
+  code: string;
+  /** Which device channel produced it, for diagnostics. */
+  source: string;
+  /** What it means, when the code is one this farm has confirmed; else null. */
+  title: string | null;
+  /** The physical remedy, in the imperative; null for codes we cannot name. */
+  action: string | null;
+  /**
+   * Whether a print provably cannot start while this is active.
+   *
+   * `false` for every code we cannot name: devices routinely report benign
+   * advisories, and refusing on an unrecognised number would ground the farm on
+   * a guess. Only codes with a confirmed meaning ever block.
+   */
+  blocksStart: boolean;
+}
+
+/**
  * Live, dashboard-facing view of a printer. The keys here match the shape the
  * frontend renders 1:1 (`type`, `status`, `nozzle`/`bed` as `[current,target]`)
  * so the dashboard can display it without extra processing.
@@ -43,6 +75,17 @@ export interface PrinterView {
   stateText: string | null;
   /** Human-readable reason (pause reason, error text) when the device gives one. */
   stateMessage: string | null;
+  /**
+   * Faults the device is reporting right now, independent of {@link status} — a
+   * printer can be `idle` and still unable to start. Empty means "nothing
+   * observed", which includes adapters that have no fault channel to read.
+   */
+  faults: PrinterFault[];
+  /**
+   * Whether the removable medium a print starts *from* is readable, where the
+   * device states it (Bambu `sdcard`); null everywhere else.
+   */
+  mediaPresent: boolean | null;
   /** When the underlying live status was produced; null before the first report. */
   updatedAt: string | null;
   job: string | null;

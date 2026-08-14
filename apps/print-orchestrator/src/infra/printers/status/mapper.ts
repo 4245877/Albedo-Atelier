@@ -81,6 +81,11 @@ export function makeOfflineStatus(printer: PrinterConfig, error: string): Printe
     light: null,
     stateText: null,
     stateMessage: null,
+    // An unreachable printer is not a printer with no faults — it is a printer
+    // we cannot ask. Empty here means "nothing observed", and every consumer
+    // treats it that way rather than as a clean bill of health.
+    faults: [],
+    mediaPresent: null,
     error,
     updatedAt: new Date().toISOString()
   };

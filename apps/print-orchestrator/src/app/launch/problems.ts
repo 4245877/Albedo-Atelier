@@ -58,6 +58,25 @@ const TRANSLATIONS: Record<string, Translation> = {
     title: "Принтер сообщает об ошибке",
     action: "Посмотрите экран принтера и устраните ошибку."
   },
+  printer_fault: {
+    // Deliberately has no fixed `action`: the message carries the device's own
+    // code and remedy, which is more specific than anything written here could
+    // be. `explainReason` keeps the original message when a translation omits it.
+    title: "Принтер сообщает об ошибке",
+    action: ""
+  },
+  printer_media_missing: {
+    title: "Принтер не видит карту памяти",
+    action:
+      "Файл печати лежит на карте памяти принтера, а принтер её не читает. " +
+      "Переустановите или замените карту, затем повторите запуск."
+  },
+  launch_unconfirmed: {
+    title: "Прошлый запуск не подтверждён",
+    action:
+      "Команда ушла, но принтер не сообщил, начал ли он печать. " +
+      "Посмотрите на принтер и отметьте, что произошло, — после этого запуск снова возможен."
+  },
   telemetry_stale: {
     title: "Нет свежих данных от принтера",
     action: "Последний ответ пришёл давно. Проверьте связь с принтером."
@@ -167,9 +186,84 @@ export function explainReason(reason: CompatibilityReason, kind: ProblemKind): L
     code: reason.code,
     kind,
     title: t?.title ?? reason.message,
-    action: t?.action ?? reason.message,
+    // An empty translated action means "the message itself is the instruction" —
+    // used by codes whose message is generated per-device (a fault carries the
+    // printer's own code and remedy).
+    action: t?.action || reason.message,
     technical: `${reason.code}: ${reason.message}`
   };
+}
+
+/**
+ * How close a code is to being the *cause* rather than a consequence of it.
+ *
+ * The incident this ranking exists for showed an operator four simultaneous
+ * reasons — «Принтер занят», «Принтер в ошибке», «Принтер недоступен»,
+ * «Неизвестно сопло» — for one physical problem: a MicroSD card the printer
+ * could not read. Three of the four were downstream of the first, and the true
+ * cause was in none of them, because the code that named it was never read off
+ * the device. Listing consequences beside a cause does not make the list more
+ * complete, it makes the cause unfindable.
+ *
+ * So the launch screen headlines exactly one problem, chosen here. Lower rank
+ * wins. Codes not listed fall in with the ordinary blockers — the ranking only
+ * needs to know which few reasons are *derived* from others, not to enumerate
+ * every reason in the system.
+ */
+const CAUSE_RANK: Record<string, number> = {
+  // The device naming its own failure — nothing outranks the printer's screen.
+  printer_fault: 0,
+  printer_media_missing: 0,
+  // An unresolved prior attempt: it explains the busy/hold that follows from it.
+  launch_unconfirmed: 1,
+  // Structural facts about the job, independent of device state.
+  pinned_elsewhere: 2,
+  slice_missing: 2,
+  slicing_unavailable: 2,
+  profileset_quarantined: 2,
+  too_large: 2,
+  nozzle_mismatch: 2,
+  material_mismatch: 2,
+  gcode_flavor_mismatch: 2,
+  // Device state without an attributed cause — true, but rarely actionable.
+  printer_offline: 4,
+  printer_error: 5,
+  // Consequences: these follow from something above and must never headline.
+  printer_busy: 6,
+  telemetry_stale: 6,
+  telemetry_missing: 6,
+  printer_nozzle_unknown: 7,
+  printer_material_unknown: 7,
+  build_volume_unknown: 7
+};
+
+const DEFAULT_CAUSE_RANK = 3;
+
+function causeRank(problem: LaunchProblem): number {
+  const base = CAUSE_RANK[problem.code] ?? DEFAULT_CAUSE_RANK;
+  // A blocker always outranks something the operator could merely confirm, so a
+  // confirmable never headlines over a hard refusal that is present.
+  return problem.kind === "blocker" ? base : base + 10;
+}
+
+/**
+ * The single problem to show as *the* reason, or null when there is none.
+ *
+ * Never invents a summary: it returns one of the problems already produced, so
+ * the headline and the diagnostics list can never disagree.
+ */
+export function primaryProblem(problems: readonly LaunchProblem[]): LaunchProblem | null {
+  let best: LaunchProblem | null = null;
+  let bestRank = Number.POSITIVE_INFINITY;
+  for (const problem of problems) {
+    if (problem.kind === "info") continue; // informational, never a cause
+    const rank = causeRank(problem);
+    if (rank < bestRank) {
+      best = problem;
+      bestRank = rank;
+    }
+  }
+  return best;
 }
 
 /**

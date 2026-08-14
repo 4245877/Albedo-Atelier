@@ -25,6 +25,7 @@ import { SchedulerContext } from "../scheduling/context";
 import { EligibilityQueries } from "../scheduling/eligibility";
 import { EvidenceResolver } from "../scheduling/evidence";
 import { SchedulerService } from "../scheduling/schedulerService";
+import type { PrinterFault } from "../../domain/printers/types";
 import type { SchedulerPrinterRef } from "../scheduling/types";
 import { LaunchService } from "./launchService";
 
@@ -89,6 +90,17 @@ interface Knobs {
   nozzle: Record<string, number | null>;
   failUpload: boolean;
   failStart: string | null;
+  /**
+   * How the dispatch classifies a failed start. `unknown` is the default and the
+   * shape of the real incident: the command went out, the printer never
+   * confirmed, and nothing could be concluded. `rejected` is the branch a device
+   * that *names* its refusal now takes.
+   */
+  classify: "unknown" | "rejected";
+  /** Faults the scheduler's view of each printer reports. */
+  faults: Record<string, PrinterFault[]>;
+  /** Media readability per printer; null = the device does not report it. */
+  mediaPresent: Record<string, boolean | null>;
 }
 
 interface Harness {
@@ -131,7 +143,10 @@ async function makeHarness(tmp: string): Promise<Harness> {
     material: { "bambu-a1": "PETG", k2: "PLA" },
     nozzle: { "bambu-a1": 0.4, k2: 0.4 },
     failUpload: false,
-    failStart: null
+    failStart: null,
+    classify: "unknown",
+    faults: {},
+    mediaPresent: {}
   };
 
   const queue = new PrintQueueService(store, {
@@ -185,6 +200,8 @@ async function makeHarness(tmp: string): Promise<Harness> {
       status: knobs.status[p.id] ?? "idle",
       remoteStartSupported: true,
       ams: false,
+      faults: knobs.faults[p.id] ?? [],
+      mediaPresent: knobs.mediaPresent[p.id] ?? null,
       telemetryAgeMs: 1_000,
       materialRemainingSufficient: null,
       printingTimeLeftMs: null,
@@ -217,7 +234,7 @@ async function makeHarness(tmp: string): Promise<Harness> {
       if (knobs.failStart) throw new Error(knobs.failStart);
       startCalls.push({ printerId, file });
     },
-    classifyError: () => "unknown",
+    classifyError: () => knobs.classify,
     listFiles,
     evaluateEligibility: (input) => eligibility().evaluate(input),
     now: () => new Date(ISO)
@@ -737,4 +754,176 @@ test("the preview reports «running» once a run holds the task", async () => {
   const preview = h.launch.preview(task.id);
   assert.equal(preview.state, "running");
   assert.ok(preview.activeRunId, "the live run is named so the UI can follow it");
+});
+
+// ── An unconfirmed start ─────────────────────────────────────────────────────
+//
+// The incident: the command went out, the A1 could not read its MicroSD card and
+// stayed IDLE, so the outcome could not be established. Everything below is what
+// the operator saw next — a task that claimed to be printing, a printer that
+// reported itself busy to its own queue, and no way out of either.
+
+test("an unconfirmed start does NOT report the task as running", async () => {
+  const { task } = seedQueuedBambuJob();
+  bedClear();
+  h.knobs.failStart = "принтер не подтвердил запуск за 45 с";
+
+  await assert.rejects(() => h.launch.launch(task.id, {}));
+
+  const preview = h.launch.preview(task.id);
+  assert.equal(
+    preview.state,
+    "unconfirmed",
+    "nothing is printing, so the state must not claim otherwise"
+  );
+  assert.ok(preview.unresolvedRunId, "the way out is named where the operator hit the wall");
+
+  const run = h.store.repositories.printRuns.findActiveByTask(task.id);
+  assert.equal(run?.state, "UNKNOWN", "held for reconciliation, never auto-completed");
+  assert.equal(run?.startedAt, null, "no start was ever observed");
+});
+
+test("a failed launch does not make the printer report itself busy", async () => {
+  const { task } = seedQueuedBambuJob();
+  bedClear();
+  h.knobs.failStart = "принтер не подтвердил запуск";
+
+  await assert.rejects(() => h.launch.launch(task.id, {}));
+
+  const preview = h.launch.preview(task.id);
+  const a1 = preview.candidates.find((c) => c.printerId === "bambu-a1");
+  assert.ok(a1);
+
+  // The bed this launch reserved used to read back as «принтер занят» — the
+  // printer blocking itself, with the real cause invisible.
+  assert.ok(
+    !a1.warnings.some((w) => w.code === "printer_busy"),
+    "an unresolved attempt is not an occupancy"
+  );
+  assert.ok(
+    a1.blockers.some((b) => b.code === "launch_unconfirmed"),
+    "it is reported as what it is: a start nobody confirmed"
+  );
+  assert.equal(preview.primaryProblem?.code, "launch_unconfirmed", "one cause, and it is the cause");
+});
+
+test("resolving «печать не началась» releases everything and re-queues the task", async () => {
+  const { task } = seedQueuedBambuJob();
+  bedClear();
+  h.knobs.failStart = "принтер не подтвердил запуск";
+  await assert.rejects(() => h.launch.launch(task.id, {}));
+
+  const runId = h.launch.preview(task.id).unresolvedRunId;
+  assert.ok(runId);
+  h.lifecycle.resolveRun(runId, "FAILED", { actor: "operator" });
+
+  const repos = h.store.repositories;
+  assert.equal(repos.printRuns.findActiveByPrinter("bambu-a1"), null, "the printer is released");
+  assert.equal(
+    repos.tasks.getById(task.id)?.state,
+    "QUEUED",
+    "nothing was wrong with the job — it goes back to the queue, not to a terminal FAILED"
+  );
+  assert.equal(repos.startGuards.get("bambu-a1"), null, "the hold is gone");
+  const bed = repos.bedCycles.findOpenByPrinter("bambu-a1");
+  assert.ok(bed === null || bed.state === "CLEAR", "the reserved bed is freed");
+});
+
+test("after resolving, the very same task launches for real", async () => {
+  const { task } = seedQueuedBambuJob();
+  bedClear();
+  h.knobs.failStart = "принтер не подтвердил запуск";
+  await assert.rejects(() => h.launch.launch(task.id, {}));
+
+  const runId = h.launch.preview(task.id).unresolvedRunId;
+  assert.ok(runId);
+  h.lifecycle.resolveRun(runId, "FAILED", { actor: "operator" });
+
+  // The physical cause is fixed; the retry must be an ordinary launch.
+  h.knobs.failStart = null;
+  bedClear();
+  const outcome = await h.launch.launch(task.id, { idempotencyKey: "launch:retry-after-fix" });
+
+  assert.ok(outcome.run.runId);
+  // The first attempt threw before recording a call, so this is the only one —
+  // and it happened, which is the whole point: the retry was not deduplicated
+  // into the failed attempt.
+  assert.equal(h.startCalls.length, 1, "the retry really did command the device");
+  assert.equal(h.launch.preview(task.id).state, "running");
+});
+
+test("a stale idempotency key cannot resurrect a failed attempt as a success", async () => {
+  const { task } = seedQueuedBambuJob();
+  bedClear();
+  const key = "launch:same-key-twice";
+  h.knobs.failStart = "принтер не подтвердил запуск";
+  await assert.rejects(() => h.launch.launch(task.id, { idempotencyKey: key }));
+
+  // Replaying the key must not report the unconfirmed run as a started print.
+  await assert.rejects(
+    () => h.launch.launch(task.id, { idempotencyKey: key }),
+    "the held attempt must be resolved, not replayed into a success"
+  );
+  assert.equal(h.startCalls.length, 0, "no second command reached the device");
+});
+
+test("a start the device REFUSES unwinds completely instead of holding the printer", async () => {
+  const { task } = seedQueuedBambuJob();
+  bedClear();
+  h.knobs.failStart = "«Bambu Lab A1 Combo» не может начать печать: MicroSD (0500-C010)";
+  h.knobs.classify = "rejected";
+
+  await assert.rejects(() => h.launch.launch(task.id, {}));
+
+  const repos = h.store.repositories;
+  assert.equal(repos.printRuns.findActiveByPrinter("bambu-a1"), null, "no run holds the printer");
+  assert.equal(repos.tasks.getById(task.id)?.state, "QUEUED", "ready to retry once the card is fixed");
+  // Nothing is held, so the screen offers the launch again rather than a dead
+  // end — a refusal the device explained needs no operator reconciliation.
+  assert.equal(h.launch.preview(task.id).state, "ready");
+});
+
+test("a device fault is the headline, and the consequences are not repeated beside it", () => {
+  const { task } = seedQueuedBambuJob();
+  bedClear();
+  h.knobs.status["bambu-a1"] = "error";
+  h.knobs.faults["bambu-a1"] = [
+    {
+      code: "0500-C010",
+      source: "print_error",
+      title: "Ошибка чтения/записи карты MicroSD",
+      action: "Переустановите карту MicroSD или замените её.",
+      blocksStart: true
+    }
+  ];
+
+  const preview = h.launch.preview(task.id, "bambu-a1");
+  const a1 = preview.candidates.find((c) => c.printerId === "bambu-a1");
+  assert.ok(a1);
+
+  assert.equal(preview.primaryProblem?.code, "printer_fault");
+  assert.match(preview.primaryProblem?.action ?? "", /0500-C010/);
+  const errorBlockers = a1.blockers.filter((b) => b.code === "printer_error");
+  assert.equal(
+    errorBlockers.length,
+    0,
+    "«принтер в ошибке» is a symptom; the named code already said it better"
+  );
+});
+
+test("recovery after a restart holds the unconfirmed run and keeps the exit visible", async () => {
+  const { task } = seedQueuedBambuJob();
+  bedClear();
+  h.knobs.failStart = "принтер не подтвердил запуск";
+  await assert.rejects(() => h.launch.launch(task.id, {}));
+
+  // Boot-time recovery: an unconfirmed dispatch WITH a start guard may not be
+  // unwound automatically — the print might really be running.
+  const summary = h.lifecycle.recover();
+  assert.equal(summary.held, 1);
+  assert.equal(summary.unwound, 0, "a held start is never guessed at on boot");
+
+  const preview = h.launch.preview(task.id);
+  assert.equal(preview.state, "unconfirmed", "state survives the restart as itself");
+  assert.ok(preview.unresolvedRunId, "and so does the operator's way out");
 });

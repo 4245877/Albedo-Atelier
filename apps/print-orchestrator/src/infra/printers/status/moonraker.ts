@@ -242,6 +242,11 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
       light: readMoonrakerLightState(printer, status),
       stateText,
       stateMessage,
+      // Klipper reports a failure as a state plus a message, not as a coded
+      // fault register, and it prints from streamed G-code rather than removable
+      // media — so neither channel exists here to read.
+      faults: [],
+      mediaPresent: null,
       error:
         mappedStatus === "error"
           ? stateMessage || firstText(webhooks.state_message) || "Принтер сообщил об ошибке"

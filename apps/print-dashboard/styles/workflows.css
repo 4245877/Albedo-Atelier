@@ -1382,6 +1382,34 @@
   color: var(--danger-ink);
 }
 
+/* Одна причина: что случилось — выделено, что делать — обычным весом под ней.
+   Раньше здесь была одна строка из первого попавшегося блокера, и оператор
+   читал следствие вместо причины. */
+.launch-reason-title { font-weight: 600; }
+
+.launch-reason-action { margin-top: 3px; }
+
+/* ── Неподтверждённый запуск ─────────────────────────────────── */
+
+.launch-unresolved {
+  margin-top: 12px;
+  padding: 11px 12px;
+  border: 1px solid var(--warn-soft);
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.launch-unresolved p { margin: 0; }
+
+.launch-unresolved-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 /* ── Подтверждения оператора ─────────────────────────────────── */
 
 .launch-confirms { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }

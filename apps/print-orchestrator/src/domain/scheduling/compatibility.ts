@@ -20,6 +20,7 @@
  * variants, profile sets, live telemetry, bed cycles) and this decides.
  */
 
+import type { PrinterFault } from "../printers/types";
 import type { BedCycleState } from "../print/types";
 import { gcodeFlavorFitsProtocol } from "../shared/gcodeFlavor";
 import { resolveEta, type EtaEstimate } from "./eta";
@@ -90,6 +91,20 @@ export interface CompatibilityPrinterInput {
   remoteStartSupported: boolean;
   /** Whether the printer exposes AMS/multi-material; null when unknown. */
   ams: boolean | null;
+  /**
+   * Faults the device is reporting, independent of {@link status}.
+   *
+   * Needed because `status` cannot express the case that caused this field to
+   * exist: a printer sitting at `idle` that nonetheless cannot begin a print,
+   * because the job it was handed never started. Only faults marked
+   * `blocksStart` refuse anything — see {@link PrinterFault}.
+   */
+  faults: PrinterFault[];
+  /**
+   * Whether the removable medium a print starts from is readable; null where the
+   * device does not report it (which is most printers, and is not a problem).
+   */
+  mediaPresent: boolean | null;
 }
 
 export interface CompatibilityEvidence {
@@ -103,6 +118,18 @@ export interface CompatibilityEvidence {
   runtimeAvailable: boolean;
   /** Bed occupancy for the printer, or null when unknown. */
   bedCycle: BedCycleState | null;
+  /**
+   * True when the printer is held by a dispatched run that was never observed
+   * printing — a start whose outcome is still unresolved.
+   *
+   * Distinct from a busy printer in the only way that matters to whoever is
+   * reading the refusal: a busy printer finishes on its own and the queue moves,
+   * while this one waits for a human to say what happened. Reporting the two as
+   * the same «принтер занят» is what left an operator watching an idle machine
+   * describe itself as busy, with no hint that the exit was a resolve action on
+   * the previous attempt.
+   */
+  heldByUnstartedRun?: boolean;
   /**
    * True when the printer's build volume from its config disagrees with the one
    * read from its approved machine profile — a `review` so a human reconciles them
@@ -213,9 +240,30 @@ export function evaluateCompatibility(
     block("maintenance", `Обслуживание: ${m}`);
   }
 
+  // ── Device faults ─────────────────────────────────────────────────────────────
+  // Checked before the state, and reported *instead of* a bare `printer_error`,
+  // because a code the machine is displaying on its own screen is a cause and
+  // "принтер в ошибке" is only a symptom. The ordering matters for the operator:
+  // whichever reason is emitted first is the one the launch screen headlines.
+  const blockingFaults = printer.faults.filter((f) => f.blocksStart);
+  for (const fault of blockingFaults) {
+    block("printer_fault", `${fault.title ?? "Ошибка принтера"} (${fault.code})`);
+  }
+  if (printer.mediaPresent === false) {
+    block(
+      "printer_media_missing",
+      `«${printer.name}» не видит карту памяти, с которой запускается печать`
+    );
+  }
+
   // ── Printer state & telemetry freshness ──────────────────────────────────────
   if (printer.status === "error") {
-    block("printer_error", `Принтер «${printer.name}» в ошибке`);
+    // A named fault has already said this, and said it better; repeating it as a
+    // second, vaguer blocker is how one incident produced four simultaneous
+    // reasons for one physical problem.
+    if (blockingFaults.length === 0) {
+      block("printer_error", `Принтер «${printer.name}» в ошибке`);
+    }
   } else if (!printer.online) {
     review("printer_offline", `Принтер «${printer.name}» не в сети — готовность не подтверждена`);
   }
@@ -326,6 +374,18 @@ export function evaluateCompatibility(
     warn("manual_start_only", "Удалённый запуск не поддержан — оператор запускает вручную");
   }
 
+  // ── Unresolved previous start ─────────────────────────────────────────────────
+  // Checked before the bed, because it *causes* the bed reservation it would
+  // otherwise be reported as. A launch that ended without a verdict reserves the
+  // bed and holds the printer; describing the consequence («занят») and hiding
+  // the cause left the only exit — resolving that run — invisible.
+  if (evidence.heldByUnstartedRun === true) {
+    block(
+      "launch_unconfirmed",
+      `Предыдущий запуск на «${printer.name}» не подтверждён — отметьте, что произошло`
+    );
+  }
+
   // ── Bed cycle ─────────────────────────────────────────────────────────────────
   switch (evidence.bedCycle) {
     case "AWAITING_CLEARANCE":
@@ -336,7 +396,11 @@ export function evaluateCompatibility(
       break;
     case "RUNNING":
     case "RESERVED":
-      warn("printer_busy", "Принтер сейчас занят — печать после освобождения");
+      // Only a genuine occupancy is «занят»; an unresolved start already said so
+      // above, with the reason and the way out.
+      if (evidence.heldByUnstartedRun !== true) {
+        warn("printer_busy", "Принтер сейчас занят — печать после освобождения");
+      }
       break;
     default:
       break;

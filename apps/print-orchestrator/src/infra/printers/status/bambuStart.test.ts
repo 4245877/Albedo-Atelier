@@ -4,6 +4,7 @@ import { afterEach, test } from "node:test";
 import type { PrinterConfig } from "../config";
 import { mergeBambuRawPrint, shutdownBambuConnections } from "./bambu";
 import {
+  assertBambuCanStart,
   BambuStartUnconfirmedError,
   buildBambuStartPayload,
   confirmBambuStart,
@@ -168,14 +169,21 @@ test("silence is an UNCONFIRMED outcome, never a success and never a refusal", a
 });
 
 test("an explicit FAILED state is a definitive refusal, not an unknown", async () => {
-  reportState({ gcode_state: "FAILED", subtask_name: "cube-1a2b3c4d", print_error: 117 });
+  reportState({ gcode_state: "FAILED", subtask_name: "cube-1a2b3c4d", print_error: 0x0300c011 });
   await assert.rejects(
     () => confirmBambuStart(PRINTER, "cube-1a2b3c4d", immediate),
     (error: unknown) => {
       assert.ok(error instanceof PrinterCommandError);
       assert.ok(!(error instanceof BambuStartUnconfirmedError), "refusal, not unknown");
       assert.match((error as Error).message, /отклонил запуск/);
-      assert.match((error as Error).message, /117/);
+      // The code as the printer's screen renders it — the decimal register was a
+      // number that appeared nowhere in the operator's world.
+      assert.match((error as Error).message, /0300-C011/);
+      assert.equal(
+        (error as PrinterCommandError).definitivelyRejected,
+        true,
+        "a refused start must unwind, not hold the printer for reconciliation"
+      );
       return true;
     }
   );
@@ -189,4 +197,125 @@ test("PREPARE counts as started — the firmware accepted the job", async () => 
 test("the job is matched however the firmware spells the file name", async () => {
   reportState({ gcode_state: "RUNNING", gcode_file: "/mnt/sdcard/cube-1a2b3c4d.gcode.3mf" });
   await confirmBambuStart(PRINTER, "cube-1a2b3c4d", immediate);
+});
+
+/**
+ * Confirmation options whose first wait makes the device raise `code`.
+ *
+ * Timing is the whole point of these cases: a fault the printer was ALREADY
+ * showing is a standing complaint, while one raised after the command went out
+ * is this start's verdict. Seeding the report before the call would test the
+ * former while claiming to test the latter.
+ */
+function raisesFaultWhileWaiting(code: number): typeof immediate {
+  let raised = false;
+  return {
+    ...immediate,
+    sleep: async () => {
+      if (!raised) {
+        raised = true;
+        reportState({ gcode_state: "IDLE", print_error: code });
+      }
+    }
+  };
+}
+
+// ── The MicroSD incident ─────────────────────────────────────────────────────
+//
+// A plate package was uploaded, size-verified on the card and correct. The A1
+// could not read the card, put `0500-C010` on its screen, and stayed at IDLE for
+// the whole confirmation window — so the only thing the service could conclude
+// was «не подтвердил запуск», which held the printer and made it report itself
+// busy to its own queue. Every assertion below is that failure, inverted.
+
+test("a MicroSD fault raised after the command is a REFUSAL, not an unknown", async () => {
+  reportState({ gcode_state: "IDLE", subtask_name: "" });
+
+  await assert.rejects(
+    // The device raises the fault mid-wait, while still sitting at IDLE — the
+    // exact shape of the incident, and the case a gcode_state-only watch can
+    // never see, because a job that never starts never leaves idle.
+    () => confirmBambuStart(PRINTER, "cube-1a2b3c4d", raisesFaultWhileWaiting(0x0500c010)),
+    (error: unknown) => {
+      assert.ok(error instanceof PrinterCommandError);
+      assert.ok(
+        !(error instanceof BambuStartUnconfirmedError),
+        "an explained refusal must not be reported as an unknown outcome"
+      );
+      assert.equal((error as PrinterCommandError).definitivelyRejected, true);
+      return true;
+    }
+  );
+});
+
+test("the refusal names the card, the code and the remedy — one cause, actionable", async () => {
+  reportState({ gcode_state: "IDLE" });
+
+  await assert.rejects(
+    () => confirmBambuStart(PRINTER, "cube-1a2b3c4d", raisesFaultWhileWaiting(0x0500c010)),
+    (error: unknown) => {
+      const message = (error as Error).message;
+      assert.match(message, /0500-C010/, "the code the printer's screen is showing");
+      assert.match(message, /MicroSD/i, "what it means");
+      assert.match(message, /Переустановите|замените/i, "what to do about it");
+      assert.match(message, /Bambu Lab A1 Combo/, "which machine");
+      return true;
+    }
+  );
+});
+
+test("a fault the printer was already showing does not fail the next launch", async () => {
+  // Standing complaints are not this start's verdict. Without this, one
+  // unacknowledged advisory would refuse every subsequent launch on the machine.
+  reportState({ gcode_state: "IDLE", print_error: 0x0500c010 });
+
+  await assert.rejects(
+    () => confirmBambuStart(PRINTER, "cube-1a2b3c4d", immediate),
+    BambuStartUnconfirmedError,
+    "pre-existing fault ⇒ still merely unconfirmed, not attributed to this start"
+  );
+});
+
+test("an unrecognised fault code never turns a slow start into a refusal", async () => {
+  reportState({ gcode_state: "IDLE" });
+
+  await assert.rejects(
+    () => confirmBambuStart(PRINTER, "cube-1a2b3c4d", raisesFaultWhileWaiting(0x07008011)),
+    BambuStartUnconfirmedError,
+    "only codes with a confirmed meaning may conclude anything"
+  );
+});
+
+test("a job that starts anyway wins over a fault raised alongside it", async () => {
+  // A benign-but-blocking-looking code must not cancel a print that is visibly
+  // running: positive evidence of our job outranks the fault channel.
+  reportState({ gcode_state: "RUNNING", subtask_name: "cube-1a2b3c4d", print_error: 0x0500c010 });
+  await confirmBambuStart(PRINTER, "cube-1a2b3c4d", immediate);
+});
+
+// ── Pre-flight ───────────────────────────────────────────────────────────────
+
+test("a start is refused before publishing when the card is not readable", () => {
+  reportState({ gcode_state: "IDLE", sdcard: false });
+
+  assert.throws(
+    () => assertBambuCanStart(PRINTER),
+    (error: unknown) => {
+      assert.ok(error instanceof PrinterCommandError);
+      assert.equal((error as PrinterCommandError).definitivelyRejected, true);
+      assert.match((error as Error).message, /карт[уы] MicroSD/i);
+      return true;
+    }
+  );
+});
+
+test("a readable card and a quiet device pass pre-flight", () => {
+  reportState({ gcode_state: "IDLE", sdcard: true, print_error: 0, hms: [] });
+  assert.doesNotThrow(() => assertBambuCanStart(PRINTER));
+});
+
+test("pre-flight stays silent when the device has reported nothing yet", () => {
+  // Absence of telemetry is refused by the dispatch gate, with a better message
+  // than this module could give; inventing a second refusal here would be noise.
+  assert.doesNotThrow(() => assertBambuCanStart(PRINTER));
 });

@@ -48,6 +48,8 @@ function liveStatus(overrides: Partial<PrinterLiveStatus>): PrinterLiveStatus {
     light: null,
     stateText: null,
     stateMessage: null,
+    faults: [],
+    mediaPresent: null,
     error: null,
     updatedAt: new Date().toISOString(),
     ...overrides,

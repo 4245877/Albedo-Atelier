@@ -53,6 +53,8 @@ function printer(over: Partial<SchedulerPrinterRef> = {}): SchedulerPrinterRef {
     status: "idle",
     remoteStartSupported: true,
     ams: null,
+    faults: [],
+    mediaPresent: null,
     telemetryAgeMs: 1000,
     materialRemainingSufficient: null,
     printingTimeLeftMs: null,

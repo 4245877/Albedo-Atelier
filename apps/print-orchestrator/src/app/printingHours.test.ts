@@ -104,6 +104,8 @@ function statusFor(printer: PrinterConfig): PrinterLiveStatus {
     light: null,
     stateText: null,
     stateMessage: null,
+    faults: [],
+    mediaPresent: null,
     error: null,
     updatedAt: new Date().toISOString()
   };

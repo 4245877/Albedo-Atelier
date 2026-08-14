@@ -37,6 +37,8 @@ function printer(over: Partial<CompatibilityPrinterInput> = {}): CompatibilityPr
     status: "idle",
     remoteStartSupported: true,
     ams: true,
+    faults: [],
+    mediaPresent: null,
     ...over
   };
 }
@@ -200,4 +202,103 @@ test("an unproven box that already overflows the bed is blocked outright", () =>
   assert.equal(r.verdict, "blocked");
   assert.ok(r.blockers.some((b) => b.code === "too_large"));
   assert.ok(r.reviews.some((x) => x.code === "model_scale_unknown"));
+});
+
+// ── Device faults ────────────────────────────────────────────────────────────
+//
+// A printer can be `idle` and still unable to start: a job that never begins
+// never leaves idle. Until the fault channel was read, that case produced
+// «принтер занят / в ошибке / недоступен / неизвестно сопло» — four reasons, all
+// downstream of one MicroSD card the machine could not read, and none of them
+// naming it.
+
+const microSd = {
+  code: "0500-C010",
+  source: "print_error",
+  title: "Ошибка чтения/записи карты MicroSD",
+  action: "Переустановите карту MicroSD или замените её.",
+  blocksStart: true
+};
+
+test("a start-blocking fault blocks, and names the code the printer is showing", () => {
+  const result = evaluateCompatibility(
+    task(),
+    printer({ status: "idle", faults: [microSd] }),
+    evidence()
+  );
+
+  const fault = result.blockers.find((b) => b.code === "printer_fault");
+  assert.ok(fault, "an idle printer that cannot start must still refuse");
+  assert.match(fault.message, /0500-C010/);
+  assert.match(fault.message, /MicroSD/i);
+});
+
+test("a named fault replaces the vaguer «принтер в ошибке», never doubles it", () => {
+  const result = evaluateCompatibility(
+    task(),
+    printer({ status: "error", faults: [microSd] }),
+    evidence()
+  );
+
+  assert.equal(
+    result.blockers.filter((b) => b.code === "printer_error").length,
+    0,
+    "the symptom is dropped once the cause is named"
+  );
+  assert.equal(result.blockers.filter((b) => b.code === "printer_fault").length, 1);
+});
+
+test("an error with no decoded cause still refuses, honestly", () => {
+  const result = evaluateCompatibility(task(), printer({ status: "error" }), evidence());
+  assert.ok(result.blockers.some((b) => b.code === "printer_error"));
+});
+
+test("an unrecognised fault is not allowed to block", () => {
+  const result = evaluateCompatibility(
+    task(),
+    printer({
+      status: "idle",
+      faults: [{ code: "0700-8011", source: "hms", title: null, action: null, blocksStart: false }]
+    }),
+    evidence()
+  );
+  assert.equal(result.verdict, "compatible", "a number nobody decoded may not ground a printer");
+});
+
+test("an unreadable print medium blocks with its own reason", () => {
+  const result = evaluateCompatibility(
+    task(),
+    printer({ status: "idle", mediaPresent: false }),
+    evidence()
+  );
+  assert.ok(result.blockers.some((b) => b.code === "printer_media_missing"));
+});
+
+// ── An unresolved previous start ─────────────────────────────────────────────
+
+test("a printer held by an unconfirmed start says so instead of «занят»", () => {
+  const result = evaluateCompatibility(
+    task(),
+    printer({ status: "idle" }),
+    evidence({ bedCycle: "RESERVED", heldByUnstartedRun: true })
+  );
+
+  assert.ok(
+    result.blockers.some((b) => b.code === "launch_unconfirmed"),
+    "the cause, with the way out"
+  );
+  assert.ok(
+    !result.warnings.some((w) => w.code === "printer_busy"),
+    "the bed it reserved is a consequence, and repeating it hides the cause"
+  );
+});
+
+test("a genuinely occupied printer is still reported as busy", () => {
+  const result = evaluateCompatibility(
+    task(),
+    printer({ status: "printing" }),
+    evidence({ bedCycle: "RUNNING" })
+  );
+  assert.ok(result.warnings.some((w) => w.code === "printer_busy"));
+  assert.ok(!result.blockers.some((b) => b.code === "launch_unconfirmed"));
 });

@@ -83,6 +83,8 @@ function makeHarness(): Harness {
     status: knobs.status as SchedulerPrinterRef["status"],
     remoteStartSupported: true,
     ams: null,
+    faults: [],
+    mediaPresent: null,
     telemetryAgeMs: 1_000,
     materialRemainingSufficient: null,
     printingTimeLeftMs: null,

@@ -51,6 +51,8 @@ function printer(over: Partial<CompatibilityPrinterInput> = {}): CompatibilityPr
     status: "idle",
     remoteStartSupported: true,
     ams: null,
+    faults: [],
+    mediaPresent: null,
     ...over
   };
 }

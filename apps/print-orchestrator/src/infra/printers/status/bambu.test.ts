@@ -139,3 +139,70 @@ test("a new subtask_id resets job fields but keeps the printer-level AMS state",
   assert.equal(status.amsTrays![0].remainPct, 80, "remain is printer state, not job state");
   assert.equal(status.status, "printing");
 });
+
+test("a new subtask does not make the machine's own nozzle unknown", () => {
+  // The defect this pins: `nozzle_diameter`/`nozzle_type` are printer settings,
+  // but they were dropped along with the job fields when a start announced a new
+  // subtask — and the announcing delta never resends them. For the ~30s until
+  // the next pushall the printer therefore had NO nozzle, which is precisely the
+  // launch window: every start raced against a `printer_nozzle_unknown` review
+  // it had caused itself. Hardware discovery reads this same cache and replaces
+  // its fact set wholesale, so the loss was persisted, not merely transient.
+  const id = "raw-merge-nozzle";
+  mergeBambuRawPrint(id, {
+    gcode_state: "IDLE",
+    subtask_id: "job-1",
+    nozzle_diameter: "0.4",
+    nozzle_type: "stainless_steel"
+  });
+  const merged = mergeBambuRawPrint(id, { gcode_state: "PREPARE", subtask_id: "job-2" });
+
+  const status = buildBambuStatus(printer(), { print: merged })!;
+  assert.equal(status.nozzleDiameterMm, 0.4, "the nozzle is hardware, not a property of the job");
+  assert.equal(status.nozzleType, "stainless_steel");
+});
+
+// ── The fault channel ────────────────────────────────────────────────────────
+
+test("a fault is carried even while the device reports IDLE", () => {
+  // A job that never starts never leaves idle, so the status this produces must
+  // still say what the machine is complaining about.
+  const status = buildBambuStatus(printer(), {
+    print: { gcode_state: "IDLE", print_error: 0x0500c010, sdcard: true }
+  })!;
+
+  assert.equal(status.status, "idle", "a lingering code must not wedge the printer into error");
+  assert.equal(status.faults.length, 1);
+  assert.equal(status.faults[0].code, "0500-C010");
+  assert.equal(status.faults[0].blocksStart, true);
+});
+
+test("the error text names the code the printer's screen shows", () => {
+  const status = buildBambuStatus(printer(), {
+    print: { gcode_state: "FAILED", print_error: 0x0500c010 }
+  })!;
+
+  assert.equal(status.status, "error");
+  assert.match(status.error ?? "", /0500-C010/);
+});
+
+test("media presence travels with the status, and stays unknown when unreported", () => {
+  const withCard = buildBambuStatus(printer(), { print: { gcode_state: "IDLE", sdcard: false } })!;
+  assert.equal(withCard.mediaPresent, false);
+
+  const silent = buildBambuStatus(printer(), { print: { gcode_state: "IDLE" } })!;
+  assert.equal(silent.mediaPresent, null, "absent is «did not say», not «the card is fine»");
+});
+
+test("a cleared fault list from a fresh report replaces the old one", () => {
+  const previous = buildBambuStatus(printer(), {
+    print: { gcode_state: "IDLE", print_error: 0x0500c010 }
+  })!;
+  const next = buildBambuStatus(printer(), {
+    print: { gcode_state: "IDLE", print_error: 0, hms: [] }
+  })!;
+
+  // Faults are computed from the merged report, so an empty list is the device
+  // clearing them — never a delta that merely omitted the register.
+  assert.deepEqual(mergeBambuStatus(previous, next).faults, []);
+});

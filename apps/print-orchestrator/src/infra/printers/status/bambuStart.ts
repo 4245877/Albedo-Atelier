@@ -2,8 +2,9 @@ import { requireReady } from "../capabilities";
 import type { PrinterConfig } from "../config";
 import { BAMBU_PLATE_GCODE_PATH } from "../files/bambuPackage";
 import { getBambuRawPrint, publishBambuRequest, requestBambuFullReport } from "./bambu";
+import { parseBambuFaults, parseBambuMediaPresent, startBlockingFaults } from "./bambuFaults";
 import { firstText } from "./mapper";
-import { PrinterCommandError } from "./types";
+import { PrinterCommandError, type PrinterFault } from "./types";
 
 /**
  * Starting a print on a Bambu printer over local MQTT — the last link the chain
@@ -25,10 +26,43 @@ import { PrinterCommandError } from "./types";
  * raised as an *unknown* outcome, never a success. That distinction is what the
  * dispatch's `classifyError` turns into "hold the printer and reconcile" instead
  * of "re-send and maybe print twice".
+ *
+ * ## Three outcomes, not two
+ *
+ * Waiting for `gcode_state` alone could only ever answer "running" or "gave up",
+ * and a real failure taught us what that costs. An A1 was handed a plate package
+ * it had itself confirmed present, could not read its MicroSD card, put
+ * `0500-C010` on its screen — and stayed at `IDLE`, because a job that never
+ * begins never leaves idle. The wait therefore timed out into *unknown*, which
+ * is the fail-closed branch: the run was held, the bed stayed reserved, and the
+ * printer went on refusing its own queue as "занят" until a human intervened.
+ * Every part of that was correct given the evidence; the evidence was simply
+ * incomplete, because the device's fault register was never read.
+ *
+ * So the loop now watches both channels and separates:
+ *
+ *  - **started** — the device names our job in a running state;
+ *  - **rejected** — the device raises a fault that provably prevents a start
+ *    (`definitivelyRejected`), so the dispatch unwinds cleanly and a retry is
+ *    safe once the operator has fixed the physical cause;
+ *  - **unknown** — genuinely no verdict, which stays fail-closed as before.
+ *
+ * Because a rejection now returns the moment the device complains, the window
+ * below is only ever spent in the third case — which is why it can be generous
+ * without making a failed launch slow.
  */
 
-/** How long to wait for the device to report the job as started. */
-const START_CONFIRM_TIMEOUT_MS = 20_000;
+/**
+ * How long to wait for the device to report the job as started.
+ *
+ * Bambu parses the plate package off the card before `gcode_state` moves, and on
+ * a large file or a tired card that can take well over the 20s this used to
+ * allow — a timeout that produced an *unknown* outcome for what was often just a
+ * slow, healthy start. The caller's HTTP deadline must exceed this (see the
+ * dashboard's launch timeout); a client that gives up first turns the server's
+ * verdict into a phantom failure, which is precisely what it did.
+ */
+const START_CONFIRM_TIMEOUT_MS = 45_000;
 const START_POLL_INTERVAL_MS = 1_000;
 
 /** Bambu `gcode_state` values that mean a job is under way. */
@@ -57,6 +91,13 @@ export class BambuStartUnconfirmedError extends PrinterCommandError {
 export async function sendBambuStart(printer: PrinterConfig, remotePath: string): Promise<void> {
   requireReady(printer);
 
+  // Pre-flight: refuse before publishing when the device is already saying it
+  // cannot do this. A file can be present, size-verified and completely correct
+  // on a card the printer can no longer read — "the bytes are there" and "the
+  // machine can open them" are different facts, and only the device knows the
+  // second one.
+  assertBambuCanStart(printer);
+
   const { payload, subtaskName } = buildBambuStartPayload(printer, remotePath);
   await publishBambuRequest(printer, { print: payload });
 
@@ -64,6 +105,40 @@ export async function sendBambuStart(printer: PrinterConfig, remotePath: string)
   // 30s pushall timer; the device answers a `pushall` within a second or two.
   await requestBambuFullReport(printer).catch(() => undefined);
   await confirmBambuStart(printer, subtaskName);
+}
+
+/**
+ * Refuses a start the device has already ruled out, naming the physical cause.
+ *
+ * Both checks read the report the status poll is already maintaining, so this
+ * costs no I/O and cannot itself fail. Both raise `definitivelyRejected`, which
+ * is the honest classification: nothing was published, so nothing can be
+ * printing, and the dispatch may unwind completely instead of holding the
+ * printer for a reconciliation that has nothing to reconcile.
+ */
+export function assertBambuCanStart(printer: PrinterConfig): void {
+  const print = getBambuRawPrint(printer.id);
+  if (!print) return; // No report yet — the dispatch gate refuses that separately.
+
+  if (parseBambuMediaPresent(print) === false) {
+    throw new PrinterCommandError(
+      `«${printer.name}» не видит карту MicroSD, с которой запускается печать — ` +
+        "вставьте карту и повторите запуск",
+      true
+    );
+  }
+
+  const blocking = startBlockingFaults(parseBambuFaults(print));
+  if (blocking.length > 0) {
+    throw new PrinterCommandError(describeFault(printer, blocking[0]), true);
+  }
+}
+
+/** One fault as a sentence an operator can act on, code first. */
+function describeFault(printer: PrinterConfig, fault: PrinterFault): string {
+  const what = fault.title ?? "ошибка принтера";
+  const how = fault.action ? ` ${fault.action}` : "";
+  return `«${printer.name}» не может начать печать: ${what} (${fault.code}).${how}`;
 }
 
 /**
@@ -186,6 +261,13 @@ export async function confirmBambuStart(
 
   const deadline = now() + timeoutMs;
   let lastState = "";
+  // Faults already active before the command went out are the printer's standing
+  // complaints, not this start's verdict — only a *newly raised* one is evidence
+  // about the job we just sent. Without this an old, unacknowledged advisory
+  // would fail every subsequent launch on the same machine.
+  const preexisting = new Set(
+    startBlockingFaults(parseBambuFaults(getBambuRawPrint(printer.id) ?? {})).map((f) => f.code)
+  );
 
   while (now() < deadline) {
     const print = getBambuRawPrint(printer.id);
@@ -193,14 +275,27 @@ export async function confirmBambuStart(
       const state = firstText(print.gcode_state).toUpperCase();
       lastState = state || lastState;
 
-      if (state === "FAILED") {
-        throw new PrinterCommandError(
-          `Принтер «${printer.name}» отклонил запуск (gcode_state=FAILED)` +
-            describePrintError(print)
-        );
-      }
+      // The device is running our job: done, whatever else it is complaining about.
       if (RUNNING_STATES.has(state) && namesJob(print, subtaskName)) {
         return;
+      }
+
+      if (state === "FAILED") {
+        throw new PrinterCommandError(
+          `Принтер «${printer.name}» отклонил запуск (gcode_state=FAILED)` + describeFaults(print),
+          true
+        );
+      }
+
+      // A fault that blocks starting, raised after the command went out, while
+      // the job is demonstrably not running: the start was refused. This is the
+      // branch the MicroSD failure needed — the machine sat at IDLE and said so
+      // in the only channel that carried the answer.
+      const raised = startBlockingFaults(parseBambuFaults(print)).filter(
+        (f) => !preexisting.has(f.code)
+      );
+      if (raised.length > 0) {
+        throw new PrinterCommandError(describeFault(printer, raised[0]), true);
       }
     }
     await sleep(intervalMs);
@@ -241,9 +336,10 @@ function normalizeJobName(value: string): string {
     .toLowerCase();
 }
 
-function describePrintError(print: Record<string, unknown>): string {
-  const code = print.print_error ?? print.mc_print_error_code;
-  return typeof code === "number" && code > 0 ? `, код ошибки ${code}` : "";
+/** The device's fault codes as it displays them, appended to a refusal message. */
+function describeFaults(print: Record<string, unknown>): string {
+  const faults = parseBambuFaults(print);
+  return faults.length > 0 ? `, код ошибки ${faults.map((f) => f.code).join(", ")}` : "";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

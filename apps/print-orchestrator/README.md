@@ -515,6 +515,26 @@ and nothing missing from it is guessed:
 | AMS / AMS Lite / CFS | ✓ `print.ams` (kind from the catalogue) | presence of the `box` object only | — |
 | Loaded materials | ✓ `print.ams` / `vt_tray` | job metadata (see below) | — |
 | Extruders, chamber, filament sensor | chamber *sensor* only | ✓ `/printer/objects/list` | — |
+| Faults (codes) | ✓ `print.print_error` + `print.hms` | ✗ a state + message, no code register | error string only |
+| Removable print medium | ✓ `print.sdcard` | ✗ prints from streamed G-code | — |
+
+**Faults are not a status.** A printer can report `idle` and still be unable to
+start: a job that never begins never leaves idle. That is not hypothetical — an
+A1 refused an uploaded, size-verified plate package because it could not read its
+MicroSD card, displayed `0500-C010` on its own screen, and stayed at `IDLE` for
+the whole confirmation window. So `PrinterLiveStatus.faults` is a separate
+channel from `status`, decoded in `status/bambuFaults.ts`, and the codes are
+rendered exactly as the device renders them (`print_error` → `%04X-%04X`, one
+`hms` entry → `%04X_%04X_%04X_%04X`) because that string is the only identifier
+an operator can match against the machine in front of them.
+
+Only codes whose meaning has been **observed on a real machine** carry
+`blocksStart` and may refuse anything; every other code is reported honestly with
+no invented meaning and blocks nothing, because devices emit benign advisories
+through the same register and grounding a printer on an undecoded number is worse
+than the fault. `print.sdcard` is the one structural pre-flight: a `false` there
+is the difference between "the file is on the card" and "the printer can open
+it".
 
 **The model catalogue** (`src/domain/printers/modelSpecs.ts`) exists for one gap:
 Bambu's LAN MQTT never states the build volume. The model is identified from the
@@ -578,6 +598,22 @@ printer, or any printer while offline) — never dressed up as telemetry.
 
 Partial MQTT deltas that omit these fields keep the last known value (merge in
 `mergeBambuStatus`), so the chips do not flicker to "unknown" between reports.
+
+The same rule applies across a **job change**, and getting it wrong was a real
+defect. `mergeBambuRawPrint` resets the merged report when a new subtask is
+announced, so one print's fields cannot leak into the next — but `nozzle_diameter`
+and `nozzle_type` describe the *machine*, not the job, and the announcing delta
+never resends them. Dropping them made the printer's own nozzle unknown for the
+~30 s until the next `pushall`, which is exactly the launch window: every start
+raced against a `printer_nozzle_unknown` review it had caused itself. Worse,
+hardware discovery reads this same cache and replaces its fact set wholesale, so
+the loss was persisted rather than merely transient. They are now in
+`PRINTER_SCOPED_FIELDS` alongside `ams`/`vt_tray`.
+
+Declaring `nozzleDiameterMm` on the printer card is still worth doing: it is the
+`manual` layer beneath live telemetry and discovery, and with all three silent
+the diameter is honestly `null` — which the compatibility rules report as
+`printer_nozzle_unknown`.
 
 ### Creality K2 filament type — what is and isn't available
 

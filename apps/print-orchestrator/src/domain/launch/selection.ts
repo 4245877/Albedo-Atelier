@@ -121,13 +121,28 @@ function launchAdmission(input: LaunchCandidateInput): CompatibilityReason | nul
     return { code: "printer_offline", message: `Принтер «${input.printerName}» не в сети` };
   }
   if (input.status !== "idle") {
+    // When the compatibility rules already named the *cause* — the code the
+    // machine is showing on its own screen — restating it as "недоступен
+    // (error)" adds a line and subtracts information. The named fault stands
+    // alone; only an unexplained error state needs this fallback.
+    if (input.status === "error") {
+      return input.blockers.some((b) => NAMED_FAULT_CODES.has(b.code))
+        ? null
+        : {
+            code: "printer_error",
+            message: `Принтер «${input.printerName}» сейчас недоступен (${input.status})`
+          };
+    }
     return {
-      code: input.status === "error" ? "printer_error" : "printer_busy",
+      code: "printer_busy",
       message: `Принтер «${input.printerName}» сейчас недоступен (${input.status})`
     };
   }
   return null;
 }
+
+/** Compatibility codes that already carry a specific physical cause. */
+const NAMED_FAULT_CODES = new Set(["printer_fault", "printer_media_missing"]);
 
 const WEIGHTS = {
   materialLoaded: 40,
@@ -237,7 +252,14 @@ export function selectLaunchPrinter(inputs: readonly LaunchCandidateInput[]): Se
     // recommends a printer that is switched off (the dispatch then refuses it,
     // and the operator is told "не готово" about a printer the UI just chose).
     const admission = launchAdmission(input);
-    const blockers = admission ? [...input.blockers, admission] : input.blockers;
+    // Deduplicated by code: the here-and-now check and the compatibility rules
+    // describe the same machine, so a printer in error used to produce two
+    // near-identical `printer_error` lines — and an operator reading four
+    // reasons for one physical fault stops reading them.
+    const blockers =
+      admission && !input.blockers.some((b) => b.code === admission.code)
+        ? [...input.blockers, admission]
+        : input.blockers;
     const eligible = blockers.length === 0;
     const scoreBreakdown = eligible ? scoreOf(input) : [];
     const score = scoreBreakdown.reduce((sum, p) => sum + p.points, 0);

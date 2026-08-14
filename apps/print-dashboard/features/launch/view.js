@@ -23,7 +23,11 @@ const STATE_LABEL = {
   ready: { text: "Готово к печати", cls: "badge-idle" },
   needs_confirmation: { text: "Нужно подтверждение", cls: "badge-paused" },
   blocked: { text: "Не готово", cls: "badge-error" },
-  running: { text: "Печатается", cls: "badge-printing" }
+  running: { text: "Печатается", cls: "badge-printing" },
+  /* Не «печатается»: команда ушла, а принтер так и не подтвердил старт. Раньше
+     это состояние показывалось как running — оператор видел «Печатается» рядом
+     с неподвижным принтером и не имел ни причины, ни выхода. */
+  unconfirmed: { text: "Запуск не подтверждён", cls: "badge-paused" }
 };
 
 export function stateLabel(state) {
@@ -126,6 +130,59 @@ function problemsBlock(candidate) {
     </ul>`;
 }
 
+/* Ровно ОДНА причина отказа, и её выбирает backend (preview.primaryProblem).
+
+   Раньше здесь брался «первый блокер по порядку», и один физический сбой —
+   принтер не смог прочитать карту MicroSD — выводился как четыре равноправные
+   строки: занят, в ошибке, недоступен, неизвестно сопло. Три из них были
+   следствиями первой, а настоящая причина не показывалась вовсе. Порядок в
+   массиве не является приоритетом, поэтому выбор перенесён на сервер, а сюда —
+   только отрисовка. Остальные строки никуда не делись: они в «Технических
+   подробностях». */
+function blockedBlock(preview, candidate) {
+  if (!candidate) {
+    return `<p class="launch-reason is-blocked">Нет принтера, готового принять это задание.</p>`;
+  }
+  if (candidate.eligible) return "";
+  // Запасной вариант — на случай ответа без primaryProblem (старый backend или
+  // кандидат, для которого сервер его не считал): показываем действие первого
+  // блокера, как было раньше. Причина по-прежнему одна, просто выбрана хуже.
+  const primary =
+    preview.primaryProblem || candidate.problems.find((p) => p.kind === "blocker") || null;
+  if (!primary) {
+    return `<p class="launch-reason is-blocked">${esc(candidate.reason)}</p>`;
+  }
+  return `
+    <div class="launch-reason is-blocked">
+      <div class="launch-reason-title">${esc(primary.title)}</div>
+      <div class="launch-reason-action">${esc(primary.action)}</div>
+    </div>`;
+}
+
+/* Выход из неподтверждённой попытки — там же, где оператор в неё упёрся.
+
+   Пока такой попытки не видно, задача выглядит вечно «running», а принтер
+   отказывает собственной очереди как «занят». Сама кнопка ничего не решает за
+   оператора: он смотрит на принтер и говорит, что там на самом деле. */
+function unresolvedBlock(preview, ui) {
+  if (!preview.unresolvedRunId) return "";
+  return `
+    <div class="launch-unresolved">
+      <p>
+        Предыдущий запуск не подтверждён принтером. Посмотрите на принтер и
+        отметьте, что произошло, — после этого задание снова можно запустить.
+      </p>
+      <div class="launch-unresolved-actions">
+        <button type="button" class="btn btn-sm" data-launch-resolve="FAILED" ${ui.busy ? "disabled" : ""}>
+          Печать не началась
+        </button>
+        <button type="button" class="btn btn-sm" data-launch-resolve="SUCCEEDED" ${ui.busy ? "disabled" : ""}>
+          Печать идёт / прошла
+        </button>
+      </div>
+    </div>`;
+}
+
 function diagnosticsBlock(preview, candidate) {
   const rows = [
     ["Задание", preview.taskId],
@@ -210,15 +267,8 @@ export function launchModalHtml(preview, ui) {
         : ""
     }
 
-    ${
-      !candidate
-        ? `<p class="launch-reason is-blocked">Нет принтера, готового принять это задание.</p>`
-        : !candidate.eligible
-          ? `<p class="launch-reason is-blocked">${esc(
-              candidate.problems.find((p) => p.kind === "blocker")?.action || candidate.reason
-            )}</p>`
-          : ""
-    }
+    ${blockedBlock(preview, candidate)}
+    ${unresolvedBlock(preview, ui)}
 
     ${confirmationsBlock(confirmations, ui.confirmed)}
     ${problemsBlock(candidate)}

@@ -2,6 +2,7 @@ import mqtt from "mqtt";
 
 import { isObject } from "../../../shared/isObject";
 import type { PrinterConfig } from "../config";
+import { parseBambuFaults, parseBambuMediaPresent } from "./bambuFaults";
 import { parseAmsTrays, resolveActiveFilament } from "./bambuUsage";
 import {
   firstFiniteNumber,
@@ -103,14 +104,25 @@ function readBambuLightState(
   return null;
 }
 
+/**
+ * Fields that describe the **printer**, not the job it happens to be running.
+ *
+ * They survive the reset below, because a new subtask changes nothing about the
+ * hardware. Leaving `nozzle_diameter`/`nozzle_type` out of this list was a real
+ * defect with a confusing signature: the delta announcing a new job carries no
+ * nozzle fields, so starting a print made the machine's own nozzle *unknown* for
+ * the ~30s until the next `pushall`. That window is exactly the launch window,
+ * so every start raced against a `printer_nozzle_unknown` review it had caused
+ * itself — and because hardware discovery reads this same cache and replaces its
+ * fact set wholesale, the loss was persisted rather than merely transient.
+ */
+const PRINTER_SCOPED_FIELDS = ["ams", "vt_tray", "nozzle_diameter", "nozzle_type"] as const;
+
 // Bambu MQTT reports are partial deltas; merge them into the last full state so
 // the status is always built from a complete snapshot. Reset when a different
 // print starts so a previous job's fields can't leak into the next one — except
-// the AMS/external-spool blocks: those describe the PRINTER's loaded filament,
-// not the job, and the delta that announces a new subtask usually carries no
-// `ams`. Dropping them would leave the start-of-print status without trays and
-// break the consumption baseline; the next report with a real `ams` overwrites
-// them as usual.
+// the printer-scoped blocks above, which describe the machine rather than the
+// job and which the announcing delta does not resend.
 export function mergeBambuRawPrint(
   printerId: string,
   print: Record<string, unknown>
@@ -126,8 +138,9 @@ export function mergeBambuRawPrint(
 
   const base: Record<string, unknown> = startedNewPrint ? {} : { ...(previous ?? {}) };
   if (startedNewPrint && previous) {
-    if ("ams" in previous) base.ams = previous.ams;
-    if ("vt_tray" in previous) base.vt_tray = previous.vt_tray;
+    for (const field of PRINTER_SCOPED_FIELDS) {
+      if (field in previous) base[field] = previous[field];
+    }
   }
 
   const merged = { ...base, ...print };
@@ -172,11 +185,14 @@ export function buildBambuStatus(printer: PrinterConfig, payload: unknown): Prin
 
   // A non-zero print_error routinely accompanies a normal PAUSE and can linger
   // after a job ends, so it must not override the device's own paused/idle
-  // state — a real failure arrives as gcode_state FAILED anyway.
+  // state — a real failure arrives as gcode_state FAILED anyway. What the code
+  // *does* do is travel on in `faults`, where a refusal that leaves the machine
+  // sitting at IDLE is still visible to the launch path.
   const baseStatus = toStatusState(rawState);
   const hasErrorCode = printErrorCode !== null && printErrorCode > 0;
   const isError =
     baseStatus === "error" || (hasErrorCode && baseStatus !== "paused" && baseStatus !== "idle");
+  const faults = parseBambuFaults(print);
 
   return {
     id: printer.id,
@@ -201,9 +217,14 @@ export function buildBambuStatus(printer: PrinterConfig, payload: unknown): Prin
     light,
     stateText: rawState || null,
     stateMessage: null,
+    faults,
+    mediaPresent: parseBambuMediaPresent(print),
+    // The device's own code, not a paraphrase of it: `0500-C010` is what the
+    // printer's screen shows and what the operator can act on, where the raw
+    // decimal register was a number that appeared nowhere else in their world.
     error: isError
-      ? hasErrorCode
-        ? `Bambu сообщил об ошибке печати (код ${printErrorCode})`
+      ? faults.length > 0
+        ? `Bambu сообщил об ошибке печати (${faults.map((f) => f.code).join(", ")})`
         : "Bambu сообщил об ошибке печати"
       : null,
     updatedAt: new Date().toISOString()
@@ -235,6 +256,11 @@ export function mergeBambuStatus(
     bedTarget: next.bedTarget ?? previous.bedTarget,
     chamberTemp: next.chamberTemp ?? previous.chamberTemp,
     light: next.light ?? previous.light,
+    // Faults are computed from the *merged* raw report, so `next` already
+    // reflects everything the device has said and an empty list is the device
+    // clearing them — never a delta that merely omitted the register.
+    faults: next.faults,
+    mediaPresent: next.mediaPresent ?? previous.mediaPresent,
     error: next.error,
     updatedAt: next.updatedAt
   };

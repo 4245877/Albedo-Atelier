@@ -204,6 +204,8 @@ async function makeHarness(tmp: string): Promise<Harness> {
       status: "idle" as const,
       remoteStartSupported: true,
       ams: null,
+      faults: [],
+      mediaPresent: null,
       telemetryAgeMs: 1_000,
       materialRemainingSufficient: null,
       printingTimeLeftMs: null,

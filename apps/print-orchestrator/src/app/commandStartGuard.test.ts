@@ -78,6 +78,8 @@ function makeStatus(over: Partial<PrinterLiveStatus> = {}): PrinterLiveStatus {
     light: null,
     stateText: null,
     stateMessage: null,
+    faults: [],
+    mediaPresent: null,
     error: null,
     updatedAt: new Date().toISOString(),
     ...over

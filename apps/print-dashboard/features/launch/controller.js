@@ -24,6 +24,17 @@ function newIdempotencyKey(taskId) {
   return `launch:${taskId}:${rand}`;
 }
 
+/* Дедлайн ОДНОГО запроса запуска.
+
+   Значение по умолчанию (15 с) здесь было прямой ошибкой: POST /launch делает
+   всю цепочку — загрузку файла на принтер и ожидание подтверждения старта, — и
+   сервер сам ограничивает каждый шаг. Клиент сдавался раньше сервера, поэтому
+   оператор видел «Истекло ожидание (15000 мс)» — сообщение этого файла, а не
+   принтера, — в тот момент, когда сервер ещё выяснял настоящий исход. Дедлайн
+   обязан быть БОЛЬШЕ серверного (передача до 180 с + подтверждение старта до
+   45 с), иначе единственный, кто знает правду, не успевает её сказать. */
+const LAUNCH_TIMEOUT_MS = 240000;
+
 export function createLaunchController({ getContent, refresh, close }) {
   let session = null;
 
@@ -101,11 +112,15 @@ export function createLaunchController({ getContent, refresh, close }) {
     render();
 
     try {
-      const res = await apiPost(`/api/print/launch/${encodeURIComponent(session.taskId)}`, {
-        printerId: candidate.printerId,
-        confirmations: [...ui.confirmed],
-        idempotencyKey: session.idempotencyKey
-      });
+      const res = await apiPost(
+        `/api/print/launch/${encodeURIComponent(session.taskId)}`,
+        {
+          printerId: candidate.printerId,
+          confirmations: [...ui.confirmed],
+          idempotencyKey: session.idempotencyKey
+        },
+        { timeoutMs: LAUNCH_TIMEOUT_MS }
+      );
       if (!session) return;
       ui.busy = false;
       ui.done = { printerName: res.printerName || candidate.printerName };
@@ -130,6 +145,34 @@ export function createLaunchController({ getContent, refresh, close }) {
     }
   }
 
+  /* Разрешение неподтверждённой попытки: оператор посмотрел на принтер и говорит,
+     что там на самом деле. Сервер снимает удержание, освобождает стол и
+     возвращает задание в очередь — после чего обычный запуск снова возможен. */
+  async function resolveRun(outcome) {
+    if (!session || session.ui.busy) return;
+    const runId = session.preview?.unresolvedRunId;
+    if (!runId) return;
+
+    session.ui.busy = true;
+    session.ui.error = null;
+    render();
+    try {
+      await apiPost(`/api/print/runs/${encodeURIComponent(runId)}/resolve`, {
+        outcome,
+        reason: "оператор проверил принтер после неподтверждённого запуска"
+      });
+      session.ui.busy = false;
+      session.preview = await load(session.taskId, session.ui.selectedPrinterId);
+      render();
+      await refresh();
+    } catch (err) {
+      if (!session) return;
+      session.ui.busy = false;
+      session.ui.error = err.message || "Не удалось снять удержание";
+      render();
+    }
+  }
+
   /** Делегированные клики внутри окна запуска. */
   function handleClick(e) {
     if (!session) return false;
@@ -138,6 +181,12 @@ export function createLaunchController({ getContent, refresh, close }) {
     if (modeBtn) {
       session.ui.mode = modeBtn.dataset.launchMode;
       render();
+      return true;
+    }
+
+    const resolve = e.target.closest("[data-launch-resolve]");
+    if (resolve && !resolve.disabled) {
+      resolveRun(resolve.dataset.launchResolve);
       return true;
     }
 

@@ -35,6 +35,25 @@ export interface ActiveFilament {
 }
 
 /**
+ * One fault the device is actively complaining about, as distinct from what the
+ * device is *doing*.
+ *
+ * The two were conflated until a real incident made the difference matter: an A1
+ * refused to open a plate package because of a MicroSD read/write exception,
+ * displayed `0500-C010` on its own screen — and reported `gcode_state: IDLE`
+ * throughout, because a job that never starts never leaves idle. Folding the
+ * complaint into `status` would have been wrong in both directions: a lingering
+ * code after a finished print must not wedge a healthy printer into `error`, and
+ * a hard refusal must not be invisible just because the machine looks idle.
+ *
+ * Defined in the domain (`domain/printers/types.ts`) because the scheduling
+ * rules reason about it; re-exported here so adapters keep one import for the
+ * telemetry shape they build.
+ */
+import type { PrinterFault } from "../../../domain/printers/types";
+export type { PrinterFault };
+
+/**
  * Live telemetry for one printer, straight from the device. Adapted from
  * apps/fulfillment (`modules/printers/routes.ts`), extended with temperature
  * targets and chamber readings where the device reports them. Every field that
@@ -84,6 +103,21 @@ export interface PrinterLiveStatus {
   stateText: string | null;
   /** Human-readable reason (pause reason, error text) when the device gives one. */
   stateMessage: string | null;
+  /**
+   * Faults the device is reporting right now, independent of {@link status}.
+   * Empty when the device is quiet — or when the adapter has no fault channel to
+   * read, which is not the same thing and is why nothing infers health from it.
+   */
+  faults: PrinterFault[];
+  /**
+   * Whether the removable medium a print is started *from* is readable.
+   *
+   * `true`/`false` only where the device states it (Bambu reports `sdcard`);
+   * `null` everywhere else, including printers that stream G-code and have no
+   * such medium. A `false` here is the one pre-flight that catches "the file is
+   * verified on a card the printer can no longer read".
+   */
+  mediaPresent: boolean | null;
   error: string | null;
   updatedAt: string;
 }

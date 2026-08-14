@@ -94,6 +94,8 @@ export function buildPrinterView(
     online: status?.online ?? false,
     stateText: status?.stateText ?? null,
     stateMessage: status?.stateMessage ?? null,
+    faults: status?.faults ?? [],
+    mediaPresent: status?.mediaPresent ?? null,
     updatedAt: status?.updatedAt ?? null,
     job: status?.currentFile ?? null,
     progress: status?.progressPct ?? null,

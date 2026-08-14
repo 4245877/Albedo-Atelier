@@ -17,7 +17,7 @@ import type { ManualOperationService } from "../operations/manualOperationServic
 import type { PrintQueueService } from "../printQueue/printQueueService";
 import { formatEta } from "../printQueue/projection";
 import type { SchedulerService } from "../scheduling/schedulerService";
-import { explainLaunchFailure, type LaunchProblem } from "./problems";
+import { explainLaunchFailure, primaryProblem, type LaunchProblem } from "./problems";
 
 /**
  * The **one** operation behind the "Запустить печать" button.
@@ -65,7 +65,16 @@ export type LaunchState =
   /** No printer can run this right now, and no confirmation would change that. */
   | "blocked"
   /** A run for this task is already live. */
-  | "running";
+  | "running"
+  /**
+   * A start was dispatched and the printer never confirmed it.
+   *
+   * Deliberately not folded into `running`: the task genuinely was not printing,
+   * and calling it "running" is the specific lie that let an operator watch an
+   * idle machine while the UI insisted a job was under way. It is also not
+   * `blocked`, because the obstacle is a question this operator can answer.
+   */
+  | "unconfirmed";
 
 export interface LaunchCandidateView extends LaunchCandidate {
   /** Operator-facing rendering of the blockers/reviews/warnings. */
@@ -91,6 +100,18 @@ export interface LaunchPreview {
   confirmations: LaunchConfirmation[];
   /** The live run holding this task, when one exists. */
   activeRunId: string | null;
+  /**
+   * The single problem to show as *the* reason the launch is refused, or null.
+   * Always one of the focused candidate's own `problems`, so the headline the
+   * operator reads and the diagnostics list behind it are the same data.
+   */
+  primaryProblem: LaunchProblem | null;
+  /**
+   * The run whose outcome is still unresolved and is holding this task, when
+   * there is one. The UI turns it into the "отметьте, что произошло" action, so
+   * the way out of a failed attempt is where the attempt failed.
+   */
+  unresolvedRunId: string | null;
 }
 
 export interface LaunchRequest {
@@ -155,7 +176,7 @@ export class LaunchService {
       taskId: task.id,
       title: task.title,
       displayTitle: stripExtension(task.title),
-      state: this.resolveState(task, views, recommendedPrinterId, activeRun !== null, focus),
+      state: this.resolveState(task, views, recommendedPrinterId, activeRun, focus),
       material,
       nozzleMm,
       etaSeconds,
@@ -165,7 +186,19 @@ export class LaunchService {
       recommendedPrinterId,
       candidates: views,
       confirmations: focus ? this.confirmationsFor(focus, material) : [],
-      activeRunId: activeRun?.id ?? null
+      activeRunId: activeRun?.id ?? null,
+      // One cause, chosen from the problems already listed — never a new
+      // sentence, so the headline and the diagnostics can never disagree. When
+      // nothing is recommended at all, the least-blocked candidate supplies it:
+      // "нет подходящего принтера" with no reason is the least useful true
+      // statement the screen could make.
+      primaryProblem: primaryProblem((focus ?? leastBlocked(views))?.problems ?? []),
+      // The exit from an unconfirmed attempt, offered where the operator hits
+      // the wall rather than in a separate screen they have no reason to open.
+      unresolvedRunId:
+        activeRun && activeRun.startedAt === null && activeRun.state !== "RUNNING"
+          ? activeRun.id
+          : null
     };
   }
 
@@ -439,10 +472,21 @@ export class LaunchService {
     task: PrintTask,
     candidates: LaunchCandidateView[],
     recommendedPrinterId: string | null,
-    hasActiveRun: boolean,
+    activeRun: { state: string; startedAt: string | null } | null,
     focus: LaunchCandidateView | null
   ): LaunchState {
-    if (hasActiveRun || task.state === "PRINTING" || task.state === "DISPATCHING") return "running";
+    // A dispatched start the printer never confirmed. Reported as itself rather
+    // than as `running`, because the physical truth is that nothing is printing
+    // — and because the operator's next action (resolve the attempt) is
+    // different from anything they would do about a live print.
+    if (
+      activeRun &&
+      activeRun.startedAt === null &&
+      (activeRun.state === "PENDING" || activeRun.state === "UNKNOWN")
+    ) {
+      return "unconfirmed";
+    }
+    if (activeRun || task.state === "PRINTING" || task.state === "DISPATCHING") return "running";
     // DRAFT is the pre-queue state: the artifact is still being analysed/sliced,
     // so there is nothing to launch yet and no printer choice to explain.
     if (task.state === "DRAFT") return "preparing";
@@ -455,10 +499,14 @@ export class LaunchService {
   }
 }
 
+/** The candidate closest to being startable — the most useful "why not". */
+function leastBlocked(candidates: LaunchCandidateView[]): LaunchCandidateView | null {
+  return [...candidates].sort((a, b) => a.blockers.length - b.blockers.length)[0] ?? null;
+}
+
 /** The blockers of the least-blocked candidate — the most useful "why not". */
 function firstBlockers(candidates: LaunchCandidateView[]): CompatibilityReason[] {
-  const best = [...candidates].sort((a, b) => a.blockers.length - b.blockers.length)[0];
-  return best ? best.blockers : [];
+  return leastBlocked(candidates)?.blockers ?? [];
 }
 
 /** `3U-default.3mf` → `3U-default`. The operator named the model, not the container. */

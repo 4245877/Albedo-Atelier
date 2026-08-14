@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { getBambuRawPrint, mergeBambuRawPrint } from "../status/bambu";
+import { firstFiniteNumber, firstText } from "../status/mapper";
 import { parseBambuAms, parseBambuFirmware, parseBambuMaterials, parseBambuSerial } from "./bambu";
 
 /*
@@ -115,4 +117,28 @@ test("an AMS tray that is feeding suppresses the external spool entry", () => {
 
 test("no filament anywhere yields null, not an empty list", () => {
   assert.equal(parseBambuMaterials({}), null);
+});
+
+/*
+ * Discovery reads the SAME merged report the status poll maintains, and it
+ * replaces its persisted fact set wholesale on every successful probe. That
+ * combination is what turned a transient cache reset into a durable loss: a
+ * start announced a new subtask, the merge dropped `nozzle_diameter`, and the
+ * next probe wrote a fact set without it — so the printer's nozzle became
+ * unknown in the hardware card too, not just for a poll. The fix belongs in the
+ * merge; this pins the chain from here.
+ */
+test("a probe after a job change still sees the machine's nozzle", () => {
+  const id = "discovery-nozzle";
+  mergeBambuRawPrint(id, {
+    gcode_state: "IDLE",
+    subtask_id: "job-1",
+    nozzle_diameter: "0.4",
+    nozzle_type: "stainless_steel"
+  });
+  mergeBambuRawPrint(id, { gcode_state: "PREPARE", subtask_id: "job-2" });
+
+  const print = getBambuRawPrint(id)!;
+  assert.equal(firstFiniteNumber(print.nozzle_diameter), 0.4);
+  assert.equal(firstText(print.nozzle_type), "stainless_steel");
 });

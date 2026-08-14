@@ -6,6 +6,7 @@ import type {
   CompatibilityResult,
   Dimensions
 } from "../../domain/scheduling/compatibility";
+import type { PrinterFault } from "../../domain/printers/types";
 import type { OperatorAvailability } from "../../domain/operations/schedule";
 import type { ManualOperation } from "../../domain/operations/types";
 import type { EtaSource } from "../../domain/scheduling/eta";
@@ -31,6 +32,14 @@ export interface SchedulerPrinterRef {
   remoteStartSupported: boolean;
   /** AMS/multi-material support; null when unknown. */
   ams: boolean | null;
+  /**
+   * Faults the device is reporting, independent of {@link status}. Carried all
+   * the way to the compatibility rules because a printer can read `idle` and
+   * still be unable to start — see {@link PrinterFault}.
+   */
+  faults: PrinterFault[];
+  /** Readability of the medium a print starts from; null where unreported. */
+  mediaPresent: boolean | null;
   /** ms since the last telemetry update, or null when there is none. */
   telemetryAgeMs: number | null;
   /** Whether remaining material covers a print; null = unknown (fails the night gate honestly). */

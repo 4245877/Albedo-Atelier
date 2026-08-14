@@ -244,6 +244,8 @@ function eligibilityFor(status: PrinterLiveStatus): EligibilityQueries {
     status: status.status as SchedulerPrinterRef["status"],
     remoteStartSupported: true,
     ams: null,
+    faults: [],
+    mediaPresent: null,
     telemetryAgeMs: 1000,
     materialRemainingSufficient: null,
     printingTimeLeftMs: null,

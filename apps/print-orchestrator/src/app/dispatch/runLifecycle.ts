@@ -21,6 +21,26 @@ import { classifyPrintOutcome } from "../printOutcome";
  */
 export type BedClearanceConfirmation = "part_removed" | "plate_swapped" | "auto_cleared";
 
+/**
+ * Why this printer cannot have started the job, in its own words — or null when
+ * it is not saying anything that rules a start out.
+ *
+ * Only faults the adapter has *confirmed* the meaning of ever qualify
+ * (`blocksStart`); an unrecognised code is reported to the operator but never
+ * used to conclude anything here, because concluding from a number nobody has
+ * decoded is how a healthy printer gets its run cancelled underneath it.
+ */
+export function startRefusalReason(status: PrinterLiveStatus): string | null {
+  if (status.mediaPresent === false) {
+    return "принтер не видит карту памяти, с которой запускается печать";
+  }
+  const blocking = status.faults.find((f) => f.blocksStart);
+  return blocking ? `${blocking.title ?? "ошибка принтера"} (${blocking.code})` : null;
+}
+
+/** Run states in which no print has been observed running yet. */
+const UNSTARTED_RUN_STATES = new Set<PrintRun["state"]>(["PENDING", "UNKNOWN"]);
+
 /** Loose filename match — devices may report a path while the run holds a basename. */
 function sameFile(a: string | null, b: string | null): boolean {
   if (!a || !b) return false;
@@ -148,6 +168,27 @@ export class RunLifecycleService {
       return;
     }
 
+    // A dispatched start the device has since *refused*.
+    //
+    // Three facts together, none of them a guess: the run never reported a
+    // start, the printer is demonstrably not printing (the busy branch above
+    // returned), and it is reporting a fault that provably prevents a start. A
+    // print that is not running and cannot begin is not ambiguous, so this is
+    // positive evidence rather than the silence the hold below exists for.
+    //
+    // Without this branch the fail-closed hold was permanent in practice: an A1
+    // that could not read its MicroSD card left an UNKNOWN run reserving the
+    // bed, which made the printer report itself «занят» to the very queue it was
+    // refusing — a printer blocking itself, with no exit but a human who knew to
+    // look for one.
+    if ((run.state === "PENDING" || run.state === "UNKNOWN") && run.startedAt === null) {
+      const refusal = startRefusalReason(next);
+      if (refusal) {
+        this.store.transaction(() => this.unwindUnstarted(run, refusal));
+        return;
+      }
+    }
+
     if (next.status === "error") {
       if (run.state === "RUNNING" || run.state === "PAUSED") {
         this.completeRun(run.id, "FAILED", { reason: next.error ?? "принтер сообщил об ошибке" });
@@ -244,6 +285,30 @@ export class RunLifecycleService {
         `Принтер сейчас печатает «${status.currentFile}» — разрешать эту печать вручную нельзя`
       );
     }
+
+    // "It never started" is not the same answer as "it failed", and recording it
+    // as the latter is what made a refused launch a dead end: `completeRun` puts
+    // the task in a terminal FAILED, so the operator who had just fixed the
+    // physical cause had no job left to relaunch. A run that was never observed
+    // printing unwinds instead — everything it reserved is released and the task
+    // goes back to the queue, exactly where a corrected retry can pick it up.
+    if (
+      (outcome === "FAILED" || outcome === "CANCELLED") &&
+      run.startedAt === null &&
+      UNSTARTED_RUN_STATES.has(run.state)
+    ) {
+      this.store.transaction(() =>
+        this.unwindUnstarted(
+          run,
+          options.reason ?? "оператор подтвердил, что печать не началась",
+          { audit: "unwound_unstarted", outcome: "unstarted (resolved by operator)" }
+        )
+      );
+      const saved = repos.printRuns.getById(runId);
+      if (!saved) throw new NotFoundError(`Печать «${runId}»`);
+      return saved;
+    }
+
     return this.completeRun(runId, outcome, { reason: options.reason, actor: options.actor });
   }
 
@@ -607,27 +672,68 @@ export class RunLifecycleService {
   }
 
   private unwindNeverSent(run: PrintRun): void {
+    this.unwindUnstarted(run, "рестарт до отправки команды", {
+      only: "PENDING",
+      audit: "unwound_never_sent",
+      outcome: "never-sent (restart before dispatch)"
+    });
+  }
+
+  /**
+   * Releases everything a start reserved, for a print that provably never began.
+   *
+   * The task goes back to `QUEUED` rather than to a terminal `FAILED`, because
+   * nothing about the job was wrong: the printer refused it, and once the
+   * physical cause is fixed the same job is meant to be launched again. The
+   * start guard is dropped for the same reason — it exists to hold a printer
+   * whose outcome is unknown, and this outcome is known.
+   *
+   * Every step is conditional on the row still being in the state it was
+   * reserved in, so a race with the operator's own resolution (or with a poll
+   * that got there first) leaves the winner's work intact instead of overwriting
+   * it. Caller supplies the transaction.
+   */
+  private unwindUnstarted(
+    run: PrintRun,
+    reason: string,
+    options: {
+      only?: PrintRun["state"];
+      audit?: string;
+      outcome?: string;
+    } = {}
+  ): void {
     const repos = this.store.repositories;
     const iso = this.nowIso();
     const current = repos.printRuns.getById(run.id);
-    if (!current || current.state !== "PENDING") return;
+    if (!current) return;
+    if (options.only ? current.state !== options.only : !UNSTARTED_RUN_STATES.has(current.state)) {
+      return;
+    }
 
     repos.printRuns.update({
       ...current,
       state: "CANCELLED",
       endedAt: iso,
       updatedAt: iso,
-      metadata: { ...current.metadata, dispatchOutcome: "never-sent (restart before dispatch)" }
+      metadata: {
+        ...current.metadata,
+        dispatchOutcome: options.outcome ?? "refused (device reported it could not start)",
+        endReason: reason
+      }
     });
-    this.audit("print_run", current.id, "unwound_never_sent", {});
+    this.audit("print_run", current.id, options.audit ?? "unwound_refused", {
+      from: current.state,
+      to: "CANCELLED",
+      detail: { reason }
+    });
 
     if (current.dispatchAttemptId) {
       const attempt = repos.dispatchAttempts.getById(current.dispatchAttemptId);
-      if (attempt && attempt.state === "PENDING") {
+      if (attempt && (attempt.state === "PENDING" || attempt.state === "SENT")) {
         repos.dispatchAttempts.update({
           ...attempt,
           state: "FAILED",
-          error: "рестарт до отправки команды",
+          error: reason,
           completedAt: iso,
           updatedAt: iso
         });
@@ -643,13 +749,17 @@ export class RunLifecycleService {
         repos.bedCycles.update({ ...bed, state: "CLEAR", clearedAt: iso, updatedAt: iso });
       }
     }
+    const guard = repos.startGuards.get(current.printerId);
+    if (guard && (guard.runId === current.id || sameFile(guard.file, current.file))) {
+      repos.startGuards.delete(current.printerId);
+    }
     const task = repos.tasks.getById(current.taskId);
     if (task && task.state === "DISPATCHING") {
       const back = repos.tasks.update({ ...task, state: "ASSIGNED", updatedAt: iso });
       repos.tasks.update({
         ...back,
         state: "QUEUED",
-        reason: "рестарт до отправки команды — задание возвращено в очередь",
+        reason: `${reason} — задание возвращено в очередь`,
         updatedAt: iso
       });
     }

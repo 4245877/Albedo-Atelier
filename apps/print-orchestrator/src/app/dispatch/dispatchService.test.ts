@@ -64,6 +64,8 @@ function idle(over: Partial<PrinterLiveStatus> = {}): PrinterLiveStatus {
     light: null,
     stateText: null,
     stateMessage: null,
+    faults: [],
+    mediaPresent: null,
     error: null,
     updatedAt: new Date().toISOString(),
     ...over
@@ -178,6 +180,10 @@ function schedulerPrinter(knobs: Harness["knobs"]): SchedulerPrinterRef {
     status: knobs.status.status as SchedulerPrinterRef["status"],
     remoteStartSupported: true,
     ams: null,
+    // Straight from the harness's live status, so a test that scripts a fault
+    // sees it in the compatibility rules too — the same join the runtime makes.
+    faults: knobs.status.faults,
+    mediaPresent: knobs.status.mediaPresent,
     telemetryAgeMs: knobs.telemetryAgeMs,
     materialRemainingSufficient: null,
     printingTimeLeftMs: null,

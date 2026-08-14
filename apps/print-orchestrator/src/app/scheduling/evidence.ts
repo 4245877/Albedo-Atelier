@@ -91,7 +91,9 @@ export class EvidenceResolver {
       online: printer.online,
       status: printer.status,
       remoteStartSupported: printer.remoteStartSupported,
-      ams: printer.ams
+      ams: printer.ams,
+      faults: printer.faults,
+      mediaPresent: printer.mediaPresent
     };
   }
 
@@ -183,6 +185,7 @@ export class EvidenceResolver {
       profileSetBlocked: profileSet ? profileSet.validation === "blocked" : false,
       runtimeAvailable: this.ctx.config.runtimeAvailable,
       bedCycle: this.bedStateFor(printer, bed ? bed.state : null),
+      heldByUnstartedRun: this.heldByUnstartedRun(printer.id),
       buildVolumeConflict,
       telemetryAgeMs: printer.telemetryAgeMs,
       maintenanceBlockers: [],
@@ -224,6 +227,21 @@ export class EvidenceResolver {
     const fresh = printer.telemetryAgeMs !== null && printer.telemetryAgeMs <= staleMs;
     if (printer.online && fresh && printer.status === "idle") return "CLEAR";
     return "UNKNOWN";
+  }
+
+  /**
+   * Whether a dispatched-but-never-observed run is holding this printer.
+   *
+   * Read from the same authoritative `findActiveByPrinter` query the dispatch
+   * path uses, so the matrix, the launch preview and the gate cannot disagree
+   * about it. `startedAt === null` is the discriminator: a run that was once
+   * seen printing is a real occupancy even if its ending is now in doubt, while
+   * one that never reported a start is an unresolved *attempt*.
+   */
+  private heldByUnstartedRun(printerId: string): boolean {
+    const run = this.ctx.store.repositories.printRuns.findActiveByPrinter(printerId);
+    if (!run) return false;
+    return (run.state === "PENDING" || run.state === "UNKNOWN") && run.startedAt === null;
   }
 
   /** The build volume from the approved machine profile bound to this printer id, or null. */

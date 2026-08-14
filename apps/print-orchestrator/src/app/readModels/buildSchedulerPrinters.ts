@@ -53,6 +53,11 @@ export function buildSchedulerPrinters(deps: SchedulerPrintersDeps): SchedulerPr
       // to `ams_unknown` and land in review, even on the A1 Combo whose AMS the
       // service has been reading all along.
       ams: view.ams ?? null,
+      // What the device is complaining about, carried separately from what it is
+      // doing: an idle printer with an unreadable card is idle and unusable at
+      // the same time, and only this field can say the second half.
+      faults: view.faults,
+      mediaPresent: view.mediaPresent,
       telemetryAgeMs: Number.isFinite(updatedMs) ? Math.max(0, now - updatedMs) : null,
       // Remaining-material telemetry does not exist; the scheduler resolves
       // sufficiency from operator material overrides instead.

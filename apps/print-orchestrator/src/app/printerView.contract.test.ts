@@ -77,6 +77,8 @@ function liveStatus(overrides: Partial<PrinterLiveStatus> = {}): PrinterLiveStat
     light: true,
     stateText: "printing",
     stateMessage: null,
+    faults: [],
+    mediaPresent: null,
     error: null,
     updatedAt: FIXED_NOW,
     ...overrides,
