@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { itemHtml } from "../features/uploads/view.js";
+import { itemHtml, listSummary } from "../features/uploads/view.js";
 
 /*
  * Разметка карточки загрузки.
@@ -96,4 +96,50 @@ test("файл, разложенный по нескольким частям м
 test("файл без нескольких частей не показывает лишнюю строку", () => {
   const html = itemHtml(item(ready({ data: { threeMfClass: "generic", modelPartCount: 1 } })));
   assert.doesNotMatch(html, /Частей модели/);
+});
+
+/*
+ * Высота списка. Развёрнутая таблица свойств у каждого файла растягивала раздел
+ * на тысячи пикселей: с десятком загрузок до «Слайсинга» приходилось листать
+ * несколько экранов. Свойства сворачиваются, но всё, по чему принимают решение —
+ * имя, статус, вердикт и находки, — остаётся на виду.
+ */
+
+test("таблица свойств лежит в свёрнутом <details>, а не разворачивает карточку", () => {
+  const html = itemHtml(item(ready({ data: { threeMfClass: "generic", objectCount: 2 } })));
+  assert.match(html, /<details class="upload-details" data-upload-details>/);
+  assert.doesNotMatch(html, /data-upload-details open/);
+  assert.match(html, /Свойства файла/);
+});
+
+test("свойства раскрыты, когда об этом просит контроллер (один-два файла)", () => {
+  const html = itemHtml(item(ready({ data: { threeMfClass: "generic", objectCount: 2 } })), { detailsOpen: true });
+  assert.match(html, /data-upload-details open/);
+});
+
+test("находки видны всегда и стоят выше свёрнутых свойств", () => {
+  const html = itemHtml(
+    item(
+      ready({
+        verdict: "blocked",
+        blockers: [{ code: "zip_corrupt", message: "Повреждённый каталог ZIP" }],
+        data: { threeMfClass: "generic", objectCount: 2 }
+      })
+    )
+  );
+  assert.ok(
+    html.indexOf("Повреждённый каталог ZIP") < html.indexOf("upload-details"),
+    "причина должна читаться раньше, чем таблица свойств"
+  );
+});
+
+test("сводка списка разделяет «в работе», «принято» и «требуют внимания»", () => {
+  const s = listSummary([
+    { stage: "uploading", analysis: null },
+    { stage: "analyzing", analysis: { state: "running" } },
+    { stage: "done", analysis: { state: "ready", verdict: "schedulable" } },
+    { stage: "done", analysis: { state: "ready", verdict: "blocked" } },
+    { stage: "error", analysis: null }
+  ]);
+  assert.deepEqual(s, { total: 5, working: 2, ready: 1, attention: 2 });
 });

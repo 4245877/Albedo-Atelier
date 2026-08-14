@@ -1335,6 +1335,9 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
      отступами, а не display:flex, — иначе у .slice-details пропал бы
      системный треугольник-маркер. */
   .ops-details > summary { min-height: 44px; }
+  /* Тач-цель раскрывашки свойств файла (.upload-details) задаётся в
+     workflows.css: там же лежит её базовый padding, и правило из этого файла
+     при равной специфичности проиграло бы более позднему по каскаду. */
   .slice-details summary { padding: 11px 0; }
 
   /* Нативные флажки: 13 px по умолчанию — вдвое меньше любой другой цели

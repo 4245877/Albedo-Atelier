@@ -131,10 +131,13 @@ export function profilesHtml(state) {
   const cols = groups
     .map((type) => {
       const rows = state.profiles.filter((p) => p.type === type);
+      // Профилей в каталоге OrcaSlicer десятки, и колонка росла во всю их длину:
+      // список получает собственную прокрутку, а число над ним говорит, сколько
+      // там всего (иначе видимый «хвост» читался бы как весь набор).
       return `
         <div class="slice-col">
           <div class="slice-col-head">${TYPE_LABEL[type]} <span class="slice-count">${rows.length}</span></div>
-          <ul class="slice-list">
+          <ul class="slice-list slice-scroll">
             ${rows.map(profileRow).join("") || `<li class="slice-empty">нет профилей</li>`}
           </ul>
         </div>`;
@@ -264,7 +267,10 @@ export function createSetHtml(state) {
         <label data-target-input="class" hidden>Класс<select name="printerClass" disabled>${classOpts || `<option value="">—</option>`}</select></label>
       </fieldset>
       ${note}
-      <button type="submit" class="btn btn-primary btn-sm"${disabledAttr}>Создать и проверить</button>
+      <div class="sch-edit-actions">
+        <button type="submit" class="btn btn-primary btn-sm"${disabledAttr}>Создать и проверить</button>
+        <span class="slice-hint">Проверка совместимости идёт сразу после создания.</span>
+      </div>
     </form>`;
 }
 
@@ -272,9 +278,11 @@ export function variantsHtml(state) {
   if (!state.variants.length) return "";
   const rows = state.variants.map((v) => variantRow(state, v)).join("");
   // aria-live: смена статусов (в очереди → слайсинг… → готово/ошибка) объявляется
-  // скринридером без перефокусировки.
-  return `<div class="slice-panel"><div class="slice-panel-head"><b>Варианты слайсинга</b></div>
-    <ul class="slice-list" role="status" aria-live="polite">${rows}</ul></div>`;
+  // скринридером без перефокусировки. Список нарезок накапливается за всё время
+  // работы фермы, поэтому — с ограниченной высотой и своей прокруткой.
+  return `<div class="slice-panel"><div class="slice-panel-head"><b>Варианты слайсинга</b>
+      <span class="slice-hint">${state.variants.length} · новые сверху</span></div>
+    <ul class="slice-list slice-scroll" role="status" aria-live="polite">${rows}</ul></div>`;
 }
 
 function variantRow(state, v) {
@@ -531,7 +539,9 @@ export function newSliceHtml(state) {
         <label>Набор профилей<select name="profileSetId" required>${setOpts}</select></label>
       </div>
       ${runtimeBlock}
-      <button type="submit" class="btn btn-primary btn-sm"${disabledAttr}>Нарезать</button>
+      <div class="sch-edit-actions">
+        <button type="submit" class="btn btn-primary btn-sm"${disabledAttr}>Нарезать</button>
+      </div>
     </form>`;
 }
 

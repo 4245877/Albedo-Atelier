@@ -11,11 +11,15 @@ import { apiGet, apiPost, uploadArtifact } from "../../api.js";
 import { createInflightGuard } from "../../shared/inflight.js";
 import { createPoller } from "../../shared/polling.js";
 import { $, cssEscape, esc, toast } from "../../util.js";
-import { itemHtml } from "./view.js";
+import { itemHtml, listBarHtml } from "./view.js";
 
 const ACCEPT = ".stl,.3mf,.gcode";
 const MAX_PARALLEL = 3;
 const POLL_MS = 1500;
+/* До скольких карточек список показывается целиком. Дальше он живёт в блоке с
+   собственной прокруткой: иначе полсотни моделей уносили «Слайсинг», «Очередь»
+   и все прочие разделы на несколько экранов вниз. */
+const INLINE_ITEMS = 3;
 
 /* Модель одного элемента загрузки. Ключ — localId (для активных загрузок) или
    artifact.id (для уже сохранённых). */
@@ -27,6 +31,13 @@ const uploadQueue = [];
 const fileStore = new Map();
 /* Защита от двойного запуска повторного анализа (по artifactId). */
 const analyzeGuard = createInflightGuard();
+/* Явный выбор оператора «раскрыть/свернуть свойства» по ключу элемента. Живёт
+   вне разметки: список перерисовывается на каждом тике опроса, и без этой карты
+   раскрытые свойства схлопывались бы, как только у соседнего файла сменился
+   статус. Пусто = поведение по умолчанию (см. detailsOpenFor). */
+const detailPrefs = new Map();
+/* Свёрнут ли список целиком (кнопка в шапке блока). */
+let listCollapsed = false;
 
 export function setupUploads() {
   const body = $("#uploads-body");
@@ -42,7 +53,15 @@ export function setupUploads() {
       <div class="upload-drop-hint">STL, 3MF, G-code · до нескольких файлов сразу</div>
       <input type="file" id="upload-input" accept="${ACCEPT}" multiple hidden />
     </div>
-    <ul class="upload-list" id="upload-list"></ul>`;
+    <div class="upload-listbox" id="upload-listbox" hidden>
+      <div class="upload-listbar">
+        <span class="panel-sub">Загруженные файлы</span>
+        <span class="upload-counts" id="upload-counts"></span>
+        <span class="slice-spacer"></span>
+        <button type="button" class="btn btn-sm" id="upload-collapse" aria-controls="upload-list"></button>
+      </div>
+      <ul class="upload-list" id="upload-list"></ul>
+    </div>`;
 
   const drop = $("#upload-drop");
   const input = $("#upload-input");
@@ -61,6 +80,11 @@ export function setupUploads() {
   input.addEventListener("change", () => {
     addFiles(input.files);
     input.value = ""; // позволяет выбрать тот же файл повторно
+  });
+
+  $("#upload-collapse").addEventListener("click", () => {
+    listCollapsed = !listCollapsed;
+    render();
   });
 
   ["dragenter", "dragover"].forEach((ev) =>
@@ -318,19 +342,42 @@ async function reanalyze(artifactId) {
 
 /* ── Отрисовка (разметка — view.js) ─────────────────────────── */
 
+/* Свойства файла раскрыты по умолчанию, пока файлов один-два: обычный сценарий
+   «загрузил модель — смотрю, что с ней». Как только список становится списком,
+   по умолчанию они свёрнуты, и каждая карточка занимает одну строку. Явный
+   выбор оператора всегда сильнее умолчания. */
+function detailsOpenFor(item) {
+  const pref = detailPrefs.get(item.key);
+  return pref === undefined ? items.length <= 2 : pref;
+}
+
 function render() {
   const list = $("#upload-list");
-  if (!list) return;
+  const box = $("#upload-listbox");
+  if (!list || !box) return;
+
+  box.hidden = items.length === 0;
   if (items.length === 0) {
     list.innerHTML = "";
     return;
   }
-  list.innerHTML = items.map((it) => itemHtml(it)).join("");
+
+  $("#upload-counts").innerHTML = listBarHtml(items);
+
+  const btn = $("#upload-collapse");
+  btn.textContent = listCollapsed ? `▸ Показать список (${items.length})` : "▾ Свернуть список";
+  btn.setAttribute("aria-expanded", listCollapsed ? "false" : "true");
+  box.classList.toggle("is-collapsed", listCollapsed);
+  // Длинный список получает собственную прокрутку — страница из-за него больше
+  // не растёт, и кнопки соседних разделов остаются в пределах экрана.
+  box.classList.toggle("is-scrollable", items.length > INLINE_ITEMS);
+
+  list.innerHTML = items.map((it) => itemHtml(it, { detailsOpen: detailsOpenFor(it) })).join("");
 }
 
 function renderItem(item) {
   const el = document.querySelector(`[data-upload="${cssEscape(item.key)}"]`);
-  if (el) el.outerHTML = itemHtml(item);
+  if (el) el.outerHTML = itemHtml(item, { detailsOpen: detailsOpenFor(item) });
 }
 
 /* ── Делегированные клики (повторный анализ) ────────────────── */
@@ -342,6 +389,19 @@ document.addEventListener("click", (e) => {
     void reanalyze(btn.dataset.reanalyze);
   }
 });
+
+/* Раскрытие свойств запоминается по ключу элемента: событие toggle не всплывает,
+   поэтому слушаем его на фазе перехвата. */
+document.addEventListener(
+  "toggle",
+  (e) => {
+    const d = e.target;
+    if (!d || typeof d.matches !== "function" || !d.matches("[data-upload-details]")) return;
+    const li = d.closest("[data-upload]");
+    if (li) detailPrefs.set(li.dataset.upload, d.open);
+  },
+  true
+);
 
 // Уход со страницы снимает таймер опроса и обрывает активный запрос.
 window.addEventListener("pagehide", () => poller.stop());

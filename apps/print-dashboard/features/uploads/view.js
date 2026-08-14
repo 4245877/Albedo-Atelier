@@ -22,7 +22,11 @@ const STATE_LABEL = {
   failed: "ошибка анализа"
 };
 
-export function itemHtml(item) {
+/* Одна карточка списка загрузок. `detailsOpen` — раскрыта ли таблица свойств
+   этого файла: при десятках моделей развёрнутые свойства у каждой растягивали
+   раздел на тысячи пикселей, поэтому по умолчанию они свёрнуты (см. controller),
+   а имя, статус, вердикт, находки и действия остаются на виду всегда. */
+export function itemHtml(item, { detailsOpen = false } = {}) {
   const a = item.analysis;
   const format = a?.detectedFormat || guessFormat(item.name);
   const badge = statusBadge(item);
@@ -34,7 +38,7 @@ export function itemHtml(item) {
          <div class="upload-pct">${Math.round(item.progress * 100)}%</div>`
       : "";
 
-  const analysisBlock = a && (a.state === "ready" || a.state === "failed") ? analysisHtml(item, a) : "";
+  const analysisBlock = a && (a.state === "ready" || a.state === "failed") ? analysisHtml(item, a, detailsOpen) : "";
   const errorBlock =
     item.stage === "error"
       ? `<div class="upload-error">${esc(item.error || "ошибка загрузки")}</div>`
@@ -74,7 +78,7 @@ function statusBadge(item) {
   return chip(esc(v.label), v.cls);
 }
 
-function analysisHtml(item, a) {
+function analysisHtml(item, a, detailsOpen) {
   if (a.state === "failed") {
     return `
       <div class="upload-analysis">
@@ -89,13 +93,45 @@ function analysisHtml(item, a) {
   const warns = (a.warnings || []).map((w) => findingHtml(w, "upload-warn", "⚠")).join("");
   const blocks = (a.blockers || []).map((b) => findingHtml(b, "upload-block", "⛔")).join("");
 
+  // Порядок намеренный: сначала вердикт и находки (почему файл нельзя печатать),
+  // и только потом — таблица свойств. Свойства нужны при разборе, находки — всегда.
   return `
     <div class="upload-analysis">
       ${verdictNote(a)}
-      ${rows ? `<dl class="upload-meta">${rows}</dl>` : ""}
       ${warns || blocks ? `<ul class="upload-findings">${blocks}${warns}</ul>` : ""}
+      ${
+        rows
+          ? `<details class="upload-details" data-upload-details${detailsOpen ? " open" : ""}>
+               <summary>Свойства файла</summary>
+               <dl class="upload-meta">${rows}</dl>
+             </details>`
+          : ""
+      }
       ${taskHtml(item)}
     </div>`;
+}
+
+/* Сводка над списком: сколько файлов и в каком они состоянии. С десятками
+   загрузок «сколько всего» и «сколько с ошибкой» — первое, что нужно знать,
+   и единственное, что нельзя прочитать, не пролистав список целиком. */
+export function listSummary(items) {
+  const s = { total: items.length, working: 0, ready: 0, attention: 0 };
+  for (const it of items) {
+    if (it.stage === "error" || it.stage === "failed") s.attention++;
+    else if (it.stage === "queued" || it.stage === "uploading" || it.stage === "analyzing") s.working++;
+    else if (it.analysis && (it.analysis.verdict === "blocked" || it.analysis.verdict === "review")) s.attention++;
+    else s.ready++;
+  }
+  return s;
+}
+
+export function listBarHtml(items) {
+  const s = listSummary(items);
+  const parts = [chip(`всего: ${s.total}`, "mute")];
+  if (s.working) parts.push(chip(`в работе: ${s.working}`, "info", true));
+  if (s.ready) parts.push(chip(`принято: ${s.ready}`, "ok"));
+  if (s.attention) parts.push(chip(`требуют внимания: ${s.attention}`, "warn"));
+  return parts.join("");
 }
 
 /* Находка = факт + (необязательно) что с этим делать. Подсказка идёт отдельной

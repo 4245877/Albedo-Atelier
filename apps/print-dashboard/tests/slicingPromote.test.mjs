@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { executionHtml, variantsHtml } from "../features/slicing/view.js";
+import { createSetHtml, executionHtml, variantsHtml } from "../features/slicing/view.js";
 
 /*
  * The slice → queue → execution surface. These are pure `(state) → HTML`
@@ -234,4 +234,26 @@ test("execution: an invalidated assignment offers no action and demands a replan
   assert.doesNotMatch(html, /data-slice-action="prepare-file"/);
   assert.match(html, /Назначение устарело/);
   assert.match(html, /Требуется перепланирование/);
+});
+
+/*
+ * Ритм формы «Новый набор». Пояснение о том, какие профили попадают в набор,
+ * стояло вплотную к «Создать и проверить» — описание и действие читались одним
+ * куском. Теперь итоговое действие живёт в собственном ряду (.sch-edit-actions),
+ * который отделён от объяснений волосяной линией.
+ */
+test("итоговое действие формы «Новый набор» отделено от пояснения собственным рядом", () => {
+  const html = createSetHtml({
+    profiles: [
+      { id: "m1", type: "machine", name: "K2", status: "active" },
+      { id: "p1", type: "process", name: "0.2 Balance", status: "active" },
+      { id: "f1", type: "filament", name: "PETG", status: "active" }
+    ],
+    runtime: { coverage: [{ printerId: "k2", printerName: "K2", printerClass: "k2", hasActiveProfile: true }] }
+  });
+  const note = html.indexOf("В набор попадают только active-профили");
+  const actions = html.indexOf('class="sch-edit-actions"');
+  const submit = html.indexOf("Создать и проверить");
+  assert.ok(note > -1 && actions > note, "пояснение идёт до ряда действий");
+  assert.ok(submit > actions, "кнопка лежит внутри ряда действий, а не сразу за текстом");
 });

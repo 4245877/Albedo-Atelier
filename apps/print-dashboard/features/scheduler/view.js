@@ -91,7 +91,10 @@ export function addTaskHtml() {
         <label>Приоритет<input type="number" name="priority" value="0" /></label>
         <label>Дедлайн<input type="datetime-local" name="deadline" /></label>
       </div>
-      <button type="submit" class="btn btn-primary btn-sm">Добавить в очередь</button>
+      <div class="sch-edit-actions">
+        <button type="submit" class="btn btn-primary btn-sm">Добавить в очередь</button>
+        <span class="slice-hint">Задание встанет в конец очереди — порядок правится стрелками.</span>
+      </div>
     </form>`;
 }
 

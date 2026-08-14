@@ -64,19 +64,61 @@
   color: var(--ink-faint);
 }
 
+/* ── Список загруженных файлов ─────────────────────────────────
+   Список растёт бесконечно (загрузки переживают перезагрузку страницы), и
+   раньше он растягивал раздел на всю свою длину: с полусотней моделей до
+   «Слайсинга» и очереди приходилось листать несколько экранов. Поэтому список
+   живёт в собственном блоке — с шапкой-сводкой, ограниченной высотой и
+   внутренней прокруткой; в нём же его можно свернуть целиком. */
+.upload-listbox {
+  margin-top: 16px;
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--card-edge) 12%, transparent);
+  /* Скругление обрезает край внутреннего скроллера — без этого прокручиваемые
+     карточки выезжали углами за рамку блока. */
+  overflow: hidden;
+}
+.upload-listbox[hidden] { display: none; }
+
+.upload-listbar {
+  display: flex;
+  align-items: center;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--card-edge);
+}
+.upload-listbar .panel-sub { margin: 0; }
+.upload-counts { display: flex; gap: 6px; flex-wrap: wrap; }
+.upload-listbox.is-collapsed .upload-listbar { border-bottom: none; }
+
 .upload-list {
   list-style: none;
-  margin: 16px 0 0;
-  padding: 0;
+  margin: 0;
+  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
+.upload-listbox.is-collapsed .upload-list { display: none; }
+/* Прокрутка включается, только когда файлов действительно много: одна-две
+   карточки в коробке с полосой прокрутки выглядели бы обрезанными. */
+.upload-listbox.is-scrollable .upload-list {
+  max-height: min(56vh, 520px);
+  overflow-y: auto;
+  /* Докрутив список до конца, страница дальше не «подхватывает» жест. */
+  overscroll-behavior: contain;
+  /* Место под полосу прокрутки резервируется заранее — карточки не дёргаются
+     по ширине, когда список переваливает за предел высоты. */
+  scrollbar-gutter: stable;
+}
+
 .upload-item {
   border: 1px solid var(--card-edge);
   border-radius: var(--radius-sm);
-  background: var(--card-inner);
-  padding: 12px 14px;
+  background: var(--card);
+  padding: 11px 13px;
 }
 .upload-head {
   display: flex;
@@ -174,10 +216,15 @@
 }
 
 .upload-analysis {
-  margin-top: 12px;
-  padding-top: 12px;
+  margin-top: 10px;
+  padding-top: 10px;
   border-top: 1px solid var(--card-edge);
 }
+/* Таблица свойств — свёрнутая по умолчанию часть карточки (см. view.js):
+   у G-code в ней десяток строк, и развёрнутая у каждого файла она давала
+   основную высоту раздела. Оформление общее с .slice-details. */
+.upload-details { margin-top: 10px; }
+.upload-details[open] .upload-meta { margin-top: 2px; }
 .upload-meta {
   display: grid;
   grid-template-columns: max-content 1fr;
@@ -389,6 +436,22 @@
   flex-direction: column;
   gap: 10px;
 }
+
+/* Список, который со временем только растёт (профили, варианты слайсинга), —
+   с собственной прокруткой вместо бесконечной ленты. Без него раздел
+   «Слайсинг» на реальной ферме занимал больше четырёх экранов, и «Запуск
+   слайсинга» внизу было проще найти поиском по странице, чем прокруткой.
+   Тот же приём, что у списка загрузок (.upload-listbox). */
+.slice-scroll {
+  max-height: min(52vh, 460px);
+  overflow-y: auto;
+  /* Докрутив список до края, жест не «пробивает» на страницу. */
+  overscroll-behavior: contain;
+  /* Место под полосу прокрутки резервируется всегда: иначе её появление
+     (например, после добавления профиля) сдвигало бы всю колонку. */
+  scrollbar-gutter: stable;
+  padding-right: 4px;
+}
 .slice-item {
   border: 1px solid var(--card-edge);
   border-radius: 10px;
@@ -468,6 +531,35 @@
   font-size: 12.5px;
   color: var(--ink-soft);
 }
+
+/* Прослеживаемость варианта и назначения («Модель: … Набор: … Принтер: …»).
+   Класс был в разметке, но не в стилях: строки-факты шли сплошным потоком
+   инлайновых span, а в «Исполнении», где между ними нет даже пробела, —
+   склеивались в «Принтер: K2Источник: планФайл: /x.gcode». Это тот же список
+   фактов, что и .slice-meta, только с более заметным разделением колонок. */
+.slice-facts {
+  display: flex;
+  gap: 4px 16px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+.slice-facts > span { min-width: 0; overflow-wrap: anywhere; }
+
+/* Отметка времени варианта — самая тихая строка карточки: она объясняет
+   «когда», а не «что». Без стиля она звучала громче самих данных. */
+.slice-when {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Колонка списка профилей (принтер/печать/филамент). min-width:0 обязателен:
+   у грид-элемента минимум по умолчанию — min-content, и одно длинное имя
+   профиля раздвигало все три колонки шире карточки. */
+.slice-col { min-width: 0; }
 .slice-out {
   margin-top: 6px;
   font-size: 12.5px;
@@ -496,18 +588,25 @@
 .slice-promote .btn {
   margin-top: 4px;
 }
-.slice-details {
+.slice-details,
+.upload-details {
   margin-top: 8px;
   font-size: 12.5px;
 }
-.slice-details summary {
+.slice-details summary,
+.upload-details summary {
   cursor: pointer;
   color: var(--ink-soft);
   border-radius: 6px;
   transition: color 0.2s;
 }
-.slice-details summary:hover { color: var(--gold-bright); }
-.slice-details[open] summary { margin-bottom: 6px; }
+/* Раскрывашка свойств файла — короткая подпись, а не полоса во всю карточку:
+   и цель нажатия точнее, и подсветка при наведении не тянется через весь ряд. */
+.upload-details summary { width: fit-content; padding: 3px 0; }
+.slice-details summary:hover,
+.upload-details summary:hover { color: var(--gold-bright); }
+.slice-details[open] summary,
+.upload-details[open] summary { margin-bottom: 6px; }
 .slice-form .slice-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
@@ -526,6 +625,48 @@
     grid-template-rows: subgrid;
     row-gap: 5px;
   }
+}
+
+/* ── Вертикальный ритм формы раздела ────────────────────────────
+   Форма — лестница из самостоятельных блоков: заголовок → пояснение → поля →
+   цель → итоговое действие. Интервал между ними задаёт ОДИН gap контейнера, а
+   не личные margin у каждого блока: разнобой margin'ов и приводил к тому, что
+   подпись «В набор попадают только active-профили…» стояла вплотную к кнопке
+   «Создать и проверить», а поля при этом дышали свободно. Поэтому собственные
+   отступы прямых детей гасятся здесь же — иначе они складывались бы с gap. */
+.slice-form {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 16px;
+}
+.slice-form > .slice-panel-head,
+.slice-form > .slice-grid,
+.slice-form > .slice-target,
+.slice-form > .slice-hint,
+.slice-form > .slice-block,
+.slice-form > .slice-warnbox { margin-bottom: 0; }
+.slice-form > .ops-details,
+.slice-form > .sch-check,
+.slice-form > .sch-edit-actions,
+.slice-form > .slice-hint,
+.slice-form > .slice-block,
+.slice-form > .slice-warnbox { margin-top: 0; }
+
+/* Пояснение формы — читаемая колонка, а не строка во всю карточку: на широком
+   экране 1400 px строка в 200+ символов теряется при переходе к следующей. */
+.slice-form > .slice-hint,
+.slice-form > .slice-block,
+.slice-form > .slice-warnbox,
+.slice-panel > .slice-hint,
+.slice-panel > .slice-empty { max-width: 92ch; line-height: 1.5; }
+
+/* Итоговое действие отделено от объяснений волосяной линией: выше — что и из
+   чего собираем, ниже — единственная кнопка, которая это делает. Правило было
+   только у формы принтера; теперь его получают все формы разделов. */
+.slice-form > .sch-edit-actions {
+  padding-top: 14px;
+  border-top: 1px dashed var(--card-edge);
 }
 
 /* ── Единые контролы рабочих форм ───────────────────────────────
@@ -630,6 +771,13 @@
 @media (max-width: 560px) {
   .slice-panel { padding: 14px 13px; }
   .slice-item { padding: 11px 12px; }
+  .upload-listbar { padding: 9px 10px; }
+  .upload-list { padding: 10px; gap: 8px; }
+  .upload-item { padding: 10px 11px; }
+  /* На телефоне экран короткий: список отдаёт ему меньшую долю, чтобы под
+     блоком оставалось видно, что раздел на этом не заканчивается. */
+  .upload-listbox.is-scrollable .upload-list { max-height: 62vh; }
+  .upload-listbar .btn { flex: 1 1 100%; }
   #uploads-body,
   #slicing-body,
   #scheduler-body,
@@ -649,10 +797,12 @@
   .slice-item-head:not(:has(.row-actions)) > .slice-spacer { flex: 1 0 100%; height: 0; }
 
   /* Итоговое действие формы — во всю ширину: на телефоне это главная
-     кнопка экрана, и она обязана читаться как главная. */
+     кнопка экрана, и она обязана читаться как главная. Кнопки форм разделов
+     живут в .sch-edit-actions (общий ряд действий), поэтому отдельного правила
+     для прямого потомка .slice-form больше нет: в колоночном flex-контейнере
+     «flex: 1 1 100%» задало бы кнопке не ширину, а высоту во весь блок. */
   .sch-edit-actions .btn,
-  .ops-actions .btn,
-  .slice-form > .btn { width: 100%; flex: 1 1 100%; }
+  .ops-actions .btn { width: 100%; flex: 1 1 100%; }
 }
 
 /* ═══ Планировщик печати (#scheduler) ═══════════════════════════ */
@@ -1038,6 +1188,10 @@
 .ops-row .ops-confirm { margin-top: 10px; }
 .ops-row .ops-confirm label { font-size: 11.5px; }
 .ops-name { font-size: 14px; font-weight: 700; color: var(--ink); overflow-wrap: anywhere; }
+/* Причина операции и срок её готовности — две разные мысли, а не абзац: между
+   ними и рядом чипов нужен воздух на любой ширине. Правило раньше жило только
+   в телефонном медиа-запросе, и на большом экране подпись липла к чипам. */
+.ops-row > .slice-hint { margin-top: 7px; }
 
 @media (max-width: 720px) {
   /* На узком экране колонки «сон» уходят под колонки «работа» отдельной
@@ -1067,9 +1221,6 @@
   .ops-details { padding: 10px 12px; }
   .ops-details[open] { padding-bottom: 12px; }
   .ops-weeks { gap: 10px 16px; margin-top: 12px; }
-  /* Между блоками строки операции нужен воздух: чипы, причина и срок
-     готовности — три разные мысли, а не абзац. */
-  .ops-row > .slice-hint { margin-top: 7px; }
   /* Кнопки строки операции делят ряд поровну: «✓ выполнено» — главное
      действие человека, и оно не должно быть уже соседних. Разрушающее «✕»
      сохраняет свой размер и уходит к правому краю (правило .btn-icon выше). */
@@ -1141,13 +1292,9 @@
 .prn-details { margin-top: 12px; }
 .prn-form { margin-top: 12px; }
 /* Итог формы — отдельная строка под волосяной линией: «Сохранить» не липнет
-   к последнему чекбоксу и всегда стоит на одном месте. */
-.prn-form .sch-edit-actions {
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px dashed var(--card-edge);
-}
-.prn-form > .sch-check { margin-top: 12px; }
+   к последнему чекбоксу и всегда стоит на одном месте. Сама линия и отступ над
+   ней теперь общие для всех форм разделов (.slice-form > .sch-edit-actions);
+   здесь остаётся только то, что специфично для карточки машины. */
 
 /* Учётные данные держим в отдельной рамке: поле всегда пустое, и подпись под
    ним — единственное место, где видно, задан ли секрет и откуда он берётся. */
@@ -1318,6 +1465,10 @@
   .slice-form input[type="checkbox"],
   .slice-form input[type="radio"],
   .sch-check input[type="checkbox"] { width: 20px; height: 20px; }
+  /* Пальцем в подпись 15 px не попасть: раскрывашка свойств файла добирает
+     высоту отступами. Правило живёт здесь, а не в dashboard.css, — базовый
+     padding задан в этом же файле, и более поздний по каскаду побеждает. */
+  .upload-details summary { padding: 11px 0; }
 }
 
 /* ═══ Запуск печати ══════════════════════════════════════════════
