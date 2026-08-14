@@ -3,6 +3,7 @@ import type {
   Artifact,
   ArtifactAnalysis,
   Assignment,
+  PrintRun,
   PrintTask,
   QueueEntry
 } from "../../domain/print/types";
@@ -42,6 +43,25 @@ export interface QueueProjectionRow {
    * material, nozzle and ETA the slice was actually produced for.
    */
   assignment?: Assignment | null;
+  /**
+   * The task's active run, when one exists. Needed here for one distinction the
+   * flat status cannot otherwise make: a run that was dispatched but never
+   * confirmed started looks exactly like a live print from the task's side
+   * (`DISPATCHING`), while physically nothing is happening and the operator —
+   * not the poller — is the only one who can say so.
+   */
+  run?: PrintRun | null;
+}
+
+/**
+ * A run that holds the printer without ever having begun: the start command was
+ * accepted, the confirmation never came. `startedAt === null` is the load-bearing
+ * half — a run with a start time was observed printing, whatever it is doing now.
+ */
+function isUnconfirmedStart(run: PrintRun | null | undefined): run is PrintRun {
+  return Boolean(
+    run && run.startedAt === null && (run.state === "PENDING" || run.state === "UNKNOWN")
+  );
 }
 
 function metaString(task: PrintTask, key: string): string | undefined {
@@ -73,14 +93,29 @@ export function formatEta(seconds: number | null): string | null {
  * diagnostic reason, never as a guessed `ready` — corrupted state must be
  * visible, not startable.
  */
-function toStatus(task: PrintTask, entry: QueueEntry): QueueJobStatus {
+function toStatus(task: PrintTask, entry: QueueEntry, run?: PrintRun | null): QueueJobStatus {
+  // Checked before everything else: an unconfirmed start is the one state where
+  // the operator's next move is neither "start it" nor "wait for it", and the
+  // row must say so in its own words. Folding it into `review` (as this did)
+  // hid the only action that can clear it.
+  if (isUnconfirmedStart(run)) return "unconfirmed";
   if (entry.state === "HELD" || task.state === "NEEDS_REVIEW") return "review";
   if (task.state === "QUEUED" && entry.state === "WAITING") return "ready";
   return "review";
 }
 
 /** A diagnostic label for a task/entry combination that should not exist. */
-function inconsistencyReason(task: PrintTask, entry: QueueEntry): string | null {
+function inconsistencyReason(
+  task: PrintTask,
+  entry: QueueEntry,
+  run?: PrintRun | null
+): string | null {
+  // Not an inconsistency: a real, named situation with a known remedy. The old
+  // text ("строка очереди ещё не закрыта") described the database to an operator
+  // who needed to be told to go look at the printer.
+  if (isUnconfirmedStart(run)) {
+    return `принтер не подтвердил запуск «${run.file}» — посмотрите на принтер и отметьте, что произошло`;
+  }
   if (entry.state === "HELD" || task.state === "NEEDS_REVIEW") return null;
   if (task.state === "QUEUED" && entry.state === "WAITING") return null;
   if (task.state === "ASSIGNED" || task.state === "DISPATCHING" || task.state === "PRINTING") {
@@ -93,7 +128,8 @@ export function toLegacyQueueJob(row: QueueProjectionRow): QueueJob {
   const { task, entry, artifact } = row;
   const analysis = row.analysis ?? null;
   const binding = row.assignment?.binding ?? null;
-  const status = toStatus(task, entry);
+  const run = row.run ?? null;
+  const status = toStatus(task, entry, run);
   const file = artifact?.source ?? metaString(task, "file");
 
   // Precedence is most-specific-first, and every source is a *fact* rather than a
@@ -120,11 +156,14 @@ export function toLegacyQueueJob(row: QueueProjectionRow): QueueJob {
   if (etaSeconds !== null) job.etaSeconds = etaSeconds;
   if (filamentG !== null) job.filamentG = filamentG;
   if (row.assignment) job.assignmentId = row.assignment.id;
+  // The id the resolution needs. Present exactly when `status` is `unconfirmed`,
+  // so the client never has to infer "is there a decision to make" from prose.
+  if (isUnconfirmedStart(run)) job.unresolvedRunId = run.id;
 
   const at = metaString(task, "at") ?? (status === "ready" ? "в очереди" : undefined);
   if (at) job.at = at;
   if (task.night) job.night = true;
-  const diagnostic = inconsistencyReason(task, entry);
+  const diagnostic = inconsistencyReason(task, entry, run);
   if (diagnostic) job.reason = diagnostic;
   else if (task.reason) job.reason = task.reason;
   if (file) job.file = file;

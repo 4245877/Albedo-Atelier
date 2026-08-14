@@ -163,7 +163,10 @@ test("execution: a prepared file offers a start; the stages stay visibly distinc
   );
 
   assert.match(html, /Исполнение/);
-  assert.match(html, /data-slice-action="start-assignment"/);
+  // Запуск ведёт в общее окно запуска, а не в POST /assignments/:id/start:
+  // пользовательский путь старта на весь дашборд ровно один, через LaunchService.
+  // Подробности — tests/unconfirmedLaunchUx.test.mjs.
+  assert.match(html, /data-slice-action="open-launch"/);
   assert.match(html, /файл сверен/);
   // The verification METHOD is shown, so "проверено" is never mistaken for a hash check.
   assert.match(html, /проверка: name_and_size/);

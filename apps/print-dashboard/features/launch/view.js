@@ -166,14 +166,20 @@ function blockedBlock(preview, candidate) {
    оператора: он смотрит на принтер и говорит, что там на самом деле. */
 function unresolvedBlock(preview, ui) {
   if (!preview.unresolvedRunId) return "";
+  // «Печать не началась» — primary: это ожидаемый ответ (команда ушла, принтер
+  // остался IDLE), и именно он возвращает задание в очередь. Второй вариант
+  // существует, но означает совсем другое — что печать всё-таки идёт, — и не
+  // должен выглядеть равновероятным.
   return `
     <div class="launch-unresolved">
+      <div class="launch-reason-title">Запуск не подтверждён</div>
       <p>
-        Предыдущий запуск не подтверждён принтером. Посмотрите на принтер и
-        отметьте, что произошло, — после этого задание снова можно запустить.
+        Команда ушла на принтер, но он не сообщил, начал ли печать. Пока это не
+        разрешено, задание нельзя ни запустить, ни считать печатающимся.
+        Посмотрите на принтер и отметьте, что произошло.
       </p>
       <div class="launch-unresolved-actions">
-        <button type="button" class="btn btn-sm" data-launch-resolve="FAILED" ${ui.busy ? "disabled" : ""}>
+        <button type="button" class="btn btn-sm btn-primary" data-launch-resolve="FAILED" ${ui.busy ? "disabled" : ""}>
           Печать не началась
         </button>
         <button type="button" class="btn btn-sm" data-launch-resolve="SUCCEEDED" ${ui.busy ? "disabled" : ""}>
@@ -242,7 +248,12 @@ export function launchModalHtml(preview, ui) {
   const allConfirmed = confirmations
     .filter((c) => c.required)
     .every((c) => ui.confirmed.has(c.code));
-  const canLaunch = Boolean(candidate?.eligible) && allConfirmed && !ui.busy;
+  // Неразрешённая попытка снимает запуск с повестки целиком. Сервер и так его
+  // не допустит (launch_unconfirmed — блокер), но показывать кнопку «Запустить»
+  // рядом с вопросом «а что вообще произошло?» значит предлагать оператору шаг,
+  // который заведомо кончится отказом. Сначала ответ, потом запуск.
+  const unresolved = Boolean(preview.unresolvedRunId);
+  const canLaunch = !unresolved && Boolean(candidate?.eligible) && allConfirmed && !ui.busy;
 
   const cta = candidate
     ? `Запустить на «${candidate.printerName}»`
@@ -267,14 +278,13 @@ export function launchModalHtml(preview, ui) {
         : ""
     }
 
-    ${blockedBlock(preview, candidate)}
-    ${unresolvedBlock(preview, ui)}
+    ${unresolved ? unresolvedBlock(preview, ui) : blockedBlock(preview, candidate)}
 
-    ${confirmationsBlock(confirmations, ui.confirmed)}
-    ${problemsBlock(candidate)}
+    ${unresolved ? "" : confirmationsBlock(confirmations, ui.confirmed)}
+    ${unresolved ? "" : problemsBlock(candidate)}
 
     ${
-      ui.mode === "manual"
+      ui.mode === "manual" && !unresolved
         ? `<div class="launch-cands">
              <p class="sub-head">Выберите принтер</p>
              ${preview.candidates.map((c) => candidateCard(c, ui.selectedPrinterId)).join("")}
@@ -287,13 +297,23 @@ export function launchModalHtml(preview, ui) {
     ${diagnosticsBlock(preview, candidate)}
 
     <div class="modal-actions launch-actions">
-      <button type="button" class="btn btn-sm btn-ghost" data-launch-mode="${ui.mode === "auto" ? "manual" : "auto"}">
-        ${ui.mode === "auto" ? "Выбрать принтер вручную" : "← Автоматический выбор"}
-      </button>
+      ${
+        unresolved
+          ? ""
+          : `<button type="button" class="btn btn-sm btn-ghost" data-launch-mode="${ui.mode === "auto" ? "manual" : "auto"}">
+               ${ui.mode === "auto" ? "Выбрать принтер вручную" : "← Автоматический выбор"}
+             </button>`
+      }
       <span class="grow"></span>
       <button type="button" class="btn btn-sm" data-modal-close ${ui.busy ? "disabled" : ""}>Отмена</button>
-      <button type="button" class="btn btn-sm btn-primary" data-launch-go ${canLaunch ? "" : "disabled"}>
-        ${ui.busy ? "Запускаю…" : esc(cta)}
-      </button>
+      ${
+        // Кнопки запуска здесь нет вовсе, пока не разрешена прошлая попытка:
+        // единственное действие — ответить, что показал принтер (выше).
+        unresolved
+          ? ""
+          : `<button type="button" class="btn btn-sm btn-primary" data-launch-go ${canLaunch ? "" : "disabled"}>
+               ${ui.busy ? "Запускаю…" : esc(cta)}
+             </button>`
+      }
     </div>`;
 }

@@ -1,5 +1,11 @@
 import type { PrintQueueStore } from "../../domain/print/repositories";
-import type { Assignment, AuditEvent, PrintTask, QueueEntry } from "../../domain/print/types";
+import type {
+  Assignment,
+  AuditEvent,
+  PrintRun,
+  PrintTask,
+  QueueEntry
+} from "../../domain/print/types";
 import type { QueueJob } from "../../domain/dashboard/types";
 import type { PrinterConfig } from "../../infra/printers/config";
 import { PrintQueueContext, type AssignmentOperationsPort } from "./context";
@@ -95,6 +101,11 @@ export class PrintQueueService {
 
   listOpenAssignments(): Assignment[] {
     return this.queries.listOpenAssignments();
+  }
+
+  /** The task's active run, if any — see {@link QueueQueries.findActiveRunByTask}. */
+  findActiveRunByTask(taskId: string): PrintRun | null {
+    return this.queries.findActiveRunByTask(taskId);
   }
 
   listAudit(limit?: number): AuditEvent[] {

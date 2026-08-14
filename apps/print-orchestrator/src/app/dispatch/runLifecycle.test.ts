@@ -382,3 +382,133 @@ test("resolving an unstarted run re-queues the task instead of failing it termin
   );
   assert.equal(repos.printRuns.findActiveByPrinter("k2"), null);
 });
+
+/*
+ * «Печать не началась», in full. The incident this pins down left FIVE separate
+ * holds on one printer — task DISPATCHING, run UNKNOWN, assignment RESERVED, bed
+ * RESERVED, start guard present — and the dispatch gate (correctly) refused a
+ * new start while ANY of them stood. A resolution that released four of five
+ * would leave the operator in exactly the same dead end with a shorter error
+ * message, so the release is asserted here as one set, not one field.
+ */
+test("«печать не началась» releases every hold in one go, and holds nothing back", async () => {
+  const { store, lifecycle, runId, taskId } = await unconfirmedRun();
+  const repos = store.repositories;
+
+  // Precondition: the live shape of the incident.
+  const before = repos.printRuns.getById(runId)!;
+  assert.equal(before.state, "UNKNOWN");
+  assert.equal(before.startedAt, null, "nothing was ever observed printing");
+  assert.equal(repos.tasks.getById(taskId)?.state, "DISPATCHING");
+  assert.equal(repos.assignments.getById(before.assignmentId)?.state, "RESERVED");
+  assert.equal(repos.bedCycles.getById(before.bedCycleId!)?.state, "RESERVED");
+
+  // The live incident had a fifth hold this harness does not produce: the start
+  // guard, written by the command path when the physical start SUCCEEDS and only
+  // the confirmation times out (here `startPhysical` throws instead, so no
+  // command was ever sent and no guard was written). It is the hold that outlives
+  // the others, so it is planted explicitly rather than left untested.
+  const iso = new Date().toISOString();
+  repos.startGuards.upsert({
+    printerId: "k2",
+    file: before.file!,
+    state: "UNKNOWN",
+    jobRef: null,
+    runId,
+    requestedAt: iso,
+    updatedAt: iso
+  });
+  assert.ok(repos.startGuards.get("k2"), "the printer is held by a start guard");
+
+  lifecycle.resolveRun(runId, "FAILED", { status: idle(), actor: "operator" });
+
+  assert.equal(repos.printRuns.getById(runId)?.state, "CANCELLED");
+  assert.equal(repos.tasks.getById(taskId)?.state, "QUEUED");
+  assert.equal(repos.assignments.getById(before.assignmentId)?.state, "CANCELLED");
+  assert.equal(repos.bedCycles.getById(before.bedCycleId!)?.state, "CLEAR", "bed is free");
+  assert.equal(repos.startGuards.get("k2"), null, "the guard is gone, not merely stale");
+  assert.equal(repos.printRuns.findActiveByPrinter("k2"), null, "printer no longer busy");
+  assert.equal(repos.printRuns.findActiveByTask(taskId), null, "task no longer has an active run");
+  if (before.dispatchAttemptId) {
+    assert.equal(repos.dispatchAttempts.getById(before.dispatchAttemptId)?.state, "FAILED");
+  }
+});
+
+test("the resolution keeps the history — it closes the attempt, it does not erase it", async () => {
+  const { store, lifecycle, runId } = await unconfirmedRun();
+  const repos = store.repositories;
+
+  lifecycle.resolveRun(runId, "FAILED", {
+    status: idle(),
+    actor: "operator",
+    reason: "оператор проверил принтер: печать не началась"
+  });
+
+  const closed = repos.printRuns.getById(runId);
+  assert.ok(closed, "the run row survives as history");
+  assert.ok(closed!.endedAt, "and is stamped with when it was closed");
+  assert.equal(closed!.metadata.endReason, "оператор проверил принтер: печать не началась");
+  assert.match(String(closed!.metadata.dispatchOutcome), /unstarted/);
+
+  const audit = repos.audit
+    .list(200)
+    .filter((e) => e.entityId === runId && e.action === "unwound_unstarted");
+  assert.equal(audit.length, 1, "the operator's decision is on the audit trail exactly once");
+});
+
+test("pressing «печать не началась» twice is safe", async () => {
+  const { store, lifecycle, runId, taskId } = await unconfirmedRun();
+  const repos = store.repositories;
+
+  lifecycle.resolveRun(runId, "FAILED", { status: idle(), actor: "operator" });
+  const afterFirst = repos.printRuns.getById(runId)!;
+
+  // A double click, a retried request, or a second operator on another screen.
+  // The run is terminal now, so the second call must not re-open, re-close or
+  // re-audit anything — and above all must not disturb the re-queued task.
+  assert.throws(
+    () => lifecycle.resolveRun(runId, "FAILED", { status: idle(), actor: "operator" }),
+    (err: unknown) => err instanceof JobError || err instanceof StateTransitionError,
+    "a terminal run refuses a second completion rather than silently redoing it"
+  );
+
+  assert.equal(repos.printRuns.getById(runId)?.state, "CANCELLED");
+  assert.equal(repos.printRuns.getById(runId)?.endedAt, afterFirst.endedAt, "unchanged");
+  assert.equal(repos.tasks.getById(taskId)?.state, "QUEUED", "still queued, not double-unwound");
+  assert.equal(repos.startGuards.get("k2"), null);
+  assert.equal(
+    repos.audit.list(200).filter((e) => e.entityId === runId && e.action === "unwound_unstarted")
+      .length,
+    1,
+    "one decision, one audit entry"
+  );
+});
+
+test("resolution sends the printer nothing — it is a statement about the past", async () => {
+  // The operator's verdict is about what the machine has ALREADY done. A
+  // resolution that touched the device could start the very print it is trying
+  // to rule out. RunLifecycleService is built from the store alone — it holds no
+  // driver, transport or status port — so the resolution completing the whole
+  // unwind is itself the proof that no device call is on this path.
+  const { store, lifecycle, runId, taskId } = await unconfirmedRun();
+
+  lifecycle.resolveRun(runId, "FAILED", { status: idle(), actor: "operator" });
+
+  assert.equal(store.repositories.printRuns.getById(runId)?.state, "CANCELLED");
+  assert.equal(store.repositories.tasks.getById(taskId)?.state, "QUEUED");
+});
+
+test("a run the printer IS printing cannot be waved away as «не началась»", async () => {
+  // The one case where the operator's verdict must lose to the evidence: the
+  // device is observably running this very file. Releasing the holds here would
+  // free a printer that is physically busy and invite a second print on top.
+  const { store, lifecycle, runId, taskId } = await unconfirmedRun();
+  const file = store.repositories.printRuns.getById(runId)!.file!;
+
+  assert.throws(
+    () => lifecycle.resolveRun(runId, "FAILED", { status: printing(file), actor: "operator" }),
+    JobError
+  );
+  assert.equal(store.repositories.printRuns.getById(runId)?.state, "UNKNOWN", "nothing moved");
+  assert.equal(store.repositories.tasks.getById(taskId)?.state, "DISPATCHING");
+});

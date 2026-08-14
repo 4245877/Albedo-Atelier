@@ -464,14 +464,27 @@ function assignmentRow(state, row) {
     ? `<span class="slice-tag">проверка: ${esc(dev.verification)}</span>`
     : "";
 
+  /* Действие строки. Две вещи здесь сознательны:
+
+     1. «Запустить» ведёт в ТО ЖЕ окно запуска, что и кнопка в очереди, а не
+        дёргает POST /assignments/:id/start напрямую. Прямой вызов пропускал
+        предпросмотр, выбор принтера и физические подтверждения: сервер всё
+        равно проверял всё сам и отвечал 409 со списком инвариантов — оператор
+        получал отказ вместо объяснения. Пользовательский путь запуска ровно
+        один, и он проходит через LaunchService.
+     2. При неразрешённой попытке кнопки запуска нет вовсе: nextAction=resolve
+        приходит с backend, который единственный видит run. Раньше здесь стояло
+        зелёное «▶ Запустить» просто потому, что файл на принтере VERIFIED. */
   let action = "";
   if (a.invalidatedAt) action = "";
   else if (row.nextAction === "prepare-file") {
     action = `<button type="button" class="btn btn-sm" data-slice-action="prepare-file" data-id="${esc(a.id)}">↑ Подготовить файл</button>`;
   } else if (row.nextAction === "confirm-file") {
     action = `<button type="button" class="btn btn-sm" data-slice-action="confirm-file" data-id="${esc(a.id)}">✓ Файл перенесён</button>`;
+  } else if (row.nextAction === "resolve") {
+    action = `<button type="button" class="btn btn-sm" data-slice-action="resolve-launch" data-task="${esc(a.taskId)}">Запуск не подтверждён — разобраться</button>`;
   } else if (row.nextAction === "start") {
-    action = `<button type="button" class="btn btn-primary btn-sm" data-slice-action="start-assignment" data-id="${esc(a.id)}">▶ Запустить</button>`;
+    action = `<button type="button" class="btn btn-primary btn-sm" data-slice-action="open-launch" data-task="${esc(a.taskId)}">▶ Запустить</button>`;
   }
 
   return `

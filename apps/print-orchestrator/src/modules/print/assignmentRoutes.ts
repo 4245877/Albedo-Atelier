@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 
 import type { PrintServices } from "../../bootstrap/createRuntime";
 import { JobError, ValidationError } from "../../core/errors";
-import type { Assignment, DeviceArtifact } from "../../domain/print/types";
+import type { Assignment, DeviceArtifact, PrintRun } from "../../domain/print/types";
 
 /**
  * The **execution** surface under `/api/print/assignments` — the part of the
@@ -33,12 +33,24 @@ export function registerAssignmentRoutes(
   app.get("/assignments", async () => ({
     assignments: services.printQueue
       .listOpenAssignments()
-      .map((assignment) => view(assignment, services.deviceArtifacts.forAssignment(assignment)))
+      .map((assignment) =>
+        assignmentView(
+          assignment,
+          services.deviceArtifacts.forAssignment(assignment),
+          services.printQueue.findActiveRunByTask(assignment.taskId)
+        )
+      )
   }));
 
   app.get<{ Params: { id: string } }>("/assignments/:id", async (request) => {
     const assignment = services.printQueue.getAssignment(request.params.id);
-    return { assignment: view(assignment, services.deviceArtifacts.forAssignment(assignment)) };
+    return {
+      assignment: assignmentView(
+        assignment,
+        services.deviceArtifacts.forAssignment(assignment),
+        services.printQueue.findActiveRunByTask(assignment.taskId)
+      )
+    };
   });
 
   app.post<{ Params: { id: string } }>("/assignments/:id/prepare-file", async (request) => ({
@@ -109,22 +121,47 @@ export function registerAssignmentRoutes(
  * printed), the device-file state, and the single next action. `nextAction` is a
  * *hint* — the server re-decides everything on the actual call, so a stale UI can
  * never talk the backend into skipping a step.
+ *
+ * The hint being only a hint is not licence for it to be wrong. It was derived
+ * from the device file alone, so a VERIFIED file made this say `start` even when
+ * the task's previous start was still awaiting the operator's verdict — and the
+ * dashboard duly drew a green "▶ Запустить" whose only possible outcome was a
+ * 409 reciting five invariants. A hint that names an impossible action is worse
+ * than no hint: it is the UI promising something the server must then refuse.
  */
-function view(assignment: Assignment, deviceArtifact: DeviceArtifact | null) {
+export function assignmentView(
+  assignment: Assignment,
+  deviceArtifact: DeviceArtifact | null,
+  activeRun: PrintRun | null = null
+) {
   // Only a VERIFIED file is startable — "present but unmatched" is not evidence,
   // and the server refuses it regardless of what this hint says.
   const ready = deviceArtifact?.state === "VERIFIED";
+  // A dispatched start the printer never confirmed. Nothing about this task can
+  // proceed until an operator says what the machine actually did, so the honest
+  // next action is that decision — not a start, and not a file step either.
+  const unresolved =
+    activeRun &&
+    activeRun.startedAt === null &&
+    (activeRun.state === "PENDING" || activeRun.state === "UNKNOWN")
+      ? activeRun
+      : null;
   return {
     assignment,
     deviceArtifact,
     fileReady: ready,
+    // Present exactly when a verdict is owed, and it is the argument the
+    // resolution takes (`POST /api/print/runs/:id/resolve`).
+    unresolvedRunId: unresolved?.id ?? null,
     nextAction: assignment.invalidatedAt
       ? "replan"
-      : ready
-        ? "start"
-        : deviceArtifact?.transferMode === "manual_file_transfer"
-          ? "confirm-file"
-          : "prepare-file"
+      : unresolved
+        ? "resolve"
+        : ready
+          ? "start"
+          : deviceArtifact?.transferMode === "manual_file_transfer"
+            ? "confirm-file"
+            : "prepare-file"
   };
 }
 

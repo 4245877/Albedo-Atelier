@@ -161,9 +161,21 @@ export function createLaunchController({ getContent, refresh, close }) {
         outcome,
         reason: "оператор проверил принтер после неподтверждённого запуска"
       });
+      // Ключ идемпотентности живёт ровно одну попытку запуска, а разрешение эту
+      // попытку ЗАКРЫВАЕТ. Без нового ключа следующий «Запустить» в этом же окне
+      // попадал бы в findByIdempotencyKey и получал прежний — уже отменённый —
+      // run: окно показало бы «Печать запущена», а принтер бы не тронулся с
+      // места. Ретрай и новая попытка — разные вещи, и различает их этот ключ.
+      session.idempotencyKey = newIdempotencyKey(session.taskId);
       session.ui.busy = false;
       session.preview = await load(session.taskId, session.ui.selectedPrinterId);
       render();
+      toast(
+        outcome === "FAILED"
+          ? "Запуск отмечен как несостоявшийся — задание вернулось в очередь"
+          : "Запуск отмечен как состоявшийся",
+        "toast-ok"
+      );
       await refresh();
     } catch (err) {
       if (!session) return;

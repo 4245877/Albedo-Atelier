@@ -52,14 +52,30 @@ export function renderHero(state) {
 
 /* ── 2 · Очередь ───────────────────────────────────────────── */
 
-function queueRow(job, printers) {
-  // Статусы очереди: ready / review (legacy "error" нормализуется в review при
-  // загрузке state-файла на backend и до фронта не доходит).
+/* Строка очереди. Статусы: ready / review / unconfirmed (legacy "error"
+   нормализуется в review на backend и до фронта не доходит).
+
+   `unconfirmed` — единственный статус со СВОИМ действием прямо в строке, и это
+   не запуск. Раньше такое задание проецировалось в review, а review-строка не
+   имеет кнопок вовсе: задание, которому был нужен ответ оператора, оказывалось
+   единственным, на котором нельзя было ничего нажать. Оператор уходил искать
+   любую кнопку «Запустить» — и находил её в «Исполнении», где она вела в 409.
+   Кнопка ведёт в то же окно запуска, что и обычный старт: разрешение прошлой
+   попытки живёт там, где оператор в неё упирается. */
+export function queueRow(job, printers) {
+  const unconfirmed = job.status === "unconfirmed";
   const review = job.status === "review";
-  const cls = review ? "row-warn" : "";
-  const st = review
-    ? `<span class="badge badge-paused">требует проверки</span>`
-    : `<span class="badge badge-idle">готово к запуску</span>`;
+  const cls = unconfirmed || review ? "row-warn" : "";
+  const st = unconfirmed
+    ? `<span class="badge badge-paused">запуск не подтверждён</span>`
+    : review
+      ? `<span class="badge badge-paused">требует проверки</span>`
+      : `<span class="badge badge-idle">готово к запуску</span>`;
+  // Не «Запустить»: следующий шаг — рассказать, что показал принтер. Обещать
+  // здесь старт значило бы обещать то, в чём сервер обязан отказать.
+  const action = unconfirmed
+    ? `<button class="btn btn-sm" data-act="launch" data-task="${esc(job.id)}">Разобраться с запуском</button>`
+    : "";
   return `
     <li class="row ${cls}">
       <div class="grow">
@@ -67,6 +83,7 @@ function queueRow(job, printers) {
         <div class="row-sub">${esc(queueJobSubtitle(job, printers))}${job.reason ? ` — ${esc(job.reason)}` : ""}</div>
       </div>
       ${st}
+      ${action}
     </li>`;
 }
 

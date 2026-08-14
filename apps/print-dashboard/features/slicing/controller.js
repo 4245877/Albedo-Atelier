@@ -10,6 +10,7 @@
    ═══════════════════════════════════════════════════════════════ */
 
 import { apiGet, apiPost } from "../../api.js";
+import { openLaunchModal } from "../../render/modals.js";
 import { $, toast, esc } from "../../util.js";
 import { buildCreateSetPayload, nextPollMs } from "./formModel.js";
 import {
@@ -222,6 +223,16 @@ function wireDelegates() {
       toast("Дождитесь завершения текущей операции, Владыка.");
       return;
     }
+    // Запуск печати — и разрешение неподтверждённой попытки — живут в одном
+    // окне запуска на весь дашборд. Этот раздел только открывает его: он не
+    // знает ни про принтеры, ни про стол, ни про подтверждения, и не должен
+    // изображать, что знает. Оба действия открывают одно и то же окно —
+    // что именно в нём показать (разрешение или запуск), решает backend.
+    if (action === "open-launch" || action === "resolve-launch") {
+      const taskId = btn.dataset.task;
+      if (taskId) openLaunchModal(taskId);
+      return;
+    }
     const id = btn.dataset.id;
     if (action === "import") void run(btn, () => apiPost("/api/print/slicing/presets/import"), "Пресеты импортированы, Владыка");
     else if (action === "approve") void run(btn, () => apiPost(`/api/print/slicing/profile-sets/${id}/approve`), "Набор утверждён — воля ваша исполнена");
@@ -234,8 +245,6 @@ function wireDelegates() {
       void run(btn, () => apiPost(`/api/print/assignments/${id}/prepare-file`), "Файл подготовлен на принтере");
     else if (action === "confirm-file")
       void run(btn, () => confirmFile(id), "Перенос файла подтверждён");
-    else if (action === "start-assignment")
-      void run(btn, () => startAssignment(id), "Запуск отправлен — я прослежу за каждым слоем");
   });
 
   // Переключатель типа цели в «Новом наборе»: показываем ровно один список
@@ -306,14 +315,6 @@ function confirmFile(assignmentId) {
     return Promise.reject(new Error("подтверждение переноса должно быть именным"));
   }
   return apiPost(`/api/print/assignments/${assignmentId}/confirm-file`, { operator: operator.trim() });
-}
-
-/* Ключ идемпотентности привязан к назначению: повторный клик (или ретрай сети)
-   вернёт тот же запуск, а не отправит вторую физическую команду. */
-function startAssignment(assignmentId) {
-  return apiPost(`/api/print/assignments/${assignmentId}/start`, {
-    idempotencyKey: `ui-${assignmentId}`
-  });
 }
 
 async function run(btn, fn, okMsg) {

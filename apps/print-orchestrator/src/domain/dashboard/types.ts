@@ -14,10 +14,20 @@ export interface ServiceStatus {
 
 /**
  * `ready` — has a printer, can be started; `review` — needs operator attention
- * (no printer assigned). Older persisted files may still carry a legacy
- * `"error"` status; the state loader normalizes it to `review` on load.
+ * (no printer assigned); `unconfirmed` — a start command went out and the
+ * printer never confirmed it, so the job is neither startable nor printing and
+ * only an operator's account of the machine can move it. Older persisted files
+ * may still carry a legacy `"error"` status; the state loader normalizes it to
+ * `review` on load.
+ *
+ * `unconfirmed` is deliberately NOT folded into `review`. It was, and that is
+ * how the resolution flow became unreachable: a `review` row is passive, so the
+ * one task that needed an operator decision was the one task with no button on
+ * it, while a stale "▶ Запустить" elsewhere still pointed at a start the server
+ * would (correctly) refuse. A distinct status lets the queue offer the decision
+ * where the operator already is.
  */
-export type QueueJobStatus = "ready" | "review";
+export type QueueJobStatus = "ready" | "review" | "unconfirmed";
 
 export interface QueueJob {
   id: string;
@@ -43,6 +53,13 @@ export interface QueueJob {
   filamentG?: number;
   /** The assignment that would execute this task, when one is already on file. */
   assignmentId?: string;
+  /**
+   * The run awaiting an operator's verdict, when `status` is `unconfirmed`. It
+   * is the argument the resolution takes (`POST /api/print/runs/:id/resolve`),
+   * so the queue row can carry the operator straight to the decision instead of
+   * describing a dead end.
+   */
+  unresolvedRunId?: string;
   /**
    * Name of the print file already present on the target printer. Optional
    * operator metadata; required for remote start (see FarmStore.startNext) —

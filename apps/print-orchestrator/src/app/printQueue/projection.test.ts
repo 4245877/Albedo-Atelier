@@ -4,6 +4,7 @@ import { test } from "node:test";
 import type {
   ArtifactAnalysis,
   Assignment,
+  PrintRun,
   PrintTask,
   QueueEntry
 } from "../../domain/print/types";
@@ -108,6 +109,33 @@ function assignment(over: Partial<Assignment["binding"]> = {}): Assignment {
   } as Assignment;
 }
 
+function run(over: Partial<PrintRun> = {}): PrintRun {
+  return {
+    id: "run_1",
+    taskId: "task_1",
+    assignmentId: "asg_1",
+    dispatchAttemptId: "dsp_1",
+    printerId: "bambu-a1-combo",
+    bedCycleId: "bed_1",
+    state: "UNKNOWN",
+    file: "3U-default-28ab3676.gcode.3mf",
+    artifactId: "art_1",
+    artifactSha256: "28ab3676",
+    idempotencyKey: null,
+    startedAt: null,
+    endedAt: null,
+    progress: null,
+    filamentUsedG: null,
+    durationS: null,
+    createdAt: ISO,
+    updatedAt: ISO,
+    version: 1,
+    legacyRef: null,
+    metadata: {},
+    ...over
+  } as PrintRun;
+}
+
 function row(over: Partial<QueueProjectionRow> = {}): QueueProjectionRow {
   return { entry: entry(), task: task(), artifact: null, ...over };
 }
@@ -190,4 +218,64 @@ test("enrichment does not make an inconsistent row look ready", () => {
     row({ entry: entry({ state: "HELD" }), analysis: analysis() })
   );
   assert.equal(job.status, "review", "a held entry stays in review however complete its data");
+});
+
+// ── An unconfirmed start is its own status ──────────────────────────────────
+//
+// The live incident: a launch was dispatched, the A1 never confirmed it, and the
+// run parked in UNKNOWN with startedAt=null. The task read DISPATCHING, which
+// projected to `review` — and a review row is passive, so the ONE task needing
+// an operator decision was the one task with no button on it. The resolution UI
+// lives in the launch modal, whose only entry point was the "next job" card,
+// which renders solely for `status === "ready"`. The operator went looking for
+// any start button, found the execution panel's, and got a 409.
+
+test("a dispatched-but-unconfirmed run projects as `unconfirmed`, not `review`", () => {
+  const job = toLegacyQueueJob(
+    row({ task: task({ state: "DISPATCHING" }), run: run(), analysis: analysis() })
+  );
+  assert.equal(job.status, "unconfirmed");
+  assert.equal(job.unresolvedRunId, "run_1", "the id the resolution call needs");
+  assert.match(
+    job.reason ?? "",
+    /посмотрите на принтер/,
+    "tells the operator what to do, not what the row looks like internally"
+  );
+});
+
+test("a PENDING run that never started is the same situation as an UNKNOWN one", () => {
+  const job = toLegacyQueueJob(
+    row({ task: task({ state: "DISPATCHING" }), run: run({ state: "PENDING" }) })
+  );
+  assert.equal(job.status, "unconfirmed");
+  assert.equal(job.unresolvedRunId, "run_1");
+});
+
+test("a run that was observed printing is NOT an unconfirmed start", () => {
+  // startedAt is the load-bearing half: this print began, so whatever it is
+  // doing now, no operator verdict is owed and no resolution is offered.
+  const job = toLegacyQueueJob(
+    row({
+      task: task({ state: "PRINTING" }),
+      run: run({ state: "RUNNING", startedAt: ISO })
+    })
+  );
+  assert.notEqual(job.status, "unconfirmed");
+  assert.equal(job.unresolvedRunId, undefined);
+});
+
+test("an UNKNOWN run that had started is left to the normal completion path", () => {
+  const job = toLegacyQueueJob(
+    row({ task: task({ state: "DISPATCHING" }), run: run({ startedAt: ISO }) })
+  );
+  assert.notEqual(job.status, "unconfirmed", "it printed; this is a completion question");
+  assert.equal(job.unresolvedRunId, undefined);
+});
+
+test("once resolved, the row carries no unresolved run and stops being unconfirmed", () => {
+  // What `unwindUnstarted` leaves behind: run CANCELLED (so no longer active,
+  // hence absent from the row), task back to QUEUED, entry still WAITING.
+  const job = toLegacyQueueJob(row({ task: task({ state: "QUEUED" }), run: null }));
+  assert.equal(job.status, "ready", "startable again through the normal path");
+  assert.equal(job.unresolvedRunId, undefined);
 });

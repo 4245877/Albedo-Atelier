@@ -44,6 +44,16 @@ export class QueueQueries {
   }
 
   /**
+   * The task's active run, if any. Exposed narrowly (rather than making callers
+   * pull the whole `getTaskDetail` chain) because the execution surface needs
+   * exactly one fact from it: whether a start is still awaiting the operator's
+   * verdict, in which case nothing about this task is startable.
+   */
+  findActiveRunByTask(taskId: string): PrintRun | null {
+    return this.ctx.store.repositories.printRuns.findActiveByTask(taskId);
+  }
+
+  /**
    * The open queue as projection rows, ordered by position.
    *
    * Each row carries the artifact's latest analysis and the task's live
@@ -69,7 +79,11 @@ export class QueueQueries {
       // longer describes what would run.
       const assignment =
         repos.assignments.listByTask(task.id).filter((a) => a.invalidatedAt === null).at(-1) ?? null;
-      return { entry, task, artifact, analysis, assignment };
+      // The active run distinguishes "printing" from "dispatched and never
+      // confirmed" — two situations the task state alone reports identically
+      // (DISPATCHING) and which need opposite things from the operator.
+      const run = repos.printRuns.findActiveByTask(task.id);
+      return { entry, task, artifact, analysis, assignment, run };
     });
   }
 
