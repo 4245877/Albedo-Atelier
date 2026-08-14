@@ -216,10 +216,32 @@ export class DispatchService {
     // THAT file, so a task edited afterwards cannot redirect the start elsewhere.
     const file = reservation?.binding.expectedRemotePath ?? resolveDispatchFile(task, artifact);
     if (!file) throw new JobError(`У задания «${task.title}» не задан файл для запуска`);
-    const target = normalizeStartablePath(file);
 
+    // The printer is resolved BEFORE the path is validated, and this order is
+    // load-bearing: what counts as a startable file is a property of the target
+    // adapter (`capabilitiesOf(printer).startableExtensions`), not a global. A
+    // printer-less check silently falls back to the Klipper G-code set and
+    // refuses the very Bambu `.gcode.3mf` plate package this service itself
+    // built, uploaded and verified — the file browser (which does pass the
+    // printer) would list it as `printable: true` while every start path threw
+    // "не похож на файл печати".
     const printer = this.resolveTargetPrinter(task, reservation);
-    const identity = await this.verifyOnDeviceFile(printer, target, artifact, request.mode);
+    const target = normalizeStartablePath(file, printer);
+    // What we expect to SEE on the device — which is not always the artifact.
+    //
+    // A Bambu is handed a `.gcode.3mf` plate package wrapping the sliced G-code,
+    // so the bytes on its SD card are legitimately a different size from the
+    // artifact's. Comparing the listing against `artifact.sizeBytes` therefore
+    // refuses every correctly-delivered Bambu package as "содержимое не то, что
+    // проверялось". The delivery record is the authority on what was actually
+    // put there (and verified there); the artifact is only the fallback for a
+    // file no delivery of ours created — an operator-adopted one.
+    const delivered = repos.deviceArtifacts.findBySlot(printer.id, target);
+    const expected = {
+      sha256: artifact?.sha256 ?? null,
+      sizeBytes: delivered ? delivered.sizeBytes : (artifact?.sizeBytes ?? null)
+    };
+    const identity = await this.verifyOnDeviceFile(printer, target, expected, request.mode);
 
     // ── Reserve transaction ──────────────────────────────────────────────────
     const reserved = this.deps.store.transaction(() =>
@@ -850,16 +872,21 @@ export class DispatchService {
   // ── On-device identity pre-flight ─────────────────────────────────────────
 
   /**
-   * Verifies the on-device file against the artifact identity with the
+   * Verifies the on-device file against the expected identity with the
    * strongest evidence the adapter offers. Moonraker exposes name + size (no
    * content hash over the API) — a size mismatch on a same-named file is a hard
    * refusal. Adapters with no file API at all are recorded honestly as
    * `name-only`; for a *night* dispatch that weakness is itself a refusal.
+   *
+   * `expected.sizeBytes` is the size **on the device**, which the caller resolves
+   * from the delivery record — not the artifact's own size. The two differ
+   * whenever the adapter wraps the artifact for transport (a Bambu plate
+   * package), and using the artifact's size there fails a healthy delivery.
    */
   private async verifyOnDeviceFile(
     printer: PrinterConfig,
     target: string,
-    artifact: { sha256: string | null; sizeBytes: number | null } | null,
+    expected: { sha256: string | null; sizeBytes: number | null } | null,
     mode: DispatchMode
   ): Promise<{ level: DeviceFileIdentity; note: string | null }> {
     if (!supportsPrinterFiles(printer)) {
@@ -898,18 +925,18 @@ export class DispatchService {
         blockers: [{ code: REASON.DEVICE_FILE_MISSING, message: `${target} @ ${printer.name}` }]
       });
     }
-    if (artifact?.sizeBytes != null && typeof entry.size === "number") {
-      if (entry.size !== artifact.sizeBytes) {
+    if (expected?.sizeBytes != null && typeof entry.size === "number") {
+      if (entry.size !== expected.sizeBytes) {
         throw new JobError(
-          `Файл «${target}» на «${printer.name}» отличается от проанализированного (размер ${entry.size} ≠ ${artifact.sizeBytes}) — содержимое не то, что проверялось`
+          `Файл «${target}» на «${printer.name}» отличается от проанализированного (размер ${entry.size} ≠ ${expected.sizeBytes}) — содержимое не то, что проверялось`
         );
       }
       return {
         level: "name+size",
-        note: "хеш недоступен через Moonraker API — идентичность подтверждена именем и размером"
+        note: "хеш недоступен через API принтера — идентичность подтверждена именем и размером"
       };
     }
-    if (mode === "night" && artifact) {
+    if (mode === "night" && expected) {
       // Night dispatch demands the strongest identity we can get; a registered
       // artifact with no recorded size cannot be matched beyond its name.
       throw new JobError(

@@ -15,7 +15,7 @@ import {
 import { supportsPrinterUpload } from "../../infra/printers/files";
 import { ANALYZER_VERSION } from "../artifacts/analyzers";
 import { profileRevisionIdsOf, resolveTaskBinding } from "../dispatch/binding";
-import { stalenessOf } from "../dispatch/deviceFileIdentity";
+import { expectedDeviceSize, stalenessOf } from "../dispatch/deviceFileIdentity";
 import type { SchedulerContext } from "./context";
 import type { EvidenceResolver } from "./evidence";
 import type { SchedulerPrinterRef } from "./types";
@@ -146,7 +146,13 @@ export class EligibilityQueries {
       deviceArtifact:
         request.deviceArtifact !== undefined
           ? request.deviceArtifact
-          : this.trackedDeviceFile(task, printer.id, file, resolved.variant?.id ?? null),
+          : this.trackedDeviceFile(
+              task,
+              printer.id,
+              file,
+              resolved.variant?.id ?? null,
+              printer.protocol
+            ),
 
       etaMinutes: etaMinutesOf(resolved.evidence.sliceEtaS, resolved.evidence.gcodeEtaS),
       nightWindow: this.ctx.config.nightWindow,
@@ -224,7 +230,9 @@ export class EligibilityQueries {
     task: PrintTask,
     printerId: string,
     file: string | null,
-    sliceVariantId: string | null
+    sliceVariantId: string | null,
+    /** Target adapter — decides whether an on-device size may be compared at all. */
+    protocol: string | null
   ): DeviceArtifactFacts | null {
     if (file === null) return null;
     const repos = this.ctx.store.repositories;
@@ -247,7 +255,10 @@ export class EligibilityQueries {
       sliceVariantId,
       artifactId: artifact?.id ?? null,
       artifactSha256: artifact?.sha256 ?? null,
-      sizeBytes: artifact?.sizeBytes ?? null,
+      // Not `artifact.sizeBytes`: a wrapping adapter (Bambu plate package) puts a
+      // different byte count on the device, and comparing the two marked every
+      // healthy Bambu delivery stale.
+      sizeBytes: expectedDeviceSize(artifact?.sizeBytes, protocol),
       assignmentId: reservation?.id ?? null,
       profileRevisionIds: profileRevisionIdsOf(resolveTaskBinding(repos, task).binding)
     });

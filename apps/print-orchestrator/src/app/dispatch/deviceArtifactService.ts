@@ -29,6 +29,7 @@ import type { StoreLogger } from "../../shared/logger";
 import { recordAuditEvent } from "../audit";
 import { profileRevisionIdsOf } from "./binding";
 import {
+  expectedDeviceSize,
   PROFILE_REVISIONS_KEY,
   stalenessOf,
   type DeviceFileExpectation
@@ -388,13 +389,9 @@ export class DeviceArtifactService {
         sliceVariantId: assignment.binding.sliceVariantId,
         artifactId: artifact.id,
         artifactSha256: artifact.sha256,
-        // `DeviceArtifact.sizeBytes` records what sits on the DEVICE. When the
-        // adapter wraps the artifact (a Bambu plate package), that is a different
-        // byte count than the artifact's, so comparing the two would mark every
-        // correct delivery stale. Identity is not weakened by dropping it: the
-        // source `artifactSha256` above is compared unconditionally and is a
-        // strictly stronger statement than a length.
-        sizeBytes: wrapsArtifact(this.capabilitiesOf(printer)) ? null : artifact.sizeBytes,
+        // `DeviceArtifact.sizeBytes` records what sits on the DEVICE, which is
+        // not the artifact's size for a wrapping adapter — see `expectedDeviceSize`.
+        sizeBytes: expectedDeviceSize(artifact.sizeBytes, printer.protocol),
         assignmentId: assignment.id,
         profileRevisionIds: profileRevisionIdsOf(assignment.binding)
       }

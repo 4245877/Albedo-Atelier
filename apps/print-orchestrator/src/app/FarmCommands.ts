@@ -197,9 +197,13 @@ export class FarmCommands {
    * file is normalized at the door, an empty title refuses.
    */
   addQueueJob(input: NewQueueJobInput): QueueJob {
+    // `"any"`: at queue-add time the target may be unnamed or name a printer that
+    // is not configured yet, so the file is checked against what *some* adapter
+    // could start. The binding per-printer check still runs at dispatch, where
+    // the target is known — this one only refuses files no printer could ever run.
     const file =
       typeof input.file === "string" && input.file.trim()
-        ? normalizeStartablePath(input.file)
+        ? normalizeStartablePath(input.file, "any")
         : undefined;
     const detail = this.runtime.printQueue.createTask({
       title: typeof input.title === "string" ? input.title : "",
@@ -327,7 +331,10 @@ export class FarmCommands {
   ): Promise<{ runId: string; taskId: string; assignmentId: string; file: string }> {
     this.runtime.ensureQueue();
     const printer = this.runtime.configById(id);
-    const target = normalizeStartablePath(file);
+    // Validated against THIS printer's startable set: the file browser lists a
+    // Bambu `.gcode.3mf` as printable (it passes the printer), so the start path
+    // behind the same row must judge it by the same rule.
+    const target = normalizeStartablePath(file, printer);
     requireCapability(
       printer,
       "supportsFileListing",

@@ -128,6 +128,25 @@ export function capabilitiesOf(printer: PrinterConfig): PrinterCapabilities {
 }
 
 /**
+ * Every extension *some* implemented adapter can start — the union over the
+ * table above, longest-match first.
+ *
+ * The honest answer for a check made before any printer is in scope (queueing a
+ * job whose target is still open). The alternative in that position is the
+ * Klipper default, which is not a neutral fallback but a *specific* adapter's
+ * answer: it silently refuses a Bambu `.gcode.3mf` for a task that may well be
+ * destined for the Bambu. This union never authorises a start — the per-printer
+ * check still runs at dispatch, where the target is known.
+ */
+export function anyAdapterStartableExtensions(): readonly string[] {
+  const seen = new Set<string>();
+  for (const caps of Object.values(CAPABILITIES)) {
+    for (const ext of caps.startableExtensions) seen.add(ext);
+  }
+  return [...seen].sort((a, b) => b.length - a.length);
+}
+
+/**
  * One thing this printer still needs before its adapter can reach the device.
  *
  * Separate from {@link PrinterCapabilities} on purpose, and the distinction is

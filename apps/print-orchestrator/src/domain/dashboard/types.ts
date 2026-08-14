@@ -31,6 +31,19 @@ export interface QueueJob {
   night?: boolean;
   reason?: string;
   /**
+   * Measured facts behind the display strings above, absent when genuinely
+   * unknown. They exist so the queue card can show what the system already
+   * knows ("PETG · 0.4 мм · ≈ 1 ч 29 мин · ≈ 31 г") instead of the `—`
+   * placeholders it printed while the data sat unread in the artifact analysis.
+   * Absent ≠ zero: a missing field means "not measured", and the UI must render
+   * it as unknown rather than as `0`.
+   */
+  nozzleMm?: number;
+  etaSeconds?: number;
+  filamentG?: number;
+  /** The assignment that would execute this task, when one is already on file. */
+  assignmentId?: string;
+  /**
    * Name of the print file already present on the target printer. Optional
    * operator metadata; required for remote start (see FarmStore.startNext) —
    * without it the farm cannot tell the device which job to run.

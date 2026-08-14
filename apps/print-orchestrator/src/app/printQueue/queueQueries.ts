@@ -43,7 +43,14 @@ export class QueueQueries {
     return task;
   }
 
-  /** The open queue as `{ entry, task, artifact }` rows, ordered by position. */
+  /**
+   * The open queue as projection rows, ordered by position.
+   *
+   * Each row carries the artifact's latest analysis and the task's live
+   * assignment alongside the task itself: those two hold the material, nozzle,
+   * duration and filament weight the queue card shows, and reading them here
+   * (once, next to the task) keeps the projection a pure function of its row.
+   */
   listOpenQueue(): QueueProjectionRow[] {
     const repos = this.ctx.store.repositories;
     const entries = repos.queue.listOpen();
@@ -55,7 +62,14 @@ export class QueueQueries {
         throw new NotFoundError(`Задание «${entry.taskId}»`);
       }
       const artifact = task.artifactId ? repos.artifacts.getById(task.artifactId) : null;
-      return { entry, task, artifact };
+      const analysis = artifact
+        ? repos.artifactAnalyses.latestForArtifact(artifact.id)
+        : null;
+      // Newest live assignment wins: an invalidated or superseded placement no
+      // longer describes what would run.
+      const assignment =
+        repos.assignments.listByTask(task.id).filter((a) => a.invalidatedAt === null).at(-1) ?? null;
+      return { entry, task, artifact, analysis, assignment };
     });
   }
 

@@ -1,5 +1,5 @@
 import { ValidationError } from "../../../core/errors";
-import { capabilitiesOf } from "../capabilities";
+import { anyAdapterStartableExtensions, capabilitiesOf } from "../capabilities";
 import type { PrinterConfig } from "../config";
 
 /**
@@ -14,17 +14,26 @@ import type { PrinterConfig } from "../config";
  */
 export const PRINTABLE_EXTENSIONS = [".gcode", ".gco", ".g"] as const;
 
-/** The extensions `printer` can start; the G-code default when none is given. */
-export function startableExtensionsFor(
-  printer?: PrinterConfig | null
-): readonly string[] {
-  return printer ? capabilitiesOf(printer).startableExtensions : PRINTABLE_EXTENSIONS;
+/**
+ * Who the startability question is being asked about.
+ *
+ * A concrete {@link PrinterConfig} is the answer that matters and the only one
+ * that may authorise a start. `"any"` is for checks made *before* a target
+ * exists (queueing a job) — see {@link anyAdapterStartableExtensions}. Omitting
+ * it keeps the historical fail-closed G-code default.
+ */
+export type StartableScope = PrinterConfig | null | undefined | "any";
+
+/** The extensions `scope` can start; the G-code default when none is given. */
+export function startableExtensionsFor(scope?: StartableScope): readonly string[] {
+  if (scope === "any") return anyAdapterStartableExtensions();
+  return scope ? capabilitiesOf(scope).startableExtensions : PRINTABLE_EXTENSIONS;
 }
 
-/** Whether a file path ends in an extension `printer` (or Klipper, by default) can start. */
-export function isPrintableFile(filePath: string, printer?: PrinterConfig | null): boolean {
+/** Whether a file path ends in an extension `scope` (or Klipper, by default) can start. */
+export function isPrintableFile(filePath: string, scope?: StartableScope): boolean {
   const lower = filePath.toLowerCase();
-  return startableExtensionsFor(printer).some((ext) => lower.endsWith(ext));
+  return startableExtensionsFor(scope).some((ext) => lower.endsWith(ext));
 }
 
 /**
@@ -104,14 +113,16 @@ export function normalizePrinterPath(raw: unknown, options: NormalizePathOptions
  * execute, can never be started). Returns the normalized path to pass to
  * `startPrint`.
  *
- * Pass `printer` wherever one is in scope — without it the check falls back to
- * the Klipper G-code set, which would reject a legitimate Bambu plate package.
+ * Pass the target printer wherever one is in scope — without it the check falls
+ * back to the Klipper G-code set, which would reject a legitimate Bambu plate
+ * package. Where no target exists yet (queueing), pass `"any"` rather than
+ * letting the default stand in for a decision that has not been made.
  */
-export function normalizeStartablePath(raw: unknown, printer?: PrinterConfig | null): string {
+export function normalizeStartablePath(raw: unknown, scope?: StartableScope): string {
   const path = normalizePrinterPath(raw);
-  if (!isPrintableFile(path, printer)) {
+  if (!isPrintableFile(path, scope)) {
     throw new ValidationError(
-      `«${path}» не похож на файл печати — на этом принтере можно запустить только ${startableExtensionsFor(printer).join(", ")}`
+      `«${path}» не похож на файл печати — на этом принтере можно запустить только ${startableExtensionsFor(scope).join(", ")}`
     );
   }
   return path;

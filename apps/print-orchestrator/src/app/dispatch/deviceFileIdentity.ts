@@ -1,4 +1,5 @@
 import type { DeviceArtifact } from "../../domain/print/types";
+import { capabilitiesOfProtocol } from "../../infra/printers/capabilities";
 
 /**
  * **What the file on the printer must be**, and whether a tracked record still
@@ -36,6 +37,33 @@ export interface DeviceFileExpectation {
 
 /** Metadata key under which a record remembers the profiles it was prepared for. */
 export const PROFILE_REVISIONS_KEY = "profileRevisionIds";
+
+/**
+ * The artifact's size **as it should appear on the device**, or `null` when that
+ * question has no meaningful answer.
+ *
+ * An adapter that hands the printer the artifact's own bytes (Moonraker) makes
+ * the two sizes equal, and a mismatch is real evidence of a bad delivery. An
+ * adapter that *wraps* the artifact for transport — a Bambu `.gcode.3mf` plate
+ * package around the sliced G-code — makes them legitimately different, and
+ * comparing them marks every correct delivery stale.
+ *
+ * This lives here, next to the comparison it feeds, because three call sites
+ * need the same answer (the delivery's own expectation, the eligibility gate,
+ * and the dispatch pre-flight) and two of them had independently re-derived it
+ * as "just use the artifact size". Dropping the length costs no identity:
+ * `artifactId` and `artifactSha256` are compared unconditionally and are
+ * strictly stronger statements.
+ */
+export function expectedDeviceSize(
+  artifactSizeBytes: number | null | undefined,
+  protocol: string | null | undefined
+): number | null {
+  if (capabilitiesOfProtocol(protocol).deviceFileExtension.toLowerCase().endsWith(".3mf")) {
+    return null;
+  }
+  return artifactSizeBytes ?? null;
+}
 
 /**
  * Why `record` no longer describes `expected`, or `null` when it still does.

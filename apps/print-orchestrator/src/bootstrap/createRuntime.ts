@@ -33,6 +33,7 @@ import { DashboardReadModel } from "../app/dashboardReadModel";
 import { DeviceArtifactService } from "../app/dispatch/deviceArtifactService";
 import { DispatchService } from "../app/dispatch/dispatchService";
 import { RunLifecycleService } from "../app/dispatch/runLifecycle";
+import { LaunchService } from "../app/launch/launchService";
 import { EventFeed } from "../app/eventFeed";
 import { FilamentConsumption } from "../app/filamentConsumption";
 import { FilamentSync } from "../app/filamentSync";
@@ -86,6 +87,8 @@ export interface PrintServices {
   readonly printerConfig: PrinterConfigService;
   /** The single physical-start service; null until the queue store is opened. */
   readonly dispatchService: DispatchService | null;
+  /** The operator-facing launch workflow (choose → deliver → confirm → start). */
+  readonly launch: LaunchService;
   readonly slicing: {
     presets: PresetImportService;
     profiles: ProfileService;
@@ -392,6 +395,26 @@ export class FarmRuntime implements PrintServices {
   get manualOperations(): ManualOperationService {
     this.ensureQueue();
     return this.manualOperationServiceRef as ManualOperationService;
+  }
+
+  /**
+   * The launch workflow, rebuilt per access like {@link scheduler} — it closes
+   * over the scheduler getter, which joins *fresh* telemetry on every call, so a
+   * cached instance would rank printers against a stale view of the farm.
+   */
+  get launch(): LaunchService {
+    this.ensureQueue();
+    return new LaunchService({
+      store: this.printQueueStoreRef as PrintQueueStore,
+      printQueue: this.printQueue,
+      scheduler: this.scheduler,
+      deviceArtifacts: this.deviceArtifacts,
+      dispatch: () => this.dispatchServiceRef,
+      runLifecycle: () => this.runLifecycleRef,
+      manualOperations: this.manualOperations,
+      resolvePrinter: (id) => this.enabledConfigs().find((p) => p.id === id),
+      automaticContinuationAllowed: (id) => this.automaticContinuationAllowed(id)
+    });
   }
 
   /** The editable printer inventory (SQLite-backed), lazy. */

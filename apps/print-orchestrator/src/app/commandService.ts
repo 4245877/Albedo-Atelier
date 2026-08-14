@@ -208,8 +208,12 @@ export class PrinterCommandService {
     opts: { runId?: string } = {}
   ): Promise<PrinterView> {
     const runId = opts.runId ?? null;
-    const target = normalizeStartablePath(file);
+    // Printer first: `normalizeStartablePath` answers "can this be started?" from
+    // the target adapter's capability table, so validating before the config is
+    // resolved falls back to the Klipper G-code set and refuses a Bambu
+    // `.gcode.3mf` plate package at the last hop before the device.
     const printer = this.getReachableConfig(id);
+    const target = normalizeStartablePath(file, printer);
     if (!supportsPrinterStart(printer)) {
       throw new JobError(
         `Удалённый запуск печати для «${printer.name}» не поддерживается — запустите файл на самом принтере`

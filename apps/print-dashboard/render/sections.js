@@ -52,7 +52,7 @@ export function renderHero(state) {
 
 /* ── 2 · Очередь ───────────────────────────────────────────── */
 
-function queueRow(job) {
+function queueRow(job, printers) {
   // Статусы очереди: ready / review (legacy "error" нормализуется в review при
   // загрузке state-файла на backend и до фронта не доходит).
   const review = job.status === "review";
@@ -63,11 +63,35 @@ function queueRow(job) {
   return `
     <li class="row ${cls}">
       <div class="grow">
-        <div class="row-title">${esc(job.title)}</div>
-        <div class="row-sub">${esc(job.printer)} · ${esc(job.material)} · ${esc(job.eta)}${job.reason ? ` — ${esc(job.reason)}` : ""}</div>
+        <div class="row-title">${esc(queueJobTitle(job))}</div>
+        <div class="row-sub">${esc(queueJobSubtitle(job, printers))}${job.reason ? ` — ${esc(job.reason)}` : ""}</div>
       </div>
       ${st}
     </li>`;
+}
+
+/** «3U-default.3mf» → «3U-default»: оператор назвал модель, а не контейнер. */
+export function queueJobTitle(job) {
+  return String(job.title || "").replace(/\.(gcode\.3mf|3mf|stl|gcode|gco|g)$/i, "");
+}
+
+/**
+ * Подпись строки очереди: имя принтера (а не его id), материал, сопло, время.
+ *
+ * Пропускаем то, чего действительно нет, вместо «— · —»: раньше подпись
+ * склеивалась из трёх полей безусловно, и полностью проанализированное задание
+ * (PETG, 0.4 мм, 1 ч 29 мин) выглядело как задание без данных.
+ */
+export function queueJobSubtitle(job, printers) {
+  const parts = [];
+  const printer = (printers || []).find((p) => p.id === job.printer);
+  if (printer) parts.push(printer.name);
+  else if (job.printer && job.printer !== "—") parts.push(job.printer);
+  if (job.material && job.material !== "—") parts.push(job.material);
+  if (job.nozzleMm != null) parts.push(`${job.nozzleMm} мм`);
+  if (job.eta && job.eta !== "—") parts.push(job.eta);
+  if (job.filamentG != null) parts.push(`≈ ${Math.round(job.filamentG)} г`);
+  return parts.join(" · ") || "данные готовятся";
 }
 
 export function renderQueue(state) {
@@ -93,18 +117,33 @@ export function renderQueue(state) {
       </div>
       <div>
         <p class="sub-head">Очередь <span class="count">${state.queue.length}</span></p>
-        <ul class="row-list">${state.queue.map(queueRow).join("") || emptyRow("Очередь пуста — Назарик ожидает ваших повелений")}</ul>
+        <ul class="row-list">${state.queue.map((j) => queueRow(j, state.printers)).join("") || emptyRow("Очередь пуста — Назарик ожидает ваших повелений")}</ul>
       </div>
     </div>
-    ${next ? `
-      <div class="next-job">
-        <span class="star">❖</span>
-        <div class="grow">
-          <div class="row-title">Следующим я подготовила: ${esc(next.title)}</div>
-          <div class="row-sub">${esc(next.printer)} · старт в ${esc(next.at)} · ${esc(next.eta)}</div>
-        </div>
-        <button class="btn btn-sm btn-primary" data-act="start-next">Запустить</button>
-      </div>` : ""}`;
+    ${next ? nextJobCard(next, state.printers) : ""}`;
+}
+
+/**
+ * Карточка ближайшего задания — единственная главная кнопка раздела.
+ *
+ * «Запустить» открывает окно запуска, а не отправляет команду сразу: проверку
+ * готовности, выбор принтера и физические подтверждения показывает backend
+ * (GET /api/print/launch/:taskId), и до открытия окна здесь про них ничего не
+ * известно. Кнопка НЕ ведёт в файловый браузер и не требует, чтобы оператор
+ * сам нашёл подготовленный пакет на принтере, — это и была прежняя поломка.
+ */
+function nextJobCard(next, printers) {
+  return `
+    <div class="next-job">
+      <span class="star">❖</span>
+      <div class="grow">
+        <div class="row-title">${esc(queueJobTitle(next))}</div>
+        <div class="row-sub">${esc(queueJobSubtitle(next, printers))}</div>
+      </div>
+      <button class="btn btn-sm btn-primary" data-act="launch" data-task="${esc(next.id)}">
+        Запустить печать
+      </button>
+    </div>`;
 }
 
 /* ── 3 · Ночная печать ─────────────────────────────────────── */

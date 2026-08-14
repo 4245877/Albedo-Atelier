@@ -12,6 +12,7 @@ import { ValidationError } from "../../core/errors";
 import type { DayNightPreference } from "../../domain/print/types";
 import { uploads } from "../../shared/env";
 import { registerAssignmentRoutes } from "./assignmentRoutes";
+import { registerLaunchRoutes } from "./launchRoutes";
 import { registerOperationsRoutes } from "./operationsRoutes";
 import { registerSlicingRoutes } from "./slicingRoutes";
 
@@ -67,6 +68,7 @@ export async function registerPrintQueueRoutes(
   registerArtifactRoutes(app, services);
   registerSlicingRoutes(app, services);
   registerAssignmentRoutes(app, services);
+  registerLaunchRoutes(app, services);
   registerOperationsRoutes(app, services);
   registerSchedulerRoutes(app, services);
 

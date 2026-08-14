@@ -58,6 +58,10 @@ export class FarmStore implements PrintServices {
   get deviceArtifacts() {
     return this.runtime.deviceArtifacts;
   }
+  /** The operator-facing launch workflow (choose → deliver → confirm → start). */
+  get launch() {
+    return this.runtime.launch;
+  }
   /** The operator availability calendar (timezone, weekly windows, sleep), lazy. */
   get operatorSchedule() {
     return this.runtime.operatorSchedule;

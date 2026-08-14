@@ -1,5 +1,11 @@
 import type { QueueJob, QueueJobStatus } from "../../domain/dashboard/types";
-import type { Artifact, PrintTask, QueueEntry } from "../../domain/print/types";
+import type {
+  Artifact,
+  ArtifactAnalysis,
+  Assignment,
+  PrintTask,
+  QueueEntry
+} from "../../domain/print/types";
 
 /**
  * Renders the new persistent model back into the legacy {@link QueueJob} shape
@@ -19,11 +25,44 @@ export interface QueueProjectionRow {
   entry: QueueEntry;
   task: PrintTask;
   artifact: Artifact | null;
+  /**
+   * Latest analysis of the task's artifact, when one exists.
+   *
+   * The task's own `material` / `metadata.eta` are *operator-stated* fields and
+   * are routinely null for anything the pipeline produced itself: a sliced task
+   * gets its material, nozzle, duration and filament weight from analysing the
+   * G-code, not from someone typing them in. Reading only the task is what made
+   * a fully-analysed job render as `— · —` while its analysis held
+   * "PETG, 0.4 mm, 1 h 29 m, 31.1 g".
+   */
+  analysis?: ArtifactAnalysis | null;
+  /**
+   * The assignment that would execute this task, when one is on file. Its
+   * binding is the most specific truth available — it names the exact printer,
+   * material, nozzle and ETA the slice was actually produced for.
+   */
+  assignment?: Assignment | null;
 }
 
 function metaString(task: PrintTask, key: string): string | undefined {
   const value = task.metadata[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/** A positive finite number, or null — analyses may carry 0/NaN for "unknown". */
+function positive(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/** `5329` → `≈ 1 ч 29 мин`. Duration is shown, never invented: null stays null. */
+export function formatEta(seconds: number | null): string | null {
+  const total = positive(seconds);
+  if (total === null) return null;
+  const minutes = Math.round(total / 60);
+  if (minutes < 60) return `≈ ${minutes} мин`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m === 0 ? `≈ ${h} ч` : `≈ ${h} ч ${m} мин`;
 }
 
 /**
@@ -52,17 +91,35 @@ function inconsistencyReason(task: PrintTask, entry: QueueEntry): string | null 
 
 export function toLegacyQueueJob(row: QueueProjectionRow): QueueJob {
   const { task, entry, artifact } = row;
+  const analysis = row.analysis ?? null;
+  const binding = row.assignment?.binding ?? null;
   const status = toStatus(task, entry);
   const file = artifact?.source ?? metaString(task, "file");
+
+  // Precedence is most-specific-first, and every source is a *fact* rather than a
+  // guess: the assignment binding (what the slice was built for) beats the
+  // operator's stated field, which beats the analysis read off the file itself.
+  const material = binding?.material ?? task.material ?? analysis?.material ?? null;
+  const nozzleMm = positive(binding?.nozzleMm ?? analysis?.nozzleDiameterMm ?? null);
+  const etaSeconds = positive(binding?.etaS ?? analysis?.estimatedDurationS ?? null);
+  const filamentG = positive(analysis?.estimatedFilamentG ?? null);
 
   const job: QueueJob = {
     id: task.id,
     title: task.title,
-    printer: task.targetPrinter ?? "—",
-    material: task.material ?? "—",
-    eta: metaString(task, "eta") ?? "—",
+    printer: task.pinnedPrinterId ?? task.targetPrinter ?? "—",
+    material: material ?? "—",
+    eta: metaString(task, "eta") ?? formatEta(etaSeconds) ?? "—",
     status
   };
+
+  // Machine-readable companions to the display strings above, so the dashboard
+  // can format/compare without re-parsing "≈ 1 ч 29 мин". Omitted when unknown —
+  // absent means "not measured", which is not the same as zero.
+  if (nozzleMm !== null) job.nozzleMm = nozzleMm;
+  if (etaSeconds !== null) job.etaSeconds = etaSeconds;
+  if (filamentG !== null) job.filamentG = filamentG;
+  if (row.assignment) job.assignmentId = row.assignment.id;
 
   const at = metaString(task, "at") ?? (status === "ready" ? "в очереди" : undefined);
   if (at) job.at = at;

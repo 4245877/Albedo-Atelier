@@ -4,6 +4,7 @@ import {
   openFilesModal,
   openInfoModal,
   openJobForm,
+  openLaunchModal,
   openPrinterModal
 } from "./render/modals.js";
 import { setActiveNav } from "./nav.js";
@@ -160,6 +161,15 @@ export function installActions({ getState, refresh }) {
           toast(`Ночная печать «${esc(res.candidate.title)}» назначена на ${esc(String(res.window).split(" ")[0])} — я буду бдить, Владыка ☾`, "toast-ok");
         }
       });
+      return;
+    }
+    // Запуск печати из очереди: открывает окно запуска, которое само сходит за
+    // готовностью, покажет выбранный принтер и соберёт подтверждения. Ничего не
+    // отправляем отсюда — прежняя прямая отправка в /api/queue/start-next
+    // стартовала dispatch, ничего не зная ни про подготовку файла, ни про стол.
+    if (act === "launch") {
+      const taskId = el.dataset.task;
+      if (taskId) openLaunchModal(taskId);
       return;
     }
     if (act === "start-next") {

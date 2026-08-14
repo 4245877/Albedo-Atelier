@@ -289,7 +289,18 @@ export class RunLifecycleService {
       const repos = this.store.repositories;
       const bed = repos.bedCycles.findOpenByPrinter(printerId);
       if (!bed) {
-        throw new NotFoundError(`Открытый цикл стола для принтера «${printerId}»`);
+        // No tracked cycle at all — the printer has never run under this model,
+        // or its history was trimmed. That reads as bed state UNKNOWN, which the
+        // dispatch gate blocks on, so the operator MUST have a way to resolve it:
+        // refusing here (as this did) left the only exit from UNKNOWN behind a
+        // cycle that only a completed print could have created, and a farm whose
+        // first print can never start.
+        //
+        // Asserting a free bed is exactly the evidence a cycle records, so the
+        // confirmation opens one in CLEAR rather than being turned away. It is
+        // still an operator statement, attributed and audited like any other —
+        // `auto_cleared` remains refused below unless the hardware is verified.
+        return this.openClearedCycle(printerId, options);
       }
       if (bed.state === "RUNNING" || bed.state === "RESERVED") {
         throw new JobError(
@@ -329,6 +340,62 @@ export class RunLifecycleService {
       this.closeClearanceOperations(printerId, bed.id, options.actor, options.note);
       return saved;
     });
+  }
+
+  /**
+   * Establishes a fresh `CLEAR` cycle for a printer that had none.
+   *
+   * Called only from {@link clearBed}, inside its transaction. The confirmation
+   * is recorded exactly as it was given, and `auto_cleared` is refused for the
+   * same reason as on an existing cycle: a mechanism nobody verified may not
+   * assert its own success. There is no prior state to transition from, so no
+   * `assertTransition` — this *opens* the history rather than moving through it,
+   * which the audit entry records as `established` rather than `cleared`.
+   */
+  private openClearedCycle(
+    printerId: string,
+    options: {
+      confirmation: BedClearanceConfirmation;
+      actor?: string;
+      note?: string;
+      automaticContinuationAllowed?: boolean;
+    }
+  ): BedCycle {
+    if (options.confirmation === "auto_cleared" && options.automaticContinuationAllowed !== true) {
+      throw new JobError(
+        `У принтера «${printerId}» нет подтверждённой автоматической очистки стола — подтвердите снятие модели вручную`
+      );
+    }
+    const iso = this.nowIso();
+    const saved = this.store.repositories.bedCycles.insert({
+      id: newId(ID_PREFIX.bedCycle),
+      printerId,
+      state: "CLEAR",
+      assignmentId: null,
+      createdAt: iso,
+      updatedAt: iso,
+      clearedAt: iso,
+      version: 1,
+      metadata: {
+        clearance: options.confirmation,
+        clearedBy: options.actor ?? "operator",
+        // Distinguishes "an operator asserted a free bed on a printer we had no
+        // history for" from "a tracked print finished and was cleared".
+        established: true,
+        ...(options.note ? { clearanceNote: options.note } : {})
+      }
+    });
+    this.audit("bed_cycle", saved.id, "established", {
+      to: "CLEAR",
+      actor: options.actor,
+      detail: {
+        printerId,
+        confirmation: options.confirmation,
+        ...(options.note ? { note: options.note } : {})
+      }
+    });
+    this.closeClearanceOperations(printerId, saved.id, options.actor, options.note);
+    return saved;
   }
 
   /**

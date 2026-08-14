@@ -1319,3 +1319,190 @@
   .slice-form input[type="radio"],
   .sch-check input[type="checkbox"] { width: 20px; height: 20px; }
 }
+
+/* ═══ Запуск печати ══════════════════════════════════════════════
+   Окно одного сценария: что печатаем → где → что проверить → одна
+   главная кнопка. Визуальный вес намеренно неравномерный: сводка и CTA
+   крупные, диагностика — свёрнутая и мелкая. */
+
+.launch-loading {
+  padding: 26px 4px;
+  color: var(--ink-faint);
+  font-size: 13.5px;
+  text-align: center;
+}
+
+.launch-sum {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius-sm);
+  background: var(--card-inner);
+}
+
+.launch-sum-title {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.15;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.launch-sum-sub { font-size: 13.5px; color: var(--ink-soft); }
+
+.launch-sum-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 6px 16px;
+}
+
+.launch-sum .badge { align-self: flex-start; }
+
+.launch-note {
+  margin-left: 6px;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+}
+
+.launch-reason {
+  margin: 12px 0 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+
+.launch-reason.is-blocked {
+  padding: 10px 12px;
+  border-left: 2px solid var(--danger);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--danger-soft);
+  color: var(--danger-ink);
+}
+
+/* ── Подтверждения оператора ─────────────────────────────────── */
+
+.launch-confirms { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+
+.launch-confirm {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 11px 12px;
+  border: 1px solid var(--warn-soft);
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft);
+  cursor: pointer;
+}
+
+.launch-confirm input { flex: 0 0 auto; margin-top: 2px; width: 17px; height: 17px; }
+.launch-confirm span { display: block; min-width: 0; }
+.launch-confirm-lbl { font-size: 13.5px; font-weight: 700; color: var(--ink); }
+.launch-confirm-hint { margin-top: 2px; font-size: 12px; color: var(--ink-soft); }
+
+.launch-notes {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-faint);
+}
+
+/* ── Ручной выбор принтера ───────────────────────────────────── */
+
+.launch-cands { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+
+.launch-cand {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px;
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius-sm);
+  background: var(--card-top);
+  cursor: pointer;
+}
+
+.launch-cand:hover { border-color: var(--edge-strong); }
+.launch-cand.is-selected { border-color: var(--gold-line); background: var(--gold-soft); }
+.launch-cand.is-blocked { opacity: 0.62; cursor: not-allowed; }
+.launch-cand input { flex: 0 0 auto; margin-top: 3px; width: 17px; height: 17px; }
+
+.launch-cand-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+
+.launch-cand-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.launch-cand-name { font-size: 14px; font-weight: 700; color: var(--ink); }
+.launch-cand-facts { font-size: 12.5px; color: var(--ink-soft); }
+
+.launch-cand-why { font-size: 12px; color: var(--ink-faint); }
+.launch-cand-why.is-blocked { display: flex; flex-direction: column; gap: 2px; color: var(--danger-ink); }
+
+/* ── Диагностика (свёрнута: нужна при разборе, мешает при запуске) ── */
+
+.launch-diag { margin-top: 14px; }
+
+.launch-diag summary {
+  font-size: 12px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  user-select: none;
+}
+
+.launch-diag summary:hover { color: var(--ink-soft); }
+
+.launch-diag-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 9px;
+  padding: 11px;
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius-sm);
+  background: var(--card-bot);
+}
+
+.launch-diag-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  overflow-wrap: anywhere;
+}
+
+/* ── Итог ────────────────────────────────────────────────────── */
+
+.launch-actions { align-items: center; margin-top: 16px; }
+
+.launch-done {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  padding: 26px 12px;
+  text-align: center;
+}
+
+.launch-done-mark {
+  font-size: 30px;
+  line-height: 1;
+  color: var(--ok-ink);
+}
+
+@media (max-width: 560px) {
+  .launch-sum { padding: 12px; }
+  .launch-sum-title { font-size: 19px; }
+  .launch-sum-grid { grid-template-columns: 1fr; }
+  .launch-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .launch-actions .grow { display: none; }
+  .launch-actions .btn { width: 100%; }
+  .launch-actions [data-launch-mode] { grid-column: 1 / -1; }
+  .launch-actions [data-launch-go] { grid-column: 1 / -1; }
+}
+
+@media (pointer: coarse) {
+  .launch-confirm input,
+  .launch-cand input { width: 20px; height: 20px; }
+}

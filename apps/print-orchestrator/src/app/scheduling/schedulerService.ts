@@ -1,5 +1,6 @@
 import type { PrintQueueStore } from "../../domain/print/repositories";
-import type { MaterialOverride, Plan } from "../../domain/print/types";
+import type { MaterialOverride, Plan, PrintTask } from "../../domain/print/types";
+import type { CompatibilityResult } from "../../domain/scheduling/compatibility";
 import type { DispatchEligibility } from "../../domain/dispatch/eligibility";
 import { SchedulerContext } from "./context";
 import { EligibilityQueries, type EligibilityRequest } from "./eligibility";
@@ -55,11 +56,14 @@ export class SchedulerService {
   private readonly night: NightQueries;
   private readonly eligibilityQueries: EligibilityQueries;
 
+  private readonly printers: () => SchedulerPrinterRef[];
+
   constructor(
     store: PrintQueueStore,
     listPrinters: () => SchedulerPrinterRef[],
     config: SchedulerConfig
   ) {
+    this.printers = listPrinters;
     const ctx = new SchedulerContext(store, listPrinters, config);
     this.evidence = new EvidenceResolver(ctx);
     this.planning = new PlanningService(ctx, this.evidence);
@@ -71,6 +75,31 @@ export class SchedulerService {
 
   compatibilityMatrix(): CompatibilityMatrix {
     return this.evidence.compatibilityMatrix();
+  }
+
+  /**
+   * Compatibility of ONE task against every configured printer, paired with the
+   * printer reference it was judged against.
+   *
+   * The launch flow needs both halves — the verdict *and* the live printer facts
+   * (loaded material, nozzle, status) it must show the operator — and it must
+   * judge a task the matrix may not list at all: `compatibilityMatrix()` covers
+   * only currently-schedulable queue rows, while a launch can legitimately be
+   * previewed for a task that is already assigned.
+   */
+  compatibilityForTask(task: PrintTask): {
+    printer: SchedulerPrinterRef;
+    result: CompatibilityResult;
+  }[] {
+    return this.listPrinterRefs().map((printer) => ({
+      printer,
+      result: this.evidence.evaluate(task, printer)
+    }));
+  }
+
+  /** The live printer references the scheduler reasons over (telemetry joined in). */
+  listPrinterRefs(): SchedulerPrinterRef[] {
+    return this.printers();
   }
 
   // ── Dispatch eligibility (EligibilityQueries) ───────────────────────────────

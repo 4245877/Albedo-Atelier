@@ -291,9 +291,40 @@ test("a bed under an active print cannot be 'cleared' out from under it", async 
   assert.equal(bedState(h), "RUNNING");
 });
 
-test("clearing a printer with no open cycle is an honest not-found, not a silent no-op", () => {
+test("clearing a printer with no tracked cycle establishes one — recorded, never a silent no-op", () => {
   const h = makeHarness();
-  assert.throws(() => h.lifecycle.clearBed("k2", { confirmation: "part_removed" }), NotFoundError);
+  // This used to be a NotFoundError. That was defensible as a statement about
+  // the data ("there is no cycle to clear") but wrong as a product rule: a
+  // printer with no history reads as bed state UNKNOWN, the dispatch gate blocks
+  // on UNKNOWN, and the only exit from UNKNOWN was a cycle that only a completed
+  // print could create. A farm's first print could therefore never start, and
+  // the operator had no button anywhere that would fix it.
+  //
+  // The confirmation now opens the history it was missing. What must NOT change
+  // is that it stays *evidence*: an attributed, audited operator assertion.
+  const cycle = h.lifecycle.clearBed("k2", { confirmation: "part_removed", actor: "miha" });
+
+  assert.equal(cycle.state, "CLEAR");
+  assert.equal(cycle.printerId, "k2");
+  assert.equal(cycle.metadata.clearedBy, "miha", "the assertion is named");
+  assert.equal(cycle.metadata.established, true, "distinguishable from a cleared print");
+
+  const audit = h.store.repositories.audit.listByEntity("bed_cycle", cycle.id);
+  assert.ok(
+    audit.some((e) => e.action === "established"),
+    "an assertion that leaves no audit trail is a silent no-op with extra steps"
+  );
+});
+
+test("an unverified auto-clear cannot establish a cycle either", () => {
+  const h = makeHarness();
+  // The `auto_cleared` guard must hold on the no-history path too, or the new
+  // branch becomes a way around it.
+  assert.throws(
+    () => h.lifecycle.clearBed("k2", { confirmation: "auto_cleared" }),
+    /автоматической очистки/
+  );
+  assert.equal(h.store.repositories.bedCycles.listByPrinter("k2").length, 0, "nothing was written");
 });
 
 // ── The night scenario from the brief ───────────────────────────────────────

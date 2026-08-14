@@ -11,6 +11,7 @@ import { badge } from "../shared/chips.js";
 import { fmtBytes, fmtLeft } from "../shared/format.js";
 import { commonActionButtons, materialBlock, telemetryTempRows } from "./printerParts.js";
 import { camBlock } from "./printers.js";
+import { createLaunchController } from "../features/launch/controller.js";
 import {
   actionAvailability,
   isBusy,
@@ -47,6 +48,18 @@ function ensureRoot() {
     if (e.target === root || e.target.closest("[data-modal-close]")) closeModal();
   });
 
+  // Окно запуска печати: собственные делегированные клики и change-события.
+  // Обрабатываются ПЕРВЫМИ и по своему kind, чтобы разметка запуска не пересекалась
+  // с обработчиками файлового браузера.
+  root.addEventListener("click", (e) => {
+    if (!current || current.kind !== "launch") return;
+    launchController().handleClick(e);
+  });
+  root.addEventListener("change", (e) => {
+    if (!current || current.kind !== "launch") return;
+    launchController().handleChange(e);
+  });
+
   // Навигация файлового браузера — делегированно, разметка перерисовывается.
   root.addEventListener("click", (e) => {
     if (!current || current.kind !== "files") return;
@@ -75,8 +88,35 @@ export function closeModal() {
   current = null;
   document.documentElement.classList.remove("modal-open");
   $("#modal-content").innerHTML = "";
+  // Сессия запуска (и её ключ идемпотентности) живёт ровно столько же, сколько
+  // окно: закрыли — следующая попытка начинается заново.
+  launchRef?.reset();
   // Снять живой плеер камеры из закрытого окна (крепления больше нет в DOM).
   reconcileCameras();
+}
+
+/* ── Запуск печати ─────────────────────────────────────────────
+   Контроллер создаётся лениво и один раз: ему нужны deps (refresh), которые
+   приходят в initModals позже, чем строится модальный корень. */
+
+let launchRef = null;
+
+function launchController() {
+  if (!launchRef) {
+    launchRef = createLaunchController({
+      getContent: () => $("#modal-content"),
+      refresh: () => deps.refresh(),
+      close: closeModal
+    });
+  }
+  return launchRef;
+}
+
+/** Открывает окно запуска для задания очереди. */
+export function openLaunchModal(taskId) {
+  current = { kind: "launch", taskId };
+  openShell();
+  launchController().open(taskId);
 }
 
 /* ── Детали принтера ───────────────────────────────────────── */
@@ -263,8 +303,12 @@ function filesListHtml(p, entries) {
         </button>`;
     }
     const disabled = startBlocked || !e.printable;
+    // `printable` приходит с backend и уже посчитан ДЛЯ ЭТОГО принтера
+    // (capabilitiesOf(printer).startableExtensions), поэтому подготовленный
+    // Bambu-пакет `.gcode.3mf` здесь запускаемый, а для Moonraker — нет.
+    // Собственного списка расширений у UI нет и быть не должно.
     const title = !e.printable
-      ? "Это не файл G-code — запускать его я не позволю"
+      ? "Этот файл нельзя запустить на этом принтере"
       : blockedNote || `Запустить «${e.name}» на печать`;
     return `
       <div class="file-row">
