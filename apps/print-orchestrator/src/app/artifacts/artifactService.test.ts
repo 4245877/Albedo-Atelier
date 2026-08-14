@@ -160,6 +160,49 @@ test("a failed analysis can be re-run", async () => {
   assert.equal(detail.analyses[detail.analyses.length - 1].state, "ready");
 });
 
+// ── No duplicate work for one file ───────────────────────────────────────────
+
+test("two re-analyse requests arriving together create ONE analysis, not two", async () => {
+  harness.setAnalyze(async () => {
+    throw new Error("boom");
+  });
+  const { artifact } = await upload("cube.stl", "bytes");
+  await harness.service.whenIdle();
+
+  harness.setAnalyze(async () => preparationResult());
+  // The dashboard's in-flight guard is client-side only; two tabs, a retried
+  // request or a double-click reach the service as two calls.
+  const first = harness.service.reanalyze(artifact.id);
+  const second = harness.service.reanalyze(artifact.id);
+  assert.equal(second.id, first.id, "the in-flight analysis is returned, not a new one");
+
+  await harness.service.whenIdle();
+  const detail = harness.service.getArtifactDetail(artifact.id);
+  assert.equal(detail.analyses.length, 2, "the failed one plus exactly one re-run");
+});
+
+test("the same analysis job running twice analyses the file only once", async () => {
+  let calls = 0;
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  harness.setAnalyze(async () => {
+    calls++;
+    await gate;
+    return preparationResult();
+  });
+
+  const { artifact, analysis } = await upload("cube.stl", "bytes");
+  // A second job for the same id — what an enqueue racing crash recovery does.
+  const second = harness.service.runAnalysis(analysis.id);
+  release?.();
+  await Promise.all([second, harness.service.whenIdle()]);
+
+  assert.equal(calls, 1, "the second job found the analysis already claimed");
+  const detail = harness.service.getArtifactDetail(artifact.id);
+  assert.equal(detail.analyses.length, 1);
+  assert.equal(detail.analyses[0].state, "ready");
+});
+
 test("unfinished (pending/running) analyses are recovered after a restart", async () => {
   const a = await upload("a.stl", "aaa");
   const b = await upload("b.stl", "bbb");

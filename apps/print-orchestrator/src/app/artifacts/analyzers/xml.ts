@@ -32,7 +32,7 @@ export class XmlSafetyError extends Error {
 const DOCTYPE_RE = /<!DOCTYPE/i;
 const ENTITY_RE = /<!ENTITY/i;
 
-const parser = new XMLParser({
+const BASE_OPTIONS = {
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
   // No entity expansion at all — removes the XXE / billion-laughs machinery.
@@ -41,14 +41,30 @@ const parser = new XMLParser({
   parseAttributeValue: false,
   parseTagValue: false,
   trimValues: true
-});
+} as const;
+
+const parser = new XMLParser(BASE_OPTIONS);
+/** One parser per distinct `rawNodes` set — constructing them per call is wasteful. */
+const rawParsers = new Map<string, XMLParser>();
+
+export interface XmlParseOptions {
+  /**
+   * Element paths (fast-xml-parser `stopNodes` syntax, e.g. `"*.mesh"`) whose
+   * bodies are handed back as raw text instead of being built into an object
+   * tree. This is a *performance* control, not a safety one: a 3MF mesh is
+   * hundreds of thousands of `<vertex>` elements, and materialising each as an
+   * object costs ~25× what scanning the text does. Everything the caller then
+   * reads out of that text it must still validate itself.
+   */
+  rawNodes?: readonly string[];
+}
 
 /**
  * Parses trusted-shape but untrusted-content XML into a plain object, after the
  * DOCTYPE/ENTITY and size guards. Throws {@link XmlSafetyError} when a guard
  * trips or the document is not well-formed.
  */
-export function parseSafeXml(text: string, maxBytes: number): unknown {
+export function parseSafeXml(text: string, maxBytes: number, options: XmlParseOptions = {}): unknown {
   if (Buffer.byteLength(text, "utf8") > maxBytes) {
     throw new XmlSafetyError(`XML превышает лимит ${maxBytes} Б`, "xml_too_large");
   }
@@ -64,10 +80,21 @@ export function parseSafeXml(text: string, maxBytes: number): unknown {
     throw new XmlSafetyError("Некорректный XML", "xml_malformed");
   }
   try {
-    return parser.parse(text);
+    return parserFor(options.rawNodes).parse(text);
   } catch {
     throw new XmlSafetyError("Некорректный XML", "xml_malformed");
   }
+}
+
+function parserFor(rawNodes: readonly string[] | undefined): XMLParser {
+  if (!rawNodes || rawNodes.length === 0) return parser;
+  const key = rawNodes.join("|");
+  let cached = rawParsers.get(key);
+  if (!cached) {
+    cached = new XMLParser({ ...BASE_OPTIONS, stopNodes: [...rawNodes] });
+    rawParsers.set(key, cached);
+  }
+  return cached;
 }
 
 /** Normalizes fast-xml-parser's "one child or an array of children" into an array. */

@@ -86,27 +86,66 @@ function analysisHtml(item, a) {
   }
 
   const rows = metaRows(a);
-  const warns = (a.warnings || [])
-    .map((w) => `<li class="upload-warn">⚠ ${esc(w.message)}</li>`)
-    .join("");
-  const blocks = (a.blockers || [])
-    .map((b) => `<li class="upload-block">⛔ ${esc(b.message)}</li>`)
-    .join("");
-
-  const taskLink = item.task
-    ? `<div class="upload-task">Черновик задания:
-         <b>${esc(item.task.title)}</b>
-         <span class="upload-chip chip-info"><i class="dot"></i>${esc(item.task.state)}</span>
-         <code>${esc(item.task.id)}</code></div>`
-    : "";
+  const warns = (a.warnings || []).map((w) => findingHtml(w, "upload-warn", "⚠")).join("");
+  const blocks = (a.blockers || []).map((b) => findingHtml(b, "upload-block", "⛔")).join("");
 
   return `
     <div class="upload-analysis">
+      ${verdictNote(a)}
       ${rows ? `<dl class="upload-meta">${rows}</dl>` : ""}
       ${warns || blocks ? `<ul class="upload-findings">${blocks}${warns}</ul>` : ""}
-      ${taskLink}
+      ${taskHtml(item)}
     </div>`;
 }
+
+/* Находка = факт + (необязательно) что с этим делать. Подсказка идёт отдельной
+   строкой: сообщение остаётся описанием причины, а не инструкцией. */
+function findingHtml(f, cls, icon) {
+  const hint = f.hint ? `<span class="upload-hint">${esc(f.hint)}</span>` : "";
+  return `<li class="${cls}">${icon} ${esc(f.message)}${hint}</li>`;
+}
+
+/* Вердикт «заблокировано» сам по себе ничего не объясняет, а рядом ещё и висит
+   черновик в NEEDS_REVIEW — со стороны это два непонятных статуса об одном и том
+   же. Поэтому даём одну человеческую фразу: что произошло и что дальше. */
+const VERDICT_NOTE = {
+  blocked: "Файл не удалось подготовить к печати — причина ниже. Задание отложено на проверку.",
+  review: "Файл сохранён, но автоматически распознать его не вышло — нужен взгляд оператора.",
+  needs_input: "Файл принят, но для планирования не хватает данных.",
+  needs_preparation: "Файл принят. Это модель — перед печатью её нужно нарезать (раздел «Слайсинг»)."
+};
+
+function verdictNote(a) {
+  const note = VERDICT_NOTE[a.verdict];
+  return note ? `<p class="upload-note">${esc(note)}</p>` : "";
+}
+
+function taskHtml(item) {
+  if (!item.task) return "";
+  const reason = item.task.reason
+    ? `<div class="upload-task-reason">${esc(item.task.reason)}</div>`
+    : "";
+  return `
+    <div class="upload-task">Черновик задания:
+      <b>${esc(item.task.title)}</b>
+      <span class="upload-chip chip-info"><i class="dot"></i>${esc(TASK_STATE[item.task.state] || item.task.state)}</span>
+      <code>${esc(item.task.id)}</code>
+    </div>${reason}`;
+}
+
+/* NEEDS_REVIEW/DRAFT — внутренние имена состояний; оператору нужны слова. */
+const TASK_STATE = {
+  DRAFT: "черновик",
+  NEEDS_REVIEW: "нужна проверка",
+  QUEUED: "в очереди",
+  PLANNED: "запланировано",
+  ASSIGNED: "назначено принтеру",
+  DISPATCHING: "отправляется",
+  PRINTING: "печатается",
+  COMPLETED: "напечатано",
+  CANCELLED: "отменено",
+  FAILED: "сбой"
+};
 
 function metaRows(a) {
   const d = a.data || {};
@@ -133,13 +172,15 @@ function metaRows(a) {
     add("Габариты", fmtBbox(d.bbox, true));
   } else if (a.detectedFormat === "3mf") {
     add("Класс", fmt3mfClass(d.threeMfClass));
+    add("Создан в", fmtProducer(d));
     add("Единицы", fmtUnits(d));
     add("Объектов", d.objectCount);
     add("Build items", d.buildItemCount);
+    // >1 — модель разложена по нескольким частям (production extension 3MF).
+    if (d.modelPartCount > 1) add("Частей модели", d.modelPartCount);
     add("Пластин", d.plateCount);
-    add("Слайсер", d.slicer);
     add("Материал", a.material);
-    add("G-code внутри", d.hasGcodePayload ? "да" : "нет");
+    add("G-code внутри", fmtGcodePayload(d));
     add("Габариты", fmtGeometry(d));
     add("По пластинам", fmtPlates(d.geometry));
   }
@@ -157,8 +198,38 @@ function fmtFormatLabel(f) {
 
 function fmt3mfClass(c) {
   return (
-    { generic: "модель 3MF", slicer_project: "проект слайсера", sliced: "нарезанный / G-code 3MF", unknown: "неизвестный 3MF" }[c] || c
+    {
+      generic: "модель 3MF",
+      slicer_project: "проект слайсера",
+      sliced: "нарезанный / G-code 3MF",
+      // «unknown» больше не значит «мы не смогли открыть файл» — только «внутри
+      // архива нет 3D-модели». Причина всегда приходит отдельной находкой.
+      unknown: "архив без 3D-модели"
+    }[c] || c
   );
+}
+
+const PRODUCER = {
+  orcaslicer: "OrcaSlicer",
+  bambustudio: "Bambu Studio",
+  prusaslicer: "PrusaSlicer",
+  cura: "Cura",
+  other: "другой слайсер"
+};
+
+/* «Создан в» — название слайсера, а в скобках его собственная подпись из файла
+   (`OrcaSlicer-2.1.1`), чтобы видеть версию. Если файл ничего не сообщает —
+   строка не выводится вовсе, а не показывает «—». */
+function fmtProducer(d) {
+  const label = d.producer ? PRODUCER[d.producer] || d.producer : null;
+  if (!label) return d.slicer || null;
+  return d.slicer && d.slicer !== label ? `${label} (${d.slicer})` : label;
+}
+
+function fmtGcodePayload(d) {
+  if (!d.hasGcodePayload) return "нет — это модель, её ещё нужно нарезать";
+  const n = Array.isArray(d.gcodeEntries) ? d.gcodeEntries.length : 0;
+  return n > 1 ? `да, ${n} шт.` : "да";
 }
 
 export function guessFormat(name) {

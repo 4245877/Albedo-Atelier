@@ -99,6 +99,23 @@ export class OrcaCliRunner implements SliceRunner {
     }
 
     const detected = (out.stdout + out.stderr).match(VERSION_RE)?.[1] ?? null;
+
+    // A non-zero exit means the CLI REFUSED the probe — and a binary that cannot
+    // answer `--version` cannot slice either. This must not be waved through on the
+    // strength of a version number scraped from the output: some builds print their
+    // whole help banner (which contains a version) on an unknown option and exit
+    // non-zero, which used to be reported as a healthy, version-matching runtime
+    // while every real slice segfaulted. Report the CLI's own words instead.
+    if (out.exitCode !== 0) {
+      return {
+        ...base,
+        detectedVersion: detected,
+        error:
+          `OrcaSlicer не принял «--version» (код ${out.exitCode}): ${tail(out.stderr || out.stdout, 200)}` +
+          " — двоичный файл несовместим или собран без CLI"
+      };
+    }
+
     if (!detected) {
       return { ...base, error: "Не удалось определить версию OrcaSlicer" };
     }

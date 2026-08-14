@@ -10,6 +10,7 @@ import {
   make3mfPackage,
   makeGeneric3mf,
   makeModelSettingsConfig,
+  makeProject3mf,
   makeSliced3mf,
   makeZip,
   tempDir,
@@ -94,11 +95,227 @@ test("an excessive uncompressed size is blocked before parsing", async () => {
   assert.ok(r.blockers.some((b) => b.code === "zip_entry_too_large"));
 });
 
-test("a ZIP without a 3MF model → review (unknown/unsupported)", async () => {
+test("a ZIP without a 3MF model → review (unknown/unsupported), with an actionable finding", async () => {
   const buf = makeZip([{ name: "readme.txt", data: "not a 3mf" }]);
   const r = await run("plain.3mf", buf);
   assert.equal(r.verdict, "review");
   assert.equal(r.data.threeMfClass, "unknown");
+  // Not blocked — the bytes are safe, there is simply nothing to print — and the
+  // operator is told what was actually found and what to do about it.
+  assert.equal(r.blockers.length, 0);
+  const f = r.warnings.find((w) => w.code === "threemf_no_model");
+  assert.ok(f, "the reason is named, not left as a bare «unknown 3MF»");
+  assert.ok(f?.message.includes("readme.txt"));
+  assert.ok(f?.hint);
+});
+
+// ── ZIP64 (the reported bug) ─────────────────────────────────────────────────
+
+test("a ZIP64 3MF is analysed exactly like the same package without ZIP64", async () => {
+  // Real OrcaSlicer/BambuStudio/PrusaSlicer output is ZIP64 at any size, because
+  // miniz writes the ZIP64 records unconditionally. Such a file used to be
+  // blocked as «ZIP64-архивы не поддерживаются» and parked in NEEDS_REVIEW.
+  const xml = make3mfModelXml({ unit: "millimeter", size: 30 });
+  const plain = await run("plain.3mf", makeGeneric3mf(xml));
+  const zip64 = await run("zip64.3mf", makeGeneric3mf(xml, { zip64: "full" }));
+
+  assert.equal(zip64.verdict, "needs_preparation");
+  assert.equal(zip64.blockers.length, 0);
+  assert.equal(zip64.data.threeMfClass, "generic");
+  assert.deepEqual(geometryOf(zip64).sizeMm, [30, 30, 30]);
+  // Byte layout is not supposed to change a single conclusion.
+  assert.deepEqual(zip64.data.geometry, plain.data.geometry);
+});
+
+test("a ZIP64 3MF is still subject to the archive safety limits", async () => {
+  const r = await run("zip64-big.3mf", makeGeneric3mf(make3mfModelXml(), { zip64: "full" }), {
+    ...LIMITS,
+    zipMaxEntryBytes: 10
+  });
+  assert.equal(r.verdict, "blocked");
+  assert.ok(r.blockers.some((b) => b.code === "zip_entry_too_large"));
+});
+
+test("a blocked 3MF explains what the operator can do about it", async () => {
+  const r = await run("torn.3mf", makeGeneric3mf(make3mfModelXml(), { zip64: "full", omitZip64Record: true }));
+  assert.equal(r.verdict, "blocked");
+  const b = r.blockers[0];
+  assert.equal(b.code, "zip_corrupt");
+  assert.ok(b.hint, "a blocker carries a next step, not just a technical code");
+});
+
+// ── Producer / class detection ───────────────────────────────────────────────
+
+const PRODUCER_CASES: [Parameters<typeof makeProject3mf>[0], string][] = [
+  ["orca", "orcaslicer"],
+  ["bambu", "bambustudio"],
+  ["prusa", "prusaslicer"]
+];
+
+for (const [slicer, expected] of PRODUCER_CASES) {
+  test(`a ${expected} project 3MF is recognised as a project of that slicer`, async () => {
+    const r = await run(`${slicer}.3mf`, makeProject3mf(slicer));
+    assert.equal(r.data.threeMfClass, "slicer_project");
+    assert.equal(r.data.producer, expected);
+    assert.equal(r.data.hasGcodePayload, false);
+    assert.equal(r.verdict, "needs_preparation");
+    assert.deepEqual(geometryOf(r).sizeMm, [20, 20, 20]);
+  });
+
+  test(`the same ${expected} project survives a ZIP64 container`, async () => {
+    const r = await run(`${slicer}64.3mf`, makeProject3mf(slicer, { zip64: "full" }));
+    assert.equal(r.data.producer, expected);
+    assert.deepEqual(geometryOf(r).sizeMm, [20, 20, 20]);
+  });
+}
+
+test("a plain CAD-exported 3MF claims no producer rather than guessing one", async () => {
+  const xml = make3mfModel({
+    unit: "millimeter",
+    application: "",
+    objects: [{ id: "1", vertices: boxVertices(10) }],
+    items: [{ objectid: "1" }]
+  });
+  const r = await run("cad.3mf", make3mfPackage(xml));
+  assert.equal(r.data.producer, null);
+  assert.equal(r.data.threeMfClass, "generic");
+});
+
+test("a .gcode.md5 sidecar alone does not make a project look sliced", async () => {
+  const r = await run(
+    "sidecar.3mf",
+    make3mfPackage(make3mfModelXml(), [
+      { name: "Metadata/project_settings.config", data: "{}" },
+      { name: "Metadata/plate_1.gcode.md5", data: "d41d8cd98f00b204e9800998ecf8427e" }
+    ])
+  );
+  assert.equal(r.data.hasGcodePayload, false);
+  assert.equal(r.data.threeMfClass, "slicer_project");
+  assert.equal(r.verdict, "needs_preparation");
+});
+
+test("a real G-code entry is listed, not just flagged", async () => {
+  const r = await run("sliced.3mf", makeSliced3mf());
+  assert.equal(r.data.hasGcodePayload, true);
+  assert.deepEqual(r.data.gcodeEntries, ["Metadata/plate_1.gcode"]);
+});
+
+// ── OPC container shape ──────────────────────────────────────────────────────
+
+test("part names are matched case-insensitively, as OPC requires", async () => {
+  const buf = makeZip([
+    { name: "[content_types].xml", data: "<Types/>" },
+    { name: "3D/3Dmodel.model", data: make3mfModelXml({ size: 12 }) }
+  ]);
+  const r = await run("case.3mf", buf);
+  assert.equal(r.data.threeMfClass, "generic");
+  assert.equal(r.warnings.some((w) => w.code === "threemf_no_content_types"), false);
+  assert.deepEqual(geometryOf(r).sizeMm, [12, 12, 12]);
+});
+
+test("a readable model without [Content_Types].xml is analysed and reported, not written off", async () => {
+  const buf = makeZip([{ name: "3D/3dmodel.model", data: make3mfModelXml({ size: 12 }) }]);
+  const r = await run("nocontenttypes.3mf", buf);
+  assert.notEqual(r.data.threeMfClass, "unknown");
+  assert.ok(r.warnings.some((w) => w.code === "threemf_no_content_types"));
+  assert.deepEqual(geometryOf(r).sizeMm, [12, 12, 12]);
+});
+
+// ── Production extension: objects in separate .model parts ───────────────────
+
+test("an object living in another .model part (production extension) is measured", async () => {
+  // Bambu Studio / OrcaSlicer emit exactly this: the root places a component
+  // that resolves through `p:path` into /3D/Objects/Object_1.model.
+  const rootXml = make3mfModel({
+    unit: "millimeter",
+    objects: [{ id: "2", components: [{ objectid: "1", path: "/3D/Objects/Object_1.model" }] }],
+    items: [{ objectid: "2", transform: "2 0 0 0 2 0 0 0 2 0 0 0" }]
+  });
+  const partXml = make3mfModel({
+    unit: "millimeter",
+    objects: [{ id: "1", vertices: boxVertices(10) }],
+    items: []
+  });
+  const r = await run(
+    "production.3mf",
+    make3mfPackage(rootXml, [{ name: "3D/Objects/Object_1.model", data: partXml }])
+  );
+  assert.equal(r.data.modelPartCount, 2);
+  assert.equal(r.warnings.some((w) => w.code === "threemf_missing_object"), false);
+  // The external mesh, through the root item's ×2 transform.
+  assert.deepEqual(geometryOf(r).sizeMm, [20, 20, 20]);
+});
+
+test("a build item pointing straight into another part is resolved too", async () => {
+  const rootXml = make3mfModel({
+    unit: "millimeter",
+    objects: [],
+    items: [{ objectid: "1", path: "/3D/Objects/Object_1.model" }]
+  });
+  const partXml = make3mfModel({
+    unit: "millimeter",
+    objects: [{ id: "1", vertices: boxVertices(15) }],
+    items: []
+  });
+  const r = await run(
+    "item-path.3mf",
+    make3mfPackage(rootXml, [{ name: "3D/Objects/Object_1.model", data: partXml }])
+  );
+  assert.deepEqual(geometryOf(r).sizeMm, [15, 15, 15]);
+});
+
+test("a p:path pointing at a part that is not in the package is reported", async () => {
+  const rootXml = make3mfModel({
+    unit: "millimeter",
+    objects: [{ id: "2", components: [{ objectid: "1", path: "/3D/Objects/Gone.model" }] }],
+    items: [{ objectid: "2" }]
+  });
+  const r = await run("missing-part.3mf", make3mfPackage(rootXml));
+  assert.ok(r.warnings.some((w) => w.code === "threemf_missing_part"));
+  assert.ok(r.warnings.some((w) => w.code === "threemf_missing_object"));
+  assert.equal(geometryOf(r).sizeMm, null);
+});
+
+test("a part that references back into its referrer is cut, not recursed", async () => {
+  const rootXml = make3mfModel({
+    unit: "millimeter",
+    objects: [{ id: "1", components: [{ objectid: "1", path: "/3D/Objects/Loop.model" }] }],
+    items: [{ objectid: "1" }]
+  });
+  const loopXml = make3mfModel({
+    unit: "millimeter",
+    objects: [{ id: "1", vertices: boxVertices(10), components: [{ objectid: "1", path: "/3D/3dmodel.model" }] }],
+    items: []
+  });
+  const r = await run(
+    "loop.3mf",
+    make3mfPackage(rootXml, [{ name: "3D/Objects/Loop.model", data: loopXml }])
+  );
+  assert.ok(r.warnings.some((w) => w.code === "threemf_component_cycle"));
+  assert.deepEqual(geometryOf(r).sizeMm, [10, 10, 10]);
+});
+
+// ── Dense meshes ─────────────────────────────────────────────────────────────
+
+test("a dense mesh is measured exactly, per vertex, through its transform", async () => {
+  // 20k vertices on a diagonal, rotated 90° about Z by the build transform: an
+  // axis-aligned shortcut would get this wrong, per-vertex maths does not.
+  const vertices = Array.from({ length: 20_000 }, (_, i): [number, number, number] => [
+    i * 0.001,
+    i * 0.002,
+    i * 0.0005
+  ]);
+  const xml = make3mfModel({
+    unit: "millimeter",
+    objects: [{ id: "1", vertices }],
+    items: [{ objectid: "1", transform: "0 1 0 -1 0 0 0 0 1 0 0 0" }]
+  });
+  const g = geometryOf(await run("dense.3mf", make3mfPackage(xml, [], { zip64: "full" })));
+  // x' = -y ∈ [-39.998, 0], y' = x ∈ [0, 19.999], z unchanged ∈ [0, 9.9995]
+  assert.deepEqual(
+    g.sizeMm?.map((v) => Math.round(v * 10000) / 10000),
+    [39.998, 19.999, 9.9995]
+  );
 });
 
 test("a malformed model XML is blocked", async () => {

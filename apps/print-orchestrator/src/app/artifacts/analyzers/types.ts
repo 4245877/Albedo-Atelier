@@ -43,8 +43,8 @@ export interface AnalyzerLimits {
   xmlMaxBytes: number;
 }
 
-export function finding(code: string, message: string): AnalysisFinding {
-  return { code, message };
+export function finding(code: string, message: string, hint?: string): AnalysisFinding {
+  return hint ? { code, message, hint } : { code, message };
 }
 
 /** How restrictive each verdict is; the worst (highest) one wins when several apply. */

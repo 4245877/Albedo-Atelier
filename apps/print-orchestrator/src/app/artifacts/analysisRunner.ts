@@ -47,26 +47,29 @@ export class AnalysisRunner {
     const artifact = repos.artifacts.getById(artifactId);
     if (!artifact) throw new NotFoundError(`Артефакт «${artifactId}»`);
 
-    const latest = repos.artifactAnalyses.latestForArtifact(artifactId);
-    if (latest && (latest.state === "pending" || latest.state === "running")) {
-      return latest;
-    }
-
-    const analysis = this.ctx.store.transaction(() => {
-      const created = this.ctx.newPendingAnalysis(artifactId, this.ctx.nowIso());
-      repos.artifactAnalyses.insert(created);
+    // The "is one already in flight?" check and the insert must be ONE atomic
+    // step. Read outside the transaction, two requests arriving together both
+    // saw "nothing pending" and each inserted an analysis — two workers on one
+    // file, two sets of findings, and a second draft-task transition.
+    const { analysis, created } = this.ctx.store.transaction(() => {
+      const latest = repos.artifactAnalyses.latestForArtifact(artifactId);
+      if (latest && (latest.state === "pending" || latest.state === "running")) {
+        return { analysis: latest, created: false };
+      }
+      const fresh = this.ctx.newPendingAnalysis(artifactId, this.ctx.nowIso());
+      repos.artifactAnalyses.insert(fresh);
       this.ctx.recordAudit({
         entityType: "artifact_analysis",
-        entityId: created.id,
+        entityId: fresh.id,
         action: "reanalyze",
-        to: created.state,
+        to: fresh.state,
         actor,
         detail: { previous: latest?.id ?? null }
       });
-      return created;
+      return { analysis: fresh, created: true };
     });
 
-    this.worker.enqueue(analysis.id);
+    if (created) this.worker.enqueue(analysis.id);
     return analysis;
   }
 
@@ -79,14 +82,8 @@ export class AnalysisRunner {
    * only logs).
    */
   async runAnalysis(analysisId: string): Promise<void> {
-    const started = this.ctx.store.repositories.artifactAnalyses.getById(analysisId);
-    if (!started || started.state === "ready" || started.state === "failed") return;
-
-    if (started.state === "pending") {
-      this.ctx.store.transaction(() =>
-        this.ctx.transitionAnalysis(started, "running", {}, "analysis_started", "analyzer")
-      );
-    }
+    const started = this.claim(analysisId);
+    if (!started) return;
 
     const artifact = this.ctx.store.repositories.artifacts.getById(started.artifactId);
     if (!artifact || !artifact.source) {
@@ -153,6 +150,22 @@ export class AnalysisRunner {
 
   // ── Internals ──────────────────────────────────────────────────────────────
 
+  /**
+   * Takes exclusive ownership of one analysis by moving it `pending → running`
+   * in a single transaction. A row that is *already* `running` belongs to
+   * another job and is left alone: without this claim, a job id that reached the
+   * pool twice (an enqueue racing a crash-recovery re-queue) analysed the same
+   * file concurrently — duplicate worker threads, duplicate findings, and a
+   * duplicate draft-task transition. `null` = not ours to run.
+   */
+  private claim(analysisId: string): ArtifactAnalysis | null {
+    return this.ctx.store.transaction(() => {
+      const current = this.ctx.store.repositories.artifactAnalyses.getById(analysisId);
+      if (!current || current.state !== "pending") return null;
+      return this.ctx.transitionAnalysis(current, "running", {}, "analysis_started", "analyzer");
+    });
+  }
+
   private applyResult(analysisId: string, result: AnalyzerResult): void {
     this.ctx.store.transaction(() => {
       const repos = this.ctx.store.repositories;
@@ -182,12 +195,13 @@ export class AnalysisRunner {
         { verdict: result.verdict, format: result.detectedFormat }
       );
 
-      // A critical problem parks the still-draft task for the operator.
+      // A critical problem parks the still-draft task for the operator. The
+      // reason is the sentence a person reads next to the task, so it carries
+      // the blocker's own next-step hint rather than a bare technical phrase.
       if (result.verdict === "blocked") {
         const task = repos.tasks.findByArtifactId(current.artifactId);
         if (task && task.state === "DRAFT") {
-          const reason = result.blockers[0]?.message ?? "анализ выявил критическую проблему";
-          this.ctx.transitionTask(task, "NEEDS_REVIEW", reason, "blocked");
+          this.ctx.transitionTask(task, "NEEDS_REVIEW", blockedReason(result), "blocked");
         }
       }
     });
@@ -223,4 +237,15 @@ export class AnalysisRunner {
       if (timer) clearTimeout(timer);
     }
   }
+}
+
+/**
+ * The sentence shown next to a task parked in `NEEDS_REVIEW`. The verdict alone
+ * ("заблокировано") tells an operator nothing they can act on, so the blocker's
+ * message *and* its next-step hint are folded into one readable line.
+ */
+function blockedReason(result: AnalyzerResult): string {
+  const blocker = result.blockers[0];
+  if (!blocker) return "Анализ выявил критическую проблему — нужна проверка оператором";
+  return blocker.hint ? `${blocker.message}. ${blocker.hint}` : blocker.message;
 }

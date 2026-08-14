@@ -102,11 +102,15 @@ export type AnalysisVerdict =
 
 /**
  * One structured warning or blocker from an analyzer. `code` is a stable machine
- * key the dashboard/tests branch on; `message` is the operator-facing text.
+ * key the dashboard/tests branch on; `message` is the operator-facing text;
+ * `hint` — when there is one — is the *action* the operator can take ("пересохраните
+ * проект в слайсере"), kept separate so the message stays a statement of fact and
+ * the UI can present the two differently.
  */
 export interface AnalysisFinding {
   code: string;
   message: string;
+  hint?: string;
 }
 
 /**

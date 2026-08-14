@@ -11,6 +11,7 @@ import {
   readMachine,
   readProcess
 } from "./orcaProfile";
+import { printerModelsMatch } from "./printerModel";
 import type { ProfileRevisionStatus, ProfileType } from "./types";
 
 /**
@@ -231,6 +232,14 @@ export interface SetMember<F> {
   name: string;
   status: ProfileRevisionStatus;
   fields: F;
+  /**
+   * The profile names this member resolved through, root→leaf (the importer records
+   * it on the revision). Only meaningful for the machine: process/filament presets
+   * declare `compatible_printers` against the **system** machine profile they were
+   * made for (`"Bambu Lab A1 0.4 nozzle"`), not against the operator's copy of it,
+   * so the chain is what makes that declaration checkable. Absent = unknown.
+   */
+  chain?: readonly string[];
 }
 
 export interface SetTarget {
@@ -321,6 +330,15 @@ export function validateProfileSet(input: ProfileSetValidationInput): FindingSet
     }
   }
 
+  // The slicer's OWN compatibility declaration. An Orca process/filament preset can
+  // name the exact machine profiles it belongs to; OrcaSlicer would not even offer
+  // it for anything else. Now that inheritance resolves, that list is finally
+  // meaningful — it is what catches "a K2 *Plus* filament combined with a plain K2".
+  // Checked only when the machine's chain is known, so a revision imported before
+  // provenance was recorded is never blocked on missing evidence.
+  appendDeclaredCompatibility(out, machine, process, "профиль печати");
+  appendDeclaredCompatibility(out, machine, filament, "профиль филамента");
+
   // Layer height vs machine limits and nozzle.
   if (p && m) {
     checkLayerAgainstMachine(p.layerHeightMm, "Высота слоя", m, out);
@@ -385,6 +403,38 @@ export function validateProfileSet(input: ProfileSetValidationInput): FindingSet
 }
 
 /**
+ * Enforces a member's own `compatible_printers` list against the machine of the set.
+ *
+ * The names in that list are OrcaSlicer *machine profile* names — normally the
+ * system parent (`"Bambu Lab A1 0.4 nozzle"`), which is why the machine's whole
+ * resolved chain is compared, not just the leaf's display name. No list (the common
+ * case) or an unknown chain means "nothing declared" and the check stays silent;
+ * only an explicit list that excludes this machine is a blocker.
+ */
+function appendDeclaredCompatibility(
+  out: FindingSet,
+  machine: SetMember<MachineFields> | null,
+  member: SetMember<{ compatiblePrinters: string[] }> | null,
+  label: string
+): void {
+  const declared = member?.fields.compatiblePrinters ?? [];
+  if (!machine || declared.length === 0) return;
+  const identities = new Set([machine.name, ...(machine.chain ?? [])].map((n) => n.trim()).filter(Boolean));
+  // An unknown chain is not evidence of incompatibility.
+  if (!machine.chain || machine.chain.length === 0) return;
+  if (declared.some((d) => identities.has(d.trim()))) return;
+  out.blockers.push(
+    finding(
+      "declared_incompatible_printer",
+      `${label[0].toUpperCase()}${label.slice(1)} «${member?.name}» объявлен совместимым только с ${declared
+        .slice(0, 4)
+        .map((d) => `«${d}»`)
+        .join(", ")}${declared.length > 4 ? " и др." : ""} — профиль принтера «${machine.name}» в этот список не входит`
+    )
+  );
+}
+
+/**
  * The target-dependent hardware checks for one concrete printer: nozzle Ø and model
  * are hard blockers (the output would be physically wrong); material fit and G-code
  * flavor vs firmware are soft warnings. Kept as a standalone helper so a single
@@ -410,7 +460,7 @@ function appendTargetChecks(
         )
       );
     }
-    if (m.printerModel && target.printerModel && !modelsLooselyMatch(m.printerModel, target.printerModel)) {
+    if (m.printerModel && target.printerModel && !printerModelsMatch(m.printerModel, target.printerModel)) {
       out.blockers.push(
         finding(
           "printer_model_mismatch",
@@ -553,15 +603,12 @@ function materialSupportedByPrinter(filamentType: string, printerMaterial: strin
   return have.some((t) => t === want);
 }
 
-/** Loose model comparison: normalise to alphanumerics and require either to contain the other. */
-function modelsLooselyMatch(a: string, b: string): boolean {
-  const na = a.toLowerCase().replace(/[^a-z0-9]+/g, "");
-  const nb = b.toLowerCase().replace(/[^a-z0-9]+/g, "");
-  if (!na || !nb) return true; // one side unknown → don't hard-block on a comparison we can't make
-  return na.includes(nb) || nb.includes(na);
-}
-
-/** True when the filament name carries a printer-model token that clashes with the machine model. */
+/**
+ * True when the filament name carries a printer-model token that clashes with the
+ * machine model. Deliberately name-based (a soft warning): Orca filament presets are
+ * conventionally suffixed `@BBL A1` / `@K2-all`, and a `mini`/`Plus` suffix on the
+ * name distinguishes sibling machines the family token alone cannot.
+ */
 function modelTokenMismatch(filamentName: string, printerModel: string): boolean {
   const name = filamentName.toUpperCase();
   const model = printerModel.toUpperCase();
@@ -572,6 +619,15 @@ function modelTokenMismatch(filamentName: string, printerModel: string): boolean
   ];
   for (const [inName, inModel] of checks) {
     if (inName.test(name) && !inModel.test(model)) return true;
+  }
+  // A filament tagged for a *sibling* of this machine ("@BBL A1 mini" on an A1).
+  const nameSuffix = /@[^@]*$/.exec(filamentName)?.[0];
+  if (nameSuffix) {
+    for (const sibling of ["mini", "plus", "pro", "max", "se", "carbon"]) {
+      const inName = new RegExp(`\\b${sibling}\\b`, "i").test(nameSuffix);
+      const inModel = new RegExp(`\\b${sibling}\\b`, "i").test(printerModel);
+      if (inName !== inModel) return true;
+    }
   }
   return false;
 }

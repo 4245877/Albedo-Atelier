@@ -38,6 +38,17 @@ if (args.includes("--version")) { console.log("OrcaSlicer 2.3.0"); process.exit(
 setTimeout(() => process.exit(0), 60000);
 `;
 
+// A build whose CLI does NOT know `--version`: it prints its whole help banner —
+// which happens to contain a version — and exits non-zero. This is the real
+// OrcaSlicer 1.10.x behaviour that used to be reported as a healthy runtime.
+const NO_VERSION_FLAG_ORCA = `
+console.log("OrcaSlicer-01.10.01.50:");
+console.error("Invalid option --version");
+console.log("Usage: orca-slicer [ OPTIONS ] [ file.3mf/file.stl ... ]");
+console.error("setup params error");
+process.exit(254);
+`;
+
 // Like FAKE_ORCA, but records each `--version` invocation to a sidecar log so a test
 // can prove how many times the runner probed for one operation.
 const COUNT_ORCA = `
@@ -53,6 +64,7 @@ process.exit(0);
 let fakeScript: string;
 let slowScript: string;
 let countScript: string;
+let noVersionScript: string;
 
 function versionCalls(): number {
   try {
@@ -73,6 +85,8 @@ before(() => {
   fs.writeFileSync(fakeScript, FAKE_ORCA);
   fs.writeFileSync(slowScript, SLOW_ORCA);
   fs.writeFileSync(countScript, COUNT_ORCA);
+  noVersionScript = path.join(TMP, "no-version-orca.js");
+  fs.writeFileSync(noVersionScript, NO_VERSION_FLAG_ORCA);
 });
 after(() => {
   fs.rmSync(TMP, { recursive: true, force: true });
@@ -116,6 +130,36 @@ test("probe() with no command configured is unavailable with a clear message", a
   const status = await runner.probe();
   assert.equal(status.available, false);
   assert.match(status.error ?? "", /не настроен|ORCA_SLICER_CMD/);
+});
+
+test("probe() refuses a CLI that exits non-zero, even when its output holds a version", async () => {
+  // OrcaSlicer 1.10.x has no `--version`: it answers with the help banner (which
+  // contains "01.10.01.50") and exit code 254. Scraping that banner used to report
+  // a healthy, version-matching runtime while every real slice segfaulted.
+  const runner = new OrcaCliRunner({
+    command: NODE,
+    baseArgs: [noVersionScript],
+    pinnedVersion: "1.10.1",
+    workerVersion: "w1"
+  });
+  const status = await runner.probe();
+  assert.equal(status.available, false);
+  assert.equal(status.detectedVersion, "01.10.01.50");
+  assert.match(status.error ?? "", /254/);
+  assert.match(status.error ?? "", /Invalid option --version|setup params error/);
+});
+
+test("a slice against such a runtime is refused before OrcaSlicer is spawned", async () => {
+  const runner = new OrcaCliRunner({
+    command: NODE,
+    baseArgs: [noVersionScript],
+    pinnedVersion: "1.10.1",
+    workerVersion: "w1"
+  });
+  await assert.rejects(
+    () => runner.slice(req(path.join(TMP, "job-no-version"))),
+    (error: Error) => error instanceof SliceRuntimeUnavailableError
+  );
 });
 
 test("probe() with a missing binary is unavailable, not a crash", async () => {

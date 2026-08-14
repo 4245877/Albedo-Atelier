@@ -119,9 +119,29 @@ export interface ZipInput {
 const SIG_LOCAL = 0x04034b50;
 const SIG_CENTRAL = 0x02014b50;
 const SIG_EOCD = 0x06054b50;
+const SIG_ZIP64_EOCD = 0x06064b50;
+const SIG_ZIP64_LOCATOR = 0x07064b50;
+const SENTINEL = 0xffffffff;
+
+export interface ZipOptions {
+  /**
+   * Emit ZIP64 structures. `"full"` reproduces exactly what miniz — the writer
+   * inside PrusaSlicer / OrcaSlicer / BambuStudio — puts in an ordinary `.3mf`:
+   * every central-directory record sentinelled with a 24-byte ZIP64 extra field,
+   * a ZIP64 end-of-central-directory record and its locator, and a classic EOCD
+   * whose directory offset is `0xFFFFFFFF`. `"eocd"` sentinels only the EOCD
+   * (entries keep their 32-bit fields), which other writers do.
+   */
+  zip64?: "full" | "eocd";
+  /** Trailing archive comment — exercises the EOCD tail scan. */
+  comment?: string;
+  /** Drops the ZIP64 records while keeping the sentinels (a corrupt archive). */
+  omitZip64Record?: boolean;
+}
 
 /** Builds a ZIP archive. Fields can be spoofed so security guards can be tested. */
-export function makeZip(entries: ZipInput[]): Buffer {
+export function makeZip(entries: ZipInput[], options: ZipOptions = {}): Buffer {
+  const zip64 = options.zip64;
   const locals: Buffer[] = [];
   const centrals: Buffer[] = [];
   let offset = 0;
@@ -150,32 +170,69 @@ export function makeZip(entries: ZipInput[]): Buffer {
     const localRecord = Buffer.concat([local, nameBuf, stored]);
     locals.push(localRecord);
 
+    // ZIP64 "full": the fixed record carries sentinels and the real 64-bit
+    // values live in the extra field, in the APPNOTE order uncompressed →
+    // compressed → local-header offset.
+    const wide = zip64 === "full";
+    const extra = wide ? Buffer.alloc(28) : Buffer.alloc(0);
+    if (wide) {
+      extra.writeUInt16LE(0x0001, 0);
+      extra.writeUInt16LE(24, 2);
+      extra.writeBigUInt64LE(BigInt(uncompressed), 4);
+      extra.writeBigUInt64LE(BigInt(stored.length), 12);
+      extra.writeBigUInt64LE(BigInt(offset), 20);
+    }
+
     const central = Buffer.alloc(46);
     central.writeUInt32LE(SIG_CENTRAL, 0);
-    central.writeUInt16LE(20, 4); // version made by
-    central.writeUInt16LE(20, 6); // version needed
+    central.writeUInt16LE(wide ? 45 : 20, 4); // version made by
+    central.writeUInt16LE(wide ? 45 : 20, 6); // version needed
     central.writeUInt16LE(0, 8); // flags
     central.writeUInt16LE(method, 10);
     central.writeUInt16LE(0, 12);
     central.writeUInt16LE(0, 14);
     central.writeUInt32LE(crc, 16);
-    central.writeUInt32LE(stored.length, 20);
-    central.writeUInt32LE(uncompressed, 24);
+    central.writeUInt32LE(wide ? SENTINEL : stored.length, 20);
+    central.writeUInt32LE(wide ? SENTINEL : uncompressed, 24);
     central.writeUInt16LE(nameBuf.length, 28);
-    central.writeUInt16LE(0, 30); // extra
+    central.writeUInt16LE(extra.length, 30);
     central.writeUInt16LE(0, 32); // comment
     central.writeUInt16LE(0, 34); // disk
     central.writeUInt16LE(0, 36); // internal attrs
     const externalAttrs = entry.unixMode !== undefined ? (entry.unixMode << 16) >>> 0 : 0;
     central.writeUInt32LE(externalAttrs, 38);
-    central.writeUInt32LE(offset, 42);
-    centrals.push(Buffer.concat([central, nameBuf]));
+    central.writeUInt32LE(wide ? SENTINEL : offset, 42);
+    centrals.push(Buffer.concat([central, nameBuf, extra]));
 
     offset += localRecord.length;
   }
 
   const centralDir = Buffer.concat(centrals);
   const localSection = Buffer.concat(locals);
+  const cdOffset = localSection.length;
+  const commentBuf = Buffer.from(options.comment ?? "", "utf8");
+
+  const tail: Buffer[] = [];
+  if (zip64 && !options.omitZip64Record) {
+    const record = Buffer.alloc(56);
+    record.writeUInt32LE(SIG_ZIP64_EOCD, 0);
+    record.writeBigUInt64LE(BigInt(44), 4); // size of the remainder of this record
+    record.writeUInt16LE(45, 12); // version made by
+    record.writeUInt16LE(45, 14); // version needed
+    record.writeUInt32LE(0, 16); // this disk
+    record.writeUInt32LE(0, 20); // disk with the CD start
+    record.writeBigUInt64LE(BigInt(entries.length), 24);
+    record.writeBigUInt64LE(BigInt(entries.length), 32);
+    record.writeBigUInt64LE(BigInt(centralDir.length), 40);
+    record.writeBigUInt64LE(BigInt(cdOffset), 48);
+
+    const locator = Buffer.alloc(20);
+    locator.writeUInt32LE(SIG_ZIP64_LOCATOR, 0);
+    locator.writeUInt32LE(0, 4); // disk holding the ZIP64 EOCD
+    locator.writeBigUInt64LE(BigInt(cdOffset + centralDir.length), 8);
+    locator.writeUInt32LE(1, 16); // total disks
+    tail.push(record, locator);
+  }
 
   const eocd = Buffer.alloc(22);
   eocd.writeUInt32LE(SIG_EOCD, 0);
@@ -184,10 +241,11 @@ export function makeZip(entries: ZipInput[]): Buffer {
   eocd.writeUInt16LE(entries.length, 8);
   eocd.writeUInt16LE(entries.length, 10);
   eocd.writeUInt32LE(centralDir.length, 12);
-  eocd.writeUInt32LE(localSection.length, 16); // central dir offset = end of locals
-  eocd.writeUInt16LE(0, 20); // comment len
+  // miniz leaves the size intact and sentinels only the offset — reproduce that.
+  eocd.writeUInt32LE(zip64 ? SENTINEL : cdOffset, 16);
+  eocd.writeUInt16LE(commentBuf.length, 20);
 
-  return Buffer.concat([localSection, centralDir, eocd]);
+  return Buffer.concat([localSection, centralDir, ...tail, eocd, commentBuf]);
 }
 
 // ── 3MF ──────────────────────────────────────────────────────────────────────
@@ -222,12 +280,14 @@ export interface ThreeMfObject {
   /** Mesh vertices; omit for a pure component-assembly object. */
   vertices?: (Vertex | [unknown, unknown, unknown])[];
   /** Nested component references, each with its own optional transform. */
-  components?: { objectid: string; transform?: string }[];
+  components?: { objectid: string; transform?: string; path?: string }[];
 }
 
 export interface ThreeMfItem {
   objectid: string;
   transform?: string;
+  /** `p:path` — the production extension's "this object lives in another part". */
+  path?: string;
 }
 
 /**
@@ -240,6 +300,8 @@ export function make3mfModel(options: {
   unit?: string | null;
   objects: ThreeMfObject[];
   items: ThreeMfItem[];
+  /** Value of the `Application` metadata — how a writer names itself. */
+  application?: string;
 }): string {
   const unitAttr = options.unit === null || options.unit === undefined ? "" : ` unit="${options.unit}"`;
   const objects = options.objects
@@ -255,7 +317,8 @@ export function make3mfModel(options: {
         ? `<components>${o.components
             .map(
               (c) =>
-                `<component objectid="${c.objectid}"${c.transform === undefined ? "" : ` transform="${c.transform}"`}/>`
+                `<component${c.path === undefined ? "" : ` p:path="${c.path}"`} objectid="${c.objectid}"` +
+                `${c.transform === undefined ? "" : ` transform="${c.transform}"`}/>`
             )
             .join("")}</components>`
         : "";
@@ -265,13 +328,15 @@ export function make3mfModel(options: {
   const items = options.items
     .map(
       (i) =>
-        `<item objectid="${i.objectid}"${i.transform === undefined ? "" : ` transform="${i.transform}"`}/>`
+        `<item objectid="${i.objectid}"${i.path === undefined ? "" : ` p:path="${i.path}"`}` +
+        `${i.transform === undefined ? "" : ` transform="${i.transform}"`}/>`
     )
     .join("");
   return (
     '<?xml version="1.0" encoding="UTF-8"?>\n' +
-    `<model${unitAttr} xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">` +
-    '<metadata name="Application">FixtureSlicer 1.0</metadata>' +
+    `<model${unitAttr} xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"` +
+    ' xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06">' +
+    `<metadata name="Application">${options.application ?? "FixtureSlicer 1.0"}</metadata>` +
     `<resources>${objects}</resources>` +
     `<build>${items}</build>` +
     "</model>"
@@ -309,22 +374,66 @@ export function makeModelSettingsConfig(plates: { index: number; objectIds: stri
 }
 
 /** A 3MF package from a model XML plus any extra entries (configs, plate assets). */
-export function make3mfPackage(modelXml: string, extra: ZipInput[] = []): Buffer {
-  return makeZip([
-    { name: "[Content_Types].xml", data: CONTENT_TYPES_XML },
-    { name: "_rels/.rels", data: RELS_XML },
-    { name: "3D/3dmodel.model", data: modelXml },
-    ...extra
-  ]);
+export function make3mfPackage(
+  modelXml: string,
+  extra: ZipInput[] = [],
+  options: ZipOptions = {}
+): Buffer {
+  return makeZip(
+    [
+      { name: "[Content_Types].xml", data: CONTENT_TYPES_XML },
+      { name: "_rels/.rels", data: RELS_XML },
+      { name: "3D/3dmodel.model", data: modelXml },
+      ...extra
+    ],
+    options
+  );
 }
 
 /** A generic (un-sliced) 3MF package as ZIP bytes. */
-export function makeGeneric3mf(modelXml = make3mfModelXml()): Buffer {
-  return makeZip([
-    { name: "[Content_Types].xml", data: CONTENT_TYPES_XML },
-    { name: "_rels/.rels", data: RELS_XML },
-    { name: "3D/3dmodel.model", data: modelXml }
-  ]);
+export function makeGeneric3mf(modelXml = make3mfModelXml(), options: ZipOptions = {}): Buffer {
+  return makeZip(
+    [
+      { name: "[Content_Types].xml", data: CONTENT_TYPES_XML },
+      { name: "_rels/.rels", data: RELS_XML },
+      { name: "3D/3dmodel.model", data: modelXml }
+    ],
+    options
+  );
+}
+
+/**
+ * A slicer *project* 3MF (model + settings, no G-code), in the layout of the
+ * named tool. `application` goes into the model's `Application` metadata exactly
+ * as the real writers spell it.
+ */
+export function makeProject3mf(
+  slicer: "orca" | "bambu" | "prusa",
+  options: ZipOptions = {}
+): Buffer {
+  const application = {
+    orca: "OrcaSlicer-2.1.1",
+    bambu: "BambuStudio-01.09.00.60",
+    prusa: "PrusaSlicer-2.7.1"
+  }[slicer];
+  const modelXml = make3mfModel({
+    unit: "millimeter",
+    application,
+    objects: [{ id: "1", vertices: boxVertices(20) }],
+    items: [{ objectid: "1" }]
+  });
+  const extra: ZipInput[] =
+    slicer === "prusa"
+      ? [
+          { name: "Metadata/Slic3r_PE.config", data: "; layer_height = 0.2\n" },
+          { name: "Metadata/Slic3r_PE_model.config", data: "<config/>" }
+        ]
+      : [
+          { name: "Metadata/project_settings.config", data: '{"layer_height":"0.2"}' },
+          { name: "Metadata/model_settings.config", data: "<config/>" },
+          { name: "Metadata/plate_1.png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47]) }
+        ];
+  return make3mfPackage(modelXml, extra, options);
 }
 
 /** A "sliced" 3MF: generic package plus an OrcaSlicer-style G-code + config payload. */

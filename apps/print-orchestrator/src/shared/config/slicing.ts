@@ -6,6 +6,16 @@ import { envVar, type EnvSource } from "./registry";
 const VARS = {
   /** The vendored catalog root (`config/slicers/orca`); ships in the image. */
   catalogDir: envVar("ORCA_CATALOG_DIR", "slicing", (_n, raw) => raw || null),
+  /**
+   * OrcaSlicer's own system-profile tree (`resources/profiles`) — the inheritance
+   * parents user presets are built on. Defaults to the tree next to the configured
+   * slicer binary, so a deployment that mounts a runtime resolves against the very
+   * profiles that runtime ships. Empty string disables the runtime source (only
+   * `vendor/` is used).
+   */
+  systemProfilesDir: envVar("ORCA_SYSTEM_PROFILES_DIR", "slicing", (_n, raw) =>
+    raw === undefined ? null : raw.trim()
+  ),
   /** Executable to spawn (OrcaSlicer, or a container runtime); null → runtime unavailable. */
   command: envVar("ORCA_SLICER_CMD", "slicing", (_n, raw) => raw?.trim() || null),
   /** Args prepended before the slice args (container `run … <image> orca-slicer`). */
@@ -39,10 +49,18 @@ const VARS = {
  * version is bumped in code when the slice logic changes (both feed the cache key).
  */
 export function buildSlicingConfig(source: EnvSource, stateDir: string) {
+  const command = VARS.command.read(source);
+  const systemProfilesDir = VARS.systemProfilesDir.read(source);
   return {
     catalogDir:
       VARS.catalogDir.read(source) ?? path.resolve(process.cwd(), "config", "slicers", "orca"),
-    command: VARS.command.read(source),
+    /**
+     * Where the OrcaSlicer *system* parents live. Unset → derived from the slicer
+     * binary's own directory; explicitly empty → disabled (`vendor/` only).
+     */
+    systemProfilesDir:
+      systemProfilesDir === null ? defaultSystemProfilesDir(command) : systemProfilesDir || null,
+    command,
     baseArgs: VARS.baseArgs.read(source),
     extraArgs: VARS.extraArgs.read(source),
     pinnedVersion: VARS.pinnedVersion.read(source),
@@ -54,4 +72,15 @@ export function buildSlicingConfig(source: EnvSource, stateDir: string) {
     tmpRoot: VARS.tmpRoot.read(source) ?? path.resolve(stateDir, "slice-tmp"),
     autoImport: VARS.autoImport.read(source)
   };
+}
+
+/**
+ * The OrcaSlicer profile tree that sits next to a slicer *binary* — `/opt/orca/AppRun`
+ * → `/opt/orca/resources/profiles`. Returns null when the command is not a path (a
+ * container runtime like `docker`, whose profiles are inside the image, or no
+ * runtime at all); a path that does not exist simply contributes no profiles.
+ */
+function defaultSystemProfilesDir(command: string | null): string | null {
+  if (!command || !command.includes(path.sep)) return null;
+  return path.resolve(path.dirname(command), "resources", "profiles");
 }

@@ -1,23 +1,40 @@
 #!/usr/bin/env node
 // Installs the OrcaSlicer *system* (vendor) parent profiles the shipped catalog
-// inherits from, so the quarantined machine/process/filament revisions can resolve
-// and a working profile set can be built. Those parents ship inside OrcaSlicer
-// (`resources/profiles/<Vendor>/…`), not in this repo — they are not redistributed
-// here — so this is the deliberate, VERIFIABLE install step the deployment docs
-// point at (see config/slicers/orca/vendor/README.md).
+// inherits from, so quarantined machine/process/filament revisions can resolve and
+// a working profile set can be built. Those parents ship inside OrcaSlicer
+// (`resources/profiles/<Vendor>/…`), not in an exported `.orca_printer` bundle.
 //
-// It is pure filesystem + JSON (no deps, no network): it reads the catalog to learn
-// exactly which parent *names* are missing, scans an OrcaSlicer resources directory
-// for the profile JSONs carrying those names, and copies them into `vendor/`. It
-// prints what it copied and what is still missing, and exits non-zero while any
-// parent is unresolved — so it doubles as a release/readiness check.
+// It is pure filesystem + JSON (no deps, no network) and models the same two rules
+// the importer does — get either wrong and the installed parents are useless or,
+// worse, silently wrong:
+//
+//   1. **the closure is transitive.** `Bambu Lab A1 0.4 PETG` inherits
+//      `Bambu Lab A1 0.4 nozzle`, which inherits `fdm_bbl_3dp_001_common`, which
+//      inherits `fdm_machine_common`. Installing only the parent the catalog names
+//      leaves the profile quarantined on the *next* link, so this walks the whole
+//      chain to its root;
+//   2. **names are vendor-scoped.** The shipped tree has 46 files named
+//      `fdm_machine_common` (41 with distinct content), two `fdm_bbl_3dp_001_common`
+//      (BBL's and OrcaArena's), and so on. A first-match-by-name copy installs
+//      another brand's base settings under a Bambu profile. So the walk locks onto
+//      the vendor of the first system parent it resolves and stays in it, and files
+//      are installed under `vendor/<Vendor>/<kind>/…` — never flattened into one
+//      colliding namespace.
+//
+// It prints what it copied and what is still missing, and exits non-zero while any
+// parent is unresolved — so it doubles as a release/readiness gate.
 //
 // Usage:
 //   node scripts/install-orca-vendor-profiles.mjs --orca-resources <dir> [--catalog <dir>] [--dry-run]
-//   node scripts/install-orca-vendor-profiles.mjs --check            # verify only, copy nothing
+//   node scripts/install-orca-vendor-profiles.mjs --check [--orca-resources <dir>]
 //
-// <dir> is an OrcaSlicer profiles tree, e.g. (Linux) ~/.config/OrcaSlicer/system
-//   or the app's resources/profiles; (macOS) OrcaSlicer.app/Contents/Resources/profiles.
+// <dir> is an OrcaSlicer profiles tree, e.g. (Linux) the extracted AppImage's
+//   resources/profiles or ~/.config/OrcaSlicer/system; (macOS)
+//   OrcaSlicer.app/Contents/Resources/profiles.
+//
+// `--check` alone verifies what the LEAN image ships (vendor/ only). Adding
+// --orca-resources also credits a mounted slicer runtime, matching a deployment
+// that sets ORCA_SYSTEM_PROFILES_DIR.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -45,7 +62,7 @@ function jsonFilesUnder(dir) {
   } catch {
     return out;
   }
-  for (const e of entries) {
+  for (const e of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
     const abs = path.join(dir, e.name);
     if (e.isDirectory()) out.push(...jsonFilesUnder(abs));
     else if (e.isFile() && e.name.toLowerCase().endsWith(".json")) out.push(abs);
@@ -61,34 +78,155 @@ function readJson(file) {
   }
 }
 
-/** OrcaSlicer stores `name` as a string; some system files use a `.sub`/`from` shape — keep it simple. */
-function profileName(obj) {
-  return obj && typeof obj.name === "string" && obj.name.trim() ? obj.name.trim() : null;
+function firstString(value) {
+  if (Array.isArray(value)) return typeof value[0] === "string" ? value[0] : null;
+  return typeof value === "string" ? value.trim() || null : null;
 }
 
-/** A filesystem-safe file name for a copied parent, preserving readability. */
-function slug(name) {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "parent";
+const MANIFEST_KEYS = ["machine_model_list", "machine_list", "process_list", "filament_list"];
+
+/** Directory-implied profile kind (`…/machine/x.json`). */
+function typeOfDir(dir) {
+  const d = dir.toLowerCase();
+  if (d === "machine" || d === "printer") return "machine";
+  if (d === "process" || d === "print") return "process";
+  if (d === "filament") return "filament";
+  return null;
 }
 
-function requiredParents(catalogDir) {
+/**
+ * The three preset kinds only. A vendor manifest (`BBL.json`) or a `machine_model`
+ * definition is NOT a preset and must never be installed as a parent.
+ */
+function profileType(obj, dirType) {
+  if (MANIFEST_KEYS.some((k) => Array.isArray(obj[k]))) return null;
+  const raw = firstString(obj.type);
+  if (raw === "machine" || raw === "printer") return "machine";
+  if (raw === "process" || raw === "print") return "process";
+  if (raw === "filament") return "filament";
+  if (raw) return null; // explicit but non-preset (machine_model, …)
+  if (dirType) return dirType;
+  if ("printer_model" in obj || "printable_area" in obj) return "machine";
+  if ("filament_type" in obj || "filament_settings_id" in obj) return "filament";
+  if ("layer_height" in obj || "print_settings_id" in obj) return "process";
+  return null;
+}
+
+/**
+ * Indexes a profile tree as `name → [{ name, type, vendor, file, inherits }]`.
+ * `vendor` is the top folder under the root (`BBL`), or null for a file sitting
+ * directly in it (an unscoped operator drop-in / a vendor manifest).
+ */
+function indexTree(root) {
+  const byName = new Map();
+  const abs = path.resolve(root);
+  for (const file of jsonFilesUnder(abs)) {
+    const obj = readJson(file);
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) continue;
+    const name = firstString(obj.name);
+    if (!name) continue;
+    const segments = path.relative(abs, file).split(path.sep);
+    const vendor = segments.length >= 2 ? segments[0] : null;
+    const dirType = segments.length >= 2 ? typeOfDir(segments[segments.length - 2]) : null;
+    const type = profileType(obj, dirType);
+    if (!type) continue;
+    const entry = { name, type, vendor, file, inherits: firstString(obj.inherits) };
+    const list = byName.get(name);
+    if (list) list.push(entry);
+    else byName.set(name, [entry]);
+  }
+  return byName;
+}
+
+/** Candidates for `name`/`type` in an index, honouring a locked vendor. */
+function candidates(index, name, type, vendor) {
+  const typed = (index.get(name) ?? []).filter((e) => e.type === type);
+  if (!vendor) return typed;
+  const sameVendor = typed.filter((e) => e.vendor === vendor);
+  return sameVendor.length > 0 ? sameVendor : typed.filter((e) => !e.vendor);
+}
+
+/**
+ * Walks the full inheritance closure of the catalog and reports, per required
+ * parent, whether it is already satisfied (by the catalog itself or by `vendor/`),
+ * resolvable from the slicer tree (→ `install`), ambiguous, or missing.
+ */
+function planClosure({ catalogDir, orcaResources }) {
   const catalog = readJson(path.join(catalogDir, "catalog.v1.json"));
   if (!catalog || !Array.isArray(catalog.profiles)) {
     throw new Error(`Не удалось прочитать ${path.join(catalogDir, "catalog.v1.json")}`);
   }
-  const names = new Set(catalog.profiles.map((p) => p.name));
-  // Parents already provided under vendor/ satisfy the requirement too.
-  const vendorNames = new Set(
-    jsonFilesUnder(path.join(catalogDir, "vendor"))
-      .map((f) => profileName(readJson(f)))
-      .filter(Boolean)
-  );
-  const missing = new Set();
+  const catalogNames = new Set(catalog.profiles.map((p) => `${p.type}:${p.name}`));
+  const vendorIndex = indexTree(path.join(catalogDir, "vendor"));
+  const orcaIndex = orcaResources ? indexTree(orcaResources) : new Map();
+
+  const install = []; // { name, type, vendor, file }
+  const missing = []; // { name, type, vendor, reason }
+  const satisfied = []; // { name, type, source }
+  const seen = new Set();
+
+  /** Queue of parents still to resolve, each carrying the vendor its chain locked to. */
+  const queue = [];
   for (const p of catalog.profiles) {
-    const parent = p.inherits;
-    if (parent && !names.has(parent) && !vendorNames.has(parent)) missing.add(parent);
+    if (p.inherits) queue.push({ name: p.inherits, type: p.type, vendor: null, via: p.name });
   }
-  return [...missing].sort();
+
+  while (queue.length > 0) {
+    const item = queue.shift();
+    const key = `${item.type}:${item.name}:${item.vendor ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    // A parent that is itself a catalog profile needs nothing installed; the
+    // importer resolves it in-bundle (and its own parents are already queued).
+    if (catalogNames.has(`${item.type}:${item.name}`)) {
+      satisfied.push({ ...item, source: "catalog" });
+      continue;
+    }
+
+    const installed = candidates(vendorIndex, item.name, item.type, item.vendor);
+    if (installed.length > 0) {
+      const chosen = installed[0];
+      satisfied.push({ ...item, source: `vendor/${path.relative(path.join(catalogDir, "vendor"), chosen.file)}` });
+      if (chosen.inherits) {
+        queue.push({
+          name: chosen.inherits,
+          type: item.type,
+          vendor: item.vendor ?? chosen.vendor,
+          via: item.name
+        });
+      }
+      continue;
+    }
+
+    const found = candidates(orcaIndex, item.name, item.type, item.vendor);
+    if (found.length === 0) {
+      missing.push({ ...item, reason: item.vendor ? `нет у вендора ${item.vendor}` : "нет в дереве профилей" });
+      continue;
+    }
+    const vendors = [...new Set(found.map((e) => e.vendor).filter(Boolean))];
+    if (!item.vendor && vendors.length > 1) {
+      missing.push({ ...item, reason: `есть у нескольких вендоров (${vendors.join(", ")}) — неоднозначно` });
+      continue;
+    }
+    const chosen = found[0];
+    install.push(chosen);
+    if (chosen.inherits) {
+      queue.push({
+        name: chosen.inherits,
+        type: item.type,
+        vendor: item.vendor ?? chosen.vendor,
+        via: item.name
+      });
+    }
+  }
+  return { install, missing, satisfied };
+}
+
+/** Where an installed parent lands: `vendor/<Vendor>/<kind>/<original name>.json`. */
+function destinationFor(vendorDir, entry) {
+  const vendor = entry.vendor ?? "_unscoped";
+  return path.join(vendorDir, vendor, entry.type, `${entry.name}.json`);
 }
 
 function main() {
@@ -102,58 +240,63 @@ function main() {
   const catalogDir = path.resolve(args.catalog ?? path.join(process.cwd(), "config", "slicers", "orca"));
   const vendorDir = path.join(catalogDir, "vendor");
 
-  const missingBefore = requiredParents(catalogDir);
-  if (missingBefore.length === 0) {
-    console.log("✓ All inheritance parents are present — the catalog can form a working set.");
-    process.exit(0);
-  }
-
   if (args.check) {
-    console.error(`✗ ${missingBefore.length} inheritance parent(s) still missing:`);
-    for (const m of missingBefore) console.error(`   - ${m}`);
-    console.error("\nRun with --orca-resources <OrcaSlicer profiles dir> to install them.");
+    // Verify only: what is resolvable from what is already installed (plus a slicer
+    // tree if one was named), with nothing copied.
+    const plan = planClosure({ catalogDir, orcaResources: args.orcaResources });
+    const unresolved = [...plan.missing, ...plan.install];
+    if (unresolved.length === 0) {
+      console.log(
+        `✓ Замыкание наследования полное: ${plan.satisfied.length} родител(я/ей) на месте — каталог может собрать рабочий набор.`
+      );
+      process.exit(0);
+    }
+    console.error(`✗ Не хватает ${unresolved.length} родительск(ого/их) профил(я/ей):`);
+    for (const m of plan.missing) console.error(`   - ${m.name} (${m.type}) — ${m.reason}`);
+    for (const i of plan.install) {
+      console.error(`   - ${i.name} (${i.type}) — есть в дереве OrcaSlicer, но не установлен в vendor/`);
+    }
+    console.error("\nЗапустите с --orca-resources <дерево профилей OrcaSlicer>, чтобы установить их.");
     process.exit(1);
   }
 
   if (!args.orcaResources) {
-    console.error("Missing --orca-resources <dir> (path to an OrcaSlicer profiles tree).");
-    console.error(`Still missing (${missingBefore.length}):`);
-    for (const m of missingBefore) console.error(`   - ${m}`);
+    console.error("Не указан --orca-resources <dir> (путь к дереву профилей OrcaSlicer).");
     process.exit(2);
   }
 
-  const wanted = new Set(missingBefore);
-  const found = new Map(); // name → source file
-  for (const file of jsonFilesUnder(path.resolve(args.orcaResources))) {
-    const name = profileName(readJson(file));
-    if (name && wanted.has(name) && !found.has(name)) found.set(name, file);
+  const plan = planClosure({ catalogDir, orcaResources: args.orcaResources });
+  if (plan.install.length === 0 && plan.missing.length === 0) {
+    console.log("✓ Все родительские профили уже на месте — устанавливать нечего.");
+    process.exit(0);
   }
 
-  if (!args.dryRun) fs.mkdirSync(vendorDir, { recursive: true });
-  for (const [name, src] of found) {
-    const dest = path.join(vendorDir, `${slug(name)}.json`);
+  for (const entry of plan.install) {
+    const dest = destinationFor(vendorDir, entry);
     if (args.dryRun) {
-      console.log(`would copy  ${name}\n            ${src} → ${dest}`);
-    } else {
-      fs.copyFileSync(src, dest);
-      console.log(`installed   ${name}  →  ${path.relative(catalogDir, dest)}`);
+      console.log(`would copy  ${entry.name} (${entry.type})\n            ${entry.file} → ${dest}`);
+      continue;
     }
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(entry.file, dest);
+    console.log(`installed   ${entry.name} (${entry.type})  →  ${path.relative(catalogDir, dest)}`);
   }
 
-  const stillMissing = missingBefore.filter((m) => !found.has(m));
   console.log(
-    `\n${found.size}/${missingBefore.length} parent(s) ${args.dryRun ? "found" : "installed"}; ${stillMissing.length} still missing.`
+    `\n${plan.install.length} родител(я/ей) ${args.dryRun ? "найдено" : "установлено"}; ` +
+      `${plan.satisfied.length} уже были на месте; ${plan.missing.length} не найдено.`
   );
-  if (stillMissing.length > 0) {
-    console.error("Still missing (not found under --orca-resources):");
-    for (const m of stillMissing) console.error(`   - ${m}`);
+  if (plan.missing.length > 0) {
+    console.error("\nНе найдены в --orca-resources (профиль отсутствует в этой сборке OrcaSlicer):");
+    for (const m of plan.missing) console.error(`   - ${m.name} (${m.type}) ← из «${m.via}» — ${m.reason}`);
     console.error(
-      "\nUse the SAME OrcaSlicer release the bundles were pinned to (02.03.00.62 / 2.3.0),\nthen re-import: POST /api/print/slicing/presets/import"
+      "\nТакие пресеты остаются в карантине осознанно: их родителя нет в закреплённой сборке.\n" +
+        "Используйте ту же сборку OrcaSlicer, из которой экспортировались бандлы."
     );
     process.exit(1);
   }
-  console.log("\nNext: re-import the catalog (POST /api/print/slicing/presets/import) and verify");
-  console.log("`missingParents` is empty at GET /api/print/slicing/runtime.");
+  console.log("\nДалее: переимпортируйте каталог (POST /api/print/slicing/presets/import) и проверьте,");
+  console.log("что `missingParents` в GET /api/print/slicing/runtime пуст.");
 }
 
 main();

@@ -6,7 +6,12 @@ import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { AnalysisFinding, AuditEntityType, Metadata } from "../../domain/print/types";
 import { checkProfileSelf } from "../../domain/slicing/compatibility";
 import { dedupeFindings, finding } from "../../domain/slicing/findings";
-import { resolveInheritance, type ByName, type ProfileNode } from "../../domain/slicing/inheritance";
+import {
+  parentNameFromFinding,
+  resolveInheritance,
+  type ByName,
+  type ProfileNode
+} from "../../domain/slicing/inheritance";
 import type {
   ProfileRevision,
   ProfileRevisionStatus,
@@ -24,7 +29,8 @@ import type { StoreLogger } from "../../shared/logger";
  * rows.
  *
  * The flow, per the brief's "Проверка профилей":
- *   1. read the catalog + any `vendor/` system parents (the resolution universe);
+ *   1. read the catalog + the vendor-scoped system parents from `vendor/` and the
+ *      pinned slicer's own profile tree (the resolution universe);
  *   2. for each profile: verify its SHA-256 (immutability), parse it, resolve its
  *      inheritance chain, and run the per-profile self checks;
  *   3. derive a status — `invalid` (unparseable), `quarantined` (any blocker: a
@@ -61,6 +67,13 @@ export interface PresetImportResult {
   missingParents: string[];
   sourceIntegrity: { ok: boolean; sources: SourceVerification[] };
   profiles: ProfileImportOutcome[];
+  /**
+   * Stored revisions whose catalog entry is gone (an older staging), re-evaluated
+   * against the current universe. They are not part of `counts`/`totalProfiles` —
+   * those describe the catalog — but they ARE re-resolved, so installing a vendor
+   * parent un-quarantines them too instead of leaving a stale verdict on the page.
+   */
+  orphans: ProfileImportOutcome[];
 }
 
 export class PresetImportService {
@@ -77,40 +90,69 @@ export class PresetImportService {
   /** Reads and imports the whole catalog; safe to call repeatedly (idempotent). */
   async import(actor = "system"): Promise<PresetImportResult> {
     const catalog = await this.catalog.readCatalog();
-    const [loaded, vendor, sourceIntegrity] = await Promise.all([
+    const [loaded, system, sourceIntegrity] = await Promise.all([
       this.catalog.loadProfiles(catalog),
-      this.catalog.loadVendorProfiles(),
+      this.catalog.loadSystemProfiles(),
       this.catalog.verifySources(catalog)
     ]);
 
-    // Build the resolution universe (catalog + vendor), keyed by profile name.
-    const nodes: ProfileNode[] = [];
+    // The resolution universe: the catalog's own profiles, indexed eagerly, plus the
+    // vendor-scoped system profiles, looked up (and parsed) lazily — the slicer's
+    // tree holds thousands of presets and a chain touches a handful.
+    const catalogNodes = new Map<string, ProfileNode[]>();
     for (const p of loaded) {
-      if (p.settings) {
-        nodes.push({ logicalId: p.logicalId, type: p.type, name: p.name, inherits: p.inherits, settings: p.settings });
-      }
+      if (!p.settings) continue;
+      const node: ProfileNode = {
+        logicalId: p.logicalId,
+        type: p.type,
+        name: p.name,
+        inherits: p.inherits,
+        settings: p.settings,
+        origin: "catalog",
+        vendor: null
+      };
+      const list = catalogNodes.get(p.name);
+      if (list) list.push(node);
+      else catalogNodes.set(p.name, [node]);
     }
-    for (const v of vendor) {
-      nodes.push({ logicalId: `${v.type}:${v.name}`, type: v.type, name: v.name, inherits: v.inherits, settings: v.settings });
-    }
-    const byName = indexByName(nodes);
+    const byName: ByName = (name) => [
+      ...(catalogNodes.get(name) ?? []),
+      ...system.lookup(name).map(
+        (v): ProfileNode => ({
+          logicalId: `system:${v.vendor ?? "-"}:${v.type}:${v.name}`,
+          type: v.type,
+          name: v.name,
+          inherits: v.inherits,
+          settings: v.settings,
+          origin: "system",
+          vendor: v.vendor
+        })
+      )
+    ];
 
     // Evaluate every profile (pure), then persist in one transaction.
     const evaluated = loaded.map((p) => this.evaluate(p, byName));
+    // Revisions from an older catalog staging are re-evaluated too. Their verdict
+    // otherwise freezes forever — a profile quarantined for a parent that has since
+    // been installed would keep showing that stale blocker on the profiles page.
+    const evaluatedOrphans = this.orphanProfiles(loaded).map((p) => this.evaluate(p, byName, true));
+
     const missingParents = new Set<string>();
-    for (const e of evaluated) {
+    for (const e of [...evaluated, ...evaluatedOrphans]) {
       for (const b of e.blockers) {
-        if (b.code === "missing_parent") {
-          const m = /«([^»]+)»/.exec(b.message);
-          if (m) missingParents.add(m[1]);
-        }
+        const parent = parentNameFromFinding(b);
+        if (parent) missingParents.add(parent);
       }
     }
 
     const outcomes: ProfileImportOutcome[] = [];
+    const orphanOutcomes: ProfileImportOutcome[] = [];
     this.store.transaction(() => {
       for (const e of evaluated) {
         outcomes.push(this.upsert(e, actor));
+      }
+      for (const e of evaluatedOrphans) {
+        orphanOutcomes.push(this.upsert(e, actor));
       }
     });
 
@@ -129,7 +171,8 @@ export class PresetImportService {
       counts,
       missingParents: [...missingParents].sort(),
       sourceIntegrity: { ok: sourceIntegrity.every((s) => s.ok), sources: sourceIntegrity },
-      profiles: outcomes
+      profiles: outcomes,
+      orphans: orphanOutcomes
     };
 
     this.recordAudit(actor, {
@@ -142,6 +185,7 @@ export class PresetImportService {
         quarantined: counts.quarantined,
         invalid: counts.invalid,
         missingParents: result.missingParents,
+        orphansReevaluated: orphanOutcomes.length,
         sourceIntegrityOk: result.sourceIntegrity.ok
       }
     });
@@ -152,21 +196,82 @@ export class PresetImportService {
     return result;
   }
 
+  // ── Orphaned revisions ─────────────────────────────────────────────────────
+
+  /**
+   * Stored revisions the current catalog no longer lists, rebuilt from their own
+   * immutable bytes so they can be re-resolved.
+   *
+   * A re-staged catalog leaves these behind (a renamed/removed preset, a bundle
+   * replaced by a newer export). They stay usable — a slice reads `resolvedJson`
+   * from the DB, not from disk — so freezing their verdict at whatever the universe
+   * looked like on the day they were imported is simply wrong: the profiles page
+   * would still show "parent missing" for a parent that has since been installed.
+   * Their SHA is their own (nothing to drift against), and they get an explicit
+   * warning that the catalog no longer carries them.
+   */
+  private orphanProfiles(loaded: readonly LoadedProfile[]): LoadedProfile[] {
+    const catalogHashes = new Set(loaded.map((p) => p.rawSha256).filter(Boolean));
+    const out: LoadedProfile[] = [];
+    for (const rev of this.store.repositories.profileRevisions.list()) {
+      if (!rev.rawSha256 || catalogHashes.has(rev.rawSha256)) continue;
+      let settings: Record<string, unknown> | null = null;
+      let parseError: string | null = null;
+      try {
+        const parsed: unknown = JSON.parse(rev.rawJson);
+        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+          settings = parsed as Record<string, unknown>;
+        } else {
+          parseError = "профиль не является JSON-объектом";
+        }
+      } catch (error) {
+        parseError = `сохранённый профиль не разбирается: ${(error as Error).message}`;
+      }
+      out.push({
+        logicalId: rev.logicalId,
+        type: rev.type,
+        name: rev.name,
+        inherits: rev.inherits,
+        source: rev.source,
+        orcaVersion: rev.orcaVersion,
+        raw: rev.rawJson,
+        rawSha256: rev.rawSha256,
+        // Its own hash: an orphan has no catalog entry to drift from.
+        expectedSha256: rev.rawSha256,
+        settings,
+        parseError
+      });
+    }
+    return out;
+  }
+
   // ── Pure evaluation ────────────────────────────────────────────────────────
 
   private evaluate(
     p: LoadedProfile,
-    byName: ByName
+    byName: ByName,
+    /** True for a revision the current catalog no longer lists (see {@link orphanProfiles}). */
+    orphan = false
   ): {
     profile: LoadedProfile;
     status: ProfileRevisionStatus;
     resolvedJson: string | null;
     resolvedSha256: string | null;
+    provenance: Metadata;
     warnings: AnalysisFinding[];
     blockers: AnalysisFinding[];
   } {
     const warnings: AnalysisFinding[] = [];
     const blockers: AnalysisFinding[] = [];
+
+    if (orphan) {
+      warnings.push(
+        finding(
+          "not_in_catalog",
+          "Профиль остался от прежней версии каталога и больше в нём не значится — он по-прежнему пригоден (байты и разрешённые настройки хранятся в БД), но пере-стейджить каталог стоит осознанно"
+        )
+      );
+    }
 
     // Integrity: the file must still hash to what the catalog recorded.
     if (p.rawSha256 && p.expectedSha256 && p.rawSha256 !== p.expectedSha256) {
@@ -180,7 +285,15 @@ export class PresetImportService {
 
     if (!p.settings) {
       blockers.push(finding("unparseable", p.parseError ?? "профиль не читается"));
-      return { profile: p, status: "invalid", resolvedJson: null, resolvedSha256: null, warnings, blockers };
+      return {
+        profile: p,
+        status: "invalid",
+        resolvedJson: null,
+        resolvedSha256: null,
+        provenance: {},
+        warnings,
+        blockers
+      };
     }
 
     const node: ProfileNode = {
@@ -188,11 +301,20 @@ export class PresetImportService {
       type: p.type,
       name: p.name,
       inherits: p.inherits,
-      settings: p.settings
+      settings: p.settings,
+      origin: "catalog",
+      vendor: null
     };
     const resolution = resolveInheritance(node, byName);
     warnings.push(...resolution.warnings);
     blockers.push(...resolution.blockers);
+    // The chain (and the vendor it locked onto) is the operator's answer to "what
+    // exactly did this profile inherit?" — kept on the revision, not just in a log.
+    const provenance: Metadata = {
+      inheritanceChain: resolution.chain,
+      inheritanceLevels: resolution.levels,
+      vendor: resolution.vendor
+    };
 
     const self = checkProfileSelf({
       type: p.type,
@@ -215,7 +337,15 @@ export class PresetImportService {
     const dedupBlockers = dedupeFindings(blockers);
     // Blocker ⇒ quarantined; content otherwise usable ⇒ active.
     const status: ProfileRevisionStatus = dedupBlockers.length > 0 ? "quarantined" : "active";
-    return { profile: p, status, resolvedJson, resolvedSha256, warnings: dedupWarnings, blockers: dedupBlockers };
+    return {
+      profile: p,
+      status,
+      resolvedJson,
+      resolvedSha256,
+      provenance,
+      warnings: dedupWarnings,
+      blockers: dedupBlockers
+    };
   }
 
   // ── Persistence ────────────────────────────────────────────────────────────
@@ -238,7 +368,10 @@ export class PresetImportService {
       orcaVersion: p.orcaVersion,
       source: p.source,
       warnings: e.warnings,
-      blockers: e.blockers
+      blockers: e.blockers,
+      // Provenance is refreshed on every pass: the same bytes can resolve through a
+      // different chain once a vendor parent is installed.
+      metadata: e.provenance
     };
 
     const existing = p.rawSha256 ? repos.profileRevisions.findByRawSha256(p.rawSha256) : null;
@@ -247,7 +380,8 @@ export class PresetImportService {
         existing.status !== base.status ||
         existing.resolvedSha256 !== base.resolvedSha256 ||
         JSON.stringify(existing.warnings) !== JSON.stringify(base.warnings) ||
-        JSON.stringify(existing.blockers) !== JSON.stringify(base.blockers);
+        JSON.stringify(existing.blockers) !== JSON.stringify(base.blockers) ||
+        JSON.stringify(existing.metadata) !== JSON.stringify(base.metadata);
       if (!changed) {
         return { logicalId: p.logicalId, type: p.type, name: p.name, status: existing.status, warnings: existing.warnings, blockers: existing.blockers, change: "unchanged" };
       }
@@ -269,8 +403,7 @@ export class PresetImportService {
       rawSha256: p.rawSha256,
       createdAt: iso,
       updatedAt: iso,
-      version: 1,
-      metadata: {}
+      version: 1
     };
     repos.profileRevisions.insert(revision);
     this.recordAudit(actor, {
@@ -292,15 +425,4 @@ export class PresetImportService {
       entityId: input.entityId ?? "catalog"
     });
   }
-}
-
-/** Groups nodes by their profile `name` for the inheritance `byName` lookup. */
-function indexByName(nodes: readonly ProfileNode[]): ByName {
-  const map = new Map<string, ProfileNode[]>();
-  for (const n of nodes) {
-    const list = map.get(n.name);
-    if (list) list.push(n);
-    else map.set(n.name, [n]);
-  }
-  return (name) => map.get(name) ?? [];
 }

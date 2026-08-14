@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { declaredType, type OrcaSettings } from "../../domain/slicing/orcaProfile";
+import type { OrcaSettings } from "../../domain/slicing/orcaProfile";
 import type { ProfileType } from "../../domain/slicing/types";
+import { SystemProfileIndex, type SystemProfile } from "./systemProfiles";
 
 /**
  * Reader for the vendored OrcaSlicer catalog under `config/slicers/orca` (see its
@@ -12,9 +13,15 @@ import type { ProfileType } from "../../domain/slicing/types";
  *
  * It is deliberately read-only and defensive: it parses `catalog.v1.json`, loads
  * each referenced profile file, **recomputes** its SHA-256 and reports whether it
- * matches the catalog (the immutability check), and loads any operator-supplied
- * `vendor/` system profiles as additional inheritance parents. Nothing here mutates
- * the catalog or the DB.
+ * matches the catalog (the immutability check), and indexes the OrcaSlicer *system*
+ * profiles that the user presets inherit from. Nothing here mutates the catalog or
+ * the DB.
+ *
+ * System parents come from `vendor/` **and** — when the deployment mounts an
+ * OrcaSlicer runtime — that slicer's own `resources/profiles` tree
+ * ({@link OrcaCatalogSource} `systemRoots`), so the parents used for resolution are
+ * the very ones the CLI ships. See {@link SystemProfileIndex} for the vendor-scoping
+ * rules that keep 46 same-named `fdm_machine_common` files apart.
  */
 
 export interface CatalogSourceEntry {
@@ -65,13 +72,8 @@ export interface LoadedProfile {
   parseError: string | null;
 }
 
-/** A vendor (system) parent profile loaded from `vendor/`. */
-export interface LoadedVendorProfile {
-  type: ProfileType;
-  name: string;
-  inherits: string | null;
-  settings: OrcaSettings;
-}
+/** A vendor (system) parent profile available as an inheritance parent. */
+export type LoadedVendorProfile = SystemProfile;
 
 export interface SourceVerification {
   id: string;
@@ -85,28 +87,19 @@ function sha256(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex");
 }
 
-/** Infers a profile type from its payload when it carries no explicit `type`. */
-function inferType(settings: OrcaSettings): ProfileType {
-  const declared = declaredType(settings);
-  if (declared) return declared;
-  if ("printer_model" in settings || "printable_area" in settings || "printer_technology" in settings) {
-    return "machine";
-  }
-  if ("filament_type" in settings || "filament_settings_id" in settings) return "filament";
-  return "process";
-}
-
-function firstString(value: unknown): string | null {
-  if (Array.isArray(value)) return typeof value[0] === "string" ? value[0] : null;
-  return typeof value === "string" ? value : null;
-}
-
 export class OrcaCatalogSource {
   /** Absolute path to the catalog root (`config/slicers/orca`). */
   readonly root: string;
+  /**
+   * Extra OrcaSlicer system-profile trees searched after `vendor/` — normally the
+   * pinned slicer's `resources/profiles`. Empty in a lean deployment, where
+   * `vendor/` alone must carry the parents.
+   */
+  readonly systemRoots: readonly string[];
 
-  constructor(root: string) {
+  constructor(root: string, systemRoots: readonly string[] = []) {
     this.root = path.resolve(root);
+    this.systemRoots = systemRoots.map((r) => path.resolve(r));
   }
 
   /** Parses `catalog.v1.json`; throws a clear error if it is missing/malformed. */
@@ -172,29 +165,14 @@ export class OrcaCatalogSource {
     return out;
   }
 
-  /** Loads operator-supplied system parents from `vendor/` (recursively). */
-  async loadVendorProfiles(): Promise<LoadedVendorProfile[]> {
-    const dir = path.join(this.root, "vendor");
-    const files = await this.walkJson(dir);
-    const out: LoadedVendorProfile[] = [];
-    for (const abs of files) {
-      try {
-        const parsed: unknown = JSON.parse(await fsp.readFile(abs, "utf8"));
-        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-        const settings = parsed as OrcaSettings;
-        const name = firstString(settings.name);
-        if (!name) continue;
-        out.push({
-          type: inferType(settings),
-          name,
-          inherits: firstString(settings.inherits),
-          settings
-        });
-      } catch {
-        // A malformed vendor file is skipped, not fatal.
-      }
-    }
-    return out;
+  /**
+   * Indexes the system (parent) profiles available to this deployment: the
+   * operator's `vendor/` first, then any configured slicer tree. The index is
+   * rebuilt on every import so dropping a parent into `vendor/` and re-importing
+   * un-quarantines the revisions that needed it.
+   */
+  async loadSystemProfiles(): Promise<SystemProfileIndex> {
+    return SystemProfileIndex.build([path.join(this.root, "vendor"), ...this.systemRoots]);
   }
 
   /** Verifies each source archive's bytes still hash to what the catalog recorded. */
@@ -232,24 +210,5 @@ export class OrcaCatalogSource {
       throw new Error(`Путь вне каталога: «${rel}»`);
     }
     return abs;
-  }
-
-  private async walkJson(dir: string): Promise<string[]> {
-    let entries: import("node:fs").Dirent[];
-    try {
-      entries = await fsp.readdir(dir, { withFileTypes: true });
-    } catch {
-      return [];
-    }
-    const out: string[] = [];
-    for (const entry of entries) {
-      const abs = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        out.push(...(await this.walkJson(abs)));
-      } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".json")) {
-        out.push(abs);
-      }
-    }
-    return out.sort();
   }
 }

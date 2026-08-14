@@ -49,7 +49,8 @@ export async function analyzeFile(input: AnalyzerInput, limits: AnalyzerLimits):
           blockers: [
             finding(
               "unsupported_content",
-              "Содержимое не распознано как STL, 3MF или G-code"
+              "Содержимое не распознано как STL, 3MF или G-code",
+              "Загрузите модель (.stl/.3mf) или нарезанный файл (.gcode). Архив с моделью внутри распакуйте сначала."
             )
           ],
           data: {},

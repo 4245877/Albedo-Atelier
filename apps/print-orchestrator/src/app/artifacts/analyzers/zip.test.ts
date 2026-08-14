@@ -93,3 +93,68 @@ test("read() caps inflation output at the requested max", async () => {
     (e: ZipSafetyError) => e.code === "zip_entry_too_large"
   );
 });
+
+// ── ZIP64 ────────────────────────────────────────────────────────────────────
+//
+// Refusing ZIP64 was the bug behind "ZIP64-архивы не поддерживаются" on ordinary
+// 150 KB slicer files: miniz — inside PrusaSlicer / OrcaSlicer / BambuStudio —
+// writes the ZIP64 records regardless of size. These lock the support in.
+
+test("ZIP64 (miniz layout: sentinels + ZIP64 EOCD + locator) reads like any archive", async () => {
+  const zip = await open(
+    makeZip(
+      [
+        { name: "a.txt", data: "hello" },
+        { name: "b.txt", data: "world world world", method: "deflate" }
+      ],
+      { zip64: "full" }
+    )
+  );
+  assert.equal(zip.entries.length, 2);
+  // The 64-bit values from the extra field replaced every 0xFFFFFFFF sentinel.
+  assert.equal(zip.entries[0].uncompressedSize, 5);
+  assert.equal(zip.entries[0].localHeaderOffset, 0);
+  assert.equal((await zip.read("a.txt", 1024)).toString(), "hello");
+  assert.equal((await zip.read("b.txt", 1024)).toString(), "world world world");
+});
+
+test("a ZIP64 end-of-central-directory alone (32-bit entries) is read too", async () => {
+  const zip = await open(makeZip([{ name: "a.txt", data: "hello" }], { zip64: "eocd" }));
+  assert.equal((await zip.read("a.txt", 1024)).toString(), "hello");
+});
+
+test("ZIP64 does not exempt an archive from the bomb limits", async () => {
+  const buf = makeZip([{ name: "big", data: "x", uncompressedSizeOverride: 10_000_000 }], {
+    zip64: "full"
+  });
+  await assert.rejects(() => open(buf), (e: ZipSafetyError) => e.code === "zip_entry_too_large");
+});
+
+test("ZIP64 sentinels with no ZIP64 record read as corruption, not as unsupported", async () => {
+  const buf = makeZip([{ name: "a.txt", data: "hello" }], {
+    zip64: "full",
+    omitZip64Record: true
+  });
+  await assert.rejects(() => open(buf), (e: ZipSafetyError) => e.code === "zip_corrupt");
+});
+
+// ── Tail scanning ────────────────────────────────────────────────────────────
+
+test("an archive comment does not hide the end-of-central-directory record", async () => {
+  const zip = await open(makeZip([{ name: "a.txt", data: "hello" }], { comment: "made by fixture" }));
+  assert.equal((await zip.read("a.txt", 1024)).toString(), "hello");
+});
+
+test("EOCD-looking bytes inside stored data do not derail the scan", async () => {
+  // "PK\x05\x06" + 18 bytes of plausible-looking record, stored verbatim.
+  const decoy = Buffer.concat([Buffer.from("PK\x05\x06", "latin1"), Buffer.alloc(18)]);
+  const zip = await open(makeZip([{ name: "decoy.bin", data: decoy }]));
+  assert.equal(zip.entries.length, 1);
+  assert.deepEqual(await zip.read("decoy.bin", 1024), decoy);
+});
+
+test("resolve() matches OPC part names case-insensitively and returns the real spelling", async () => {
+  const zip = await open(makeZip([{ name: "3D/3Dmodel.model", data: "<model/>" }]));
+  assert.equal(zip.resolve("3d/3dmodel.model"), "3D/3Dmodel.model");
+  assert.equal(zip.resolve("3D/missing.model"), null);
+});

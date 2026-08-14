@@ -588,6 +588,32 @@ test("a re-import that quarantines a member revokes a previously-approved set (n
   assert.equal(raw?.validation, "blocked");
 });
 
+test("a boot-time re-validation with no printers loaded yet must NOT revoke approvals", () => {
+  // At boot the catalog import (and its revalidateSets) can run before the printer
+  // inventory is readable. Validating a printer-scoped set against an EMPTY farm
+  // yields `target_printer_unknown` for every set — which used to silently revoke
+  // every approval on each restart, so the next slice was refused with
+  // "Набор профилей не утверждён". An unknown inventory is not evidence.
+  const { machine, process, filament } = seedActiveTrio();
+  const set = profiles.createSet({
+    name: "survives a restart",
+    machineRevisionId: machine.id,
+    processRevisionId: process.id,
+    filamentRevisionId: filament.id,
+    printerId: "creality-k2"
+  });
+  assert.equal(profiles.approveSet(set.id).approved, true);
+
+  const blindProfiles = new ProfileService(store, runner, () => []);
+  assert.equal(blindProfiles.revalidateSets("system"), 0);
+
+  const raw = store.repositories.profileSets.getById(set.id);
+  assert.equal(raw?.approved, true);
+  assert.equal(raw?.validation, "valid");
+  // And once the printers ARE loaded, the set is still approved and usable.
+  assert.equal(profiles.getSet(set.id).approved, true);
+});
+
 test("re-import that leaves an approved set valid does NOT revoke it or churn (idempotent)", () => {
   const { machine, process, filament } = seedActiveTrio();
   const set = profiles.createSet({

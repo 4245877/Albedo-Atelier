@@ -59,7 +59,7 @@ after(async () => {
   fs.rmSync(TMP, { recursive: true, force: true });
 });
 
-test("POST /slicing/presets/import imports the real catalog (3 active, 17 quarantined)", async () => {
+test("POST /slicing/presets/import imports the real catalog (15 active, 6 quarantined)", async () => {
   const res = await app.inject({
     method: "POST",
     url: "/api/print/slicing/presets/import",
@@ -67,10 +67,18 @@ test("POST /slicing/presets/import imports the real catalog (3 active, 17 quaran
   });
   assert.equal(res.statusCode, 200);
   const { result } = res.json();
-  assert.equal(result.counts.active, 3);
-  assert.equal(result.counts.quarantined, 17);
+  // The vendor/ closure resolves every Bambu A1 chain and the Creality filaments.
+  assert.equal(result.counts.active, 15);
+  // Only the six Creality K2 presets stay quarantined: their parents
+  // (`Creality K2 0.2 nozzle`, `0.08mm SuperDetail @Creality K2 0.2 nozzle`) do not
+  // exist in OrcaSlicer 2.3.x at all — a real unresolved dependency, not a gap.
+  assert.equal(result.counts.quarantined, 6);
   assert.equal(result.counts.invalid, 0);
   assert.equal(result.sourceIntegrity.ok, true);
+  assert.deepEqual(result.missingParents, [
+    "0.08mm SuperDetail @Creality K2 0.2 nozzle",
+    "Creality K2 0.2 nozzle"
+  ]);
 });
 
 test("GET /slicing/runtime honestly reports no runtime + the profile counts", async () => {
@@ -79,18 +87,44 @@ test("GET /slicing/runtime honestly reports no runtime + the profile counts", as
   const body = res.json();
   assert.equal(body.runtime.available, false);
   assert.ok(body.runtime.error, "expected an honest diagnostic");
-  assert.equal(body.profileCounts.active, 3);
-  assert.equal(body.profileCounts.quarantined, 17);
+  assert.equal(body.profileCounts.active, 15);
+  assert.equal(body.profileCounts.quarantined, 6);
   assert.ok(Array.isArray(body.coverage));
-  assert.ok(body.missingParents.length >= 7);
+  assert.deepEqual(body.missingParents, [
+    "0.08mm SuperDetail @Creality K2 0.2 nozzle",
+    "Creality K2 0.2 nozzle"
+  ]);
 });
 
-test("GET /slicing/profiles lists all 20 revisions; ?type filters", async () => {
+test("GET /slicing/profiles lists all 21 revisions; ?type filters", async () => {
   const all = await app.inject({ method: "GET", url: "/api/print/slicing/profiles" });
-  assert.equal(all.json().profiles.length, 20);
+  assert.equal(all.json().profiles.length, 21);
   const filament = await app.inject({ method: "GET", url: "/api/print/slicing/profiles?type=filament" });
   const names = filament.json().profiles.map((p: { name: string }) => p.name);
   assert.ok(names.includes("Creality"));
+});
+
+test("the Bambu A1 0.4 machine profile is served active, with its resolved BBL chain", async () => {
+  const res = await app.inject({ method: "GET", url: "/api/print/slicing/profiles?type=machine" });
+  const profiles = res.json().profiles as Array<{
+    name: string;
+    status: string;
+    resolvedJson: string | null;
+    metadata: { vendor?: string; inheritanceChain?: string[] };
+  }>;
+  const a1 = profiles.find((p) => p.name === "Bambu Lab A1 0.4 PETG");
+  assert.ok(a1, "expected the Bambu Lab A1 0.4 PETG machine profile");
+  assert.equal(a1.status, "active");
+  assert.equal(a1.metadata.vendor, "BBL");
+  assert.deepEqual(a1.metadata.inheritanceChain, [
+    "fdm_machine_common",
+    "fdm_bbl_3dp_001_common",
+    "Bambu Lab A1 0.4 nozzle",
+    "Bambu Lab A1 0.4 PETG"
+  ]);
+  const resolved = JSON.parse(a1.resolvedJson ?? "{}");
+  assert.deepEqual(resolved.nozzle_diameter, ["0.4"]);
+  assert.equal(resolved.printer_model, "Bambu Lab A1");
 });
 
 test("creating a set with a quarantined member is blocked, and approval is refused (409)", async () => {

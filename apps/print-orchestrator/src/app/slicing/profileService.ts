@@ -10,6 +10,8 @@ import {
   type SetTarget
 } from "../../domain/slicing/compatibility";
 import { finding } from "../../domain/slicing/findings";
+import { parentNameFromFinding } from "../../domain/slicing/inheritance";
+import { printerModelsMatchStrict } from "../../domain/slicing/printerModel";
 import {
   readFilament,
   readMachine,
@@ -281,6 +283,13 @@ export class ProfileService {
    * would actually accept can't drift. Returns the number of sets it changed.
    */
   revalidateSets(actor = "system"): number {
+    // An EMPTY printer inventory is "we don't know yet", not "every target is gone".
+    // The boot sequence imports the catalog before the printer inventory is
+    // necessarily readable, and validating a printer-scoped set against zero
+    // printers yields `target_printer_unknown` for all of them — which silently
+    // revoked every operator approval on each restart, leaving slicing refused with
+    // "Набор профилей не утверждён". Approvals are only ever withdrawn on *evidence*.
+    if (this.listPrinters().length === 0) return 0;
     let changed = 0;
     for (const set of this.store.repositories.profileSets.list()) {
       const machine = this.store.repositories.profileRevisions.getById(set.machineRevisionId);
@@ -336,10 +345,8 @@ export class ProfileService {
     const missingParents = new Set<string>();
     for (const rev of all) {
       for (const b of rev.blockers) {
-        if (b.code === "missing_parent") {
-          const m = /«([^»]+)»/.exec(b.message);
-          if (m) missingParents.add(m[1]);
-        }
+        const parent = parentNameFromFinding(b);
+        if (parent) missingParents.add(parent);
       }
     }
     return {
@@ -464,12 +471,27 @@ export function setMembersOf(
   filament: SetMember<FilamentFields> | null;
 } {
   return {
-    machine: machine ? { name: machine.name, status: machine.status, fields: readMachine(settingsOf(machine)) } : null,
+    machine: machine
+      ? {
+          name: machine.name,
+          status: machine.status,
+          fields: readMachine(settingsOf(machine)),
+          // Lets the validator check a process/filament's own `compatible_printers`,
+          // which names the SYSTEM machine profile the preset was made for.
+          chain: inheritanceChainOf(machine)
+        }
+      : null,
     process: process ? { name: process.name, status: process.status, fields: readProcess(settingsOf(process)) } : null,
     filament: filament
       ? { name: filament.name, status: filament.status, fields: readFilament(settingsOf(filament)) }
       : null
   };
+}
+
+/** The resolved inheritance chain the importer recorded on a revision (root→leaf). */
+export function inheritanceChainOf(rev: ProfileRevision): string[] {
+  const chain = rev.metadata?.inheritanceChain;
+  return Array.isArray(chain) ? chain.filter((n): n is string => typeof n === "string") : [];
 }
 
 /** The compatibility {@link SetTarget} view of one farm printer's hardware. */
@@ -506,15 +528,16 @@ function validationStatus(findings: FindingSet): ProfileSetValidation {
   return "valid";
 }
 
-/** Loose printer-model match: normalise and check either token contains the other. */
+/**
+ * Whether a machine profile covers a printer. Uses the same model identity as the
+ * compatibility gate ({@link printerModelsMatchStrict}), so the coverage report can
+ * never claim a printer is covered by a profile the gate would then reject — nor
+ * count an `A1 mini` profile as covering an `A1`.
+ */
 function modelMatches(machine: ProfileRevision, printer: SlicerPrinterRef): boolean {
   const settings = settingsOf(machine);
-  const machineModel = normalizeModel(readMachine(settings).printerModel ?? machine.name);
-  const printerModel = normalizeModel(printer.model ?? printer.name);
-  if (!machineModel || !printerModel) return false;
-  return machineModel.includes(printerModel) || printerModel.includes(machineModel);
-}
-
-function normalizeModel(value: string | null): string {
-  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return printerModelsMatchStrict(
+    readMachine(settings).printerModel ?? machine.name,
+    printer.model ?? printer.name
+  );
 }

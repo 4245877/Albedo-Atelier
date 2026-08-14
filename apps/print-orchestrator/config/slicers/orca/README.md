@@ -52,13 +52,23 @@ them in the source directory and re-running, then re-import from the dashboard /
 On import each profile becomes an immutable `ProfileRevision` with a status:
 
 - `active` — inheritance resolves fully and there are no blocker-level problems.
-- `quarantined` — a blocker was found: an **unresolved parent** (a `vendor/` system
-  profile is missing), an inheritance **cycle**, a **wrong-type** parent, or a
-  self-contradiction (e.g. `nozzle_diameter` disagreeing with `printer_variant`).
-  A quarantined revision is **never** activated and cannot be used in a profile set.
+- `quarantined` — a blocker was found: an **unresolved parent** (no system profile
+  with that name in `vendor/` or the pinned slicer's tree), an **ambiguous parent**
+  (several OrcaSlicer vendors ship that exact name and nothing says which is meant),
+  an inheritance **cycle**, a **wrong-type** parent, or a self-contradiction (e.g.
+  `nozzle_diameter` disagreeing with `printer_variant`). A quarantined revision is
+  **never** activated and cannot be used in a profile set.
 - `invalid` — the file is not a usable profile (unparseable, not an object, no name,
   unknown type).
 
-A profile that inherits an OrcaSlicer system profile (almost all of them) stays
-quarantined until that parent is provided under `vendor/` — see `vendor/README.md`.
-This is intentional: the orchestrator will not slice against an unresolved profile.
+Almost every user preset inherits an OrcaSlicer **system** profile, and the whole
+chain must resolve — transitively and **within one vendor** (see
+`vendor/README.md`). The resolved settings are literally what is handed to the
+slicer, so a parent resolved from the wrong vendor would be a wrong-G-code bug;
+resolution therefore locks onto the vendor of the first system parent it enters.
+Each revision records what it resolved through in its `metadata`
+(`inheritanceChain`, `inheritanceLevels`, `vendor`).
+
+A preset whose parent genuinely does not exist in the pinned OrcaSlicer release
+stays quarantined — that is a real unresolved dependency, and the orchestrator will
+not slice against an unresolved profile.

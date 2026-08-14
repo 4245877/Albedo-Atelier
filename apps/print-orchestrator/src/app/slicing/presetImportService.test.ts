@@ -14,7 +14,7 @@ const REAL_CATALOG = path.resolve(__dirname, "../../../config/slicers/orca");
 
 // ── Against the real vendored catalog (config/slicers/orca) ───────────────────
 
-test("imports the real catalog: 3 active filaments, the rest quarantined on missing vendor parents", async () => {
+test("imports the real catalog: the installed vendor closure resolves 15 of 21 profiles", async () => {
   const store = openPrintQueueStore(":memory:");
   try {
     const service = new PresetImportService(store, new OrcaCatalogSource(REAL_CATALOG));
@@ -22,26 +22,39 @@ test("imports the real catalog: 3 active filaments, the rest quarantined on miss
 
     assert.equal(result.totalProfiles, 21);
     assert.equal(result.counts.invalid, 0);
-    assert.equal(result.counts.active, 3);
-    assert.equal(result.counts.quarantined, 18);
+    assert.equal(result.counts.active, 15);
+    assert.equal(result.counts.quarantined, 6);
     assert.equal(result.inserted, 21);
 
     // Source archives hash to what the catalog recorded (immutability).
     assert.equal(result.sourceIntegrity.ok, true);
 
-    // The three self-rooted Creality filaments resolve and go active.
+    // Everything Bambu A1 (machine + processes + filaments) and every Creality
+    // filament resolves through the vendor/ system parents.
     const active = result.profiles.filter((p) => p.status === "active").map((p) => p.name).sort();
-    assert.deepEqual(active, ["Creality", "Creality PLA", "ENYONE PLA"]);
+    assert.deepEqual(active, [
+      "@BBL A1 0.4 PLA",
+      "Bambu Lab A1 0.4 PETG",
+      "Creality",
+      "Creality PLA",
+      "ENYONE PLA",
+      "PETG 0.4mm @BBL A1",
+      "PETG 0.4mm Quality @BBL A1",
+      "PETG 0.6mm @BBL A1",
+      "PETG 0.8mm @BBL A1",
+      "PETG @K2",
+      "PETG @K2 Balance",
+      "PETG @K2 FAST1",
+      "VVM PETG 0.4@BBL A1",
+      "VVM PETG 0.6@BBL A1",
+      "VVM PETG 0.8@BBL A1"
+    ]);
 
-    // All seven OrcaSlicer system parents are reported missing. The replacement
-    // bundle declares the K2 machine against its 0.2-nozzle parent.
+    // Only two parents remain unresolvable, and for a real reason: OrcaSlicer 2.3.x
+    // ships `Creality K2 Plus`, never a plain `Creality K2`. Those presets came from
+    // a different build, so their six dependants stay honestly quarantined.
     assert.deepEqual(result.missingParents, [
       "0.08mm SuperDetail @Creality K2 0.2 nozzle",
-      "0.20mm Standard @BBL A1",
-      "0.20mm Strength @BBL A1",
-      "Bambu Lab A1 0.4 nozzle",
-      "Bambu PLA Basic @BBL A1",
-      "Creality Generic PLA @K2-all",
       "Creality K2 0.2 nozzle"
     ]);
 
@@ -59,7 +72,136 @@ test("imports the real catalog: 3 active filaments, the rest quarantined on miss
   }
 });
 
+test("the Bambu Lab A1 0.4 machine resolves its whole BBL chain to real A1 hardware", async () => {
+  const store = openPrintQueueStore(":memory:");
+  try {
+    await new PresetImportService(store, new OrcaCatalogSource(REAL_CATALOG)).import();
+    const machine = store.repositories.profileRevisions
+      .list("machine")
+      .find((r) => r.name === "Bambu Lab A1 0.4 PETG");
+    assert.ok(machine);
+    assert.equal(machine.status, "active");
+    assert.equal(machine.inherits, "Bambu Lab A1 0.4 nozzle");
+    assert.deepEqual(machine.blockers, []);
+
+    // Every link, in the BBL vendor and no other (46 files share the root's name).
+    assert.equal(machine.metadata.vendor, "BBL");
+    assert.deepEqual(machine.metadata.inheritanceChain, [
+      "fdm_machine_common",
+      "fdm_bbl_3dp_001_common",
+      "Bambu Lab A1 0.4 nozzle",
+      "Bambu Lab A1 0.4 PETG"
+    ]);
+    assert.equal(machine.metadata.inheritanceLevels, 3);
+
+    // The resolved settings are what OrcaSlicer is actually fed: a 256³ A1 with a
+    // 0.4 nozzle, and layer limits inherited from the BBL parents.
+    const resolved = JSON.parse(machine.resolvedJson ?? "{}");
+    assert.deepEqual(resolved.nozzle_diameter, ["0.4"]);
+    assert.equal(resolved.printer_variant, "0.4");
+    assert.equal(resolved.printer_model, "Bambu Lab A1");
+    assert.equal(resolved.printable_height, "256");
+    assert.deepEqual(resolved.printable_area, ["0x0", "256x0", "256x256", "0x256"]);
+    assert.deepEqual(resolved.max_layer_height, ["0.28"]);
+    assert.deepEqual(resolved.min_layer_height, ["0.08"]);
+  } finally {
+    store.close();
+  }
+});
+
+test("A1 PETG filament and both A1 process families resolve through their BBL parents", async () => {
+  const store = openPrintQueueStore(":memory:");
+  try {
+    await new PresetImportService(store, new OrcaCatalogSource(REAL_CATALOG)).import();
+    const repos = store.repositories;
+
+    // PETG filament: inherits the system Bambu PLA Basic @BBL A1 chain, but its own
+    // PETG values must win the merge (this is what the slicer receives).
+    const petg = repos.profileRevisions.list("filament").find((r) => r.name === "VVM PETG 0.4@BBL A1");
+    assert.ok(petg);
+    assert.equal(petg.status, "active");
+    assert.equal(petg.metadata.vendor, "BBL");
+    assert.deepEqual(petg.metadata.inheritanceChain, [
+      "fdm_filament_common",
+      "fdm_filament_pla",
+      "Bambu PLA Basic @base",
+      "Bambu PLA Basic @BBL A1",
+      "VVM PETG 0.4@BBL A1"
+    ]);
+    const petgResolved = JSON.parse(petg.resolvedJson ?? "{}");
+    assert.deepEqual(petgResolved.filament_type, ["PETG"]);
+
+    // PLA process (0.20mm Strength @BBL A1) and PETG process (0.20mm Standard @BBL A1)
+    // both resolve — the operator can pick either material's process for the A1.
+    const pla = repos.profileRevisions.list("process").find((r) => r.name === "@BBL A1 0.4 PLA");
+    assert.ok(pla);
+    assert.equal(pla.status, "active");
+    assert.equal(pla.metadata.vendor, "BBL");
+    assert.ok((pla.metadata.inheritanceChain as string[]).includes("0.20mm Strength @BBL A1"));
+
+    const petgProcess = repos.profileRevisions.list("process").find((r) => r.name === "PETG 0.4mm @BBL A1");
+    assert.ok(petgProcess);
+    assert.equal(petgProcess.status, "active");
+    assert.ok((petgProcess.metadata.inheritanceChain as string[]).includes("0.20mm Standard @BBL A1"));
+    // A thin user diff (20 keys) inherits a full process definition (100+ keys) —
+    // the layer height itself comes from the system `0.20mm Standard @BBL A1`.
+    const processResolved = JSON.parse(petgProcess.resolvedJson ?? "{}");
+    assert.ok(Object.keys(processResolved).length > 100);
+    assert.equal(processResolved.layer_height, "0.2");
+    assert.equal(processResolved.print_settings_id, "PETG 0.4mm @BBL A1");
+  } finally {
+    store.close();
+  }
+});
+
+test("the six Creality K2 presets stay quarantined — their parents exist nowhere", async () => {
+  const store = openPrintQueueStore(":memory:");
+  try {
+    const result = await new PresetImportService(store, new OrcaCatalogSource(REAL_CATALOG)).import();
+    const quarantined = result.profiles.filter((p) => p.status === "quarantined").map((p) => p.name).sort();
+    assert.deepEqual(quarantined, [
+      "0.08mm SuperDetail @Creality K2 0.2 nozzle - Copy",
+      "Creality K2 0.4",
+      "Creality K2 0.4 Balance",
+      "Creality K2 0.4 FAST",
+      "Creality K2 0.4 FAST1",
+      "Creality K2 PETG 0.4 FAST"
+    ]);
+    // The diagnostic must say what is missing and where we looked — the difference
+    // between "install the parents" and "this build has no such profile".
+    const k2 = result.profiles.find((p) => p.name === "Creality K2 0.4");
+    const missing = k2?.blockers.find((b) => b.code === "missing_parent");
+    assert.ok(missing);
+    assert.match(missing.message, /«0\.08mm SuperDetail @Creality K2 0\.2 nozzle» \(process\)/);
+    assert.match(missing.message, /vendor\/ или resources\/profiles/);
+  } finally {
+    store.close();
+  }
+});
+
+test("the shipped vendor/ closure alone resolves the catalog — no slicer runtime needed", async () => {
+  // The production/lean-container case: the image carries config/ but no OrcaSlicer
+  // mount, so `vendor/` MUST be self-sufficient. Re-run over a copy that has only
+  // the committed vendor/ tree and no ORCA_SYSTEM_PROFILES_DIR.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "orca-lean-"));
+  const store = openPrintQueueStore(":memory:");
+  try {
+    fs.cpSync(REAL_CATALOG, tmp, { recursive: true });
+    const result = await new PresetImportService(store, new OrcaCatalogSource(tmp, [])).import();
+    assert.equal(result.counts.active, 15);
+    assert.deepEqual(result.missingParents, [
+      "0.08mm SuperDetail @Creality K2 0.2 nozzle",
+      "Creality K2 0.2 nozzle"
+    ]);
+  } finally {
+    store.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("re-importing the real catalog is idempotent (no new revisions, nothing changes)", async () => {
+  // Also covers load order: the second pass re-resolves every chain from scratch and
+  // must reach byte-identical resolved settings, whatever order files are visited in.
   const store = openPrintQueueStore(":memory:");
   try {
     const service = new PresetImportService(store, new OrcaCatalogSource(REAL_CATALOG));
@@ -222,6 +364,288 @@ test("verifySources flags a tampered source archive", async () => {
     const result = await new PresetImportService(store, new OrcaCatalogSource(TMP)).import();
     assert.equal(result.sourceIntegrity.ok, false);
     assert.equal(result.sourceIntegrity.sources[0].ok, false);
+  } finally {
+    store.close();
+  }
+});
+
+// ── Vendor-scoped system parents (synthetic trees) ───────────────────────────
+
+/** Writes a system profile into `vendor/<vendor>/<type>/<name>.json`. */
+function writeVendor(vendor: string | null, p: SynProfile): void {
+  const rel = vendor ? path.join("vendor", vendor, p.type, `${p.name}.json`) : path.join("vendor", `${p.name}.json`);
+  const abs = path.join(TMP, rel);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(
+    abs,
+    JSON.stringify({ name: p.name, type: p.type, inherits: p.inherits ?? "", ...p.settings })
+  );
+}
+
+test("a user preset resolves through the vendor its parent belongs to, not a namesake", async () => {
+  // Two vendors ship `fdm_machine_common` with different content — the shipped
+  // OrcaSlicer tree has 46 of them. Resolution must follow BBL, because that is
+  // where the chain's first system parent lives.
+  writeCatalog([
+    {
+      type: "machine",
+      name: "Bambu Lab A1 0.4 PETG",
+      inherits: "Bambu Lab A1 0.4 nozzle",
+      settings: { nozzle_diameter: ["0.4"], printer_variant: "0.4", printer_model: "Bambu Lab A1" }
+    }
+  ]);
+  writeVendor("BBL", {
+    type: "machine",
+    name: "Bambu Lab A1 0.4 nozzle",
+    inherits: "fdm_machine_common",
+    settings: { printable_area: ["0x0", "256x0", "256x256", "0x256"], printable_height: "256" }
+  });
+  writeVendor("BBL", { type: "machine", name: "fdm_machine_common", settings: { max_layer_height: ["0.28"] } });
+  writeVendor("Anker", { type: "machine", name: "fdm_machine_common", settings: { max_layer_height: ["0.1"] } });
+
+  store = newStore();
+  try {
+    const result = await new PresetImportService(store, new OrcaCatalogSource(TMP)).import();
+    assert.equal(result.counts.active, 1);
+    const rev = store.repositories.profileRevisions.list("machine")[0];
+    assert.equal(rev.metadata.vendor, "BBL");
+    // Anker's 0.1 mm ceiling must NOT have leaked into a Bambu profile.
+    assert.deepEqual(JSON.parse(rev.resolvedJson ?? "{}").max_layer_height, ["0.28"]);
+  } finally {
+    store.close();
+  }
+});
+
+test("a parent shipped by two vendors with no vendor context is quarantined as ambiguous", async () => {
+  writeCatalog([
+    { type: "filament", name: "My PLA", inherits: "fdm_filament_common", settings: { filament_type: ["PLA"] } }
+  ]);
+  writeVendor("BBL", { type: "filament", name: "fdm_filament_common", settings: { nozzle_temperature: ["220"] } });
+  writeVendor("Creality", { type: "filament", name: "fdm_filament_common", settings: { nozzle_temperature: ["200"] } });
+
+  store = newStore();
+  try {
+    const result = await new PresetImportService(store, new OrcaCatalogSource(TMP)).import();
+    assert.equal(result.counts.quarantined, 1);
+    const blocker = result.profiles[0].blockers[0];
+    assert.equal(blocker.code, "ambiguous_parent");
+    assert.match(blocker.message, /BBL, Creality/);
+    // Reported to the operator alongside the genuinely missing ones.
+    assert.deepEqual(result.missingParents, ["fdm_filament_common"]);
+  } finally {
+    store.close();
+  }
+});
+
+test("installing the missing link of a deep chain un-quarantines it; removing it re-quarantines", async () => {
+  // Load order in the large sense: a chain is only usable once EVERY link exists,
+  // and the importer re-evaluates existing revisions on each pass in both directions.
+  writeCatalog([
+    {
+      type: "machine",
+      name: "My A1",
+      inherits: "A1 nozzle",
+      settings: { nozzle_diameter: ["0.4"], printer_variant: "0.4" }
+    }
+  ]);
+  writeVendor("BBL", { type: "machine", name: "A1 nozzle", inherits: "bbl common", settings: {} });
+
+  store = newStore();
+  try {
+    const service = new PresetImportService(store, new OrcaCatalogSource(TMP));
+    // Only the first link is installed → still quarantined, now on the NEXT link.
+    const first = await service.import();
+    assert.equal(first.counts.quarantined, 1);
+    assert.deepEqual(first.missingParents, ["bbl common"]);
+
+    // Complete the closure → active, without rewriting the raw bytes.
+    writeVendor("BBL", { type: "machine", name: "bbl common", settings: { max_layer_height: ["0.28"] } });
+    const second = await service.import();
+    assert.equal(second.counts.active, 1);
+    assert.equal(second.updated, 1);
+    assert.equal(store.repositories.profileRevisions.list().length, 1);
+
+    // A third pass changes nothing (idempotent re-import).
+    const third = await service.import();
+    assert.equal(third.unchanged, 1);
+
+    // And removing the parent again puts it straight back in quarantine.
+    fs.rmSync(path.join(TMP, "vendor/BBL/machine/bbl common.json"));
+    const fourth = await service.import();
+    assert.equal(fourth.counts.quarantined, 1);
+    assert.equal(fourth.counts.active, 0);
+  } finally {
+    store.close();
+  }
+});
+
+test("a machine whose nozzle contradicts its inherited variant is quarantined even with the parent present", async () => {
+  // Validation is not weakened by having the parents: a 0.4 nozzle declared on a
+  // profile inheriting the 0.2-nozzle machine is a real contradiction.
+  writeCatalog([
+    {
+      type: "machine",
+      name: "K2 0.4 on 0.2 parent",
+      inherits: "K2 0.2 nozzle",
+      settings: { nozzle_diameter: ["0.4"], printer_variant: "0.2" }
+    }
+  ]);
+  writeVendor("Creality", {
+    type: "machine",
+    name: "K2 0.2 nozzle",
+    settings: { printable_area: ["0x0", "260x0", "260x260", "0x260"], printable_height: "260" }
+  });
+
+  store = newStore();
+  try {
+    const result = await new PresetImportService(store, new OrcaCatalogSource(TMP)).import();
+    assert.equal(result.counts.quarantined, 1);
+    const codes = result.profiles[0].blockers.map((b) => b.code);
+    assert.deepEqual(codes, ["nozzle_variant_mismatch"]);
+  } finally {
+    store.close();
+  }
+});
+
+test("a vendor manifest or machine_model file in vendor/ is never used as a parent", async () => {
+  writeCatalog([
+    { type: "machine", name: "My A1", inherits: "Bambu Lab A1", settings: { nozzle_diameter: ["0.4"] } }
+  ]);
+  // A `machine_model` definition carries the marketing name "Bambu Lab A1" — it is
+  // NOT a preset and must not satisfy an `inherits`.
+  fs.mkdirSync(path.join(TMP, "vendor/BBL/machine"), { recursive: true });
+  fs.writeFileSync(
+    path.join(TMP, "vendor/BBL/machine/Bambu Lab A1.json"),
+    JSON.stringify({ type: "machine_model", name: "Bambu Lab A1", nozzle_diameter: "0.2;0.4" })
+  );
+  fs.writeFileSync(
+    path.join(TMP, "vendor/BBL.json"),
+    JSON.stringify({ name: "Bambulab", machine_model_list: [], machine_list: [], process_list: [], filament_list: [] })
+  );
+
+  store = newStore();
+  try {
+    const result = await new PresetImportService(store, new OrcaCatalogSource(TMP)).import();
+    assert.equal(result.counts.quarantined, 1);
+    assert.equal(result.profiles[0].blockers[0].code, "missing_parent");
+  } finally {
+    store.close();
+  }
+});
+
+test("an OrcaSlicer resources tree can supply the parents instead of vendor/", async () => {
+  // The compose.orca.yml deployment: no files copied into vendor/, the mounted
+  // slicer's own resources/profiles tree resolves the chain.
+  writeCatalog([
+    {
+      type: "process",
+      name: "PETG 0.4mm @BBL A1",
+      inherits: "0.20mm Standard @BBL A1",
+      settings: { layer_height: "0.2" }
+    }
+  ]);
+  const tree = path.join(TMP, "orca-resources");
+  fs.mkdirSync(path.join(tree, "BBL/process"), { recursive: true });
+  fs.writeFileSync(
+    path.join(tree, "BBL/process/0.20mm Standard @BBL A1.json"),
+    JSON.stringify({ name: "0.20mm Standard @BBL A1", type: "process", initial_layer_print_height: "0.2" })
+  );
+
+  store = newStore();
+  try {
+    const result = await new PresetImportService(store, new OrcaCatalogSource(TMP, [tree])).import();
+    assert.equal(result.counts.active, 1);
+    const rev = store.repositories.profileRevisions.list("process")[0];
+    assert.equal(rev.metadata.vendor, "BBL");
+    assert.equal(JSON.parse(rev.resolvedJson ?? "{}").initial_layer_print_height, "0.2");
+  } finally {
+    store.close();
+  }
+});
+
+test("vendor/ wins over the slicer tree for the same profile (operator override)", async () => {
+  writeCatalog([
+    { type: "filament", name: "Mine", inherits: "Base", settings: { filament_type: ["PETG"] } }
+  ]);
+  writeVendor("BBL", { type: "filament", name: "Base", settings: { nozzle_temperature: ["250"] } });
+  const tree = path.join(TMP, "orca-resources");
+  fs.mkdirSync(path.join(tree, "BBL/filament"), { recursive: true });
+  fs.writeFileSync(
+    path.join(tree, "BBL/filament/Base.json"),
+    JSON.stringify({ name: "Base", type: "filament", nozzle_temperature: ["999"] })
+  );
+
+  store = newStore();
+  try {
+    await new PresetImportService(store, new OrcaCatalogSource(TMP, [tree])).import();
+    const rev = store.repositories.profileRevisions.list("filament")[0];
+    assert.deepEqual(JSON.parse(rev.resolvedJson ?? "{}").nozzle_temperature, ["250"]);
+  } finally {
+    store.close();
+  }
+});
+
+test("a revision left over from an older catalog is re-evaluated, not frozen at its old verdict", async () => {
+  // Production case: `Creality Hyper PLA @BBL A1 - Copy` was imported from a bundle
+  // that a later re-staging dropped. It stayed quarantined on «Bambu PLA Basic @BBL A1»
+  // long after that parent was installed, because the importer only ever looked at
+  // profiles the CURRENT catalog lists.
+  writeCatalog([
+    { type: "filament", name: "Kept", inherits: "Bambu PLA Basic @BBL A1", settings: { filament_type: ["PETG"] } },
+    { type: "filament", name: "Dropped Later", inherits: "Bambu PLA Basic @BBL A1", settings: { filament_type: ["PLA"] } }
+  ]);
+  store = newStore();
+  try {
+    const service = new PresetImportService(store, new OrcaCatalogSource(TMP));
+    const first = await service.import();
+    assert.equal(first.counts.quarantined, 2);
+
+    // Re-stage the catalog WITHOUT the second profile, and install the parent.
+    writeCatalog([
+      { type: "filament", name: "Kept", inherits: "Bambu PLA Basic @BBL A1", settings: { filament_type: ["PETG"] } }
+    ]);
+    writeVendor("BBL", {
+      type: "filament",
+      name: "Bambu PLA Basic @BBL A1",
+      settings: { nozzle_temperature: ["240"] }
+    });
+
+    const second = await service.import();
+    // The catalog profile resolves…
+    assert.equal(second.counts.active, 1);
+    assert.equal(second.totalProfiles, 1);
+    // …and so does the orphan, which is reported separately and flagged.
+    assert.equal(second.orphans.length, 1);
+    assert.equal(second.orphans[0].name, "Dropped Later");
+    assert.equal(second.orphans[0].status, "active");
+    assert.deepEqual(second.orphans[0].blockers, []);
+    assert.ok(second.orphans[0].warnings.some((w) => w.code === "not_in_catalog"));
+    assert.deepEqual(second.missingParents, []);
+
+    // Both rows survive in the table with their own immutable bytes.
+    assert.equal(store.repositories.profileRevisions.list().length, 2);
+    const orphanRow = store.repositories.profileRevisions.list().find((r) => r.name === "Dropped Later");
+    assert.equal(orphanRow?.status, "active");
+    assert.deepEqual(JSON.parse(orphanRow?.resolvedJson ?? "{}").nozzle_temperature, ["240"]);
+  } finally {
+    store.close();
+  }
+});
+
+test("an orphan whose parent is still missing stays quarantined and is still reported", async () => {
+  writeCatalog([
+    { type: "process", name: "Gone", inherits: "0.08mm SuperDetail @Creality K2 0.2 nozzle", settings: { layer_height: "0.08" } }
+  ]);
+  store = newStore();
+  try {
+    const service = new PresetImportService(store, new OrcaCatalogSource(TMP));
+    await service.import();
+    writeCatalog([{ type: "process", name: "Other", inherits: "", settings: { layer_height: "0.2" } }]);
+
+    const second = await service.import();
+    assert.equal(second.orphans.length, 1);
+    assert.equal(second.orphans[0].status, "quarantined");
+    assert.deepEqual(second.missingParents, ["0.08mm SuperDetail @Creality K2 0.2 nozzle"]);
   } finally {
     store.close();
   }

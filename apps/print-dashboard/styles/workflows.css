@@ -203,6 +203,25 @@
 }
 .upload-warn { color: var(--warn-ink); }
 .upload-block { color: var(--danger-ink); }
+/* Подсказка «что делать» — отдельной строкой под причиной, спокойным тоном:
+   причина окрашена по важности, действие читается как обычный текст. */
+.upload-hint {
+  display: block;
+  margin-top: 2px;
+  padding-left: 1.35em;
+  color: var(--ink-soft);
+}
+/* Одна человеческая фраза о вердикте — над таблицей свойств. */
+.upload-note {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+.upload-task-reason {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
 .upload-error {
   color: var(--danger-ink);
   font-size: 13px;

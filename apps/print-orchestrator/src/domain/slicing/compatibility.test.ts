@@ -208,6 +208,72 @@ test("a loosely-matching model (normalised) does not block", () => {
   assert.ok(!codes(r.blockers).includes("printer_model_mismatch"));
 });
 
+test("an A1 Combo target accepts the A1 machine profile (Combo = A1 + AMS Lite)", () => {
+  // The farm printer is configured as "Bambu Lab A1 Combo"; OrcaSlicer has no such
+  // machine — the Combo is an A1 sold with an AMS Lite, and the profile's
+  // printer_model is "Bambu Lab A1". This must slice, on 0.4 mm, with PETG.
+  const r = validateProfileSet(
+    activeSet({
+      target: {
+        printerModel: "Bambu Lab A1 Combo",
+        printerNozzleMm: 0.4,
+        printerMaterial: "PLA / PETG / TPU",
+        printerProtocol: "bambu"
+      }
+    })
+  );
+  assert.deepEqual(r.blockers, []);
+});
+
+test("a sibling machine's profile is blocked, not silently accepted (A1 vs A1 mini)", () => {
+  // "Bambu Lab A1" is a substring of "Bambu Lab A1 mini" — the old loose match let
+  // a mini profile (180³ bed) validate against an A1 and vice versa.
+  const miniProfileOnA1 = validateProfileSet(
+    activeSet({
+      machine: {
+        name: "Bambu Lab A1 mini 0.4 PETG",
+        status: "active",
+        fields: machineFields({ printerModel: "Bambu Lab A1 mini" })
+      },
+      target: { printerModel: "Bambu Lab A1 Combo", printerNozzleMm: 0.4 }
+    })
+  );
+  assert.ok(codes(miniProfileOnA1.blockers).includes("printer_model_mismatch"));
+
+  const a1ProfileOnMini = validateProfileSet(
+    activeSet({ target: { printerModel: "Bambu Lab A1 mini", printerNozzleMm: 0.4 } })
+  );
+  assert.ok(codes(a1ProfileOnMini.blockers).includes("printer_model_mismatch"));
+});
+
+test("a K2 Plus profile is blocked against a plain K2 printer", () => {
+  const r = validateProfileSet(
+    activeSet({
+      machine: {
+        name: "Creality K2 Plus 0.4",
+        status: "active",
+        fields: machineFields({ printerModel: "Creality K2 Plus" })
+      },
+      target: { printerModel: "Creality K2", printerNozzleMm: 0.4 }
+    })
+  );
+  assert.ok(codes(r.blockers).includes("printer_model_mismatch"));
+});
+
+test("a filament tagged for a sibling model warns even when the family token matches", () => {
+  const r = validateProfileSet(
+    activeSet({
+      filament: {
+        name: "Bambu PLA Basic @BBL A1 mini",
+        status: "active",
+        fields: filamentFields({ filamentType: "PLA", nozzleTempC: 220, nozzleTempInitialC: 220 })
+      },
+      target: { printerModel: "Bambu Lab A1 Combo", printerNozzleMm: 0.4 }
+    })
+  );
+  assert.ok(codes(r.warnings).includes("filament_model_mismatch"));
+});
+
 test("PET and PETG are NOT treated as the same material (no two-sided prefix match)", () => {
   // A printer loaded with PET must not silently 'support' a PETG filament (and the
   // reverse), which the old two-sided startsWith allowed.
@@ -291,4 +357,85 @@ test("class target: a class where NO member fits is a blocker", () => {
   assert.ok(codes(r.blockers).includes("printer_class_incompatible"));
   // The concrete reason (nozzle mismatch) is surfaced too.
   assert.ok(codes(r.blockers).includes("printer_nozzle_mismatch"));
+});
+
+// ── The slicer's own compatible_printers declaration ─────────────────────────
+
+test("a process/filament whose compatible_printers excludes the machine is a blocker", () => {
+  // Real case: the farm's `PETG @K2*` filaments declare `Creality K2 **Plus**` —
+  // they were made for a different machine than the K2 in the farm, and nothing
+  // but this declaration says so (same family token, same nozzle).
+  const r = validateProfileSet(
+    activeSet({
+      machine: {
+        name: "Creality K2 PETG 0.4 FAST",
+        status: "active",
+        fields: machineFields({ printerModel: "Creality K2" }),
+        chain: ["fdm_machine_common", "Creality K2 0.2 nozzle", "Creality K2 PETG 0.4 FAST"]
+      },
+      filament: {
+        name: "PETG @K2",
+        status: "active",
+        fields: filamentFields({
+          compatiblePrinters: [
+            "Creality K2 Plus 0.2 nozzle",
+            "Creality K2 Plus 0.4 nozzle",
+            "Creality K2 Plus 0.6 nozzle"
+          ]
+        })
+      },
+      target: { printerModel: "Creality K2", printerNozzleMm: 0.4 }
+    })
+  );
+  assert.ok(codes(r.blockers).includes("declared_incompatible_printer"));
+});
+
+test("the declaration is satisfied by the machine's system PARENT, not just its own name", () => {
+  // `PETG 0.4mm @BBL A1` declares compatible_printers ["Bambu Lab A1 0.4 nozzle"] —
+  // the system parent of the operator's "Bambu Lab A1 0.4 PETG" copy.
+  const r = validateProfileSet(
+    activeSet({
+      machine: {
+        name: "Bambu Lab A1 0.4 PETG",
+        status: "active",
+        fields: machineFields(),
+        chain: [
+          "fdm_machine_common",
+          "fdm_bbl_3dp_001_common",
+          "Bambu Lab A1 0.4 nozzle",
+          "Bambu Lab A1 0.4 PETG"
+        ]
+      },
+      process: {
+        name: "PETG 0.4mm @BBL A1",
+        status: "active",
+        fields: processFields({ compatiblePrinters: ["Bambu Lab A1 0.4 nozzle"] })
+      },
+      filament: {
+        name: "VVM PETG 0.4@BBL A1",
+        status: "active",
+        fields: filamentFields({
+          compatiblePrinters: ["Bambu Lab A1 0.4 nozzle", "Bambu Lab A1 0.6 nozzle", "Bambu Lab A1 0.8 nozzle"]
+        })
+      },
+      target: { printerModel: "Bambu Lab A1 Combo", printerNozzleMm: 0.4, printerMaterial: "PLA / PETG / TPU" }
+    })
+  );
+  assert.deepEqual(r.blockers, []);
+});
+
+test("an unknown machine chain never blocks on a declaration it cannot check", () => {
+  // A revision imported before provenance was recorded: fail open, since the model
+  // and nozzle checks still apply.
+  const r = validateProfileSet(
+    activeSet({
+      machine: { name: "Bambu Lab A1 0.4 PETG", status: "active", fields: machineFields() },
+      process: {
+        name: "PETG 0.4mm @BBL A1",
+        status: "active",
+        fields: processFields({ compatiblePrinters: ["Bambu Lab A1 0.4 nozzle"] })
+      }
+    })
+  );
+  assert.ok(!codes(r.blockers).includes("declared_incompatible_printer"));
 });

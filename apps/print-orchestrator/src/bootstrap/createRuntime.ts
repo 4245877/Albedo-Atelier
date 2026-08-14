@@ -649,7 +649,13 @@ export class FarmRuntime implements PrintServices {
     });
     this.presetImportServiceRef = new PresetImportService(
       store,
-      new OrcaCatalogSource(slicing.catalogDir),
+      // System (parent) profiles come from `vendor/` first, then the pinned
+      // slicer's own resources tree when one is mounted — so inheritance resolves
+      // against the exact profiles the CLI that slices would use.
+      new OrcaCatalogSource(
+        slicing.catalogDir,
+        slicing.systemProfilesDir ? [slicing.systemProfilesDir] : []
+      ),
       { logger }
     );
     this.profileServiceRef = new ProfileService(
