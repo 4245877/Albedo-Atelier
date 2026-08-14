@@ -10,8 +10,14 @@ import type { AnalysisFinding, AnalysisVerdict, DetectedFormat } from "../../../
  * scoping. A row written by `1.0.0` is still *readable* (the scheduler falls
  * back to its `bbox`/`units` pair) but dispatch refuses it as outdated until it
  * is re-analysed — which is the intended, fail-closed upgrade path.
+ *
+ * `1.2.0` changed what G-code analysis *means* on two counts, so its rows are not
+ * comparable with `1.1.0`'s and the same fail-closed re-analysis applies: `bbox`
+ * is now the printed model's box rather than every motion the head makes (see
+ * {@link file://./gcode.ts}), and command safety is judged in the context of the
+ * target machine rather than by opcode alone (see {@link file://./gcodePolicy.ts}).
  */
-export const ANALYZER_VERSION = "1.1.0";
+export const ANALYZER_VERSION = "1.2.0";
 
 /**
  * The pure output of analysing one file's bytes — no persistence, no ids. The

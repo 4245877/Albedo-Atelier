@@ -350,6 +350,25 @@
   border-radius: 999px;
   padding: 2px 8px;
 }
+.slice-tag-warn {
+  color: var(--warn, #b8860b);
+  border-style: solid;
+}
+/* Технический текст среды (stderr, пути): для админа, а не для оператора —
+   поэтому он живёт в свёрнутом <details> и не растягивает панель. */
+.slice-pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 180px;
+  overflow-y: auto;
+  color: var(--ink-faint);
+  background: var(--card-sunken, rgba(127, 127, 127, 0.08));
+  border-radius: 6px;
+}
 .slice-cols {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

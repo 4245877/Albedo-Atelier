@@ -52,6 +52,8 @@ export class FakeOrcaRunner implements SliceRunner {
   detectedVersion: string | null;
   behavior: FakeBehavior = "ok";
   sliceCount = 0;
+  /** How many times {@link verifySlicing} ran (boot warms it exactly once). */
+  verifyCount = 0;
   lastRequest: SliceRequest | null = null;
   /** The probe status the last {@link slice} call received (to assert the caller passed it). */
   lastProbed: OrcaRuntimeStatus | null | undefined;
@@ -77,25 +79,50 @@ export class FakeOrcaRunner implements SliceRunner {
     if (this.behavior === "unavailable") {
       return {
         available: false,
+        state: "not_configured",
         binaryPath: null,
         detectedVersion: null,
+        cliBuild: null,
+        resourcesVersion: null,
         pinnedVersion: this.pinnedVersion,
         versionMatches: null,
         networkIsolated: true,
         error: "OrcaSlicer недоступен (тестовый режим unavailable)",
+        detail: null,
+        smoke: null,
         workerVersion: this.workerVersion
       };
     }
     return {
       available: true,
+      state: "ready",
       binaryPath: "/fake/orca-slicer",
       detectedVersion: this.detectedVersion,
+      // The banner build id is deliberately unlike the release, mirroring the real
+      // CLI (release 2.3.0 ships banner 01.10.01.50).
+      cliBuild: "01.10.01.50",
+      resourcesVersion: this.detectedVersion,
       pinnedVersion: this.pinnedVersion,
       versionMatches: this.pinnedVersion ? true : null,
       networkIsolated: true,
       error: null,
+      detail: null,
+      smoke: {
+        ok: true,
+        releaseVersion: this.detectedVersion,
+        gcodeBytes: this.gcode.length,
+        durationMs: 1,
+        error: null,
+        checkedAt: "2026-01-01T00:00:00.000Z"
+      },
       workerVersion: this.workerVersion
     };
+  }
+
+  /** The fake proves nothing by slicing — it just reports what {@link probe} would. */
+  async verifySlicing(): Promise<OrcaRuntimeStatus> {
+    this.verifyCount += 1;
+    return this.probe();
   }
 
   async slice(req: SliceRequest, options: SliceRunOptions = {}): Promise<SliceRunOutput> {

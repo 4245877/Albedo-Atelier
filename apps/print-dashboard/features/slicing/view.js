@@ -41,16 +41,46 @@ export function errorsHtml(state) {
     </div>`;
 }
 
+/* Каждое состояние среды требует своего ремонта, поэтому «недоступен» больше не
+   единственная надпись: подпись говорит, ЧТО сломано, а стадия — где искать.
+   Полный технический текст (stderr, пути) прячем в <details> — он для админа. */
+const RUNTIME_STATE = {
+  ready: { label: "готов", cls: "ok" },
+  not_configured: { label: "не настроен", cls: "warn" },
+  executable_missing: { label: "файл не найден", cls: "error" },
+  executable_corrupted: { label: "файл повреждён", cls: "error" },
+  runtime_dependency_missing: { label: "нет системных библиотек", cls: "error" },
+  cli_incompatible: { label: "несовместимый CLI", cls: "error" },
+  resources_missing: { label: "нет resources/profiles", cls: "error" },
+  version_mismatch: { label: "несовпадение версий", cls: "error" },
+  smoke_failed: { label: "пробный слайсинг не прошёл", cls: "error" }
+};
+
 export function runtimeHtml(state) {
   const r = state.runtime;
   if (!r) return "";
   const rt = r.runtime || {};
   const ok = rt.available;
+  const st = RUNTIME_STATE[rt.state] || { label: rt.state || "неизвестно", cls: ok ? "ok" : "error" };
   const badge = ok
-    ? chip(`OrcaSlicer ${esc(rt.detectedVersion || "")} готов`, "ok")
-    : chip("OrcaSlicer недоступен", "error");
+    ? chip(`OrcaSlicer ${esc(rt.detectedVersion || "")} ${esc(st.label)}`, "ok")
+    : chip(`OrcaSlicer: ${esc(st.label)}`, st.cls);
   const net = rt.networkIsolated ? `<span class="slice-tag">сеть отключена</span>` : "";
-  const err = !ok && rt.error ? `<div class="slice-block">⛔ ${esc(rt.error)}</div>` : "";
+
+  // Сборка CLI (01.10.01.50) — это унаследованный от BambuStudio номер, он НЕ равен
+  // релизу (2.3.0). Показываем оба, чтобы это расхождение больше никого не пугало.
+  const build = rt.cliBuild ? `<span class="slice-tag">сборка CLI ${esc(rt.cliBuild)}</span>` : "";
+  const smoke = rt.smoke
+    ? rt.smoke.ok
+      ? `<span class="slice-tag">✓ проверено слайсингом: ${Math.round((rt.smoke.gcodeBytes || 0) / 1024)} КБ G-code за ${rt.smoke.durationMs} мс</span>`
+      : `<span class="slice-tag slice-tag-warn">пробный слайсинг не дал G-code</span>`
+    : `<span class="slice-tag">слайсингом не проверено</span>`;
+
+  const detail = rt.detail
+    ? `<details class="slice-details"><summary>Техническая причина (для администратора)</summary>
+         <pre class="slice-pre">${esc(rt.detail)}</pre></details>`
+    : "";
+  const err = !ok && rt.error ? `<div class="slice-block">⛔ ${esc(rt.error)}${detail}</div>` : "";
   const counts = r.profileCounts || {};
   const countRow = `
     <div class="slice-counts">
@@ -84,7 +114,7 @@ export function runtimeHtml(state) {
     <div class="slice-panel slice-runtime">
       <div class="slice-panel-head">
         <b>Среда OrcaSlicer</b>
-        ${badge}${net}
+        ${badge}${net}${build}${smoke}
         <span class="slice-spacer"></span>
         <button type="button" class="btn btn-sm" data-slice-action="reload">↻ Обновить</button>
         <button type="button" class="btn btn-sm" data-slice-action="import">↻ Импорт пресетов</button>
@@ -482,8 +512,10 @@ export function newSliceHtml(state) {
   // как восстановить среду. (available === null/unknown не блокируем — решает сервер.)
   const runtimeDown = state.runtime?.runtime?.available === false;
   const runtimeMsg = state.runtime?.runtime?.error;
+  const runtimeState = state.runtime?.runtime?.state;
+  const runtimeLabel = (RUNTIME_STATE[runtimeState] || {}).label || "недоступен";
   const runtimeBlock = runtimeDown
-    ? `<div class="slice-block" id="slice-runtime-block">⛔ OrcaSlicer недоступен — запуск невозможен${runtimeMsg ? `: ${esc(runtimeMsg)}` : ""}.
+    ? `<div class="slice-block" id="slice-runtime-block">⛔ OrcaSlicer: ${esc(runtimeLabel)} — запуск невозможен${runtimeMsg ? `: ${esc(runtimeMsg)}` : ""}.
          Восстановите среду (проверьте контейнер OrcaSlicer, затем ↻ Импорт пресетов) и повторите.</div>`
     : "";
   // Причина блокировки доступна скринридеру через aria-describedby, а не только title.

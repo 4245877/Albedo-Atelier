@@ -645,6 +645,13 @@ export class FarmRuntime implements PrintServices {
       pinnedVersion: slicing.pinnedVersion,
       workerVersion: slicing.workerVersion,
       networkIsolated: slicing.networkIsolated,
+      // The smoke slice resolves its fixture from the same roots, in the same
+      // order, that user presets resolve against — so "проверено слайсингом"
+      // covers the profile tree the real slices will use, not a synthetic one.
+      smokeProfileRoots: [
+        path.join(slicing.catalogDir, "vendor"),
+        ...(slicing.systemProfilesDir ? [slicing.systemProfilesDir] : [])
+      ],
       logger
     });
     this.presetImportServiceRef = new PresetImportService(

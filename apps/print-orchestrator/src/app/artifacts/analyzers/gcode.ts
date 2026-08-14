@@ -2,6 +2,7 @@ import fs from "node:fs";
 import readline from "node:readline";
 
 import type { AnalysisFinding, AnalysisVerdict } from "../../../domain/print/types";
+import { CommandPolicy } from "./gcodePolicy";
 import {
   ANALYZER_VERSION,
   escalateToReview,
@@ -14,14 +15,17 @@ import {
  * Streaming G-code analysis. The file is read line by line (constant memory —
  * never slurped whole and never executed) and yields, best-effort: slicer +
  * version, estimated time, material and usage, layer height, nozzle diameter,
- * temperatures, tool count, firmware flavor, target printer, and a toolpath
- * bounding box.
+ * temperatures, tool count, firmware flavor, target printer, and bounding boxes.
  *
- * The bounding box is computed from the motion commands while honouring the
- * coordinate model — absolute/relative positioning (G90/G91), absolute/relative
- * extrusion (M82/M83), the coordinate-reset G92, and inch/millimetre units
- * (G20/G21). It does not emulate firmware; arcs and other constructs it cannot
- * follow lower a reported confidence and add a warning rather than pretend.
+ * The boxes are computed from the motion commands while honouring the coordinate
+ * model — absolute/relative positioning (G90/G91), absolute/relative extrusion
+ * (M82/M83), the coordinate-reset G92, and inch/millimetre units (G20/G21). It
+ * does not emulate firmware; arcs and other constructs it cannot follow lower a
+ * reported confidence and add a warning rather than pretend.
+ *
+ * Command safety is delegated to {@link CommandPolicy}, which judges a word in the
+ * context of the machine the file targets — some opcodes are an attack on one
+ * firmware and the vendor's own start-up routine on another.
  *
  * A recognised slicer + known target + material with no critical command yields
  * `schedulable` (fit for *planning*, not an unattended auto-start). An unknown
@@ -32,63 +36,12 @@ import {
 const INCH = 25.4;
 
 /**
- * Command policy for print files, by *threat model* rather than a blind
- * denylist. A normal sliced print needs only: motion (G0–G5, G10/G11, G28/G29,
- * G90–G92, G20/G21, G4), extrusion mode (M82/M83), temperatures (M104/M109,
- * M140/M190, M141/M191), fans (M106/M107), steppers (M17/M18/M84), motion
- * tuning the slicers themselves emit (M201–M205, M220/M221, M900), reports
- * (M105/M114/M115), display (M117/M118) and tool selects (T*). Those pass.
- *
- * Everything else falls in one of two explicit classes:
- *
- * - **Forbidden** — mutates firmware/persistent configuration, manages files,
- *   resets/updates the machine, or chains other jobs. Never needed inside a
- *   print job; presence makes the file `blocked` (never printable via the
- *   queue until the file is fixed).
- * - **Review** — legitimate in *some* attended workflows but incompatible with
- *   an unattended print (waits for a human, kills power, changes live
- *   calibration, drives raw pins). Presence forces at least `review`, which
- *   the dispatch gate refuses for night/unattended.
+ * A tool index at or above this is a *pseudo*-tool, not a physical extruder.
+ * Bambu's G-code selects `T255` (no tool / park) and `T1000` (the AMS unload
+ * pseudo-tool) around every filament change, which counted as real extruders and
+ * reported a single-nozzle A1 print as three-tool multi-material.
  */
-const FORBIDDEN_COMMANDS: ReadonlyMap<string, string> = new Map([
-  ["M500", "запись настроек в EEPROM"],
-  ["M501", "загрузка настроек из EEPROM (подменяет конфигурацию во время печати)"],
-  ["M502", "сброс настроек к заводским"],
-  ["M509", "изменение защиты EEPROM"],
-  ["M997", "перепрошивка firmware"],
-  ["M999", "перезапуск после ошибки (маскирует аварию)"],
-  ["M22", "размонтирование SD-карты"],
-  ["M23", "выбор другого файла на SD (сцепление заданий)"],
-  ["M24", "запуск печати с SD (сцепление заданий)"],
-  ["M28", "запись файла на SD"],
-  ["M29", "завершение записи файла на SD"],
-  ["M30", "удаление файла с SD"],
-  ["M32", "запуск другого файла (сцепление заданий)"],
-  ["SAVE_CONFIG", "запись конфигурации Klipper и перезапуск"],
-  ["FIRMWARE_RESTART", "перезапуск firmware Klipper"],
-  ["RESTART", "перезапуск Klipper"],
-  ["RUN_SHELL_COMMAND", "выполнение shell-команды на хосте"]
-]);
-
-const REVIEW_COMMANDS: ReadonlyMap<string, string> = new Map([
-  ["M0", "остановка с ожиданием человека"],
-  ["M1", "остановка с ожиданием человека"],
-  ["M25", "пауза SD-печати"],
-  ["M112", "аварийный стоп внутри файла"],
-  ["M226", "ожидание состояния пина"],
-  ["M600", "смена филамента — требует присутствия"],
-  ["M80", "управление питанием"],
-  ["M81", "выключение питания"],
-  ["M42", "прямое управление пином"],
-  ["M280", "управление сервоприводом"],
-  ["M302", "разрешение холодной экструзии"],
-  ["M92", "изменение калибровки шагов"],
-  ["M301", "изменение PID хотэнда"],
-  ["M304", "изменение PID стола"],
-  ["PID_CALIBRATE", "калибровка PID во время задания"],
-  ["BED_MESH_CALIBRATE", "калибровка стола во время задания"],
-  ["DELTA_CALIBRATE", "калибровка кинематики"]
-]);
+const MAX_PHYSICAL_TOOL = 16;
 
 interface Vec3 {
   x: number;
@@ -102,57 +55,92 @@ interface Bounds {
   any: boolean;
 }
 
-export async function analyzeGcode(path: string): Promise<AnalyzerResult> {
-  const warnings: AnalysisFinding[] = [];
-  const blockers: AnalysisFinding[] = [];
+/** A rectangular bed, read from the file's own `; printable_area = …` comment. */
+interface BedArea {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+/** Everything one streaming pass over the file collects. */
+interface Scan {
+  meta: GcodeMeta;
+  policy: CommandPolicy;
+  /** Everything the head does, including the machine's own priming and parking. */
+  toolpath: Bounds;
+  /** Material deposited on the bed, wherever it happened. */
+  deposited: Bounds;
+  /** Material deposited on the bed *inside the slicer's object markers*. */
+  object: Bounds;
+  sawObjectMarkers: boolean;
+  depositedOffBed: boolean;
+  motionCommands: number;
+  hasArcs: boolean;
+  hasRelativeMoves: boolean;
+  usedInches: boolean;
+  tools: Set<number>;
+}
+
+interface GcodeMeta {
+  slicer: string | null;
+  slicerVersion: string | null;
+  flavor: string | null;
+  printerModel: string | null;
+  material: string | null;
+  layerHeightMm: number | null;
+  nozzleDiameterMm: number | null;
+  nozzleTempC: number | null;
+  bedTempC: number | null;
+  estimatedDurationS: number | null;
+  filamentUsedMm: number | null;
+  filamentUsedG: number | null;
+}
+
+/**
+ * One line-by-line pass over the file: metadata comments, the command policy, and
+ * the coordinate simulation that produces the boxes. Constant memory — the file is
+ * streamed, never slurped, and never executed.
+ */
+async function scanGcode(path: string): Promise<Scan> {
+  const scan: Scan = {
+    meta: {
+      slicer: null,
+      slicerVersion: null,
+      flavor: null,
+      printerModel: null,
+      material: null,
+      layerHeightMm: null,
+      nozzleDiameterMm: null,
+      nozzleTempC: null,
+      bedTempC: null,
+      estimatedDurationS: null,
+      filamentUsedMm: null,
+      filamentUsedG: null
+    },
+    policy: new CommandPolicy(),
+    toolpath: newBounds(),
+    deposited: newBounds(),
+    object: newBounds(),
+    sawObjectMarkers: false,
+    depositedOffBed: false,
+    motionCommands: 0,
+    hasArcs: false,
+    hasRelativeMoves: false,
+    usedInches: false,
+    tools: new Set<number>()
+  };
 
   // Coordinate state (firmware defaults).
   let absolutePos = true;
+  let absoluteE = true; // M82 is the firmware default; slicers usually switch to M83
   let unitScale = 1; // mm; G20 → 25.4
+  let ePos = 0;
+  let insideObject = false;
+  let bed: BedArea | null = null;
+  let lineNo = 0;
   const pos: Vec3 = { x: 0, y: 0, z: 0 };
   const originOffset: Vec3 = { x: 0, y: 0, z: 0 };
-  const bounds: Bounds = {
-    min: { x: Infinity, y: Infinity, z: Infinity },
-    max: { x: -Infinity, y: -Infinity, z: -Infinity },
-    any: false
-  };
-
-  let motionCommands = 0;
-  let hasArcs = false;
-  let hasRelativeMoves = false;
-  let usedInches = false;
-  const tools = new Set<number>();
-  const riskyFound = new Set<string>();
-  const forbiddenFound = new Set<string>();
-
-  // Extracted metadata (null until a line supplies it).
-  const meta: {
-    slicer: string | null;
-    slicerVersion: string | null;
-    flavor: string | null;
-    printerModel: string | null;
-    material: string | null;
-    layerHeightMm: number | null;
-    nozzleDiameterMm: number | null;
-    nozzleTempC: number | null;
-    bedTempC: number | null;
-    estimatedDurationS: number | null;
-    filamentUsedMm: number | null;
-    filamentUsedG: number | null;
-  } = {
-    slicer: null,
-    slicerVersion: null,
-    flavor: null,
-    printerModel: null,
-    material: null,
-    layerHeightMm: null,
-    nozzleDiameterMm: null,
-    nozzleTempC: null,
-    bedTempC: null,
-    estimatedDurationS: null,
-    filamentUsedMm: null,
-    filamentUsedG: null
-  };
 
   const rl = readline.createInterface({
     input: fs.createReadStream(path, { encoding: "utf8" }),
@@ -161,11 +149,18 @@ export async function analyzeGcode(path: string): Promise<AnalyzerResult> {
 
   try {
     for await (const rawLine of rl) {
+      lineNo += 1;
       const line = rawLine.trim();
       if (line.length === 0) continue;
 
       if (line.startsWith(";")) {
-        extractComment(line, meta);
+        extractComment(line, scan.meta);
+        bed ??= readPrintableArea(line);
+        const marker = readObjectMarker(line);
+        if (marker !== null) {
+          insideObject = marker;
+          scan.sawObjectMarkers = true;
+        }
         continue;
       }
 
@@ -174,84 +169,133 @@ export async function analyzeGcode(path: string): Promise<AnalyzerResult> {
       if (code.length === 0) continue;
       const word = code.split(/\s+/)[0].toUpperCase();
 
-      if (FORBIDDEN_COMMANDS.has(word)) forbiddenFound.add(word);
-      else if (REVIEW_COMMANDS.has(word)) riskyFound.add(word);
+      scan.policy.observe(word, lineNo);
 
       if (word === "G20") {
         unitScale = INCH;
-        usedInches = true;
+        scan.usedInches = true;
       } else if (word === "G21") {
         unitScale = 1;
       } else if (word === "G90") {
         absolutePos = true;
       } else if (word === "G91") {
         absolutePos = false;
+      } else if (word === "M82") {
+        absoluteE = true;
+      } else if (word === "M83") {
+        absoluteE = false;
       } else if (word === "G92") {
         applyG92(code, pos, originOffset, unitScale);
+        const e = readAxis(code, "e");
+        if (e !== null) ePos = e;
       } else if (word === "G28") {
         // Homing resets the logical origin; treat homed axes as 0.
         applyHome(code, pos, originOffset);
-      } else if (word === "G0" || word === "G1") {
-        motionCommands++;
-        if (!absolutePos) hasRelativeMoves = true;
-        applyMove(code, pos, originOffset, unitScale, absolutePos, bounds);
-      } else if (word === "G2" || word === "G3") {
-        motionCommands++;
-        hasArcs = true;
-        // Arc endpoint still bounds the path even if the arc bulge is not traced.
-        applyMove(code, pos, originOffset, unitScale, absolutePos, bounds);
+      } else if (word === "G0" || word === "G1" || word === "G2" || word === "G3") {
+        scan.motionCommands++;
+        if (!absolutePos) scan.hasRelativeMoves = true;
+        // An arc's endpoint still bounds the path even if the bulge is not traced.
+        if (word === "G2" || word === "G3") scan.hasArcs = true;
+        const from = { ...pos };
+        const moved = applyMove(code, pos, originOffset, unitScale, absolutePos);
+        const extruded = readExtrusion(code, absoluteE, ePos);
+        ePos = extruded.ePos;
+        if (moved) {
+          extend(scan.toolpath, pos);
+          // Material laid down, with both ends of the segment on the bed. Travels
+          // are excluded by the first condition; the machine's own priming, purge
+          // and nozzle-wipe lines by the second (Bambu draws them a hair *outside*
+          // the bed, at Y=-0.5, precisely so they are not part of the print).
+          if (extruded.deposits) {
+            if (bed !== null && !(onBed(bed, from) && onBed(bed, pos))) {
+              scan.depositedOffBed = true;
+            } else {
+              extend(scan.deposited, from);
+              extend(scan.deposited, pos);
+              // …and the flush a filament change performs mid-print is excluded by
+              // the object markers, which is why they are tracked separately.
+              if (insideObject) {
+                extend(scan.object, from);
+                extend(scan.object, pos);
+              }
+            }
+          }
+        }
       } else if (/^T\d+$/.test(word)) {
-        tools.add(Number(word.slice(1)));
+        const index = Number(word.slice(1));
+        if (index <= MAX_PHYSICAL_TOOL) scan.tools.add(index);
       }
     }
   } finally {
     rl.close();
   }
 
+  return scan;
+}
+
+export async function analyzeGcode(path: string): Promise<AnalyzerResult> {
+  const warnings: AnalysisFinding[] = [];
+  const blockers: AnalysisFinding[] = [];
+
+  const {
+    meta,
+    policy,
+    toolpath,
+    deposited,
+    object,
+    sawObjectMarkers,
+    depositedOffBed,
+    motionCommands,
+    hasArcs,
+    hasRelativeMoves,
+    usedInches,
+    tools
+  } = await scanGcode(path);
+
   // ── Findings ────────────────────────────────────────────────────────────
+  const commands = policy.evaluate({ slicer: meta.slicer, printerModel: meta.printerModel });
+  warnings.push(...commands.warnings);
+  blockers.push(...commands.blockers);
+
   if (hasArcs) {
     warnings.push(finding("gcode_arcs", "Дуги (G2/G3) — габариты по конечным точкам, приблизительно"));
   }
   if (usedInches) {
     warnings.push(finding("gcode_inch_units", "Часть координат в дюймах (G20) — приведены к мм"));
   }
-  for (const cmd of riskyFound) {
+  if (depositedOffBed) {
     warnings.push(
-      finding("gcode_risky_command", `Команда ${cmd} требует присмотра: ${REVIEW_COMMANDS.get(cmd)}`)
-    );
-  }
-  for (const cmd of forbiddenFound) {
-    blockers.push(
-      finding("gcode_forbidden_command", `Запрещённая команда ${cmd}: ${FORBIDDEN_COMMANDS.get(cmd)}`)
+      finding(
+        "gcode_purge_outside_bed",
+        "Часть экструзии идёт вне рабочей области (штатная промывка/очистка сопла) — в габариты модели не включена"
+      )
     );
   }
   if (motionCommands === 0) {
     warnings.push(finding("gcode_no_toolpath", "Не найдено команд перемещения — это точно печатный G-code?"));
   }
 
+  // The *model's* box is what downstream fit checks mean by "dimensions"; the raw
+  // toolpath box is kept beside it for diagnostics. Preference order, best evidence
+  // first: what the slicer marked as the object, else everything extruded onto the
+  // bed, else — for a file that lays down nothing we can attribute — the bare
+  // toolpath. `bboxBasis` reports which, rather than passing a purge-inflated box
+  // off as the model. The choice is made here, at the end, because "this file has no
+  // object markers" is only knowable once the whole file has been read.
+  const basis = sawObjectMarkers && object.any ? "object" : deposited.any ? "extrusion" : "toolpath";
+  const bounds = basis === "object" ? object : basis === "extrusion" ? deposited : toolpath;
   const confidence: "high" | "medium" | "low" = !bounds.any || motionCommands === 0
     ? "low"
     : hasArcs || hasRelativeMoves
       ? "medium"
       : "high";
 
-  const bbox = bounds.any
-    ? {
-        min: [bounds.min.x, bounds.min.y, bounds.min.z],
-        max: [bounds.max.x, bounds.max.y, bounds.max.z],
-        size: [
-          bounds.max.x - bounds.min.x,
-          bounds.max.y - bounds.min.y,
-          bounds.max.z - bounds.min.z
-        ],
-        confidence
-      }
-    : null;
+  const bbox = boxOf(bounds, confidence);
 
   // ── Verdict ─────────────────────────────────────────────────────────────
   const verdicts: AnalysisVerdict[] = ["schedulable"];
   if (!meta.material) verdicts.push("needs_input");
-  if (!meta.slicer || !meta.printerModel || riskyFound.size > 0 || confidence === "low") {
+  if (!meta.slicer || !meta.printerModel || policy.hasReviewCommands || confidence === "low") {
     verdicts.push("review");
   }
   if (!meta.slicer) {
@@ -261,7 +305,9 @@ export async function analyzeGcode(path: string): Promise<AnalyzerResult> {
     warnings.push(finding("gcode_unknown_target", "Целевой принтер не указан — не считать безопасным для ночной печати"));
   }
   const verdict =
-    blockers.length > 0 ? "blocked" : escalateFromConditions(worstVerdict(verdicts), riskyFound.size > 0);
+    blockers.length > 0
+      ? "blocked"
+      : escalateFromConditions(worstVerdict(verdicts), policy.hasReviewCommands);
 
   return {
     detectedFormat: "gcode",
@@ -278,7 +324,9 @@ export async function analyzeGcode(path: string): Promise<AnalyzerResult> {
       toolCount: tools.size > 0 ? tools.size : 1,
       filamentUsedMm: meta.filamentUsedMm,
       motionCommands,
-      bbox
+      bbox,
+      bboxBasis: basis,
+      toolpathBbox: boxOf(toolpath, confidence)
     },
     analyzer: "gcode",
     analyzerVersion: ANALYZER_VERSION,
@@ -297,19 +345,27 @@ function escalateFromConditions(verdict: ReturnType<typeof worstVerdict>, risky:
 
 // ── Coordinate handling ─────────────────────────────────────────────────────
 
+/**
+ * Reads one axis word's value, in every shape a slicer actually writes.
+ *
+ * The permissive number grammar is not theoretical tidiness: OrcaSlicer omits the
+ * leading zero on fractions, so 94 731 of the 96 480 E words in a single real A1
+ * file are written `E.03338` and only 1 749 as `E0.03338`. A pattern demanding a
+ * digit before the point silently skipped 98 % of the extrusion in that file (and
+ * every `Z.3` move with it) — which, once the model's box came to be measured from
+ * extruding moves, would have meant measuring it from a two-percent sample.
+ */
+const AXIS_NUMBER = "([-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+))";
+
 function readAxis(code: string, axis: string): number | null {
-  const match = code.match(new RegExp(`(?:^|\\s)${axis}(-?\\d+(?:\\.\\d+)?)`, "i"));
-  return match ? Number(match[1]) : null;
+  const match = code.match(new RegExp(`(?:^|\\s)${axis}${AXIS_NUMBER}`, "i"));
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
 }
 
-function applyMove(
-  code: string,
-  pos: Vec3,
-  origin: Vec3,
-  scale: number,
-  absolute: boolean,
-  bounds: Bounds
-): void {
+/** Advances `pos` by one move command. Returns whether any axis actually moved. */
+function applyMove(code: string, pos: Vec3, origin: Vec3, scale: number, absolute: boolean): boolean {
   let moved = false;
   for (const axis of ["x", "y", "z"] as const) {
     const raw = readAxis(code, axis);
@@ -321,15 +377,67 @@ function applyMove(
       pos[axis] += raw * scale;
     }
   }
-  if (!moved) return;
-  if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y) || !Number.isFinite(pos.z)) return;
+  return moved;
+}
+
+function newBounds(): Bounds {
+  return {
+    min: { x: Infinity, y: Infinity, z: Infinity },
+    max: { x: -Infinity, y: -Infinity, z: -Infinity },
+    any: false
+  };
+}
+
+/** Grows `bounds` to contain `p`, ignoring a position no longer numerically sane. */
+function extend(bounds: Bounds, p: Vec3): void {
+  if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) return;
   bounds.any = true;
-  bounds.min.x = Math.min(bounds.min.x, pos.x);
-  bounds.min.y = Math.min(bounds.min.y, pos.y);
-  bounds.min.z = Math.min(bounds.min.z, pos.z);
-  bounds.max.x = Math.max(bounds.max.x, pos.x);
-  bounds.max.y = Math.max(bounds.max.y, pos.y);
-  bounds.max.z = Math.max(bounds.max.z, pos.z);
+  bounds.min.x = Math.min(bounds.min.x, p.x);
+  bounds.min.y = Math.min(bounds.min.y, p.y);
+  bounds.min.z = Math.min(bounds.min.z, p.z);
+  bounds.max.x = Math.max(bounds.max.x, p.x);
+  bounds.max.y = Math.max(bounds.max.y, p.y);
+  bounds.max.z = Math.max(bounds.max.z, p.z);
+}
+
+function boxOf(bounds: Bounds, confidence: "high" | "medium" | "low") {
+  if (!bounds.any) return null;
+  return {
+    min: [bounds.min.x, bounds.min.y, bounds.min.z],
+    max: [bounds.max.x, bounds.max.y, bounds.max.z],
+    size: [
+      bounds.max.x - bounds.min.x,
+      bounds.max.y - bounds.min.y,
+      bounds.max.z - bounds.min.z
+    ],
+    confidence
+  };
+}
+
+/**
+ * Whether a point is on the declared bed. The tolerance is float noise only, not a
+ * courtesy margin: Bambu's purge and nozzle-load lines sit a mere 0.5 mm past the
+ * front edge (`Y-0.5`), so anything more generous would pull them back into the
+ * model's box — which is the whole thing this filter exists to prevent.
+ */
+function onBed(bed: BedArea, p: Vec3): boolean {
+  const eps = 0.01;
+  return (
+    p.x >= bed.minX - eps && p.x <= bed.maxX + eps && p.y >= bed.minY - eps && p.y <= bed.maxY + eps
+  );
+}
+
+/**
+ * Reads a move's E word and reports whether it *deposits* material. Handles both
+ * extrusion modes: in relative mode (`M83`, what every modern slicer emits) any
+ * positive E adds material; in absolute mode (`M82`) only an E that advances past
+ * the current position does, so retract/prime pairs do not count as printing.
+ */
+function readExtrusion(code: string, absolute: boolean, ePos: number): { deposits: boolean; ePos: number } {
+  const raw = readAxis(code, "e");
+  if (raw === null) return { deposits: false, ePos };
+  if (absolute) return { deposits: raw > ePos + 1e-9, ePos: raw };
+  return { deposits: raw > 1e-9, ePos: ePos + raw };
 }
 
 /** G92 renames the current physical position: keep `pos`, shift the origin offset. */
@@ -353,13 +461,52 @@ function applyHome(code: string, pos: Vec3, origin: Vec3): void {
   }
 }
 
+// ── Object / bed markers ─────────────────────────────────────────────────────
+
+/**
+ * The slicer's own "this is the model" brackets. OrcaSlicer, BambuStudio and
+ * PrusaSlicer all emit a pair around each object's per-layer toolpath
+ * (`; start printing object, unique label id: 8` … `; stop printing object …`,
+ * PrusaSlicer's `; printing object Foo id:0 copy 0` … `; stop printing object …`),
+ * which is the authoritative statement of where the model ends and the machine's
+ * own routines begin. Returns true/false to open/close the region, null when the
+ * comment says nothing about it.
+ */
+function readObjectMarker(line: string): boolean | null {
+  const low = line.toLowerCase();
+  if (!low.includes("printing object")) return null;
+  if (low.includes("stop printing object")) return false;
+  if (low.includes("start printing object") || /;\s*printing object\b/.test(low)) return true;
+  return null;
+}
+
+/**
+ * The bed the file was sliced for, from its own config block
+ * (`; printable_area = 0x0,256x0,256x256,0x256`). Used to tell the model apart
+ * from the purge/flush a machine performs off the bed — never to *judge* whether
+ * the print fits, which is the scheduler's call against the real printer.
+ */
+function readPrintableArea(line: string): BedArea | null {
+  const m = line.match(/;\s*printable_area\s*=\s*(.+)/i);
+  if (!m) return null;
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (const point of m[1].split(",")) {
+    const pair = point.trim().match(/^(-?\d+(?:\.\d+)?)x(-?\d+(?:\.\d+)?)$/i);
+    if (!pair) continue;
+    xs.push(Number(pair[1]));
+    ys.push(Number(pair[2]));
+  }
+  if (xs.length < 3) return null;
+  return { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) };
+}
+
 // ── Comment / metadata extraction ────────────────────────────────────────────
 
-function extractComment(line: string, meta: Record<string, unknown>): void {
-  const set = <T>(key: string, value: T | null): void => {
-    if (value !== null && value !== undefined && (meta[key] === null || meta[key] === undefined)) {
-      meta[key] = value;
-    }
+function extractComment(line: string, meta: GcodeMeta): void {
+  /** First writer wins: a header banner outranks a repeated per-layer comment. */
+  const set = <K extends keyof GcodeMeta>(key: K, value: GcodeMeta[K] | null): void => {
+    if (value !== null && value !== undefined && meta[key] === null) meta[key] = value;
   };
 
   // Slicer + version banners.

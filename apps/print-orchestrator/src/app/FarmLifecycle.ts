@@ -59,22 +59,32 @@ export class FarmLifecycle {
     // discovered later when a slice silently blocks.
     if (runtime.sliceRunner) {
       try {
-        const orca = await runtime.sliceRunner.probe();
+        // `verifySlicing` really slices a tiny fixture (~1 s) rather than asking the
+        // CLI a question about itself, so boot either proves the runtime can produce
+        // G-code or names the stage that failed. Doing it here also warms the cache,
+        // so the slicing tab's first runtime report costs nothing.
+        const orca = await runtime.sliceRunner.verifySlicing();
         runtime.sliceRuntimeAvailable = orca.available;
         if (orca.available) {
           logger.info?.(
             {
               binary: orca.binaryPath,
               version: orca.detectedVersion,
+              cliBuild: orca.cliBuild,
+              resourcesVersion: orca.resourcesVersion,
               pinned: orca.pinnedVersion,
               versionMatches: orca.versionMatches,
-              networkIsolated: orca.networkIsolated
+              networkIsolated: orca.networkIsolated,
+              smokeMs: orca.smoke?.durationMs ?? null,
+              smokeBytes: orca.smoke?.gcodeBytes ?? null
             },
-            "orca slicing runtime available"
+            orca.smoke?.ok
+              ? "orca slicing runtime available (verified by a real smoke slice)"
+              : "orca slicing runtime available (smoke slice not run — capability unverified)"
           );
         } else {
           logger.warn?.(
-            { reason: orca.error, pinned: orca.pinnedVersion },
+            { state: orca.state, reason: orca.error, detail: orca.detail, pinned: orca.pinnedVersion },
             "orca slicing runtime UNAVAILABLE — slicing stays blocked until ORCA_SLICER_CMD points at an OrcaSlicer binary or container runtime (see .env.example / config/slicers/orca/README.md); monitoring and dispatch are unaffected"
           );
         }
