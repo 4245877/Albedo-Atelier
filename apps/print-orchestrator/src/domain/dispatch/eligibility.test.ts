@@ -605,3 +605,75 @@ test("hard rules are never overridable", () => {
     assert.ok(NON_OVERRIDABLE.has(code), `${code} must not be overridable`);
   }
 });
+
+// ── G-code containers (Bambu plate packages) ────────────────────────────────
+
+/**
+ * A Bambu printer is started on a `<name>.gcode.3mf` — a 3MF *wrapper* whose
+ * payload is the sliced plate. The analysed content is therefore G-code while
+ * the path ends in `.3mf`, and the naive "extension promises a model" rule read
+ * that as a corrupted file and refused every Bambu start.
+ */
+
+const CONTAINER = {
+  file: "chalice-1a2b3c4d.gcode.3mf",
+  printerProtocol: "bambu",
+  printerLabels: ["Bambu Lab A1", "Bambu Lab A1 Combo"],
+  deviceArtifact: {
+    state: "VERIFIED",
+    transferMode: "adapter_upload",
+    verification: "name_and_size",
+    remotePath: "chalice-1a2b3c4d.gcode.3mf",
+    lastError: null,
+    stale: false,
+    staleReason: null
+  }
+} satisfies Partial<DispatchFacts>;
+
+const CONTAINER_ANALYSIS = {
+  id: "an1",
+  state: "ready",
+  verdict: "schedulable",
+  detectedFormat: "gcode",
+  blockers: [],
+  analyzerVersion: "1.0.0",
+  updatedAt: "2026-07-26T11:00:00Z",
+  declaredTargetPrinter: "Bambu Lab A1",
+  declaredGcodeFlavor: "marlin"
+};
+
+test("a .gcode.3mf plate package holding G-code is NOT a format contradiction", () => {
+  const result = evaluate("manual", {
+    facts: { ...CONTAINER, analysis: CONTAINER_ANALYSIS }
+  });
+  assert.ok(
+    !result.reasons.some((r) => r.code === REASON.FORMAT_MISMATCH),
+    `a G-code container must not be refused as a format mismatch: ${JSON.stringify(
+      result.reasons.filter((r) => r.code === REASON.FORMAT_MISMATCH)
+    )}`
+  );
+});
+
+test("a .gcode.3mf that does NOT contain G-code is still refused", () => {
+  // The wrapper must contain what its name claims — the contradiction simply
+  // runs in the other direction.
+  const result = evaluate("manual", {
+    facts: {
+      ...CONTAINER,
+      analysis: { ...CONTAINER_ANALYSIS, detectedFormat: "3mf" }
+    }
+  });
+  assert.ok(result.reasons.some((r) => r.code === REASON.FORMAT_MISMATCH));
+});
+
+test("a bare .3mf holding G-code keeps its old meaning — refused", () => {
+  const result = evaluate("manual", {
+    facts: {
+      ...CONTAINER,
+      file: "chalice.3mf",
+      deviceArtifact: { ...CONTAINER.deviceArtifact, remotePath: "chalice.3mf" },
+      analysis: CONTAINER_ANALYSIS
+    }
+  });
+  assert.ok(result.reasons.some((r) => r.code === REASON.FORMAT_MISMATCH));
+});

@@ -7,6 +7,7 @@ import {
   sendBambuLightCommand,
   shutdownBambuConnections
 } from "./bambu";
+import { sendBambuStart } from "./bambuStart";
 import { getCrealityStatus } from "./creality";
 import { makeOfflineStatus } from "./mapper";
 import {
@@ -51,21 +52,24 @@ export async function sendPrinterCommand(
 
 /**
  * Whether remote start of an on-device file is implemented for this printer's
- * adapter — read from the single capability table, never re-derived here. Only
- * Moonraker exposes a simple, well-defined print-start endpoint; Bambu local
- * start needs a full 3mf/AMS mapping and Creality control is unimplemented, so
- * those are reported as unsupported rather than faked.
+ * adapter — read from the single capability table, never re-derived here.
+ * Moonraker exposes a print-start endpoint; Bambu starts an on-card file over
+ * local MQTT (`print.project_file` / `print.gcode_file`). Creality control is
+ * unimplemented and is reported as unsupported rather than faked.
  */
 export function supportsPrinterStart(printer: PrinterConfig): boolean {
   return capabilitiesOf(printer).supportsRemoteStart;
 }
 
 /**
- * Starts a print of a file already on the printer. Supported for Moonraker;
- * other protocols throw a structured {@link PrinterCapabilityError}.
+ * Starts a print of a file already on the printer, and does **not** return until
+ * the device has confirmed the job is running (Bambu) or the endpoint has
+ * accepted it (Moonraker). Protocols with no implementation throw a structured
+ * {@link PrinterCapabilityError}.
  */
 export async function sendPrinterStart(printer: PrinterConfig, filename: string): Promise<void> {
   requireCapability(printer, "supportsRemoteStart", "запустите файл на самом принтере");
+  if (printer.protocol === "bambu") return sendBambuStart(printer, filename);
   return sendMoonrakerStart(printer, filename);
 }
 

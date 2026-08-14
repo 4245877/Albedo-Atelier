@@ -12,13 +12,17 @@ import type {
   DeviceTransferMode,
   Metadata
 } from "../../domain/print/types";
+import type { SliceVariant } from "../../domain/slicing/types";
 import { capabilitiesOf, type PrinterCapabilities } from "../../infra/printers/capabilities";
 import type { PrinterConfig } from "../../infra/printers/config";
 import {
+  bambuModelIdFor,
+  buildBambuPlatePackage,
   MAX_DEVICE_UPLOAD_BYTES,
   normalizeStartablePath,
   type PrinterFilesListing
 } from "../../infra/printers/files";
+import { deriveBambuModelCode } from "../../domain/printers/modelSpecs";
 import type { ArtifactStorage } from "../../infra/storage/artifactStorage";
 import { KeyedMutex } from "../../shared/keyedMutex";
 import type { StoreLogger } from "../../shared/logger";
@@ -43,15 +47,21 @@ import {
  * Two honest modes, chosen by declared adapter capability — never a pretend
  * automatic third:
  *
- *  - **adapter_upload** (Moonraker): the bytes are pushed over the file API,
- *    then the directory is re-listed and the entry compared by name and size.
- *    Moonraker exposes no content hash, so the recorded verification is
- *    `name_and_size` — accurately, not dressed up as a SHA-256 check.
- *  - **manual_file_transfer** (Bambu, Creality WS): no upload API is
- *    implemented, so the service records what the operator must copy and where,
- *    and refuses to call the file present until a named operator confirms it.
- *    The eligibility rules turn an unconfirmed manual transfer into a hard
- *    blocker, and an unattended start is refused for such printers outright.
+ *  - **adapter_upload** (Moonraker over HTTP, Bambu over FTPS): the bytes are
+ *    pushed over the file API, then the directory is re-listed and the entry
+ *    compared by name and size. Neither API exposes a content hash, so the
+ *    recorded verification is `name_and_size` — accurately, not dressed up as a
+ *    SHA-256 check.
+ *  - **manual_file_transfer** (Creality WS): no upload API is implemented, so
+ *    the service records what the operator must copy and where, and refuses to
+ *    call the file present until a named operator confirms it. The eligibility
+ *    rules turn an unconfirmed manual transfer into a hard blocker, and an
+ *    unattended start is refused for such printers outright.
+ *
+ * What is delivered is not always the artifact itself: see {@link
+ * DeviceArtifactService.materialize}. A Bambu is handed a `.gcode.3mf` plate
+ * package built around the slice, because that is the container its firmware
+ * starts. The slice stays a plain analysable G-code; only the delivery wraps it.
  *
  * Four properties this module is responsible for, each of which used to be
  * missing:
@@ -114,6 +124,22 @@ interface PreparationTarget {
   artifact: Artifact;
   remotePath: string;
   expectation: DeviceFileExpectation;
+  /** The slice this delivery came from, when the work was sliced. */
+  variant: SliceVariant | null;
+}
+
+/**
+ * The bytes actually delivered to a device, and how big they are there.
+ *
+ * Distinct from the artifact on purpose. For Moonraker the two are the same
+ * file, but a Bambu is handed a `.gcode.3mf` **plate package** wrapping that
+ * G-code, so the on-device size is the package's, not the artifact's. Every
+ * later comparison — post-upload verification, the dispatch pre-flight — must
+ * use this size, or a correctly delivered package looks like a corrupted one.
+ */
+interface DeliveredBytes {
+  bytes: Uint8Array;
+  sizeBytes: number;
 }
 
 export class DeviceArtifactService {
@@ -254,11 +280,11 @@ export class DeviceArtifactService {
     }
 
     // ── adapter_upload ────────────────────────────────────────────────────────
-    const bytes = await this.readArtifactBytes(artifact);
+    const delivered = await this.materialize(target);
 
     const uploading = this.write(
       existing,
-      this.identityOf(target),
+      { ...this.identityOf(target), sizeBytes: delivered.sizeBytes },
       "UPLOADING",
       { verification: null, lastError: null },
       actor,
@@ -267,7 +293,7 @@ export class DeviceArtifactService {
 
     let uploadedBytes: number;
     try {
-      const result = await this.deps.uploadFile(printer, remotePath, bytes);
+      const result = await this.deps.uploadFile(printer, remotePath, delivered.bytes);
       uploadedBytes = result.sizeBytes;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -345,15 +371,16 @@ export class DeviceArtifactService {
     }
     // Rejects traversal, absolute paths, control characters, over-long names and
     // anything that is not a printable G-code extension.
-    const remotePath = normalizeStartablePath(raw);
+    const remotePath = normalizeStartablePath(raw, printer);
 
-    const artifact = this.resolveArtifact(assignment);
+    const { artifact, variant } = this.resolveArtifact(assignment);
 
     return {
       assignment,
       printer,
       capabilities: this.capabilitiesOf(printer),
       artifact,
+      variant,
       remotePath,
       expectation: {
         printerId: printer.id,
@@ -361,7 +388,13 @@ export class DeviceArtifactService {
         sliceVariantId: assignment.binding.sliceVariantId,
         artifactId: artifact.id,
         artifactSha256: artifact.sha256,
-        sizeBytes: artifact.sizeBytes,
+        // `DeviceArtifact.sizeBytes` records what sits on the DEVICE. When the
+        // adapter wraps the artifact (a Bambu plate package), that is a different
+        // byte count than the artifact's, so comparing the two would mark every
+        // correct delivery stale. Identity is not weakened by dropping it: the
+        // source `artifactSha256` above is compared unconditionally and is a
+        // strictly stronger statement than a length.
+        sizeBytes: wrapsArtifact(this.capabilitiesOf(printer)) ? null : artifact.sizeBytes,
         assignmentId: assignment.id,
         profileRevisionIds: profileRevisionIdsOf(assignment.binding)
       }
@@ -375,7 +408,7 @@ export class DeviceArtifactService {
    * re-slice) is refused rather than resolved to the newer file: the placement
    * was confirmed for what the operator saw.
    */
-  private resolveArtifact(assignment: Assignment): Artifact {
+  private resolveArtifact(assignment: Assignment): { artifact: Artifact; variant: SliceVariant | null } {
     const repos = this.deps.store.repositories;
     const artifactId = assignment.binding.artifactId;
     if (!artifactId) throw new JobError("У назначения не задан исполнимый артефакт");
@@ -383,8 +416,9 @@ export class DeviceArtifactService {
     if (!artifact) throw new NotFoundError(`Артефакт «${artifactId}»`);
 
     const variantId = assignment.binding.sliceVariantId;
+    let variant: SliceVariant | null = null;
     if (variantId) {
-      const variant = repos.sliceVariants.getById(variantId);
+      variant = repos.sliceVariants.getById(variantId);
       if (!variant) throw new NotFoundError(`Вариант слайсинга «${variantId}»`);
       if (variant.state !== "ready") {
         throw new JobError(
@@ -404,7 +438,69 @@ export class DeviceArtifactService {
         `Содержимое артефакта «${artifact.id}» изменилось после подтверждения назначения — требуется перепланирование`
       );
     }
-    return artifact;
+    return { artifact, variant };
+  }
+
+  /**
+   * The exact bytes to put on this device — the artifact, or a container built
+   * around it when the firmware starts one.
+   *
+   * This is where "our pipeline emits a format the printer cannot be handed
+   * directly" is resolved, and it is resolved at the transport boundary rather
+   * than in the slicer: the slice stays a plain, analysable, printer-agnostic
+   * G-code (which is what the analyser, the ETA and every compatibility rule
+   * read), and only the delivery wraps it in whatever the target expects.
+   *
+   * For Bambu that wrapper is the `.gcode.3mf` plate package the LAN
+   * `project_file` command names. It is built deterministically, so re-preparing
+   * the same slice produces byte-identical bytes and `prepare` stays idempotent.
+   */
+  private async materialize(target: PreparationTarget): Promise<DeliveredBytes> {
+    const gcode = await this.readArtifactBytes(target.artifact);
+    if (!wrapsArtifact(target.capabilities)) {
+      return { bytes: gcode, sizeBytes: gcode.byteLength };
+    }
+
+    const { printer, variant, artifact } = target;
+    const modelId = bambuModelIdFor(deriveBambuModelCode(printer.serial));
+    if (!modelId) {
+      throw new JobError(
+        `Не удалось определить модель Bambu по серийному номеру принтера «${printer.name}» — ` +
+          "пакет печати не может быть собран; проверьте серийный номер в настройках принтера"
+      );
+    }
+
+    // Nozzle and material come from the BINDING — the values this assignment was
+    // confirmed with — falling back to the printer's configured ones. Never from
+    // live telemetry: the package must describe the slice, not the machine's
+    // current state.
+    const binding = target.assignment.binding;
+    const pkg = buildBambuPlatePackage({
+      gcode,
+      printerModelId: modelId,
+      nozzleDiameterMm: binding.nozzleMm ?? printer.nozzleDiameterMm ?? 0.4,
+      material: binding.material ?? printer.material ?? null,
+      etaSeconds: binding.etaS ?? variant?.orcaEtaS ?? null,
+      filamentGrams: variant?.filamentG ?? null
+    });
+
+    if (pkg.bytes.byteLength > MAX_DEVICE_UPLOAD_BYTES) {
+      throw new JobError(
+        `Пакет печати для «${artifact.id}» (${pkg.bytes.byteLength} байт) превышает лимит загрузки на принтер`
+      );
+    }
+
+    this.logger.info?.(
+      {
+        printer: printer.id,
+        artifact: artifact.id,
+        gcodeBytes: gcode.byteLength,
+        packageBytes: pkg.bytes.byteLength,
+        gcodeMd5: pkg.gcodeMd5
+      },
+      "built Bambu plate package for delivery"
+    );
+    return { bytes: pkg.bytes, sizeBytes: pkg.bytes.byteLength };
   }
 
   /**
@@ -531,7 +627,7 @@ export class DeviceArtifactService {
         "upload_failed"
       );
     }
-    if (!entry || !this.sizeMatches(entry.size, target.artifact.sizeBytes)) {
+    if (!entry || !this.sizeMatches(entry.size, record.sizeBytes ?? target.artifact.sizeBytes)) {
       return this.transition(
         record,
         "FAILED",
@@ -571,7 +667,10 @@ export class DeviceArtifactService {
     target: PreparationTarget,
     actor: string
   ): Promise<DeviceArtifact> {
-    const expectedSize = target.artifact.sizeBytes;
+    // What SHOULD be on the device: the bytes this record delivered. For a direct
+    // upload that equals the artifact; for a packaged one it is the package, and
+    // only the record knows its size.
+    const expectedSize = record.sizeBytes ?? target.artifact.sizeBytes;
 
     if (!target.capabilities.supportsFileListing) {
       // Nothing on the device can be read. A named operator confirmation is the
@@ -837,4 +936,13 @@ interface RecordPatch {
 /** Mutex key: one chain per physical device slot. */
 function slotKey(printerId: string, remotePath: string): string {
   return `${printerId}::${remotePath}`;
+}
+
+/**
+ * Whether this adapter puts a **container** on the device rather than the
+ * artifact's own bytes — read from the declared device extension, so adding an
+ * adapter that packages differently needs no change here.
+ */
+function wrapsArtifact(capabilities: PrinterCapabilities): boolean {
+  return capabilities.deviceFileExtension.toLowerCase().endsWith(".3mf");
 }

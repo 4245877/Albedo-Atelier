@@ -423,13 +423,22 @@ export class TaskCommands {
       // overwrite the first one's bytes while both records still read VERIFIED.
       // An operator override may choose the directory (and influence the stem),
       // but not defeat the content suffix.
+      // The *extension* is the target device's container, not the artifact's: the
+      // same sliced G-code is `x.gcode` on Klipper and an `x.gcode.3mf` plate
+      // package on a Bambu, because that is what each firmware starts. Resolving
+      // the printer here (rather than at prepare time) keeps the recorded path,
+      // the uploaded file and the start command naming one and the same thing.
       const rawFile = input.onDeviceFile?.trim() || output.name;
+      const targetPrinter =
+        (variant.targetPrinterId ?? task.pinnedPrinterId) !== null
+          ? this.ctx.resolvePrinter((variant.targetPrinterId ?? task.pinnedPrinterId) as string)
+          : undefined;
       let onDeviceFile: string;
       try {
         const slash = rawFile.replace(/\\/g, "/").lastIndexOf("/");
         const dir = slash === -1 ? "" : rawFile.slice(0, slash);
-        const name = buildDeviceFileName({ name: rawFile, sha256: output.sha256 });
-        onDeviceFile = normalizeStartablePath(dir ? `${dir}/${name}` : name);
+        const name = buildDeviceFileName({ name: rawFile, sha256: output.sha256 }, targetPrinter);
+        onDeviceFile = normalizeStartablePath(dir ? `${dir}/${name}` : name, targetPrinter);
       } catch (error) {
         if (error instanceof ValidationError) throw error;
         throw new ValidationError(`Недопустимый путь файла на устройстве: «${rawFile}»`);

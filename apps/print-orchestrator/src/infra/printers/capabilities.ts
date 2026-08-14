@@ -37,6 +37,21 @@ export interface PrinterCapabilities {
   supportsFileDelete: boolean;
   /** Strongest identity check the adapter's file API allows. */
   fileVerification: "name_and_size" | "name_only" | "none";
+  /**
+   * Extensions this adapter can actually *start*, lower-case, longest-match first.
+   *
+   * Protocol-scoped on purpose: Klipper starts a bare `.gcode`, while a Bambu
+   * printer is handed a `.gcode.3mf` plate package (what Bambu Studio itself
+   * uploads, and what this farm's A1 already holds on its SD card). A single
+   * global list would either forbid the Bambu package or invite someone to hand
+   * Moonraker a `.3mf` it cannot execute.
+   */
+  startableExtensions: readonly string[];
+  /**
+   * The extension a *prepared* file takes on this device. Always one of
+   * {@link startableExtensions}; it is what `buildDeviceFileName` appends.
+   */
+  deviceFileExtension: string;
 }
 
 const CAPABILITIES: Readonly<Record<PrinterProtocol, PrinterCapabilities>> = {
@@ -49,17 +64,32 @@ const CAPABILITIES: Readonly<Record<PrinterProtocol, PrinterCapabilities>> = {
     supportsFileListing: true,
     supportsRemoteStart: true,
     supportsFileDelete: false,
-    fileVerification: "name_and_size"
+    fileVerification: "name_and_size",
+    startableExtensions: [".gcode", ".gco", ".g"],
+    deviceFileExtension: ".gcode"
   },
-  // Bambu local MQTT + FTPS. Only pause/resume/cancel are implemented; a local
-  // start needs a full 3mf/AMS mapping and the FTPS file transfer is not wired,
-  // so every file capability is false — the operator copies the file and confirms.
+  // Bambu LAN: implicit FTPS on 990 for files (`infra/printers/files/bambu.ts`)
+  // and local MQTT for control (`infra/printers/status/bambuStart.ts`).
+  //
+  // Every one of these was `false` until the FTPS client existed, with the
+  // comment "the FTPS file transfer is not wired" — an accurate statement about
+  // this codebase that was routinely misread as a statement about the hardware.
+  // The device has always served `220 BBL-P003 FTP Server` on 990 and accepted
+  // `print.project_file` over MQTT.
+  //
+  // `LIST` reports names *and* byte sizes, so the verification ceiling is the
+  // same `name_and_size` Moonraker offers. Delete (`DELE`) is implemented, which
+  // is what lets a superseded package be removed from a small SD card.
   bambu: {
-    supportsUpload: false,
-    supportsFileListing: false,
-    supportsRemoteStart: false,
-    supportsFileDelete: false,
-    fileVerification: "none"
+    supportsUpload: true,
+    supportsFileListing: true,
+    supportsRemoteStart: true,
+    supportsFileDelete: true,
+    fileVerification: "name_and_size",
+    // `.gcode.3mf` must precede `.3mf`: the longest match wins, so a plate
+    // package keeps its full double extension instead of being split at `.3mf`.
+    startableExtensions: [".gcode.3mf", ".3mf", ".gcode"],
+    deviceFileExtension: ".gcode.3mf"
   },
   // Creality's WebSocket protocol: telemetry only in this codebase.
   creality: {
@@ -67,7 +97,9 @@ const CAPABILITIES: Readonly<Record<PrinterProtocol, PrinterCapabilities>> = {
     supportsFileListing: false,
     supportsRemoteStart: false,
     supportsFileDelete: false,
-    fileVerification: "none"
+    fileVerification: "none",
+    startableExtensions: [".gcode", ".gco", ".g"],
+    deviceFileExtension: ".gcode"
   }
 };
 
@@ -77,7 +109,9 @@ const NONE: PrinterCapabilities = {
   supportsFileListing: false,
   supportsRemoteStart: false,
   supportsFileDelete: false,
-  fileVerification: "none"
+  fileVerification: "none",
+  startableExtensions: [".gcode", ".gco", ".g"],
+  deviceFileExtension: ".gcode"
 };
 
 /** The declared capabilities of a protocol; an unknown protocol can do nothing. */
@@ -93,8 +127,122 @@ export function capabilitiesOf(printer: PrinterConfig): PrinterCapabilities {
   return capabilitiesOfProtocol(printer.protocol);
 }
 
-/** The capability names, so a caller can name the one it needs in an error. */
-export type PrinterCapabilityName = Exclude<keyof PrinterCapabilities, "fileVerification">;
+/**
+ * One thing this printer still needs before its adapter can reach the device.
+ *
+ * Separate from {@link PrinterCapabilities} on purpose, and the distinction is
+ * the whole point of this half of the module:
+ *
+ *  - a **capability** says what the adapter *implements* — a property of our code,
+ *    identical for every printer speaking that protocol;
+ *  - a **readiness requirement** says what this *particular* printer is missing —
+ *    a property of its configuration.
+ *
+ * Conflating them is what produced the report an operator could do nothing with:
+ * a Bambu printer with no access code answered "адаптер не умеет загружать
+ * файлы", which is a statement about the software and left them nothing to fix.
+ * The honest answer is "укажите LAN access code", which names the field.
+ */
+export interface PrinterRequirement {
+  /** Config field the operator must fill (matches the inventory form). */
+  field: string;
+  /** Operator-facing name of what is missing. */
+  label: string;
+  /** Where to get it / why it is needed. */
+  hint: string;
+}
+
+export interface PrinterReadiness {
+  /** True when every requirement for device I/O is satisfied. */
+  ready: boolean;
+  missing: PrinterRequirement[];
+}
+
+/**
+ * What this printer still needs before upload/listing/start can be attempted.
+ *
+ * Only ever reports *configuration* gaps — never reachability. Whether the device
+ * answers is a live fact the status poll owns; a printer can be perfectly
+ * configured and switched off, and those two must not be reported as one thing.
+ */
+export function printerReadiness(printer: PrinterConfig): PrinterReadiness {
+  const missing: PrinterRequirement[] = [];
+
+  if (printer.protocol === "bambu") {
+    if (!printer.serial?.trim()) {
+      missing.push({
+        field: "serial",
+        label: "серийный номер принтера",
+        hint: "экран принтера: Settings → Device — задаёт MQTT-топики устройства"
+      });
+    }
+    if (!printer.accessCode?.trim()) {
+      missing.push({
+        field: "accessCode",
+        label: "LAN access code",
+        hint: "экран принтера: Settings → LAN Only Mode — пароль и для MQTT, и для FTPS"
+      });
+    }
+    // Both LAN channels use the same per-printer self-signed certificate, so the
+    // same explicit opt-in gates both. Without it the adapter refuses to connect
+    // rather than silently disabling TLS authentication.
+    if (printer.allowInsecureTls !== true && process.env.BAMBU_ALLOW_INSECURE_TLS !== "1") {
+      missing.push({
+        field: "allowInsecureTls",
+        label: "подтверждение TLS без проверки сертификата",
+        hint: "у Bambu самоподписанный сертификат без CA: allowInsecureTls: true у принтера или BAMBU_ALLOW_INSECURE_TLS=1"
+      });
+    }
+  }
+
+  if (printer.protocol === "moonraker" && !printer.host?.trim()) {
+    missing.push({
+      field: "host",
+      label: "адрес принтера",
+      hint: "IP или имя хоста Moonraker"
+    });
+  }
+
+  return { ready: missing.length === 0, missing };
+}
+
+/**
+ * A structured refusal for an operation whose adapter *is* implemented but whose
+ * printer is not fully configured. Distinct code from
+ * {@link PrinterCapabilityError} so the dashboard can offer the settings form
+ * instead of the manual-transfer flow.
+ */
+export class PrinterNotConfiguredError extends AppError {
+  constructor(printer: { id: string; name: string; protocol: string }, missing: PrinterRequirement[]) {
+    super(
+      `Принтер «${printer.name}» не настроен для удалённой работы — не хватает: ${missing
+        .map((m) => `${m.label} (${m.hint})`)
+        .join("; ")}`,
+      "PRINTER_NOT_CONFIGURED",
+      409,
+      { printerId: printer.id, protocol: printer.protocol, missing }
+    );
+    this.name = "PrinterNotConfiguredError";
+  }
+}
+
+/** Throws {@link PrinterNotConfiguredError} when any requirement is unmet. */
+export function requireReady(printer: PrinterConfig): void {
+  const readiness = printerReadiness(printer);
+  if (!readiness.ready) {
+    throw new PrinterNotConfiguredError(printer, readiness.missing);
+  }
+}
+
+/**
+ * The *boolean* capability names, so a caller can name the one it needs in an
+ * error. Descriptive fields (`fileVerification`, the extension lists) are not
+ * capabilities to require — they describe how a capability behaves.
+ */
+export type PrinterCapabilityName = Exclude<
+  keyof PrinterCapabilities,
+  "fileVerification" | "startableExtensions" | "deviceFileExtension"
+>;
 
 const CAPABILITY_LABEL: Record<PrinterCapabilityName, string> = {
   supportsUpload: "загрузка файлов",

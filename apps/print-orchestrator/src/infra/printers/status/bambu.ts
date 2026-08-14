@@ -376,6 +376,39 @@ export function getBambuStatus(printer: PrinterConfig): PrinterLiveStatus {
   };
 }
 
+/**
+ * Publishes one arbitrary request payload on the printer's MQTT request topic,
+ * over the SAME persistent client the status poll maintains.
+ *
+ * Exported for the start command (`bambuStart.ts`), which must not open a second
+ * connection: Bambu accepts very few concurrent sessions, and a start issued on
+ * a private client would also be invisible to the status cache that has to
+ * confirm it. Rejects with {@link PrinterCommandError} when no live connection
+ * exists, so a start is never reported as sent over a dead socket.
+ */
+export async function publishBambuRequest(
+  printer: PrinterConfig,
+  payload: Record<string, unknown>
+): Promise<void> {
+  // Make sure the persistent client exists (and the credentials/TLS opt-in are
+  // satisfied) before deciding there is nothing to publish on.
+  ensureBambuClient(printer);
+  const client = bambuClients.get(printer.id);
+  if (!client || !client.connected) {
+    throw new PrinterCommandError(
+      `Нет активного MQTT-подключения к «${printer.name}» — команда не отправлена`
+    );
+  }
+  await publishRequest(client, printer, payload);
+}
+
+/** Asks the device for a full status report; best-effort, used to speed up confirmation. */
+export async function requestBambuFullReport(printer: PrinterConfig): Promise<void> {
+  await publishBambuRequest(printer, {
+    pushing: { sequence_id: String(Date.now()), command: "pushall" }
+  });
+}
+
 export async function sendBambuCommand(
   printer: PrinterConfig,
   command: PrinterCommand

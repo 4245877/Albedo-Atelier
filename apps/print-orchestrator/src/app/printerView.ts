@@ -11,6 +11,7 @@ import {
   hasCameraStream,
   resolveWebrtcSource
 } from "../infra/printers/camera";
+import { printerReadiness } from "../infra/printers/capabilities";
 import type { PrinterConfig } from "../infra/printers/config";
 import { supportsPrinterFiles } from "../infra/printers/files";
 import {
@@ -128,6 +129,12 @@ export function buildPrinterView(
     latestSnapshotUrl,
     filesSupported: supportsPrinterFiles(printer),
     remoteStartSupported: supportsPrinterStart(printer),
+    // What this printer still needs CONFIGURED before its (implemented) adapter
+    // can reach the device. Sent alongside the capabilities so the dashboard can
+    // tell "this printer cannot do remote start" apart from "this printer needs
+    // an access code" — the two used to arrive as one unactionable message.
+    setupRequired: !printerReadiness(printer).ready,
+    setupMissing: printerReadiness(printer).missing,
     interfaceUrl: printer.interfaceUrl || null,
     ...(status?.error ? { error: status.error } : {})
   };

@@ -1,3 +1,5 @@
+import { capabilitiesOf } from "../capabilities";
+import type { PrinterConfig } from "../config";
 import { PRINTABLE_EXTENSIONS } from "./path";
 
 /**
@@ -42,14 +44,26 @@ export interface DeviceFileNameInput {
  * Returns a bare file name (never a path): callers that want a subdirectory
  * prepend it themselves and re-validate with `normalizeStartablePath`.
  */
-export function buildDeviceFileName(input: DeviceFileNameInput): string {
+export function buildDeviceFileName(
+  input: DeviceFileNameInput,
+  printer?: PrinterConfig | null
+): string {
   const raw = (input.name ?? "").trim();
   // Only the base name matters — a caller-supplied "a/b/../c.gcode" contributes
   // nothing but its last segment, so traversal cannot survive into the result.
   const base = raw.split(/[\\/]/).pop() ?? "";
-  const extension = extensionOf(base);
-  const stem = sanitizeStem(base.slice(0, base.length - extension.length));
+  const stripped = stripKnownExtension(base, printer);
+  const stem = sanitizeStem(stripped);
   const suffix = hashSuffix(input.sha256);
+  // With a printer in scope the extension is the TARGET device's, not the
+  // artifact's: the same sliced G-code becomes `x.gcode` on Klipper and
+  // `x.gcode.3mf` on a Bambu, because that is the container each one starts.
+  // Without one, the artifact's own declared extension is preserved (and only a
+  // missing/unknown one defaults to `.gcode`), so a caller with no target device
+  // still gets a startable, unsurprising name.
+  const extension = printer
+    ? capabilitiesOf(printer).deviceFileExtension
+    : declaredExtension(base) ?? ".gcode";
   return `${truncateBytes(stem, MAX_STEM_BYTES)}${suffix}${extension}`;
 }
 
@@ -58,19 +72,42 @@ export function buildDeviceFileName(input: DeviceFileNameInput): string {
  * artifact. Used to tell "the operator picked their own path" from "the system
  * generated this one" without re-deriving naming rules at the call site.
  */
-export function isGeneratedDeviceFileName(name: string, input: DeviceFileNameInput): boolean {
-  return (name.split("/").pop() ?? name) === buildDeviceFileName(input);
+export function isGeneratedDeviceFileName(
+  name: string,
+  input: DeviceFileNameInput,
+  printer?: PrinterConfig | null
+): boolean {
+  return (name.split("/").pop() ?? name) === buildDeviceFileName(input, printer);
 }
 
 // ── Internals ────────────────────────────────────────────────────────────────
 
-/** The printable extension the name declares, lower-cased; `.gcode` when it declares none. */
-function extensionOf(base: string): string {
+/**
+ * `base` with any recognised printable extension removed.
+ *
+ * Both the default G-code set and the target adapter's own set are considered,
+ * longest match first, so an artifact named `part.gcode` retargeted at a Bambu
+ * becomes `part-<sha8>.gcode.3mf` rather than `part.gcode-<sha8>.gcode.3mf`.
+ */
+/** The printable extension `base` declares (lower-cased), or null when it declares none. */
+function declaredExtension(base: string): string | null {
   const lower = base.toLowerCase();
   for (const ext of PRINTABLE_EXTENSIONS) {
     if (lower.endsWith(ext)) return ext;
   }
-  return ".gcode";
+  return null;
+}
+
+function stripKnownExtension(base: string, printer?: PrinterConfig | null): string {
+  const lower = base.toLowerCase();
+  const known = [
+    ...(printer ? capabilitiesOf(printer).startableExtensions : []),
+    ...PRINTABLE_EXTENSIONS
+  ].sort((a, b) => b.length - a.length);
+  for (const ext of known) {
+    if (lower.endsWith(ext)) return base.slice(0, base.length - ext.length);
+  }
+  return base;
 }
 
 /**

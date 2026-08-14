@@ -4,6 +4,7 @@ import { capabilitiesOfProtocol, requireCapability } from "../capabilities";
 import type { PrinterConfig } from "../config";
 import { moonrakerBaseUrl, moonrakerHeaders } from "../status/moonraker";
 import { PrinterCommandError } from "../status/types";
+import { uploadBambuFile } from "./bambu";
 import { normalizeStartablePath } from "./path";
 
 /**
@@ -57,6 +58,9 @@ export async function uploadPrinterFile(
 ): Promise<UploadResult> {
   requireCapability(printer, "supportsUpload", "перенесите файл вручную и подтвердите перенос");
 
+  // Size guards are transport-independent and must precede any branch: an empty
+  // or oversized payload is refused before a byte leaves the host, whichever
+  // adapter would have carried it.
   if (bytes.byteLength === 0) {
     throw new PrinterCommandError("Пустой файл не загружается на принтер");
   }
@@ -67,7 +71,14 @@ export async function uploadPrinterFile(
     );
   }
 
-  const target = normalizeStartablePath(remotePath);
+  // Bambu speaks FTPS, not Moonraker's multipart HTTP endpoint. The path is
+  // validated against THIS printer's startable extensions, so a `.gcode.3mf`
+  // plate package passes here and would still be refused for Moonraker.
+  if (printer.protocol === "bambu") {
+    return uploadBambuFile(printer, normalizeStartablePath(remotePath, printer), bytes);
+  }
+
+  const target = normalizeStartablePath(remotePath, printer);
   const slash = target.lastIndexOf("/");
   const dir = slash === -1 ? "" : target.slice(0, slash);
   const name = slash === -1 ? target : target.slice(slash + 1);

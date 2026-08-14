@@ -17,29 +17,40 @@ function makePrinter(protocol: string) {
 }
 
 /*
- * The protocol capability gate: only Moonraker has a file API adapter; Bambu
- * (MQTT) and Creality (WebSocket) are reported honestly as unsupported.
+ * The protocol capability gate. Moonraker (HTTP) and Bambu (FTPS on 990) both
+ * have a file API adapter; Creality's WebSocket protocol does not and is
+ * reported honestly as unsupported rather than as an empty directory.
  */
 
-test("only Moonraker printers support file browsing", () => {
+test("printers with an implemented file API support browsing; Creality WS does not", () => {
   assert.equal(supportsPrinterFiles(makePrinter("moonraker")), true);
-  assert.equal(supportsPrinterFiles(makePrinter("bambu")), false);
+  assert.equal(supportsPrinterFiles(makePrinter("bambu")), true);
   assert.equal(supportsPrinterFiles(makePrinter("creality")), false);
 });
 
-test("fetchPrinterFiles throws a STRUCTURED unsupported error for Bambu and Creality WS", async () => {
-  for (const protocol of ["bambu", "creality"]) {
-    await assert.rejects(
-      fetchPrinterFiles(makePrinter(protocol), ""),
-      (error: unknown) =>
-        error instanceof PrinterCapabilityError &&
-        error.code === "PRINTER_CAPABILITY_UNSUPPORTED" &&
-        // The capability and protocol are machine-readable, so the dashboard can
-        // offer the manual flow instead of parsing a Russian sentence.
-        (error.details as { capability?: string; protocol?: string }).capability ===
-          "supportsFileListing" &&
-        (error.details as { protocol?: string }).protocol === protocol,
-      protocol
-    );
-  }
+test("fetchPrinterFiles throws a STRUCTURED unsupported error for Creality WS", async () => {
+  await assert.rejects(
+    fetchPrinterFiles(makePrinter("creality"), ""),
+    (error: unknown) =>
+      error instanceof PrinterCapabilityError &&
+      error.code === "PRINTER_CAPABILITY_UNSUPPORTED" &&
+      // The capability and protocol are machine-readable, so the dashboard can
+      // offer the manual flow instead of parsing a Russian sentence.
+      (error.details as { capability?: string }).capability === "supportsFileListing" &&
+      (error.details as { protocol?: string }).protocol === "creality"
+  );
+});
+
+test("a Bambu with no credentials reports WHAT TO CONFIGURE, not «unsupported»", async () => {
+  // The distinction an operator can act on: the adapter exists, this printer is
+  // simply not set up. Naming the missing field is the whole point.
+  await assert.rejects(
+    fetchPrinterFiles(makePrinter("bambu"), ""),
+    (error: unknown) => {
+      const err = error as { code?: string; details?: { missing?: { field: string }[] } };
+      assert.equal(err.code, "PRINTER_NOT_CONFIGURED");
+      assert.ok(err.details?.missing?.some((m) => m.field === "accessCode"));
+      return true;
+    }
+  );
 });

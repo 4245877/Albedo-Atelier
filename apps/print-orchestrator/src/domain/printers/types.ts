@@ -118,6 +118,10 @@ export interface PrinterView {
   filesSupported: boolean;
   /** Whether the backend can remote-start an on-device file (Moonraker only). */
   remoteStartSupported: boolean;
+  /** True when the adapter is implemented but this printer lacks configuration. */
+  setupRequired: boolean;
+  /** Exactly which fields are missing, each with where to obtain it. */
+  setupMissing: { field: string; label: string; hint: string }[];
   /** Configured URL of the printer's own web UI, or null when none is set. */
   interfaceUrl: string | null;
   error?: string;

@@ -1,6 +1,7 @@
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { Assignment, AuditEvent, PrintTask, QueueEntry } from "../../domain/print/types";
 import type { QueueJob } from "../../domain/dashboard/types";
+import type { PrinterConfig } from "../../infra/printers/config";
 import { PrintQueueContext, type AssignmentOperationsPort } from "./context";
 import type { QueueProjectionRow } from "./projection";
 import { QueueCommands } from "./queueCommands";
@@ -54,6 +55,8 @@ export class PrintQueueService {
       actor?: string;
       /** Farm-config check for a printer id; when set, pins to unknown printers are refused. */
       isPrinterConfigured?: (printerId: string) => boolean;
+      /** Farm-config resolver; lets promote name the file the TARGET device starts. */
+      resolvePrinter?: (printerId: string) => PrinterConfig | undefined;
       /** Manual-operations cascade for a withdrawn assignment; absent = no cascade. */
       operations?: AssignmentOperationsPort;
     } = {}

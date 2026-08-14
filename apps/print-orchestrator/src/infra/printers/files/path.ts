@@ -1,15 +1,30 @@
 import { ValidationError } from "../../../core/errors";
+import { capabilitiesOf } from "../capabilities";
+import type { PrinterConfig } from "../config";
 
 /**
  * Extensions Klipper/Moonraker can actually print. Anything else (directories,
  * thumbnails, configs) is listed but not startable. Case-insensitive.
+ *
+ * This is the **default** set, used when no printer is in scope. What a given
+ * device can start is a property of its adapter and lives in the capability
+ * table (`startableExtensions`): a Bambu printer starts a `.gcode.3mf` plate
+ * package, which Moonraker could not execute, and vice versa. Callers that hold
+ * a printer pass it, and get that printer's answer.
  */
 export const PRINTABLE_EXTENSIONS = [".gcode", ".gco", ".g"] as const;
 
-/** Whether a file path ends in a printable G-code extension. */
-export function isPrintableFile(filePath: string): boolean {
+/** The extensions `printer` can start; the G-code default when none is given. */
+export function startableExtensionsFor(
+  printer?: PrinterConfig | null
+): readonly string[] {
+  return printer ? capabilitiesOf(printer).startableExtensions : PRINTABLE_EXTENSIONS;
+}
+
+/** Whether a file path ends in an extension `printer` (or Klipper, by default) can start. */
+export function isPrintableFile(filePath: string, printer?: PrinterConfig | null): boolean {
   const lower = filePath.toLowerCase();
-  return PRINTABLE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+  return startableExtensionsFor(printer).some((ext) => lower.endsWith(ext));
 }
 
 /**
@@ -84,15 +99,19 @@ export function normalizePrinterPath(raw: unknown, options: NormalizePathOptions
 }
 
 /**
- * Validates a path for remote start: non-empty, safe, and a printable file
- * (a directory or a non-G-code file can never be started). Returns the
- * normalized path to pass to `startPrint`.
+ * Validates a path for remote start: non-empty, safe, and a file the target
+ * adapter can actually start (a directory, or a format that firmware cannot
+ * execute, can never be started). Returns the normalized path to pass to
+ * `startPrint`.
+ *
+ * Pass `printer` wherever one is in scope — without it the check falls back to
+ * the Klipper G-code set, which would reject a legitimate Bambu plate package.
  */
-export function normalizeStartablePath(raw: unknown): string {
+export function normalizeStartablePath(raw: unknown, printer?: PrinterConfig | null): string {
   const path = normalizePrinterPath(raw);
-  if (!isPrintableFile(path)) {
+  if (!isPrintableFile(path, printer)) {
     throw new ValidationError(
-      `«${path}» не похож на файл печати — удалённо можно запустить только ${PRINTABLE_EXTENSIONS.join(", ")}`
+      `«${path}» не похож на файл печати — на этом принтере можно запустить только ${startableExtensionsFor(printer).join(", ")}`
     );
   }
   return path;

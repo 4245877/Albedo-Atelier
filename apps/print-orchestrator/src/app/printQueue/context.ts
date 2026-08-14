@@ -9,6 +9,7 @@ import {
 } from "../../domain/print/states";
 import type { Assignment, BedCycle, PrintTask, QueueEntry } from "../../domain/print/types";
 import { recordAuditEvent, type AuditInput } from "../audit";
+import type { PrinterConfig } from "../../infra/printers/config";
 
 /** How a queue reservation is positioned relative to the current tail. */
 export const POSITION_STEP = 10;
@@ -33,6 +34,7 @@ export interface AssignmentOperationsPort {
 export class PrintQueueContext {
   readonly now: () => Date;
   readonly defaultActor: string;
+  private readonly resolvePrinterFn: ((printerId: string) => PrinterConfig | undefined) | null;
   private readonly isPrinterConfiguredFn: ((printerId: string) => boolean) | null;
   private readonly operations: AssignmentOperationsPort | null;
 
@@ -42,12 +44,14 @@ export class PrintQueueContext {
       now?: () => Date;
       actor?: string;
       isPrinterConfigured?: (printerId: string) => boolean;
+      resolvePrinter?: (printerId: string) => PrinterConfig | undefined;
       operations?: AssignmentOperationsPort;
     } = {}
   ) {
     this.now = options.now ?? (() => new Date());
     this.defaultActor = options.actor ?? "operator";
     this.isPrinterConfiguredFn = options.isPrinterConfigured ?? null;
+    this.resolvePrinterFn = options.resolvePrinter ?? null;
     this.operations = options.operations ?? null;
   }
 
@@ -57,6 +61,19 @@ export class PrintQueueContext {
 
   recordAudit(input: AuditInput): void {
     recordAuditEvent(this.store, () => this.nowIso(), this.defaultActor, input);
+  }
+
+  /**
+   * The farm config for a printer id, when a resolver is wired.
+   *
+   * Needed wherever a decision depends on what the *target device* can do rather
+   * than on the task alone — today that is the on-device file name, whose
+   * extension is the container that printer starts (`.gcode` for Klipper, a
+   * `.gcode.3mf` plate package for Bambu). Absent resolver ⇒ `undefined`, and the
+   * caller falls back to the G-code default.
+   */
+  resolvePrinter(printerId: string): PrinterConfig | undefined {
+    return this.resolvePrinterFn?.(printerId);
   }
 
   /** Refuses a pin to a printer the farm does not know (when a config check is wired). */

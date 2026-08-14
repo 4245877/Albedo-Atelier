@@ -47,6 +47,8 @@
     "latestSnapshotUrl": "/api/printers/contract-printer/snapshots/snap-1",
     "filesSupported": true,
     "remoteStartSupported": true,
+    "setupRequired": false,
+    "setupMissing": [],
     "interfaceUrl": "http://printer.internal.example:4408"
   },
   "completed": {
@@ -97,6 +99,8 @@
     "latestSnapshotUrl": null,
     "filesSupported": true,
     "remoteStartSupported": true,
+    "setupRequired": false,
+    "setupMissing": [],
     "interfaceUrl": "http://printer.internal.example:4408"
   },
   "errored": {
@@ -147,6 +151,8 @@
     "latestSnapshotUrl": null,
     "filesSupported": true,
     "remoteStartSupported": true,
+    "setupRequired": false,
+    "setupMissing": [],
     "interfaceUrl": "http://printer.internal.example:4408",
     "error": "Nozzle thermal runaway"
   },
@@ -192,6 +198,8 @@
     "latestSnapshotUrl": null,
     "filesSupported": true,
     "remoteStartSupported": true,
+    "setupRequired": false,
+    "setupMissing": [],
     "interfaceUrl": "http://printer.internal.example:4408"
   }
 }

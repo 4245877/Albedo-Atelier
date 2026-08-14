@@ -45,7 +45,7 @@ const ISO = "2026-07-26T12:00:00.000Z";
 /** The on-device name promotion generates for that artifact (stem + content hash). */
 const DEVICE_FILE = buildDeviceFileName({ name: "cube.gcode", sha256: GCODE_SHA });
 
-/** k2 speaks Moonraker (upload + listing); x1c is a Bambu (neither). */
+/** k2 speaks Moonraker (upload + listing); ender-ws is Creality WS (neither). */
 const PRINTERS: PrinterConfig[] = [
   {
     id: "k2",
@@ -58,11 +58,14 @@ const PRINTERS: PrinterConfig[] = [
     enabled: true
   },
   {
-    id: "x1c",
-    name: "Bambu X1C",
-    model: "X1 Carbon",
+    id: "ender-ws",
+    name: "Creality Ender 3 V3 KE",
+    model: "Ender 3 V3 KE",
     type: "FDM",
-    protocol: "bambu",
+    // The farm's remaining adapter with NO file API at all. (Bambu used to play
+    // this role; it now uploads over FTPS, so the manual-transfer path is
+    // exercised against the protocol that genuinely still needs it.)
+    protocol: "creality",
     host: "127.0.0.2",
     material: "PLA",
     enabled: true
@@ -250,7 +253,7 @@ function seedReadySlice(targetPrinterId = "k2"): {
   const repos = h.store.repositories;
   // The flavor must match the firmware family, or the dispatch (correctly)
   // refuses to hand the file to it.
-  const declaredFlavor = targetPrinterId === "x1c" ? "marlin" : "klipper";
+  const declaredFlavor = targetPrinterId === "ender-ws" ? "marlin" : "klipper";
   const source: Artifact = {
     id: newId(ID_PREFIX.artifact),
     kind: "model",
@@ -501,7 +504,7 @@ test("a manually assigned task is startable by the canonical operation (no dead 
 test("startAssignment uses the assignment's printer even when the task is re-pinned elsewhere", async () => {
   const { taskId, assignmentId } = await promoteAssignPrepare();
   // Somebody re-pins the task to the Bambu after the placement was made.
-  h.queue.pinPrinter(taskId, "x1c");
+  h.queue.pinPrinter(taskId, "ender-ws");
 
   await assert.rejects(
     h.dispatch.startAssignment(assignmentId),
@@ -637,9 +640,9 @@ test("a failed upload marks the file FAILED and leaves the assignment un-started
 });
 
 test("an adapter without upload demands a named manual transfer and blocks until confirmed", async () => {
-  const { variant } = seedReadySlice("x1c");
+  const { variant } = seedReadySlice("ender-ws");
   const detail = h.queue.promoteSliceVariant(variant.id);
-  const assignment = h.queue.assignTask(detail.task.id, "x1c");
+  const assignment = h.queue.assignTask(detail.task.id, "ender-ws");
 
   const prepared = await h.devices.prepare(assignment.id);
   assert.equal(prepared.deviceArtifact.transferMode, "manual_file_transfer");
@@ -665,18 +668,18 @@ test("an adapter without upload demands a named manual transfer and blocks until
   assert.equal(confirmed.deviceArtifact.confirmedBy, "Миха");
 
   const result = await h.dispatch.startAssignment(assignment.id);
-  assert.equal(result.printerId, "x1c");
+  assert.equal(result.printerId, "ender-ws");
 });
 
 test("a manual-transfer printer stays blocked for an UNATTENDED start even after confirmation", async () => {
-  const { variant, task } = seedReadySlice("x1c");
+  const { variant, task } = seedReadySlice("ender-ws");
   const detail = h.queue.promoteSliceVariant(variant.id);
   const repos = h.store.repositories;
   const queued = repos.tasks.getById(detail.task.id)!;
   repos.tasks.update({ ...queued, night: true, unattendedAllowed: true, updatedAt: ISO });
   void task;
 
-  const assignment = h.queue.assignTask(detail.task.id, "x1c");
+  const assignment = h.queue.assignTask(detail.task.id, "ender-ws");
   await h.devices.confirmManualTransfer(assignment.id, "Миха");
 
   await assert.rejects(

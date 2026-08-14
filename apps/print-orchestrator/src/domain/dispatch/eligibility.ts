@@ -456,6 +456,16 @@ function pushFileIdentity(f: DispatchFacts, push: (r: EligibilityReason) => void
 
 const GCODE_EXT_RE = /\.(gcode|gco|g)$/i;
 const MODEL_EXT_RE = /\.(stl|3mf)$/i;
+/**
+ * A **G-code container**: a 3MF whose payload is a sliced plate, not geometry.
+ *
+ * This is what a Bambu printer is handed (`<name>.gcode.3mf`, started via
+ * `print.project_file`). Its content genuinely *is* G-code, so the "extension
+ * promises a model, content is G-code" rule below must not fire on it — the
+ * double extension is precisely the slicer's way of saying "3MF wrapper, G-code
+ * inside". A bare `.3mf` keeps the old, correct meaning.
+ */
+const GCODE_CONTAINER_RE = /\.gcode\.3mf$/i;
 
 function pushFormatContradiction(
   file: string | null,
@@ -463,6 +473,21 @@ function pushFormatContradiction(
   push: (r: EligibilityReason) => void
 ): void {
   if (!file || !detectedFormat) return;
+  if (GCODE_CONTAINER_RE.test(file)) {
+    // The wrapper must contain what it claims: a plate package built around
+    // anything other than G-code is a contradiction in the other direction.
+    if (detectedFormat !== "gcode") {
+      push(
+        reason(
+          REASON.FORMAT_MISMATCH,
+          "blocker",
+          `имя обещает G-code внутри 3MF-пакета, а содержимое — «${detectedFormat}»`,
+          { file, detectedFormat }
+        )
+      );
+    }
+    return;
+  }
   if (GCODE_EXT_RE.test(file) && detectedFormat !== "gcode") {
     push(
       reason(

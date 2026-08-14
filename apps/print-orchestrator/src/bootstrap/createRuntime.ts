@@ -572,6 +572,9 @@ export class FarmRuntime implements PrintServices {
       // Refuse a pin to a printer the farm does not know (evaluated lazily, so the
       // config loaded in start() is in place by the time an operator pins).
       isPrinterConfigured: (id) => this.isPrinterConfigured(id),
+      // Lets promote build the on-device name with the extension the TARGET
+      // printer actually starts (a Bambu gets a `.gcode.3mf` plate package).
+      resolvePrinter: (id) => this.configs.find((p) => p.id === id),
       operations: this.manualOperationServiceRef
     });
     this.runLifecycleRef = new RunLifecycleService(store, {

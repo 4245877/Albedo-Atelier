@@ -47,7 +47,7 @@ const ISO = "2026-07-26T12:00:00.000Z";
 /** What promotion names the file on the device: sanitized stem + content hash. */
 const DEVICE_FILE = buildDeviceFileName({ name: "cube.gcode", sha256: GCODE_SHA });
 
-/** k2 speaks Moonraker (upload + listing); x1c is a Bambu (neither). */
+/** k2 speaks Moonraker (upload + listing); ender-ws is Creality WS (neither). */
 const PRINTERS: PrinterConfig[] = [
   {
     id: "k2",
@@ -60,11 +60,14 @@ const PRINTERS: PrinterConfig[] = [
     enabled: true
   },
   {
-    id: "x1c",
-    name: "Bambu X1C",
-    model: "X1 Carbon",
+    id: "ender-ws",
+    name: "Creality Ender 3 V3 KE",
+    model: "Ender 3 V3 KE",
     type: "FDM",
-    protocol: "bambu",
+    // The farm's remaining adapter with NO file API at all. (Bambu used to play
+    // this role; it now uploads over FTPS, so the manual-transfer path is
+    // exercised against the protocol that genuinely still needs it.)
+    protocol: "creality",
     host: "127.0.0.2",
     material: "PLA",
     enabled: true
@@ -315,7 +318,7 @@ function seedReadySlice(targetPrinterId = "k2"): {
   set: ProfileSet;
 } {
   const repos = h.store.repositories;
-  const declaredFlavor = targetPrinterId === "x1c" ? "marlin" : "klipper";
+  const declaredFlavor = targetPrinterId === "ender-ws" ? "marlin" : "klipper";
   const source: Artifact = {
     id: newId(ID_PREFIX.artifact),
     kind: "model",
@@ -738,7 +741,7 @@ test("12b. every non-VERIFIED state refuses the start", async () => {
 // ── 13–14. Printers with no upload API ───────────────────────────────────────
 
 test("13. a manual transfer needs a NAMED operator confirmation", async () => {
-  const { assignment } = assignReadySlice("x1c");
+  const { assignment } = assignReadySlice("ender-ws");
 
   const prepared = await h.devices.prepare(assignment.id);
   assert.equal(prepared.deviceArtifact.transferMode, "manual_file_transfer");
@@ -764,7 +767,7 @@ test("13. a manual transfer needs a NAMED operator confirmation", async () => {
 });
 
 test("14. a manually transferred file never authorises an automatic (night) start", async () => {
-  const { assignment, taskId } = assignReadySlice("x1c");
+  const { assignment, taskId } = assignReadySlice("ender-ws");
   const repos = h.store.repositories;
   const task = repos.tasks.getById(taskId)!;
   repos.tasks.update({ ...task, night: true, unattendedAllowed: true, updatedAt: ISO });
@@ -775,7 +778,7 @@ test("14. a manually transferred file never authorises an automatic (night) star
 
   // The attended start, by contrast, is admissible.
   const result = await h.dispatch.startAssignment(assignment.id, { mode: "manual" });
-  assert.equal(result.printerId, "x1c");
+  assert.equal(result.printerId, "ender-ws");
 });
 
 // ── 15–16. Path and source safety ────────────────────────────────────────────
@@ -954,7 +957,9 @@ test("an adapter that cannot upload is never asked to — its declared capabilit
       supportsFileListing: false,
       supportsRemoteStart: false,
       supportsFileDelete: false,
-      fileVerification: "none"
+      fileVerification: "none",
+      startableExtensions: [".gcode"],
+      deviceFileExtension: ".gcode"
     };
   };
   const devices = new DeviceArtifactService({

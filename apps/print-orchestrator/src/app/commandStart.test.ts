@@ -135,15 +135,14 @@ test("startPrint refuses a printer in a not-ready state (e.g. error)", async () 
   );
 });
 
-test("startPrint reports remote start as unsupported for Bambu and Creality WS", async () => {
-  for (const protocol of ["bambu", "creality"] as const) {
-    const service = makeService(makePrinter({ protocol }), makeStatus());
-    await assert.rejects(
-      service.startPrint("k2", "model.gcode"),
-      (error: unknown) => error instanceof JobError && error.message.includes("не поддерживается"),
-      protocol
-    );
-  }
+test("startPrint reports remote start as unsupported for Creality WS", async () => {
+  // The one control protocol still unimplemented here. Bambu is deliberately NOT
+  // in this list any more — it starts an on-card file over local MQTT.
+  const service = makeService(makePrinter({ protocol: "creality" }), makeStatus());
+  await assert.rejects(
+    service.startPrint("k2", "model.gcode"),
+    (error: unknown) => error instanceof JobError && error.message.includes("не поддерживается")
+  );
 });
 
 test("startPrint rejects unsafe or non-G-code paths before touching the device", async () => {
