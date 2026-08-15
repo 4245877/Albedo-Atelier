@@ -262,9 +262,15 @@
     radial-gradient(closest-side, rgb(109 76 120 / 20%), transparent 72%),
     radial-gradient(closest-side at 70% 30%, rgb(184 144 31 / 18%), transparent 70%);
 }
-:root[data-theme="light"] .aura-figure { color: var(--gold); opacity: 0.6; }
-:root[data-theme="light"] .aura-wing { color: #3a2f45; opacity: 0.4; }
-:root[data-theme="light"] .aura-horns { color: var(--gold-bright); }
+
+/* Портрет днём — тушь по фарфору, а не свечение из тьмы: ночная сепия увела бы
+   белые рога и кожу в цвет самой плиты и растворила бы их. Оставляем скетч
+   почти как есть — лёгкий тёплый оттенок и чуть больше контраста, чтобы
+   волосы не выглядели серыми на белом. */
+:root[data-theme="light"] .aura-portrait {
+  --portrait-opacity: 0.76;
+  filter: sepia(0.18) contrast(1.06);
+}
 
 /* Плитки показателей — белые изразцы с прохладной гранью, цифры-обсидиан. */
 :root[data-theme="light"] .stat-tile {

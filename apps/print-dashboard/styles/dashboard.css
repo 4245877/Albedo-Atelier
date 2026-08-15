@@ -550,46 +550,81 @@
 .stat-tile.tone-gold .num { color: var(--gold-bright); }
 
 /* ── Декоративная композиция hero ───────────────────────────────
-   Абстрактный образ вместо буквального портрета: силуэт крыла, намёк на рога
-   тонкой золотой геометрией, аметистовое свечение и опадающие перья.
-   Слой ничего не ловит, ничего не весит в раскладке (всё внутри absolute) и
-   не задерживает первый кадр. */
+   Портрет надзирательницы, аметистовое свечение за её спиной и опадающие
+   перья перед ней. Слой ничего не ловит, ничего не весит в раскладке (всё
+   внутри absolute) и не задерживает первый кадр. */
 .hero-aura {
   position: relative;
   align-self: stretch;
-  min-height: 210px;
+  /* Портрет вертикальный (2:3), а колонка узкая — высоту задаём ей самой, иначе
+     на широком экране короткая колонка текста оставляла бы от Альбедо полосу
+     поперёк глаз. 300 px хватает на голову, рога и плечи в полный размер. */
+  min-height: 300px;
   pointer-events: none;
   /* Ограничивает область перерисовки декоративных слоёв: движение перьев не
      заставляет браузер пересчитывать остальной зал. */
   contain: layout paint;
 }
 
+/* Свечение за спиной надзирательницы. Гасить его НАДО внутри своей коробки:
+   `contain: paint` у колонки режет всё по её краю, и прежнее свечение
+   (`inset` с отрицательными полями и `closest-side`) упиралось в этот срез
+   ещё непрозрачным — вокруг портрета стояла светлая рамка-прямоугольник,
+   будто картинку вставили поверх зала. Поэтому радиусы задаются в процентах
+   от самой коробки и доходят до нуля раньше её границ. */
 .aura-glow {
   position: absolute;
-  inset: -25% -35% -25% -15%;
+  inset: 0;
   background:
-    radial-gradient(closest-side, rgb(154 118 172 / 40%), transparent 74%),
-    radial-gradient(closest-side at 62% 26%, rgb(230 200 123 / 26%), transparent 68%);
+    radial-gradient(64% 54% at 50% 46%, rgb(154 118 172 / 42%), transparent 100%),
+    radial-gradient(44% 34% at 58% 24%, rgb(230 200 123 / 26%), transparent 100%);
   filter: blur(4px);
   animation: aura-breathe 14s ease-in-out infinite;
   will-change: opacity, transform;
 }
 
-.aura-figure {
+/* ── Портрет надзирательницы ────────────────────────────────────
+   Тушевый скетч на прозрачном фоне: белые рога и фарфоровая кожа светятся из
+   обсидиановой тьмы, чёрные волосы уходят в фон зала. Правки — по трём осям:
+
+   · МЕСТО. Абсолютная в своей колонке, `inset: 0` + `margin: auto` — так она
+     центрируется и когда ширина ограничена (телефон). Из колонки не выходит
+     ни на пиксель: текст, показатели и кнопки живут в соседней дорожке сетки
+     и физически не могут быть перекрыты.
+   · КАДР. `cover` + `object-position` по вертикали: колонка почти квадратная,
+     а скетч — 2:3, поэтому кадрируем низ платья, а не голову. `object-fit`
+     кадрирует БЕЗ пересчёта раскладки, значит и без сдвигов (CLS).
+   · КРАЙ. Радиальная маска растворяет прямоугольные границы файла в фоне
+     зала: без неё виден срез кадра, и портрет читается как вставленная
+     картинка, а не как часть зала. Сепия подгоняет холодный графит под
+     золото Назарика. */
+.aura-portrait {
+  --portrait-opacity: 0.82;
   position: absolute;
   inset: 0;
+  margin: auto;
   width: 100%;
   height: 100%;
-  color: var(--gold);
-  animation: aura-drift 18s ease-in-out infinite;
-  will-change: transform;
+  object-fit: cover;
+  /* Голова в верхней трети файла: показываем её целиком, срезая подол. */
+  object-position: 50% 8%;
+  opacity: var(--portrait-opacity);
+  /* Радиусы эллипса — в процентах от коробки: 52% по горизонтали значит, что
+     маска обнуляется ровно на боковых гранях, и волосы растворяются в зале,
+     а не обрываются по срезу. Лицо (±20% от центра) остаётся в непрозрачном
+     ядре. Центр смещён вверх (36%): снизу растворять надо сильнее — там кадр
+     обрывает платье. */
+  -webkit-mask-image: radial-gradient(52% 64% at 50% 36%, #000 44%, rgb(0 0 0 / 55%) 78%, transparent 100%);
+  mask-image: radial-gradient(52% 64% at 50% 36%, #000 44%, rgb(0 0 0 / 55%) 78%, transparent 100%);
+  filter: sepia(0.38) saturate(0.92) brightness(0.94) contrast(1.06);
+  /* Дыхание — ТОЛЬКО прозрачностью. Прежний медальон дрейфовал трансформом, и
+     Firefox рвал этот дрейф на palette-PNG с маской и фильтром (ему приходилось
+     заново растрировать слой каждый кадр) — под это держали отдельный
+     @supports-фоллбек. Opacity живёт на композиторе во всех движках: один
+     растр, дальше — только прозрачность слоя. */
+  animation: portrait-breathe 13s ease-in-out infinite;
+  will-change: opacity;
 }
-
-/* Рога — единственный золотой акцент композиции: они держат взгляд. */
-.aura-horns { color: var(--gold-bright); opacity: 0.85; }
-/* Крыло — обсидиан со слоновой костью прожилок: тёмная масса, а не рисунок. */
-.aura-wing { color: var(--ivory); opacity: 0.34; }
-.aura-sigil { color: var(--topaz); opacity: 0.9; filter: drop-shadow(0 0 10px rgb(217 198 94 / 45%)); }
 
 /* ── Перья ──────────────────────────────────────────────────────
    Пять перьев, и ни одно не повторяет другое: своя траектория (три разных
@@ -1478,11 +1513,12 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
   50% { opacity: 1; transform: scale(1.06); }
 }
 
-/* Фигура крыла чуть покачивается — как если бы зал дышал вместе с ней. */
-@keyframes aura-drift {
-  0%, 100% { transform: translate3d(0, 0, 0) rotate(0deg); }
-  33% { transform: translate3d(-4px, -7px, 0) rotate(-1.1deg); }
-  66% { transform: translate3d(3px, 5px, 0) rotate(0.8deg); }
+/* Портрет дышит вместе с залом — очень медленно и только прозрачностью
+   (о причине см. .aura-portrait). Амплитуда мала намеренно: это дыхание, а не
+   мигание. */
+@keyframes portrait-breathe {
+  0%, 100% { opacity: var(--portrait-opacity); }
+  50% { opacity: calc(var(--portrait-opacity) - 0.08); }
 }
 
 /* ── Три траектории пера ──────────────────────────────────────
@@ -1563,8 +1599,9 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
   .feather.f4 { transform: translate3d(11px, 168px, 0) rotate(21deg); opacity: 0.26; }
   .feather.f5 { transform: translate3d(-9px, 196px, 0) rotate(-15deg); opacity: 0.24; }
 
-  .aura-glow, .aura-figure, .brand-sigil::after { animation: none !important; }
+  .aura-glow, .aura-portrait, .brand-sigil::after { animation: none !important; }
   .aura-glow { opacity: 0.85; }
+  .aura-portrait { opacity: var(--portrait-opacity); }
   .brand-sigil::after { opacity: 0.5; }
 }
 
@@ -1608,7 +1645,9 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
   .dot-pulse, .cam-tag.live .dot, .sys-warn .dot, .sys-err .dot { animation: none; }
   .progress > i::after { animation: none; }
   .aura-glow { animation: none; opacity: 0.9; }
-  .aura-figure { animation: none; }
+  /* Портрет остаётся, замирает только дыхание: растр уже готов, а без анимации
+     слой перестаёт перерисовываться вовсе. */
+  .aura-portrait { animation: none; will-change: auto; }
   .feather.f4, .feather.f5 { display: none; }
 }
 
@@ -1640,12 +1679,30 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
 }
 
 @media (max-width: 900px) {
-  /* Hero в одну колонку: декоративная композиция становится узкой полосой
-     НАД текстом. Атмосфера сохраняется (свечение, крыло, два пера), но
-     ничего не проходит под заголовком и показателями. */
+  /* Hero в одну колонку: декоративная композиция становится полосой НАД
+     текстом. Атмосфера сохраняется (свечение, портрет, три пера), но ничего
+     не проходит под заголовком и показателями — портрет по-прежнему в своей
+     дорожке сетки, просто теперь она сверху.
+
+     Портрету отдаём не всю ширину, а медальон по центру: растянутый на 900 px
+     `cover` оставил бы от Альбедо полосу поперёк лица. Высота полосы —
+     компромисс с телефонным экраном: голова, рога и плечи видны, а зал не
+     теряет пол-экрана до первых данных. */
   .hero { grid-template-columns: 1fr; gap: var(--s-4); }
-  .hero-aura { order: -1; min-height: 92px; }
-  .aura-figure { opacity: 0.4; }
+  .hero-aura { order: -1; min-height: 168px; }
+  .aura-portrait {
+    --portrait-opacity: 0.72;
+    width: min(100%, 156px);
+    object-position: 50% 4%;
+  }
+  /* Свечение сжимается вместе с портретом. Растянутое на всю ширину зала, оно
+     превращало полосу в сплошную сливовую заливку с фигуркой посередине.
+     Центрируем полями, а НЕ transform: его занимает дыхание (aura-breathe),
+     и translateX был бы стёрт первым же кадром анимации. */
+  .aura-glow {
+    width: min(100%, 300px);
+    margin-inline: auto;
+  }
   .feather.f4, .feather.f5 { display: none; }
 }
 
@@ -1675,7 +1732,11 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
   .modebar { padding: 6px var(--s-1) 10px; gap: var(--s-2); }
   .mode-tab { padding: 7px var(--s-3); font-size: var(--t-13); }
   .hero { padding: var(--s-4) var(--s-4) var(--s-6); }
-  .hero-aura { min-height: 76px; }
+  /* Телефон: медальон ужимается, но остаётся портретом, а не намёком —
+     рога, лицо и плечи должны читаться и на 320 px. */
+  .hero-aura { min-height: 148px; }
+  .aura-portrait { width: min(100%, 136px); }
+  .aura-glow { width: min(100%, 240px); }
   .printer-actions { flex-wrap: wrap; }
 }
 
