@@ -23,13 +23,17 @@ import { syncModals } from "./render/modals.js";
 import { renderTopbar } from "./render/sections.js";
 import { installMenus, isMenuOpen } from "./shared/menu.js";
 import { setNightWindow, setupTheme } from "./theme.js";
-import { $, esc, toast } from "./util.js";
+import { $, emptyRow, esc, toast } from "./util.js";
 
 /* Состояние фермы — заполняется из GET /api/dashboard. До первой удачной
    загрузки равно null. */
 let state = null;
 let backendReachable = false;
 let everLoaded = false;
+/* Пришёл ли ХОТЬ КАКОЙ-ТО ответ на первый запрос доски (удачный или нет).
+   Пока нет — связь неизвестна, и шапка обязана говорить «проверяю», а не
+   «безмолвствует»: незавершённый запрос это не отказ. */
+let firstReplySettled = false;
 /* Снимок последних отрисованных данных: если новый ответ идентичен,
    DOM не пересобираем (камеры не мигают, нет лишних перекачек кадров). */
 let lastRenderedJson = null;
@@ -83,14 +87,14 @@ function renderAll() {
   // тик опроса снёс бы открытое меню прямо из-под курсора. Шапку обновляем —
   // она вне перерисовываемой разметки.
   if (isMenuOpen()) {
-    renderTopbar(state, backendReachable);
+    renderTopbar(state, backendReachable, { settled: firstReplySettled });
     return;
   }
   const snapshot = JSON.stringify(state);
   if (snapshot === lastRenderedJson) {
     // Данные не изменились — трогаем только шапку (статус связи), DOM доски
     // оставляем как есть, чтобы не пересоздавать <img> камер (без мерцания).
-    renderTopbar(state, backendReachable);
+    renderTopbar(state, backendReachable, { settled: firstReplySettled });
     return;
   }
   lastRenderedJson = snapshot;
@@ -101,10 +105,38 @@ function renderAll() {
   // Доска пересобрана — вернуть живые видеоплееры в новые крепления, чтобы
   // трансляция не прерывалась при обновлении телеметрии.
   reconcileCameras();
-  renderTopbar(state, backendReachable);
+  renderTopbar(state, backendReachable, { settled: firstReplySettled });
   // Открытое окно деталей принтера держим в согласии со свежим состоянием.
   syncModals();
   ensureReveal();
+}
+
+/* ── Первая загрузка не удалась ────────────────────────────────
+   Скелет означает «данные сейчас будут». Когда первый запрос отказал, данных
+   не будет — и вечно мерцающие заглушки на месте принтеров, очереди и ночной
+   карточки превращаются в ложь того же рода, что и зелёный статус у
+   заблокированного задания: интерфейс изображает загрузку, которой нет.
+   Заменяем их честным состоянием — ровно до первого удачного ответа, после
+   которого секции рисуются обычным путём. */
+const FAILED_FIRST_LOAD = [
+  ["#printer-grid", "Принтеры мне сейчас не видны: ферма не ответила. Я продолжаю звать её каждые 6 секунд."],
+  ["#queue-body", "Очередь недоступна, пока backend молчит."],
+  ["#night-body", "Ночной расчёт недоступен, пока backend молчит."],
+];
+
+function showFailedFirstLoad() {
+  for (const [sel, text] of FAILED_FIRST_LOAD) {
+    const host = $(sel);
+    // Трогаем только НЕТРОНУТЫЕ скелеты: если данные когда-то приходили,
+    // на доске стоит последнее известное состояние — его стирать нельзя.
+    if (!host || !host.querySelector(".is-skeleton, .sk")) continue;
+    host.innerHTML = `<ul class="row-list">${emptyRow(text, { glyph: "warn" })}</ul>`;
+  }
+  // Плитки показателей hero: числа мерцать перестают — считать нечего.
+  const tiles = $("#hero-stats");
+  if (tiles && tiles.querySelector(".is-skeleton")) {
+    tiles.innerHTML = `<div class="stat-tile tone-offline"><span class="num">—</span><span class="lbl">данных нет</span></div>`;
+  }
 }
 
 function renderBackendError(err) {
@@ -127,6 +159,7 @@ const dashboardPoller = createPoller({
   apply: (data, { wasReachable }) => {
     state = data;
     backendReachable = true;
+    firstReplySettled = true;
     // Эффективное ночное окно фермы определяет backend (NIGHT_PRINT_WINDOW);
     // auto-тема следует ему. Старый payload без этих полей оставляет fallback.
     setNightWindow(data.night?.windowStart, data.night?.windowEnd);
@@ -138,7 +171,11 @@ const dashboardPoller = createPoller({
   },
   onError: (err, { silent }) => {
     backendReachable = false;
-    renderTopbar(state, backendReachable);
+    firstReplySettled = true;
+    renderTopbar(state, backendReachable, { settled: firstReplySettled });
+    // Ни одного удачного ответа так и не было — на доске стоят скелеты, и им
+    // нечего дожидаться.
+    if (!everLoaded) showFailedFirstLoad();
     if (!silent) renderBackendError(err);
   },
   intervalMs: DASHBOARD_POLL_MS,
@@ -189,7 +226,7 @@ function openWorkSection(id) {
 setupTheme();
 installMenus();
 renderNav();
-renderTopbar(state, backendReachable);
+renderTopbar(state, backendReachable, { settled: firstReplySettled });
 tickClock();
 setInterval(tickClock, 1000);
 

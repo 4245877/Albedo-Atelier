@@ -310,7 +310,7 @@ function filesShellHtml(p, path, bodyHtml) {
     ${filesCrumbsHtml(path)}
     ${bodyHtml}
     <div class="modal-actions">
-      <button type="button" class="btn btn-sm" data-files-back>← К принтеру</button>
+      <button type="button" class="btn btn-sm" data-files-back>${icon("arrowLeft")}<span>К принтеру</span></button>
       <button type="button" class="btn btn-sm" data-modal-close>Закрыть</button>
     </div>`;
 }

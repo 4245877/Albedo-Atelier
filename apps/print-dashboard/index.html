@@ -41,6 +41,37 @@
         var root = document.documentElement;
         root.classList.add("has-js");
         setTimeout(function () { root.classList.add("reveal-all"); }, 1200);
+
+        /* Модуль или стиль не доехал. Содержимое при этом ВИДНО (см. выше про
+           has-js/reveal-all) — но панель мертва: часы стоят, кнопки не
+           отвечают, данные не обновляются. Молчать об этом нельзя: оператор
+           видит правдоподобный интерфейс и делает выводы по устаревшему
+           экрану. Полоса нарисована собственными стилями, без единого класса —
+           не доехать мог и CSS. */
+        var told = false;
+        window.addEventListener("error", function (e) {
+          var el = e.target;
+          if (told || !el || !el.tagName) return;
+          var tag = el.tagName.toLowerCase();
+          if (tag !== "script" && tag !== "link") return;
+          told = true;
+          var bar = document.createElement("div");
+          bar.setAttribute("role", "alert");
+          bar.style.cssText = "position:fixed;left:0;right:0;top:0;z-index:500;display:flex;gap:12px;" +
+            "align-items:center;justify-content:center;flex-wrap:wrap;padding:10px 16px;" +
+            "background:#3a1420;color:#f6dfe4;border-bottom:1px solid #a63c52;" +
+            "font:600 13px/1.4 system-ui,sans-serif";
+          bar.innerHTML = "<span>Панель загрузилась не полностью — часть её не доехала, " +
+            "и показанное могло устареть.</span>";
+          var again = document.createElement("button");
+          again.type = "button";
+          again.textContent = "Загрузить заново";
+          again.style.cssText = "padding:6px 14px;border-radius:8px;border:1px solid #c9536a;" +
+            "background:#c9536a;color:#fff3f4;font:700 13px system-ui,sans-serif;cursor:pointer";
+          again.addEventListener("click", function () { location.reload(); });
+          bar.appendChild(again);
+          (document.body || root).appendChild(bar);
+        }, true);
       })();
     </script>
     <title>Albedo — Зал Верховного Надзора</title>
@@ -59,7 +90,21 @@
     <link rel="stylesheet" href="/styles/dashboard.css" />
     <link rel="stylesheet" href="/styles/theme.css" />
     <link rel="stylesheet" href="/styles/modals.css" />
-    <link rel="stylesheet" href="/styles/workflows.css" />
+    <!-- workflows.css — самый большой файл набора (83 КБ, треть всего CSS), но
+         на первом экране им не покрашен НИ ОДИН пиксель: он одевает панели
+         «Работ» (они скрыты и грузятся лениво) и окно запуска (открывается
+         кликом). Держать его render-blocking значило задерживать первую
+         отрисовку Зала ради разметки, которой на экране нет.
+
+         Поэтому он грузится ПАРАЛЛЕЛЬНО, но не блокирует первый кадр:
+         rel=preload скачивает его с приоритетом стиля, onload превращает
+         ссылку в обычный stylesheet. Порядок каскада сохраняется — ссылка
+         стоит последней, как и раньше. Без JS сработает <noscript>-копия
+         (обычная блокирующая), поэтому «Работы» одеты в любом случае.
+         Сборщик для этого не понадобился. -->
+    <link rel="preload" as="style" href="/styles/workflows.css"
+      onload="this.onload=null;this.rel='stylesheet'" />
+    <noscript><link rel="stylesheet" href="/styles/workflows.css" /></noscript>
   </head>
   <body>
     <a class="skip-link" href="#mode-hall">Перейти к содержимому</a>
@@ -89,9 +134,14 @@
         <div class="topbar-side">
           <!-- Состояние связи: на широком экране — две подписанные пилюли, на
                телефоне остаётся один компактный индикатор (см. dashboard.css),
-               иначе шапка занимала три ряда и четверть экрана. -->
-          <span class="pill pill-ok" id="pill-service"><i class="dot dot-pulse"></i><span class="pill-txt">Сервис работает</span></span>
-          <span class="pill pill-ok" id="pill-backend"><i class="dot"></i><span class="pill-txt">Backend подключён</span></span>
+               иначе шапка занимала три ряда и четверть экрана.
+
+               Начальное состояние — НЕЙТРАЛЬНОЕ «проверяю», а не зелёное
+               «подключён»: до первого ответа панель ничего не знает о связи, и
+               утверждать обратное в разметке — врать на первом же кадре (а
+               потом ещё и мигать красным, пока запрос всего лишь идёт). -->
+          <span class="pill" id="pill-service"><i class="dot dot-pulse"></i><span class="pill-txt">Опрашиваю ферму…</span></span>
+          <span class="pill" id="pill-backend"><i class="dot dot-pulse"></i><span class="pill-txt">Проверяю связь…</span></span>
           <button type="button" class="theme-toggle" id="theme-toggle" title="Переключить облик зала">
             <span class="theme-toggle-icon" aria-hidden="true"></span>
             <span class="theme-toggle-label">Авто</span>

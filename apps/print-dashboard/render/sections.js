@@ -6,13 +6,38 @@ import { isBusy, progressBarHtml, progressPercentText } from "./printerView.js";
 
 /* ── Верхняя панель (статус сервиса / backend) ─────────────── */
 
-export function renderTopbar(state, backendReachable) {
+/**
+ * Пилюли связи в шапке.
+ *
+ * Три состояния, а не два. Раньше их было два — «подключён» и
+ * «безмолвствует», — и оба врали на первом кадре: разметка index.html
+ * утверждала зелёным «Backend подключён» ещё до единого запроса, а первый же
+ * вызов renderTopbar(null, false) переключал шапку на красное
+ * «Backend безмолвствует» — хотя запрос был всего лишь ЕЩЁ НЕ ЗАВЕРШЁН. На
+ * медленной связи оператор несколько секунд смотрел на тревогу, которой не
+ * было, и видел две вспышки чужого статуса подряд.
+ *
+ * Молчание и неизвестность — разные вещи. Пока первого ответа нет, шапка
+ * честно говорит «проверяю связь», и только настоящий отказ красит её в
+ * тревогу.
+ */
+export function renderTopbar(state, backendReachable, { settled = true } = {}) {
   const pillService = $("#pill-service");
   const pillBackend = $("#pill-backend");
   if (!pillService || !pillBackend) return;
 
   // Подпись пилюли живёт в .pill-txt: на телефоне CSS прячет именно её, оставляя
   // цветную точку-индикатор, — шапка перестаёт занимать три ряда.
+  if (!settled && !state) {
+    pillBackend.className = "pill";
+    pillBackend.innerHTML = `<i class="dot dot-pulse"></i><span class="pill-txt">Проверяю связь…</span>`;
+    pillBackend.title = "Проверяю связь с backend";
+    pillService.className = "pill";
+    pillService.innerHTML = `<i class="dot dot-pulse"></i><span class="pill-txt">Опрашиваю ферму…</span>`;
+    pillService.title = "Опрашиваю ферму";
+    return;
+  }
+
   if (backendReachable && state) {
     pillBackend.className = "pill pill-ok";
     pillBackend.innerHTML = `<i class="dot"></i><span class="pill-txt">Backend подключён</span>`;
@@ -176,12 +201,63 @@ export function queueJobSubtitle(job, printers) {
   return parts.join(" · ") || "данные готовятся";
 }
 
+/* ── Предел списка очереди в Зале ──────────────────────────────
+   Зал отвечает на вопрос «что происходит сейчас и нужно ли моё вмешательство».
+   Очередь из 200 заданий отвечает на другой вопрос — «чем ферма занята
+   ближайшие сутки», — и это работа Планировщика. Без предела Зал вырастал до
+   19 600 px одной только очереди (≈ 26 экранов на 1440): всё остальное —
+   ночная карточка, события, материалы — уезжало за горизонт прокрутки, и
+   ответа на свой вопрос оператор не получал вовсе.
+
+   Поэтому: ближайшие задания видны целиком, а хвост честно назван числом и
+   уводит туда, где очередью и управляют. Скрытые задания НЕ пропадают из
+   внимания — строка отдельно называет, сколько из них требует вмешательства. */
+export const QUEUE_VISIBLE_LIMIT = 8;
+
+/**
+ * Хвост очереди, не поместившийся в Зал.
+ * @returns {{hidden:number, blocked:number}|null} null — если поместилось всё.
+ */
+export function queueOverflow(queue, limit = QUEUE_VISIBLE_LIMIT) {
+  const rest = (queue || []).slice(limit);
+  if (!rest.length) return null;
+  return { hidden: rest.length, blocked: rest.filter((j) => queueJobStatus(j).blocked).length };
+}
+
+function queueMoreRow(overflow) {
+  if (!overflow) return "";
+  return `
+    <li class="row row-more">
+      <span class="row-icon">${icon("queue")}</span>
+      <div class="grow">
+        <div class="row-title">Ещё ${overflow.hidden} ${plural(overflow.hidden, "задание", "задания", "заданий")} в очереди</div>
+        <div class="row-sub">${
+          overflow.blocked
+            ? `Из них ${overflow.blocked} ${plural(overflow.blocked, "требует", "требуют", "требуют")} внимания`
+            : "Все они ожидают своей очереди — препятствий нет"
+        }</div>
+      </div>
+      <button type="button" class="btn btn-sm" data-goto="scheduler">Открыть планировщик</button>
+    </li>`;
+}
+
+/** Русское склонение по числу: 1 задание / 2 задания / 5 заданий. */
+export function plural(n, one, few, many) {
+  const abs = Math.abs(n) % 100;
+  const last = abs % 10;
+  if (abs > 10 && abs < 20) return many;
+  if (last > 1 && last < 5) return few;
+  if (last === 1) return one;
+  return many;
+}
+
 export function renderQueue(state) {
   const active = state.printers.filter(isBusy);
   // Главной кнопкой раздела становится только ДЕЙСТВИТЕЛЬНО запускаемое
   // задание: у «ready» с блокирующей причиной запуск невозможен, и предлагать
   // его крупной золотой кнопкой — то же самое враньё, что и зелёный статус.
   const next = state.queue.find((j) => !queueJobStatus(j).blocked);
+  const overflow = queueOverflow(state.queue);
   $("#queue-meta").textContent = `${active.length} активных · ${state.queue.length} в очереди`;
 
   $("#queue-body").innerHTML = `
@@ -202,7 +278,10 @@ export function renderQueue(state) {
       </div>
       <div>
         <p class="sub-head">Очередь <span class="count">${state.queue.length}</span></p>
-        <ul class="row-list">${state.queue.map((j) => queueRow(j, state.printers)).join("") || emptyRow("Очередь пуста — Назарик ожидает ваших повелений")}</ul>
+        <ul class="row-list">${
+          state.queue.slice(0, QUEUE_VISIBLE_LIMIT).map((j) => queueRow(j, state.printers)).join("")
+          || emptyRow("Очередь пуста — Назарик ожидает ваших повелений")
+        }${queueMoreRow(overflow)}</ul>
       </div>
     </div>
     ${next ? nextJobCard(next, state.printers) : ""}`;

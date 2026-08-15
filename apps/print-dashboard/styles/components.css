@@ -20,7 +20,21 @@
   border: 1px solid var(--card-edge);
   color: var(--ink-soft);
   white-space: nowrap;
+  /* Пилюля не имеет права вылезти за свою карточку. В шапке подписи короткие и
+     держат одну строку, а вот пилюли hero несут фразу целиком («Замечены
+     отклонения — я уже занимаюсь ими»): на 390 px она уезжала за край hero и
+     обрезалась ровно посередине слова — сообщение о неполадке становилось
+     нечитаемым именно там, где важнее всего. */
+  max-width: 100%;
 }
+
+/* Пилюли hero — не ярлыки, а реплики: переносим по словам, а не режем. */
+.hero-pills .pill {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  align-items: flex-start;
+}
+.hero-pills .pill .dot { margin-top: 5px; }
 
 .pill-ok    { color: var(--ok-ink); background: var(--ok-soft); border-color: var(--ok-line); }
 .pill-warn  { color: var(--warn-ink); background: var(--warn-soft); border-color: var(--warn-line); }
@@ -124,6 +138,15 @@
 }
 .row-blocked:hover { border-color: var(--blocked-line); background: var(--blocked-soft); }
 
+/* Хвост очереди: не задание, а указатель — тише строк с данными, но с явным
+   переходом туда, где очередью управляют. */
+.row-more {
+  background: transparent;
+  border: 1px dashed var(--card-edge);
+}
+.row-more:hover { border-color: var(--gold-line); background: var(--gold-soft); }
+.row-more .row-title { font-weight: 600; color: var(--ink-soft); }
+
 .row-icon {
   flex: none;
   width: 30px;
@@ -185,6 +208,23 @@
   font-weight: 700;
   letter-spacing: 0.03em;
   white-space: nowrap;
+  /* Статусный бейдж («трудится», «пауза») короток и обязан держать строку.
+     Но тот же класс носят бейджи с ТЕКСТОМ С BACKEND — имя принтера с
+     материалом, потребность очереди, «на ночь: <имя задания>». С nowrap такая
+     строка растягивала документ: 955 px при вьюпорте 320 и 1787 px при 1440,
+     то есть настоящая горизонтальная прокрутка ВСЕЙ страницы от одного
+     длинного имени. Предел ширины обязателен всем; перенос — тем, кто носит
+     свободный текст (правило ниже). */
+  max-width: 100%;
+}
+
+/* Бейдж со свободным текстом переносится по словам. Ряды .chip-line и
+   ночные факты — единственные места, где в бейдж кладут строку с backend. */
+.chip-line .badge,
+.night-facts .badge {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
 .badge .dot { width: 6px; height: 6px; }

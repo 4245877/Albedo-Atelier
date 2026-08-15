@@ -394,7 +394,7 @@ function promoteHtml(state, v) {
         <div class="slice-meta">${analysisChip} ${chip(`в очереди: ${esc(promotedTask.state)}`, "ok")}</div>
         <div class="slice-out">Задание: <code>${esc(promotedTask.title)}</code>
           — файл <code>${esc(promotedTask.onDeviceFile || "—")}</code></div>
-        <button type="button" class="btn btn-sm" data-goto="scheduler">→ Перейти к очереди</button>
+        <button type="button" class="btn btn-sm" data-goto="scheduler">${icon("arrowRight")}<span>Перейти к очереди</span></button>
       </div>`;
   }
 

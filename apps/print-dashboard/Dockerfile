@@ -15,7 +15,7 @@ COPY styles /usr/share/nginx/html/styles
 # Dashboard ES modules: entry (app.js) + root modules, the shared primitives
 # (polling/inflight/format/chips), the per-feature controller/view folders and
 # the board render/ folder.
-COPY app.js api.js poll.js util.js nav.js cameraPlayers.js actions.js theme.js /usr/share/nginx/html/
+COPY app.js api.js util.js nav.js cameraPlayers.js actions.js theme.js /usr/share/nginx/html/
 COPY shared /usr/share/nginx/html/shared
 COPY features /usr/share/nginx/html/features
 COPY render /usr/share/nginx/html/render

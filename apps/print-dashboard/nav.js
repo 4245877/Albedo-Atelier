@@ -61,6 +61,12 @@ let currentMode = "hall";
 let currentWork = null;
 let onWorkOpen = () => {};
 const startedWork = new Set();
+/* Место, на котором оператор оставил каждый режим. Без этого переход
+   «Зал → Работы → Зал» приземлял его не туда, откуда он уходил: страницы разной
+   высоты, и общая прокрутка окна то упиралась в конец короткой «Работы», то
+   (после якорения прокрутки браузером) уезжала на добрую тысячу пикселей ниже
+   исходного места в Зале. Режим — это отдельный экран; у экрана своё место. */
+const scrollByMode = { hall: 0, works: 0 };
 
 /* ── Построение разметки навигации ─────────────────────────── */
 
@@ -100,8 +106,11 @@ export function renderNav() {
 /* ── Режимы ────────────────────────────────────────────────── */
 
 /** Открыть режим. `focus` — перевести фокус в панель (переход с клавиатуры). */
-export function showMode(mode, { focus = false, remember = true } = {}) {
+export function showMode(mode, { focus = false, remember = true, restoreScroll = true } = {}) {
   if (mode !== "hall" && mode !== "works") mode = "hall";
+  const from = currentMode;
+  const switching = restoreScroll && from !== mode;
+  if (switching) scrollByMode[from] = window.scrollY;
   currentMode = mode;
 
   for (const m of ["hall", "works"]) {
@@ -124,7 +133,10 @@ export function showMode(mode, { focus = false, remember = true } = {}) {
   if (remember) {
     try { localStorage.setItem(MODE_KEY, mode); } catch { /* приватный режим */ }
   }
-  if (focus) document.getElementById(`mode-${mode}`)?.focus();
+  // Прокрутка возвращается ДО фокуса: focus() сам подтягивает панель в поле
+  // зрения, и порядок «сначала место, потом фокус» не даёт им спорить.
+  if (switching) window.scrollTo({ top: scrollByMode[mode] || 0, behavior: "auto" });
+  if (focus) document.getElementById(`mode-${mode}`)?.focus({ preventScroll: true });
   syncStickyOffsets();
   updateNavEdges();
   if (mode === "hall") updateActiveNav();
@@ -326,9 +338,19 @@ export function restoreMode() {
     mode = localStorage.getItem(MODE_KEY) || "hall";
     work = localStorage.getItem(WORK_KEY);
   } catch { /* приватный режим */ }
-  if (work) currentWork = null;
-  showMode(mode, { remember: false });
-  if (mode === "works" && work) showWork(work, { remember: false });
+  // Раздел прошлого визита открываем ЯВНО и ровно один. Прежде здесь стояло
+  // `currentWork = null`, и showMode(«works») успевал поднять раздел по
+  // умолчанию («Загрузка») ПЕРЕД тем, как открыться сохранённому: оператор,
+  // ушедший в «Оборудование», на каждом заходе получал ещё и контроллер
+  // загрузок — лишний модуль, лишний запрос и вечный фоновый опрос раздела,
+  // которого он не открывал. Ленивый старт обязан означать «ровно то, что
+  // открыли», а не «то, что открыли, плюс первый по списку».
+  const restoreWork = mode === "works" && work && WORK_NAV.some(([w]) => w === work) ? work : null;
+  if (restoreWork) currentWork = restoreWork;
+  // restoreScroll:false — на первой отрисовке своего «прошлого места» ещё нет,
+  // а собственное восстановление прокрутки браузером (F5) трогать нельзя.
+  showMode(mode, { remember: false, restoreScroll: false });
+  if (restoreWork) showWork(restoreWork, { remember: false });
 }
 
 /* ── Смещения под липкие шапку и навигацию ─────────────────── */

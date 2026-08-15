@@ -409,10 +409,11 @@ function printerForm(printer, state) {
         )}
         ${textField("swatch", "Цвет метки", printer.swatch, { placeholder: "#7fb3d8" })}
         ${textField("interfaceUrl", "Веб-интерфейс принтера", printer.interfaceUrl, {
-          placeholder: "http://192.168.0.132:4408"
+          placeholder: "http://192.168.0.132:4408",
+          wide: true
         })}
-        ${textField("snapshotUrl", "URL кадра камеры", printer.snapshotUrl)}
-        ${textField("streamUrl", "URL потока камеры", printer.streamUrl)}
+        ${textField("snapshotUrl", "URL кадра камеры", printer.snapshotUrl, { wide: true })}
+        ${textField("streamUrl", "URL потока камеры", printer.streamUrl, { wide: true })}
         ${numberField("buildVolume.x", "Стол X, мм", bv.x, axisHints("x", specs, auto))}
         ${numberField("buildVolume.y", "Стол Y, мм", bv.y, axisHints("y", specs, auto))}
         ${numberField("buildVolume.z", "Стол Z, мм", bv.z, axisHints("z", specs, auto))}
@@ -648,9 +649,14 @@ function fieldHint(opts) {
   return opts.hint ? `<span class="slice-hint">${esc(opts.hint)}</span>` : `<span></span>`;
 }
 
+/* `wide` — поле под ДЛИННОЕ значение (адрес камеры, ссылка на веб-интерфейс).
+   Ширина поля обязана соответствовать роду данных в обе стороны: дорожка сетки
+   в 214 px показывает от «http://192.168.0.132:4408/webcam/?action=snapshot»
+   треть, и проверять введённое приходится, елозя каретку по строке. Такие поля
+   занимают две дорожки (см. .fld-wide в workflows.css). */
 function textField(name, label, value, opts = {}) {
   return `
-    <label>
+    <label${opts.wide ? ' class="fld-wide"' : ""}>
       ${fieldLabel(label, opts)}
       <input type="text" name="${esc(name)}" value="${esc(value ?? "")}"
         ${opts.placeholder ? `placeholder="${esc(opts.placeholder)}"` : ""} />

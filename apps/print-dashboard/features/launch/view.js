@@ -302,7 +302,7 @@ export function launchModalHtml(preview, ui) {
         unresolved
           ? ""
           : `<button type="button" class="btn btn-sm btn-ghost" data-launch-mode="${ui.mode === "auto" ? "manual" : "auto"}">
-               ${ui.mode === "auto" ? "Выбрать принтер вручную" : "← Автоматический выбор"}
+               ${ui.mode === "auto" ? "" : icon("arrowLeft")}<span>${ui.mode === "auto" ? "Выбрать принтер вручную" : "Автоматический выбор"}</span>
              </button>`
       }
       <span class="grow"></span>
