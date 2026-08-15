@@ -10,20 +10,20 @@
 .theme-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 13px;
-  border-radius: 999px;
+  gap: var(--s-2);
+  padding: 6px var(--s-3);
+  border-radius: var(--r-pill);
   background: var(--card);
   border: 1px solid var(--card-edge);
   color: var(--ink-soft);
-  font: 700 12.5px var(--font-body);
+  font: 700 var(--t-12) var(--font-body);
   letter-spacing: 0.02em;
   cursor: pointer;
-  transition: color 0.2s, border-color 0.2s, background 0.2s, transform 0.2s, box-shadow 0.2s;
+  transition: color var(--dur-fast), border-color var(--dur-fast), background var(--dur-fast), transform var(--dur-fast), box-shadow var(--dur-fast);
 }
 
 .theme-toggle:hover {
-  color: var(--gold-bright);
+  color: var(--gold-on-soft);
   border-color: var(--gold-line);
   background: var(--gold-soft);
   transform: translateY(-1px);
@@ -34,19 +34,23 @@
 .theme-toggle-icon {
   display: inline-grid;
   place-items: center;
-  width: 16px;
-  height: 16px;
   color: var(--gold);
-  transition: color 0.2s, transform 0.4s ease;
+  transition: color var(--dur-fast), transform 0.4s ease;
 }
-
-.theme-toggle-icon svg { width: 16px; height: 16px; display: block; }
 
 /* Иконка светит цветом текущего облика: луна — аметист, солнце — золото. */
 .theme-toggle[data-effective="dark"] .theme-toggle-icon { color: var(--amethyst-ink); }
 .theme-toggle[data-effective="light"] .theme-toggle-icon { color: var(--gold); }
-.theme-toggle:hover .theme-toggle-icon { color: var(--gold-bright); transform: rotate(-12deg); }
+.theme-toggle:hover .theme-toggle-icon { color: var(--gold-on-soft); transform: rotate(-12deg); }
 .theme-toggle-label { line-height: 1; }
+
+@media (max-width: 720px) {
+  /* На телефоне остаётся только знак облика — подпись «Авто/День/Ночь»
+     дублируется самим значком. Ширина не меньше 44 px: это цель для пальца,
+     а не декоративный кружок. */
+  .theme-toggle { padding: 0; width: 44px; height: 40px; justify-content: center; }
+  .theme-toggle-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+}
 
 /* ═══════════════════════════════════════════════════════════════
    СВЕТЛАЯ ТЕМА · «Соборный свет»
@@ -54,6 +58,15 @@
    в строках заголовков; старинное золото рогов и топазовый ирис глаз;
    аметистовая слива и чёрные перья крыльев. Тот же Назарик — но в
    утреннем свете витражей, а не в тронной тьме.
+
+   Это НЕ выцветшая копия тёмной темы: у неё своя логика. Тьма строит
+   иерархию свечением (что светлее — то важнее), свет строит её глубиной
+   чернил (что темнее — то важнее). Поэтому золото для ТЕКСТА здесь
+   углублено до старинного, а декоративные штрихи остаются живыми.
+
+   Все текстовые роли выверены по WCAG AA (≥ 4.5:1 к своей подложке —
+   именно к своей, а не к белому: цветной текст в этом интерфейсе почти
+   всегда лежит на собственном тонированном фоне).
 
    Активна только при [data-theme="light"] и выше по специфичности,
    чем тёмные значения в :root, — тёмная система остаётся нетронутой.
@@ -65,55 +78,86 @@
   /* Фарфор и жемчуг · светлый мрамор зала */
   --bg: #f3edf4;
   --card: #ffffff;
-  --card-edge: #e6dde7;          /* Холодная тень кожи, смягчённая */
+  --card-edge: #e2d8e4;          /* Холодная тень кожи; углублена — грань должна быть видна */
   --card-inner: rgb(31 27 40 / 4%);
   --track: #e7dfea;
 
   --card-top: #ffffff;
   --card-bot: #f7f1f8;
-  --edge-strong: #d8c9db;
+  --edge-strong: #cfbdd3;
   --btn-bg: #fbf7fc;
-  --btn-edge: #e3d9e6;
-  --toggle-off: #d2c7d6;
-  --table-line: #eee7f0;
+  --btn-edge: #ded2e1;
+  --toggle-off: #c9bcce;
+  --table-line: #ece4ee;
+  --card-sunken: rgb(31 27 40 / 5%);
 
   /* Обсидиановый волос · индиговый отлив — иерархия текста */
-  --ink: #201a2b;
-  --ink-soft: #55506c;
-  --ink-faint: #736b82;          /* 5.05:1 на белом — микрометки проходят AA */
+  --ink: #1d1727;
+  --ink-soft: #4b465f;
+  --ink-faint: #625c73;          /* 6.3:1 на белом — микрометки проходят AA с запасом */
 
   /* Старинное золото рогов · топазовый ирис.
      Для ТЕКСТА на светлом фоне золото углубляем (иначе теряет контраст);
      декоративные штрихи и рамки остаются в живом «старинном золоте». */
-  --gold: #c49a3a;
-  --gold-bright: #96701c;
-  --gold-deep: #7c5c16;
+  --gold: #b8901f;
+  --gold-bright: #8a6413;
+  --gold-deep: #6d4e0d;
   --gold-soft: rgb(196 154 58 / 15%);
-  --gold-line: rgb(196 154 58 / 42%);
-  --topaz: #b78d24;
+  --gold-line: rgb(160 122 32 / 45%);
+  --topaz: #a37c18;
+  /* Золото текстом на золотой подложке — прежняя пара давала 3.99:1.
+     #6f5210 на --gold-soft поверх белого (≈ #f6efdd) даёт ≈ 6.4:1. */
+  --gold-on-soft: #6f5210;
 
   /* Аметистовая слива крыльев */
   --amethyst: #6d4c78;
   --amethyst-soft: rgb(109 76 120 / 13%);
-  --amethyst-ink: #5a3d66;
+  --amethyst-line: rgb(109 76 120 / 42%);
+  --amethyst-ink: #543660;
 
   /* Заголовки — обсидиан на фарфоре (чёрные волосы на бледной коже). */
-  --ivory: #221a2b;
+  --ivory: #201829;
 
-  --ok: #3f9769;
-  --ok-soft: rgb(63 151 105 / 13%);
-  --warn: #b5792a;
-  --warn-soft: rgb(181 121 42 / 14%);
-  --danger: #c0485c;
-  --danger-soft: rgb(192 72 92 / 12%);
+  /* ── Семантика состояний ─────────────────────────────────────
+     Каждый ink выверен к СВОЕЙ подложке (соответствующий *-soft на фарфоре),
+     а не к чистому белому. */
+  --ok: #2f8156;
+  --ok-ink: #1f6741;             /* было #2f7d52 → 4.35:1; теперь ≈ 5.6:1 */
+  --ok-soft: rgb(47 129 86 / 13%);
+  --ok-line: rgb(47 129 86 / 40%);
 
-  --ok-ink: #2f7d52;
-  --warn-ink: #8c5c16;
-  --danger-ink: #a5384b;
-  --slate: #6a6786;
-  --slate-soft: rgb(106 103 134 / 14%);
-  --offline: #857f95;
-  --offline-soft: rgb(133 127 149 / 16%);
+  --warn: #a86a12;
+  --warn-ink: #7a4c0b;           /* ≈ 6.1:1 на своей подложке */
+  --warn-soft: rgb(168 106 18 / 14%);
+  --warn-line: rgb(168 106 18 / 40%);
+
+  --danger: #b83c52;
+  --danger-ink: #98243a;         /* ≈ 6.4:1 */
+  --danger-soft: rgb(184 60 82 / 12%);
+  --danger-line: rgb(184 60 82 / 40%);
+
+  --info: #3f5680;
+  --info-ink: #2f4468;
+  --info-soft: rgb(63 86 128 / 12%);
+  --info-line: rgb(63 86 128 / 38%);
+
+  --blocked: #6f5872;
+  --blocked-ink: #523956;
+  --blocked-soft: rgb(111 88 114 / 14%);
+  --blocked-line: rgb(111 88 114 / 42%);
+
+  --slate: #56536e;
+  --slate-soft: rgb(86 83 110 / 14%);
+  --offline: #5f5a6e;
+  --offline-ink: #4d4859;        /* было #6d687e → 4.49:1; теперь ≈ 7:1 */
+  --offline-soft: rgb(95 90 110 / 14%);
+
+  /* Погашенное: собственная светлая поверхность и текст, держащий 4.5:1.
+     Прежние 2.45:1 (opacity .4 на кнопке) делали подпись нечитаемой. */
+  --disabled-bg: #f0ebf2;
+  --disabled-edge: #ddd3df;
+  --disabled-ink: #625d70;       /* ≈ 5.9:1 на --disabled-bg */
+  --disabled-icon: #746e83;
 
   /* Ночная карточка остаётся тёмной (тронная чернота) и днём —
      чёрное крыло Альбедо, обсидиановая брошь на фарфоре зала. */
@@ -122,12 +166,15 @@
   --night-deep: #0a0714;
 
   /* Тени — прохладные и лёгкие, свет словно из витражей, не из бездны. */
-  --shadow: 0 16px 34px -14px rgb(74 58 104 / 26%);
-  --shadow-hover: 0 26px 50px -16px rgb(66 50 96 / 34%);
+  --shadow: 0 10px 22px -14px rgb(74 58 104 / 26%);
+  --shadow-hover: 0 18px 34px -18px rgb(66 50 96 / 32%);
+  --shadow-pop: 0 22px 44px -20px rgb(66 50 96 / 38%);
 
   /* Кружево-парча (светлый облик): сливовое плетение и узлы, старинно-золотые
-     перья — тот же мотив, что и ночью, но для фарфора зала. */
-  --damask: url("data:image/svg+xml,%3Csvg xmlns='http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg' width='168' height='235' viewBox='0 0 150 210'%3E%3Cpath d='M75 0 C40 20 0 55 0 105 C0 155 40 190 75 210M75 0 C110 20 150 55 150 105 C150 155 110 190 75 210' fill='none' stroke='%236d4c78' stroke-opacity='0.17' stroke-width='1.1'%2F%3E%3Cg fill='%236d4c78' fill-opacity='0.22'%3E%3Cpath d='M0 105 l6 -6 -6 -6 -6 6 z'%2F%3E%3Cpath d='M150 105 l6 -6 -6 -6 -6 6 z'%2F%3E%3Cpath d='M75 0 l6 6 -6 6 -6 -6 z'%2F%3E%3Cpath d='M75 210 l6 -6 -6 -6 -6 6 z'%2F%3E%3C%2Fg%3E%3Cg transform='translate(59.5 87) scale(1.55)' fill='%23b58a2a' fill-opacity='0.17' stroke='%236d4c78' stroke-opacity='0.17' stroke-width='0.5'%3E%3Cpath d='M16 3.5C10.6 6.2 6.6 11.4 4.6 20.4c5.2-1.5 9.1-5.6 11-12.3z'%2F%3E%3Cpath d='M4.6 20.4C8.4 13.6 12.2 8.2 16 3.5' fill='none'%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E");
+     перья — тот же мотив, что и ночью, но для фарфора зала. Днём узор ощутимо
+     тише: на светлом он контрастнее по своей природе и начинал соперничать
+     с данными в формах. */
+  --damask: url("data:image/svg+xml,%3Csvg xmlns='http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg' width='168' height='235' viewBox='0 0 150 210'%3E%3Cpath d='M75 0 C40 20 0 55 0 105 C0 155 40 190 75 210M75 0 C110 20 150 55 150 105 C150 155 110 190 75 210' fill='none' stroke='%236d4c78' stroke-opacity='0.11' stroke-width='1.1'%2F%3E%3Cg fill='%236d4c78' fill-opacity='0.15'%3E%3Cpath d='M0 105 l6 -6 -6 -6 -6 6 z'%2F%3E%3Cpath d='M150 105 l6 -6 -6 -6 -6 6 z'%2F%3E%3Cpath d='M75 0 l6 6 -6 6 -6 -6 z'%2F%3E%3Cpath d='M75 210 l6 -6 -6 -6 -6 6 z'%2F%3E%3C%2Fg%3E%3Cg transform='translate(59.5 87) scale(1.55)' fill='%23b58a2a' fill-opacity='0.12' stroke='%236d4c78' stroke-opacity='0.11' stroke-width='0.5'%3E%3Cpath d='M16 3.5C10.6 6.2 6.6 11.4 4.6 20.4c5.2-1.5 9.1-5.6 11-12.3z'%2F%3E%3Cpath d='M4.6 20.4C8.4 13.6 12.2 8.2 16 3.5' fill='none'%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E");
 }
 
 /* Соборный свет: фарфор, тёплые нити золота и сливы; то же кружево-парча, что
@@ -153,9 +200,9 @@
 
 /* Липкие панели — полупрозрачный жемчуг поверх контента. */
 :root[data-theme="light"] .topbar,
-:root[data-theme="light"] .section-nav { background: rgb(248 245 251 / 82%); }
+:root[data-theme="light"] .modebar { background: rgb(248 245 251 / 86%); }
 
-:root[data-theme="light"].scrolled .section-nav {
+:root[data-theme="light"].scrolled .modebar {
   box-shadow:
     0 1px 0 rgb(196 154 58 / 24%),
     0 16px 26px -22px rgb(80 60 110 / 55%);
@@ -168,6 +215,17 @@
 }
 
 :root[data-theme="light"] .brand-sub { color: var(--gold-bright); }
+
+/* Переключатель режимов днём: активный сегмент — то же тяжёлое золото. */
+:root[data-theme="light"] .modeswitch { background: #ffffff; }
+:root[data-theme="light"] .mode-tab { color: var(--ink-soft); }
+:root[data-theme="light"] .mode-tab-ico { color: var(--gold-bright); }
+:root[data-theme="light"] .mode-tab.is-active,
+:root[data-theme="light"] .mode-tab.is-active:hover {
+  color: #251a06;
+  background: linear-gradient(180deg, #e6c675, #c39738);
+}
+:root[data-theme="light"] .mode-tab.is-active .mode-tab-ico { color: #3a2a08; }
 
 /* Hero: светящаяся фарфоровая плита с золотым и сливовым свечением. */
 :root[data-theme="light"] .hero {
@@ -186,38 +244,32 @@
    обсидиановый текст (var(--ivory)), а не залитую плашку. */
 @supports (-webkit-background-clip: text) or (background-clip: text) {
   :root[data-theme="light"] .hero h1 {
-    background: linear-gradient(105deg, #1d1727 0%, #3e3a57 44%, #96701c 100%);
+    background: linear-gradient(105deg, #1d1727 0%, #3e3a57 44%, #8a6413 100%);
     -webkit-background-clip: text;
     background-clip: text;
   }
 }
 
-/* Днём скетч — графит на фарфоре: плотнее и почти без сепии, тёплый тон
-   подобран под свечение из тьмы и на белом отдаёт желтизной. */
-:root[data-theme="light"] .hero-sketch {
-  --hero-sketch-opacity: 0.6;
-  --hero-sketch-opacity-breathe: 0.64;
-}
-:root[data-theme="light"] .hero-sketch img { filter: sepia(0.18) contrast(1.03); }
+/* Днём над залом опадают чёрные перья крыльев (одно — сливовое), а свечение
+   ауры становится сливово-золотым по фарфору. */
+:root[data-theme="light"] .feather { color: rgb(26 20 34 / 30%); }
+:root[data-theme="light"] .feather.f2 { color: rgb(109 76 120 / 30%); }
+:root[data-theme="light"] .feather.f4 { color: rgb(109 76 120 / 34%); }
+:root[data-theme="light"] .feather.f5 { color: rgb(26 20 34 / 20%); }
 
-/* В одну колонку портрет оказывается за текстом — днём приглушаем сильнее:
-   тёмный графит волос под обсидиановым текстом съедает контраст быстрее,
-   чем тот же портрет под слоновой костью ночи. */
-@media (max-width: 900px) {
-  :root[data-theme="light"] .hero-sketch {
-    --hero-sketch-opacity: 0.32;
-    --hero-sketch-opacity-breathe: 0.35;
-  }
+:root[data-theme="light"] .aura-glow {
+  background:
+    radial-gradient(closest-side, rgb(109 76 120 / 20%), transparent 72%),
+    radial-gradient(closest-side at 70% 30%, rgb(184 144 31 / 18%), transparent 70%);
 }
-
-/* Днём над залом опадают чёрные перья крыльев (одно — сливовое). */
-:root[data-theme="light"] .feather { color: rgb(26 20 34 / 34%); }
-:root[data-theme="light"] .feather.f2 { color: rgb(109 76 120 / 32%); }
+:root[data-theme="light"] .aura-figure { color: var(--gold); opacity: 0.6; }
+:root[data-theme="light"] .aura-wing { color: #3a2f45; opacity: 0.4; }
+:root[data-theme="light"] .aura-horns { color: var(--gold-bright); }
 
 /* Плитки показателей — белые изразцы с прохладной гранью, цифры-обсидиан. */
 :root[data-theme="light"] .stat-tile {
   background: linear-gradient(180deg, #ffffff, #f6f0f7);
-  border-color: #e7dee9;
+  border-color: #e3d9e5;
   box-shadow: 0 1px 2px rgb(80 60 110 / 5%);
 }
 
@@ -226,35 +278,42 @@
   background: linear-gradient(90deg, transparent 12%, rgb(196 154 58 / 55%) 50%, transparent 88%);
 }
 
-/* В hero изразцы полупрозрачны: глухой белый прятал скетч целиком, а сквозь
-   матовый фарфор портрет просвечивает, оставляя обсидиановые цифры чёткими. */
-:root[data-theme="light"] .hero-stats .stat-tile {
-  background: linear-gradient(180deg, rgb(255 255 255 / 82%), rgb(246 240 247 / 66%));
-}
-
 :root[data-theme="light"] .stat-tile:hover {
-  box-shadow: 0 10px 22px -12px rgb(80 60 110 / 30%), 0 0 0 1px rgb(196 154 58 / 20%);
+  box-shadow: 0 10px 22px -14px rgb(80 60 110 / 30%), 0 0 0 1px rgb(196 154 58 / 20%);
   border-color: var(--gold-line);
 }
 
 /* Строки-списки: наведение — лёгкий обсидиановый иней. */
 :root[data-theme="light"] .row:hover { background: rgb(31 27 40 / 5%); }
-:root[data-theme="light"] .row-danger:hover { background: rgb(192 72 92 / 14%); border-color: rgb(192 72 92 / 40%); }
-:root[data-theme="light"] .row-warn:hover { background: rgb(181 121 42 / 16%); border-color: rgb(181 121 42 / 40%); }
+:root[data-theme="light"] .row-danger:hover { background: rgb(184 60 82 / 14%); border-color: var(--danger-line); }
+:root[data-theme="light"] .row-warn:hover { background: rgb(168 106 18 / 16%); border-color: var(--warn-line); }
+:root[data-theme="light"] .row-blocked {
+  background:
+    repeating-linear-gradient(135deg, rgb(111 88 114 / 8%) 0 6px, transparent 6px 12px),
+    var(--blocked-soft);
+}
+
+/* Меню «⋯» днём — белая карточка с прохладной тенью. */
+:root[data-theme="light"] .menu { background: #ffffff; }
+
+/* Скелеты: на фарфоре бегущий блик должен быть темнее фона, а не светлее. */
+:root[data-theme="light"] .sk::after {
+  background: linear-gradient(90deg, transparent, rgb(31 27 40 / 5%), transparent);
+}
 
 /* Иконка быстрого действия — светлый изразец с золотым знаком. */
 :root[data-theme="light"] .quick .q-icon {
   background: #f4eef6;
-  border-color: #e7dce9;
+  border-color: #e3d8e5;
   color: var(--gold-bright);
 }
 
 /* Тост — белый пергамент; золотую/статусную грань слева не трогаем. */
 :root[data-theme="light"] .toast {
   background: linear-gradient(180deg, #ffffff, #f7f1f8);
-  border-top-color: #e8dfea;
-  border-right-color: #e8dfea;
-  border-bottom-color: #e8dfea;
+  border-top-color: #e4dae6;
+  border-right-color: #e4dae6;
+  border-bottom-color: #e4dae6;
 }
 
 /* Свотчи материалов: near-white (жемчужный PLA) на белой карточке держится
@@ -264,11 +323,11 @@
   box-shadow: 0 1px 2px rgb(74 58 104 / 12%);
 }
 
-/* Глифы-иконки заголовков секций: --gold (#c49a3a) = 2.62:1 на белом — почти
-   не видны. Углубляем до #96701c (4.53:1); статусные (danger/warn) и глиф на
-   тёмной ночной карточке (топаз) не трогаем. */
+/* Глифы-иконки заголовков секций: живое золото #b8901f = 2.9:1 на белом —
+   почти не видно. Углубляем; статусные (danger/warn) и глиф на тёмной ночной
+   карточке (топаз) не трогаем. */
 :root[data-theme="light"] .card:not(.card-night) .glyph:not(.glyph-danger):not(.glyph-warn) {
-  color: #96701c;
+  color: var(--gold-bright);
 }
 
 /* «Следующий запуск» плана — было захардкоженное тёмное золото; приводим к
@@ -288,19 +347,23 @@
     repeating-linear-gradient(90deg, rgb(31 27 40 / 3.5%) 0 1px, transparent 1px 22px),
     radial-gradient(320px 150px at 50% 115%, rgb(196 154 58 / 14%), transparent 70%),
     linear-gradient(170deg, #f5eff7, #e9e0ec);
-  color: #9187a4;
+  color: #7d7490;
 }
 
-:root[data-theme="light"] .cam-offline,
+/* Плашка «подключение…» была #7a7288 на светлом — 4.05:1. Углубляем. */
 :root[data-theme="light"] .cam-state {
-  color: #7a7288;
+  color: #574f68;
   background:
     repeating-linear-gradient(45deg, rgb(31 27 40 / 3%) 0 6px, transparent 6px 12px),
-    rgb(245 239 247 / 86%);
+    rgb(245 239 247 / 88%);
 }
+:root[data-theme="light"] .cam-strip { color: var(--ink-soft); }
+:root[data-theme="light"] .cam-tag,
+:root[data-theme="light"] .cam-tag-stale { background: rgb(255 255 255 / 82%); color: #3f3852; }
+:root[data-theme="light"] .cam-tag-stale { color: var(--warn-ink); }
 
 /* Приглушённые бейджи — углубляем текст для читаемости на светлом. */
-:root[data-theme="light"] .badge-offline { color: #6d687e; }
+:root[data-theme="light"] .badge-offline { color: var(--offline-ink); }
 
 :root[data-theme="light"] .footer-sig { color: var(--gold-bright); }
 
@@ -310,8 +373,12 @@
   border-color: rgb(196 154 58 / 40%);
   box-shadow: var(--shadow-hover), inset 0 1px 0 rgb(236 229 216 / 5%);
 }
+/* Внутри тёмной броши действуют тёмные роли, а не светлые. */
+:root[data-theme="light"] .card-night .btn { background: rgb(244 238 226 / 6%); border-color: rgb(244 238 226 / 16%); color: var(--night-ink); }
+:root[data-theme="light"] .card-night .btn-primary { background: linear-gradient(135deg, #e0bd63, #b08834); color: #221806; border-color: #8a6a24; }
+:root[data-theme="light"] .card-night .btn[disabled] { background: rgb(244 238 226 / 5%); border-color: rgb(244 238 226 / 12%); color: #9a94ab; }
+:root[data-theme="light"] .card-night .night-reco { background: rgb(244 238 226 / 5%); border-color: rgb(244 238 226 / 10%); }
 
 @media (pointer: coarse) {
   .theme-toggle { min-height: 44px; }
 }
-

@@ -17,15 +17,11 @@ import { apiGet, apiPost } from "./api.js";
 import { createPoller } from "./shared/polling.js";
 import { installActions } from "./actions.js";
 import { reconcileCameras } from "./cameraPlayers.js";
-import { ensureReveal, renderNav, setupNav, setupStickyOffsets } from "./nav.js";
+import { ensureReveal, renderNav, restoreMode, setupNav, setupStickyOffsets } from "./nav.js";
 import { renderBoard } from "./render/board.js";
 import { syncModals } from "./render/modals.js";
 import { renderTopbar } from "./render/sections.js";
-import { setupOperations } from "./features/operations/controller.js";
-import { setupPrinterConfig } from "./features/printers/controller.js";
-import { setupScheduler } from "./features/scheduler/controller.js";
-import { setupSlicing } from "./features/slicing/controller.js";
-import { setupUploads } from "./features/uploads/controller.js";
+import { installMenus, isMenuOpen } from "./shared/menu.js";
 import { setNightWindow, setupTheme } from "./theme.js";
 import { $, esc, toast } from "./util.js";
 
@@ -83,6 +79,13 @@ function tickClock() {
 
 function renderAll() {
   if (!state) return;
+  // Пока оператор держит открытым меню «⋯», доску не пересобираем: очередной
+  // тик опроса снёс бы открытое меню прямо из-под курсора. Шапку обновляем —
+  // она вне перерисовываемой разметки.
+  if (isMenuOpen()) {
+    renderTopbar(state, backendReachable);
+    return;
+  }
   const snapshot = JSON.stringify(state);
   if (snapshot === lastRenderedJson) {
     // Данные не изменились — трогаем только шапку (статус связи), DOM доски
@@ -128,7 +131,9 @@ const dashboardPoller = createPoller({
     // auto-тема следует ему. Старый payload без этих полей оставляет fallback.
     setNightWindow(data.night?.windowStart, data.night?.windowEnd);
     renderAll();
-    if (everLoaded && !wasReachable) toast("Связь восстановлена — зал вновь под моим неусыпным надзором, Владыка ❖", "toast-ok");
+    // Знак тоста рисует сам toast() (SVG из общего набора) — в текст сообщения
+    // символы-картинки не кладём: у оператора может не оказаться такого шрифта.
+    if (everLoaded && !wasReachable) toast("Связь восстановлена — зал вновь под моим неусыпным надзором, Владыка", "toast-ok");
     everLoaded = true;
   },
   onError: (err, { silent }) => {
@@ -152,20 +157,39 @@ function refresh({ silent = true } = {}) {
 
 installActions({ getState: () => state, refresh });
 
+/* ── Ленивый старт разделов «Работ» ────────────────────────────
+   Каждый рабочий раздел — самостоятельный контроллер с собственным опросом
+   (загрузка, слайсинг, планировщик, оператор, оборудование). Раньше все пять
+   поднимались на старте страницы: девять лишних запросов и пять таймеров ещё
+   до того, как оператор вообще решил, нужны ли ему «Работы». Теперь модуль
+   раздела грузится динамическим import() при ПЕРВОМ открытии вкладки — это
+   же снимает его код с критического пути первой отрисовки. */
+const WORK_SETUP = {
+  uploads: () => import("./features/uploads/controller.js").then((m) => m.setupUploads()),
+  slicing: () => import("./features/slicing/controller.js").then((m) => m.setupSlicing()),
+  scheduler: () => import("./features/scheduler/controller.js").then((m) => m.setupScheduler()),
+  operations: () => import("./features/operations/controller.js").then((m) => m.setupOperations()),
+  hardware: () => import("./features/printers/controller.js").then((m) => m.setupPrinterConfig()),
+  // Автоматизации рисуются из общего payload доски — своего контроллера нет.
+  automations: () => Promise.resolve(),
+};
+
+function openWorkSection(id) {
+  const start = WORK_SETUP[id];
+  if (!start) return;
+  start().catch((err) => {
+    console.error("не удалось поднять раздел", id, err);
+    const body = document.getElementById(`${id}-body`);
+    if (body) {
+      body.innerHTML = `<div class="slice-empty">Раздел не загрузился: ${esc(err?.message || "причина неизвестна")}. Обновите страницу.</div>`;
+    }
+  });
+}
+
 setupTheme();
+installMenus();
 renderNav();
 renderTopbar(state, backendReachable);
-// Раздел загрузки живёт независимо от опроса доски: инициализируем один раз.
-setupUploads();
-// Раздел слайсинга (профили OrcaSlicer, наборы, подготовка) — тоже независим.
-setupSlicing();
-// Раздел планировщика (ручная очередь, совместимость, план, ночь) — независим.
-setupScheduler();
-// Раздел оператора (расписание, сон, ручные операции, вынужденный простой).
-setupOperations();
-// Раздел оборудования (подключение принтеров, настройки, коды доступа) —
-// независим от опроса доски: его данные живут в отдельном разделе API.
-setupPrinterConfig();
 tickClock();
 setInterval(tickClock, 1000);
 
@@ -174,7 +198,8 @@ setInterval(tickClock, 1000);
 // проявляется, а не остаётся с opacity:0.
 ensureReveal();
 setupStickyOffsets();
-setupNav();
+setupNav({ onWorkOpen: openWorkSection });
+restoreMode();
 
 // Запускаем цикл опроса, затем — немедленная первая (не тихая) загрузка. Дальше
 // каждый следующий тик планируется через DASHBOARD_POLL_MS после завершения

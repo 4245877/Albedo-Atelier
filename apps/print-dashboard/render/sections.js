@@ -1,6 +1,7 @@
-import { $, esc, emptyRow } from "../util.js";
+import { $, esc, emptyRow, emptyState } from "../util.js";
 import { badge } from "../shared/chips.js";
 import { fmtLeft } from "../shared/format.js";
+import { icon } from "../shared/icons.js";
 import { isBusy, progressBarHtml, progressPercentText } from "./printerView.js";
 
 /* ── Верхняя панель (статус сервиса / backend) ─────────────── */
@@ -10,17 +11,24 @@ export function renderTopbar(state, backendReachable) {
   const pillBackend = $("#pill-backend");
   if (!pillService || !pillBackend) return;
 
+  // Подпись пилюли живёт в .pill-txt: на телефоне CSS прячет именно её, оставляя
+  // цветную точку-индикатор, — шапка перестаёт занимать три ряда.
   if (backendReachable && state) {
     pillBackend.className = "pill pill-ok";
-    pillBackend.innerHTML = `<i class="dot"></i>Backend подключён`;
+    pillBackend.innerHTML = `<i class="dot"></i><span class="pill-txt">Backend подключён</span>`;
+    pillBackend.title = "Backend подключён";
     const ok = state.service.status === "ok";
     pillService.className = `pill ${ok ? "pill-ok" : "pill-warn"}`;
-    pillService.innerHTML = `<i class="dot dot-pulse"></i>${ok ? "Служба безупречна" : "Сервис: требует внимания"}`;
+    const label = ok ? "Служба безупречна" : "Сервис: требует внимания";
+    pillService.innerHTML = `<i class="dot dot-pulse"></i><span class="pill-txt">${label}</span>`;
+    pillService.title = label;
   } else {
     pillBackend.className = "pill pill-danger";
-    pillBackend.innerHTML = `<i class="dot"></i>Backend безмолвствует`;
+    pillBackend.innerHTML = `<i class="dot"></i><span class="pill-txt">Backend безмолвствует</span>`;
+    pillBackend.title = "Backend безмолвствует";
     pillService.className = "pill pill-warn";
-    pillService.innerHTML = `<i class="dot"></i>Нет вестей`;
+    pillService.innerHTML = `<i class="dot"></i><span class="pill-txt">Нет вестей</span>`;
+    pillService.title = "Нет вестей";
   }
 }
 
@@ -52,37 +60,94 @@ export function renderHero(state) {
 
 /* ── 2 · Очередь ───────────────────────────────────────────── */
 
+/**
+ * Итоговое состояние задания очереди.
+ *
+ * ПРАВИЛО, ради которого функция существует: видимый статус объекта
+ * определяется САМЫМ СЕРЬЁЗНЫМ его актуальным состоянием.
+ *
+ * Раньше строка очереди читала только `job.status`. Задание, у которого
+ * `status: "ready"` и при этом `reason: "MicroSD не отвечает — файл не удалось
+ * записать"`, показывалось зелёным «готово к запуску», причина уходила в
+ * приглушённую подпись через тире, а рядом стояла заметная кнопка запуска.
+ * Оператор видел зелёное «готово» и жал «Запустить» — запуск был невозможен
+ * с самого начала. Это худший вид ошибки интерфейса: он не путает, а
+ * дезинформирует.
+ *
+ * Теперь наличие блокирующей причины ПЕРЕВЕШИВАЕТ «ready», причина выносится
+ * отдельной заметной строкой, а действие меняется с «Запустить» на
+ * «Разобраться» — то есть на то, что действительно можно сделать.
+ *
+ * @returns {{key:string,label:string,badge:string,row:string,blocked:boolean,
+ *            reason:string,actionLabel:string}}
+ */
+export function queueJobStatus(job) {
+  const reason = typeof job.reason === "string" ? job.reason.trim() : "";
+
+  if (job.status === "unconfirmed") {
+    return {
+      key: "unconfirmed",
+      label: "запуск не подтверждён",
+      badge: "badge-amethyst",
+      row: "row-warn",
+      blocked: true,
+      reason: reason || "Прошлая попытка запуска осталась без ответа принтера",
+      actionLabel: "Разобраться с запуском"
+    };
+  }
+
+  // «Готово» с блокирующей причиной готовым не является.
+  if (reason) {
+    return {
+      key: job.status === "review" ? "review" : "blocked",
+      label: job.status === "review" ? "требует проверки" : "требует внимания",
+      badge: job.status === "review" ? "badge-paused" : "badge-blocked",
+      row: job.status === "review" ? "row-warn" : "row-blocked",
+      blocked: true,
+      reason,
+      actionLabel: "Разобраться"
+    };
+  }
+
+  if (job.status === "review") {
+    return {
+      key: "review",
+      label: "требует проверки",
+      badge: "badge-paused",
+      row: "row-warn",
+      blocked: true,
+      reason: "Задание ещё не готово к запуску",
+      actionLabel: "Разобраться"
+    };
+  }
+
+  return {
+    key: "ready", label: "готово к запуску", badge: "badge-idle",
+    row: "", blocked: false, reason: "", actionLabel: "Запустить печать"
+  };
+}
+
 /* Строка очереди. Статусы: ready / review / unconfirmed (legacy "error"
    нормализуется в review на backend и до фронта не доходит).
 
-   `unconfirmed` — единственный статус со СВОИМ действием прямо в строке, и это
-   не запуск. Раньше такое задание проецировалось в review, а review-строка не
-   имеет кнопок вовсе: задание, которому был нужен ответ оператора, оказывалось
-   единственным, на котором нельзя было ничего нажать. Оператор уходил искать
-   любую кнопку «Запустить» — и находил её в «Исполнении», где она вела в 409.
-   Кнопка ведёт в то же окно запуска, что и обычный старт: разрешение прошлой
-   попытки живёт там, где оператор в неё упирается. */
+   Блокирующая причина — СВОЯ строка с собственным знаком, а не хвост
+   приглушённой подписи: подпись читают последней, а причина отказа обязана
+   попадаться на глаза первой. */
 export function queueRow(job, printers) {
-  const unconfirmed = job.status === "unconfirmed";
-  const review = job.status === "review";
-  const cls = unconfirmed || review ? "row-warn" : "";
-  const st = unconfirmed
-    ? `<span class="badge badge-paused">запуск не подтверждён</span>`
-    : review
-      ? `<span class="badge badge-paused">требует проверки</span>`
-      : `<span class="badge badge-idle">готово к запуску</span>`;
-  // Не «Запустить»: следующий шаг — рассказать, что показал принтер. Обещать
-  // здесь старт значило бы обещать то, в чём сервер обязан отказать.
-  const action = unconfirmed
-    ? `<button class="btn btn-sm" data-act="launch" data-task="${esc(job.id)}">Разобраться с запуском</button>`
+  const st = queueJobStatus(job);
+  // Кнопка есть у всего, что требует вмешательства, и ведёт в одно и то же
+  // окно запуска: разрешение проблемы живёт там, где оператор в неё упирается.
+  const action = st.blocked
+    ? `<button class="btn btn-sm" data-act="launch" data-task="${esc(job.id)}">${esc(st.actionLabel)}</button>`
     : "";
   return `
-    <li class="row ${cls}">
+    <li class="row ${st.row}">
       <div class="grow">
         <div class="row-title">${esc(queueJobTitle(job))}</div>
-        <div class="row-sub">${esc(queueJobSubtitle(job, printers))}${job.reason ? ` — ${esc(job.reason)}` : ""}</div>
+        <div class="row-sub">${esc(queueJobSubtitle(job, printers))}</div>
+        ${st.reason ? `<p class="row-reason">${icon(st.key === "blocked" ? "blocked" : "warn")}<span>${esc(st.reason)}</span></p>` : ""}
       </div>
-      ${st}
+      <span class="badge ${st.badge}">${esc(st.label)}</span>
       ${action}
     </li>`;
 }
@@ -113,7 +178,10 @@ export function queueJobSubtitle(job, printers) {
 
 export function renderQueue(state) {
   const active = state.printers.filter(isBusy);
-  const next = state.queue.find((j) => j.status === "ready");
+  // Главной кнопкой раздела становится только ДЕЙСТВИТЕЛЬНО запускаемое
+  // задание: у «ready» с блокирующей причиной запуск невозможен, и предлагать
+  // его крупной золотой кнопкой — то же самое враньё, что и зелёный статус.
+  const next = state.queue.find((j) => !queueJobStatus(j).blocked);
   $("#queue-meta").textContent = `${active.length} активных · ${state.queue.length} в очереди`;
 
   $("#queue-body").innerHTML = `
@@ -152,13 +220,14 @@ export function renderQueue(state) {
 function nextJobCard(next, printers) {
   return `
     <div class="next-job">
-      <span class="star">❖</span>
+      <span class="star" aria-hidden="true">${icon("sigilFilled", { cls: "ico-md" })}</span>
       <div class="grow">
+        <p class="next-job-lbl">Ближайшее к запуску</p>
         <div class="row-title">${esc(queueJobTitle(next))}</div>
         <div class="row-sub">${esc(queueJobSubtitle(next, printers))}</div>
       </div>
-      <button class="btn btn-sm btn-primary" data-act="launch" data-task="${esc(next.id)}">
-        Запустить печать
+      <button class="btn btn-primary" data-act="launch" data-task="${esc(next.id)}">
+        ${icon("play")}<span>Запустить печать</span>
       </button>
     </div>`;
 }
@@ -177,8 +246,9 @@ export function renderNight(state) {
   $("#night-window").textContent = `окно ${n.window}`;
 
   const blockersBlock = c && !startable ? `
-      <div class="night-part-sub" style="margin-top:6px;color:var(--danger-ink)">
-        ⚠ Я не позволю этому запуску состояться: ${blockers.map((b) => esc(b)).join("; ")}
+      <div class="night-blockers">
+        <p class="night-blockers-head">${icon("blocked")}<span>Я не позволю этому запуску состояться</span></p>
+        <ul>${blockers.map((b) => `<li>${esc(b)}</li>`).join("")}</ul>
       </div>` : "";
 
   const reco = c ? `
@@ -200,14 +270,22 @@ export function renderNight(state) {
       <div class="night-part-sub" style="margin-top:6px">Достойных кандидатов нет, Владыка — добавьте в очередь готовые задания (с принтером и файлом) или включите «Подсказки ночной печати» в разделе автоматизаций, и я изберу лучшее.</div>
     </div>`;
 
+  // Запуск недоступен — кнопка называет причину: погашенная кнопка без
+  // объяснения неотличима от сломанной.
+  const startTitle = startable
+    ? ""
+    : c
+      ? ` title="${esc(`Запуск невозможен: ${blockers.join("; ")}`)}"`
+      : ' title="Кандидат на ночь ещё не избран"';
+
   $("#night-body").innerHTML = `
     ${reco}
     <div class="night-facts">
-      <span class="badge">☾ окно: ${esc(n.window)}</span>
+      <span class="badge">${icon("moon")}<span>окно: ${esc(n.window)}</span></span>
     </div>
     <div class="night-actions">
-      <button class="btn btn-ghost" data-act="night-pick" ${c ? "" : "disabled"}>Подобрать задание на ночь</button>
-      <button class="btn btn-primary" data-act="night-start" ${startable ? "" : "disabled"}>☾ Запустить ночную печать</button>
+      <button class="btn btn-primary" data-act="night-start"${startTitle} ${startable ? "" : "disabled"}>${icon("moon")}<span>Запустить ночную печать</span></button>
+      <button class="btn btn-ghost" data-act="night-pick" ${c ? "" : "disabled"}>Подобрать другое задание</button>
     </div>`;
 }
 
@@ -219,10 +297,10 @@ export function renderCritical(state) {
     <ul class="row-list">
       ${state.critical.map((e) => `
         <li class="row ${e.level === "err" ? "row-danger" : "row-warn"}">
-          <span class="row-icon">${esc(e.icon)}</span>
-          <div class="grow"><div class="row-title" style="font-weight:600">${esc(e.text)}</div></div>
+          <span class="row-icon ${e.level === "err" ? "row-icon-danger" : "row-icon-warn"}">${icon(e.level === "err" ? "blocked" : "warn")}</span>
+          <div class="grow"><div class="row-title row-title-plain">${esc(e.text)}</div></div>
           <span class="row-time">${esc(e.time)}</span>
-        </li>`).join("") || emptyRow("Критических событий нет — в зале царит безупречный порядок, как и подобает")}
+        </li>`).join("") || emptyRow("Критических событий нет — в зале царит безупречный порядок, как и подобает", { glyph: "shield" })}
     </ul>`;
 }
 
@@ -278,7 +356,7 @@ export function renderMaterials(state) {
     </div>
     ${mats.mismatch.map((m) => `
       <div class="row row-danger">
-        <span class="row-icon">◈</span>
+        <span class="row-icon row-icon-danger">${icon("material")}</span>
         <div class="grow">
           <div class="row-title">Несоответствие материала — недопустимо</div>
           <div class="row-sub">«${esc(m.job)}» требует ${esc(m.needs)}, но в ${esc(m.printer)} заправлен ${esc(m.loaded)}</div>
@@ -348,7 +426,7 @@ export function renderAutomations(state) {
         </div>
       </div>`).join("") || `<ul class="row-list">${emptyRow("Правила автоматизации ещё не установлены — движок автоматизаций пока не подключён, Владыка")}</ul>`}
     <div class="row">
-      <span class="row-icon">✠</span>
+      <span class="row-icon">${icon("clock")}</span>
       <div class="grow"><div class="row-sub">Последний запуск: <b>${esc(state.automationLastRun || "нет данных")}</b></div></div>
     </div>`;
 }
@@ -365,7 +443,7 @@ export function renderMaintenance(state) {
   const due = rows.filter((m) => m.due);
   $("#maint-meta").textContent = due.length ? `${due.length} требуют внимания` : "всё содержится безупречно";
   $("#maint-body").innerHTML = `
-    ${due.length ? `<div class="chip-line">${due.map((m) => `<span class="badge badge-paused">⚙ ${esc(m.p)}: пора обслужить</span>`).join("")}</div>` : ""}
+    ${due.length ? `<div class="chip-line">${due.map((m) => `<span class="badge badge-paused">${icon("gear")}<span>${esc(m.p)}: пора обслужить</span></span>`).join("")}</div>` : ""}
     <div class="table-wrap">
       <table class="table">
         <thead><tr>
@@ -390,26 +468,23 @@ export function renderMaintenance(state) {
 
 // Каждое быстрое действие ведёт к реальному результату: форма (data-act),
 // справочное окно (data-act) или прокрутка к существующей секции (data-goto).
+/* Быстрые действия — только то, что ЗАПУСКАЕТ работу. Переходы между
+   разделами теперь делает навигация режимов, и дублировать её плиткой
+   «Открыть очередь» больше незачем. */
 const QUICK = [
-  // Ведёт в раздел «Оборудование фермы»: принтер добавляется прямо в панели,
-  // без правки конфигурации и пересборки — справочное окно здесь больше не нужно.
-  ["＋", "Добавить принтер", { goto: "hardware" }],
-  ["▦", "Добавить задание", { act: "add-job" }],
-  ["⇪", "Загрузить файл", { goto: "uploads" }],
-  ["☰", "Открыть очередь", { goto: "queue" }],
-  ["☾", "Ночная печать", { goto: "night" }],
-  ["◉", "Камеры", { goto: "cameras" }],
-  ["◈", "Материалы", { goto: "materials" }],
-  ["⚙", "Настройки", { act: "settings" }],
+  ["queue", "Добавить задание", { act: "add-job" }],
+  ["upload", "Загрузить файл", { goto: "uploads" }],
+  ["printer", "Принять принтер", { goto: "hardware" }],
+  ["gear", "Настройки", { act: "settings" }],
 ];
 
 export function renderQuick() {
   $("#actions-body").innerHTML = QUICK
-    .map(([i, l, target]) => {
+    .map(([ico, label, target]) => {
       const attr = target.goto
         ? `data-goto="${esc(target.goto)}"`
         : `data-act="${esc(target.act)}"`;
-      return `<button class="quick" ${attr}><span class="q-icon">${i}</span>${l}</button>`;
+      return `<button type="button" class="quick" ${attr}><span class="q-icon">${icon(ico)}</span><span>${esc(label)}</span></button>`;
     })
     .join("");
 }
@@ -440,8 +515,8 @@ export function renderFeed(state) {
   $("#feed-body").innerHTML = `
     <ul class="feed-list">
       ${state.feed.slice(0, 8).map((e) => `
-        <li class="feed-item f-${e.kind}">
-          <div class="feed-text">${esc(e.icon)} ${feedText(e.text)}</div>
+        <li class="feed-item f-${esc(e.kind)}">
+          <div class="feed-text">${feedText(e.text)}</div>
           <div class="feed-time">${esc(e.time)}</div>
         </li>`).join("") || `<li class="feed-item f-info"><div class="feed-text">Хроника пока чиста — я заношу сюда каждый реальный переход статусов принтеров</div></li>`}
     </ul>`;
@@ -449,20 +524,49 @@ export function renderFeed(state) {
 
 /* ── 15 · Предупреждения ───────────────────────────────────── */
 
+/* ── Куда ведёт предупреждение ─────────────────────────────────
+   Важное предупреждение обязано объяснять и проблему, и путь решения.
+   «Автоматика остановлена из-за отсутствия расписания» маленькой янтарной
+   подписью — это сообщение о том, что ферма стоит, поданное как примечание.
+
+   Текст предупреждений приходит с backend в свободной форме, поэтому здесь —
+   БЕЗ ПРЕТЕНЗИЙ на полноту — сопоставление знакомых формулировок с разделом,
+   где это чинится. Не нашли соответствия — просто не показываем кнопку;
+   выдумывать переход, который никуда не ведёт, хуже, чем его отсутствие. */
+const WARNING_ROUTES = [
+  [/расписан|таймзон|часов[оы]|оператор|присмотр/i, { label: "Задать расписание", goto: "operations" }],
+  [/материал|филамент|катушк|смол|заканчива/i, { label: "К материалам", goto: "materials" }],
+  [/камер|snapshoturl|streamurl|поток/i, { label: "Настроить камеру", goto: "hardware" }],
+  [/принтер|подключ|адрес|код доступа|учётн/i, { label: "К оборудованию", goto: "hardware" }],
+  [/слайс|профил|orca/i, { label: "К слайсингу", goto: "slicing" }],
+  [/очеред|задани/i, { label: "К очереди", goto: "queue" }],
+];
+
+export function warningRoute(w) {
+  const haystack = `${w?.text || ""} ${w?.hint || ""}`;
+  for (const [re, route] of WARNING_ROUTES) if (re.test(haystack)) return route;
+  return null;
+}
+
 export function renderWarnings(state) {
   $("#warnings-meta").textContent = state.warnings.length
     ? `${state.warnings.length} требуют внимания`
     : "всё под моим контролем";
   $("#warnings-body").innerHTML = `
     <ul class="row-list">
-      ${state.warnings.map((w) => `
-        <li class="row ${w.level === "err" ? "row-danger" : w.level === "warn" ? "row-warn" : ""}">
-          <span class="row-icon">${esc(w.icon)}</span>
+      ${state.warnings.map((w) => {
+        const err = w.level === "err";
+        const route = warningRoute(w);
+        return `
+        <li class="row row-action ${err ? "row-danger" : w.level === "warn" ? "row-warn" : ""}">
+          <span class="row-icon ${err ? "row-icon-danger" : "row-icon-warn"}">${icon(err ? "blocked" : "warn")}</span>
           <div class="grow">
-            <div class="row-title" style="font-weight:600">${esc(w.text)}</div>
+            <div class="row-title row-title-plain">${esc(w.text)}</div>
             <div class="row-sub">${esc(w.hint)}</div>
           </div>
-        </li>`).join("") || emptyRow("Предупреждений нет — ничто не смеет тревожить ваш покой, Владыка")}
+          ${route ? `<button type="button" class="btn btn-sm" data-goto="${esc(route.goto)}">${esc(route.label)}</button>` : ""}
+        </li>`;
+      }).join("") || emptyRow("Предупреждений нет — ничто не смеет тревожить ваш покой, Владыка", { glyph: "shield" })}
     </ul>`;
 }
 
@@ -499,13 +603,13 @@ export function renderPlan(state) {
     <div>
       <p class="sub-head">Требует ручной подготовки</p>
       <ul class="row-list">
-        ${pl.manual.map((m) => `<li class="row row-warn"><span class="row-icon">✎</span><div class="grow row-sub" style="color:var(--ink)">${esc(m)}</div></li>`).join("")}
+        ${pl.manual.map((m) => `<li class="row row-warn"><span class="row-icon row-icon-warn">${icon("pencil")}</span><div class="grow row-sub row-sub-strong">${esc(m)}</div></li>`).join("")}
       </ul>
     </div>` : "";
 
   $("#plan-body").innerHTML = `
     ${nextBlock}
     ${upcomingBlock}
-    ${pl.nightReady ? `<div class="chip-line"><span class="badge badge-amethyst">☾ На ночь: ${esc(pl.nightReady)}</span></div>` : ""}
+    ${pl.nightReady ? `<div class="chip-line"><span class="badge badge-amethyst">${icon("moon")}<span>На ночь: ${esc(pl.nightReady)}</span></span></div>` : ""}
     ${manualBlock}`;
 }

@@ -5,6 +5,7 @@
 import { esc } from "../../util.js";
 import { chip, panel } from "../../shared/chips.js";
 import { fmtDate, fmtDuration, fmtTime, isoToInput } from "../../shared/format.js";
+import { icon } from "../../shared/icons.js";
 
 const VERDICT = {
   compatible: { label: "совместимо", cls: "ok" },
@@ -17,7 +18,7 @@ const DAYNIGHT = { any: "любое", day: "день", night: "ночь" };
    остаются на месте, оператор не видит ложного пустого состояния. */
 export function errorBanner(state) {
   if (!state.error) return "";
-  return `<div class="slice-panel sch-poll-error"><div class="slice-warn">⚠ Часть данных не обновилась (${esc(state.error)}) — показаны последние полученные; повторю попытку автоматически.</div></div>`;
+  return `<div class="slice-panel sch-poll-error"><div class="slice-warn">${icon("warn")}Часть данных не обновилась (${esc(state.error)}) — показаны последние полученные; повторю попытку автоматически.</div></div>`;
 }
 
 export function queueHtml(state) {
@@ -57,9 +58,9 @@ function queueRow(state, row, index) {
           ${t.material ? chip(esc(t.material), "mute") : ""}
           <span class="slice-spacer"></span>
           <div class="row-actions">
-            <button type="button" class="btn btn-sm btn-icon" data-sch-action="up" title="Поднять в очереди" aria-label="Поднять в очереди">↑</button>
-            <button type="button" class="btn btn-sm btn-icon" data-sch-action="down" title="Опустить в очереди" aria-label="Опустить в очереди">↓</button>
-            <button type="button" class="btn btn-sm" data-sch-action="toggle-edit">✎ параметры</button>
+            <button type="button" class="btn btn-sm btn-icon" data-sch-action="up" title="Поднять в очереди" aria-label="Поднять в очереди">${icon("arrowUp")}</button>
+            <button type="button" class="btn btn-sm btn-icon" data-sch-action="down" title="Опустить в очереди" aria-label="Опустить в очереди">${icon("arrowDown")}</button>
+            <button type="button" class="btn btn-sm" data-sch-action="toggle-edit">${icon("pencil")}<span>Параметры</span></button>
           </div>
         </div>
         <div class="sch-tags">${tags.join("") || `<span class="slice-hint">без ограничений</span>`}</div>
@@ -98,6 +99,93 @@ export function addTaskHtml() {
     </form>`;
 }
 
+/* ── Матрица совместимости ─────────────────────────────────────
+   Прежде вердикт стоял чипом, а ПРИЧИНА жила только в `title="…"`. На
+   телефоне и планшете подсказки по наведению не существует вовсе, то есть
+   ответ на единственный важный вопрос — «почему заблокировано?» — был
+   физически недоступен на устройстве, с которого чаще всего и смотрят ферму.
+   С клавиатуры до него тоже было не добраться.
+
+   Теперь: первая причина видна прямо в ячейке, а вся раскладка (блокеры /
+   замечания / предупреждения) раскрывается строкой «задание × принтеры» по
+   нажатию. `title` оставлен как дополнительный источник, но больше не
+   единственный. */
+
+/** Все причины ячейки, разложенные по важности. */
+function cellReasons(res) {
+  return {
+    blockers: (res.blockers || []).map((x) => x.message),
+    reviews: (res.reviews || []).map((x) => x.message),
+    warnings: (res.warnings || []).map((x) => x.message)
+  };
+}
+
+function matrixCell(r, p) {
+  const res = r.results.find((x) => x.printerId === p.id);
+  if (!res) return `<td class="mx-td"><span class="mx-none">—</span></td>`;
+  const v = VERDICT[res.verdict] || { label: res.verdict, cls: "info" };
+  const reasons = cellReasons(res);
+  const all = [...reasons.blockers, ...reasons.reviews, ...reasons.warnings];
+  const eta = res.eta && res.eta.seconds != null ? ` ${fmtDuration(res.eta.seconds)}` : "";
+  const verdictChip = chip(esc(v.label) + eta, v.cls);
+
+  if (!all.length) {
+    return `<td class="mx-td">${verdictChip}</td>`;
+  }
+
+  // Ячейка с причиной — кнопка: до неё доходит Tab, срабатывает Enter/Space,
+  // а на тач-устройстве это единственный способ добраться до подробностей.
+  const count = all.length > 1 ? `<span class="mx-more">ещё ${all.length - 1}</span>` : "";
+  return `
+    <td class="mx-td">
+      <button type="button" class="mx-cell" data-sch-action="cell" data-task="${esc(r.taskId || r.title)}"
+        title="${esc(all.join(" · "))}" aria-expanded="false">
+        ${verdictChip}
+        <span class="mx-reason">${esc(all[0])}</span>
+        ${count}
+      </button>
+    </td>`;
+}
+
+function reasonGroup(label, list, cls) {
+  if (!list.length) return "";
+  return `
+    <div class="mx-group mx-group-${cls}">
+      <p class="panel-sub">${esc(label)}</p>
+      <ul class="slice-findings">${list.map((m) => `<li class="slice-${cls}">${esc(m)}</li>`).join("")}</ul>
+    </div>`;
+}
+
+function matrixDetail(r, printers, colspan, expanded) {
+  const cards = printers.map((p) => {
+    const res = r.results.find((x) => x.printerId === p.id);
+    if (!res) return "";
+    const v = VERDICT[res.verdict] || { label: res.verdict, cls: "info" };
+    const reasons = cellReasons(res);
+    const groups = [
+      reasonGroup("Блокеры", reasons.blockers, "error"),
+      reasonGroup("Замечания", reasons.reviews, "warn"),
+      reasonGroup("Предупреждения", reasons.warnings, "hint")
+    ].join("");
+    return `
+      <div class="mx-card mx-card-${esc(v.cls)}">
+        <div class="mx-card-head"><b>${esc(p.name)}</b>${chip(esc(v.label), v.cls)}</div>
+        ${groups || `<p class="slice-hint">Препятствий нет — можно печатать.</p>`}
+      </div>`;
+  }).join("");
+
+  return `
+    <tr class="mx-detail" data-detail="${esc(r.taskId || r.title)}"${expanded ? "" : " hidden"}>
+      <td colspan="${colspan}">
+        <div class="mx-detail-head">
+          <b>${esc(r.title)}</b>
+          <span class="slice-hint">почему на каждом принтере</span>
+        </div>
+        <div class="mx-cards">${cards}</div>
+      </td>
+    </tr>`;
+}
+
 export function compatibilityHtml(state) {
   const { printers, rows } = state.matrix;
   if (!printers.length) {
@@ -106,18 +194,16 @@ export function compatibilityHtml(state) {
   if (!rows.length) {
     return panel("Матрица совместимости", `<div class="slice-empty">Нет заданий, которые надлежало бы проверить.</div>`);
   }
-  const head = `<tr><th>Задание</th>${printers.map((p) => `<th>${esc(p.name)}</th>`).join("")}</tr>`;
+  const expanded = state.expandedMatrix instanceof Set ? state.expandedMatrix : new Set();
+  const colspan = printers.length + 1;
+  const head = `<tr><th scope="col">Задание</th>${printers.map((p) => `<th scope="col">${esc(p.name)}</th>`).join("")}</tr>`;
   const body = rows.map((r) => {
-    const cells = printers.map((p) => {
-      const res = r.results.find((x) => x.printerId === p.id);
-      if (!res) return `<td>—</td>`;
-      const v = VERDICT[res.verdict] || { label: res.verdict, cls: "info" };
-      const reasons = [...res.blockers, ...res.reviews, ...res.warnings].map((x) => x.message).join(" · ");
-      const eta = res.eta && res.eta.seconds != null ? ` ${fmtDuration(res.eta.seconds)}` : "";
-      return `<td title="${esc(reasons)}">${chip(esc(v.label) + eta, v.cls)}</td>`;
-    }).join("");
-    return `<tr><td class="sch-cell-task">${esc(r.title)}</td>${cells}</tr>`;
+    const key = r.taskId || r.title;
+    const cells = printers.map((p) => matrixCell(r, p)).join("");
+    return `<tr data-mx-row="${esc(key)}"><th scope="row" class="sch-cell-task">${esc(r.title)}</th>${cells}</tr>
+            ${matrixDetail(r, printers, colspan, expanded.has(key))}`;
   }).join("");
+
   return panel("Матрица совместимости",
     `<div class="sch-matrix-wrap"><table class="sch-matrix"><thead>${head}</thead><tbody>${body}</tbody></table></div>`,
     `<span class="slice-hint">неизвестное критичное значение → «проверить», не «совместимо»</span>`);
@@ -164,9 +250,9 @@ const SEGMENT = {
 export function planHtml(state) {
   const plan = state.plan;
   const controls = `
-    <button type="button" class="btn btn-primary btn-sm" data-sch-action="recompute-all">↻ Пересчитать рекомендации</button>
+    <button type="button" class="btn btn-primary btn-sm" data-sch-action="recompute-all">${icon("refresh")}<span>Пересчитать рекомендации</span></button>
     ${plan && plan.plan.state === "DRAFT"
-      ? `<button type="button" class="btn btn-ok btn-sm" data-sch-action="confirm" data-id="${esc(plan.plan.id)}">✓ Подтвердить план вручную</button>`
+      ? `<button type="button" class="btn btn-ok btn-sm" data-sch-action="confirm" data-id="${esc(plan.plan.id)}">${icon("check")}<span>Подтвердить план вручную</span></button>`
       : ""}`;
 
   if (!plan) {
@@ -183,7 +269,7 @@ export function planHtml(state) {
       : chip(`${esc(p.state)} · ревизия ${p.revision}`, "info");
   const confirmed = p.confirmedAt ? `<span class="slice-hint">подтверждён ${fmtDate(p.confirmedAt)}</span>` : "";
   const stale = plan.staleness && plan.staleness.stale
-    ? `<div class="slice-warn sch-stale-plan">⚠ План устарел: ${esc(plan.staleness.reason || "есть более новая рекомендация")} — пересчитайте, прежде чем подтверждать.</div>`
+    ? `<div class="slice-warn sch-stale-plan">${icon("warn")}План устарел: ${esc(plan.staleness.reason || "есть более новая рекомендация")} — пересчитайте, прежде чем подтверждать.</div>`
     : "";
   const generated = plan.generatedAt
     ? `<span class="slice-hint">рассчитан ${fmtDate(plan.generatedAt)}</span>`
@@ -296,10 +382,10 @@ function assignmentCard(view) {
     ? `<div class="slice-hint">альтернативы: ${ex.alternatives.map((a) => `${esc(a.printerId)} (${a.score})`).join(", ")}</div>`
     : "";
   const blockers = Array.isArray(ex.blockers) && ex.blockers.length
-    ? `<ul class="slice-findings">${ex.blockers.map((b) => `<li class="slice-error">✖ ${esc(b)}</li>`).join("")}</ul>`
+    ? `<ul class="slice-findings">${ex.blockers.map((b) => `<li class="slice-error">${icon("cross")}${esc(b)}</li>`).join("")}</ul>`
     : "";
   const warns = Array.isArray(ex.warnings) && ex.warnings.length
-    ? `<ul class="slice-findings">${ex.warnings.map((w) => `<li class="slice-warn">⚠ ${esc(w)}</li>`).join("")}</ul>`
+    ? `<ul class="slice-findings">${ex.warnings.map((w) => `<li class="slice-warn">${icon("warn")}${esc(w)}</li>`).join("")}</ul>`
     : "";
   return `
     <div class="sch-assign${ex.frozen ? " sch-assign-frozen" : ""}">
@@ -319,7 +405,7 @@ function assignmentCard(view) {
 function unplacedHtml(unplaced) {
   if (!Array.isArray(unplaced) || !unplaced.length) return "";
   return `<div class="sch-unplaced"><p class="panel-sub">Не поставлены в план</p><ul class="slice-findings">
-      ${unplaced.map((u) => `<li class="slice-warn">⚠ ${esc(u.title)} — <code>${esc(u.code || "UNKNOWN")}</code> ${esc(UNPLACED_LABEL[u.code] || "")}: ${esc(u.reason)}${
+      ${unplaced.map((u) => `<li class="slice-warn">${icon("warn")}${esc(u.title)} — <code>${esc(u.code || "UNKNOWN")}</code> ${esc(UNPLACED_LABEL[u.code] || "")}: ${esc(u.reason)}${
         u.hint ? ` <span class="slice-hint">(${esc(u.hint.note)}: ${esc(u.hint.printerId)} ${fmtTime(u.hint.startMs)}–${fmtTime(u.hint.endMs)})</span>` : ""
       }</li>`).join("")}
      </ul></div>`;
@@ -347,7 +433,7 @@ export function nightHtml(state) {
     : `<div class="slice-empty">Достойных ночи кандидатов нет, Владыка. Я требую от них: готовый слайс, утверждённый набор, известную ETA, достаток материала, свежую телеметрию, чистый стол и дозволение печатать без присмотра.</div>`;
   const rejected = (n.rejected || []).length
     ? `<details class="slice-details"><summary>Отклонённые кандидаты (${n.rejected.length})</summary>
-        <ul class="slice-findings">${n.rejected.map((r) => `<li class="slice-warn">⚠ ${esc(r.title)} → ${esc(r.printerId)}: ${esc((r.reasons || []).join("; "))}</li>`).join("")}</ul>
+        <ul class="slice-findings">${n.rejected.map((r) => `<li class="slice-warn">${icon("warn")}${esc(r.title)} → ${esc(r.printerId)}: ${esc((r.reasons || []).join("; "))}</li>`).join("")}</ul>
        </details>`
     : "";
   return panel("Ночные кандидаты", `${candidates}${rejected}`, buffer);

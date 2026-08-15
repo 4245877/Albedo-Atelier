@@ -6,14 +6,22 @@
 
 import { API_BASE, apiGet, apiPost } from "../api.js";
 import { reconcileCameras } from "../cameraPlayers.js";
-import { $, esc, toast } from "../util.js";
+import { $, esc, setBusy, toast } from "../util.js";
 import { badge } from "../shared/chips.js";
+import { confirmAction, createFocusTrap } from "../shared/dialog.js";
 import { fmtBytes, fmtLeft } from "../shared/format.js";
-import { commonActionButtons, materialBlock, telemetryTempRows } from "./printerParts.js";
+import {
+  focusFirstInvalid,
+  formErrorHtml,
+  showFormError,
+  validateForm,
+  wireBlurValidation
+} from "../shared/form.js";
+import { icon } from "../shared/icons.js";
+import { actionBar, materialBlock, telemetryTempRows } from "./printerParts.js";
 import { camBlock } from "./printers.js";
 import { createLaunchController } from "../features/launch/controller.js";
 import {
-  actionAvailability,
   isBusy,
   jobLine,
   lightPolicyLine,
@@ -25,6 +33,9 @@ import {
 let deps = { getState: () => null, refresh: async () => {} };
 let root = null; // .modal-backdrop
 let current = null; // { kind, printerId?, lastJson? }
+/* Ловушка фокуса открытого окна: Tab не уходит за скрым, Esc закрывает,
+   а фокус возвращается на кнопку, которой окно открыли. */
+let trap = null;
 
 export function initModals(injected) {
   deps = injected;
@@ -37,8 +48,8 @@ function ensureRoot() {
   root.className = "modal-backdrop";
   root.hidden = true;
   root.innerHTML = `
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-      <button type="button" class="modal-x" data-modal-close aria-label="Закрыть">✕</button>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1">
+      <button type="button" class="modal-x" data-modal-close aria-label="Закрыть окно">${icon("cross", { cls: "ico-md" })}</button>
       <div class="modal-content" id="modal-content"></div>
     </div>`;
   document.body.appendChild(root);
@@ -70,16 +81,33 @@ function ensureRoot() {
     const printBtn = e.target.closest("[data-files-print]");
     if (printBtn && !printBtn.disabled) startFileFromBrowser(current.printerId, printBtn.dataset.filesPrint, printBtn);
   });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !root.hidden) closeModal();
-  });
   return root;
 }
 
 function openShell() {
   ensureRoot();
+  const alreadyOpen = !root.hidden;
   root.hidden = false;
   document.documentElement.classList.add("modal-open");
+  // Ловушка ставится один раз на сессию окна: переходы «принтер → файлы →
+  // принтер» происходят внутри того же слоя и не должны терять точку возврата.
+  if (!alreadyOpen) {
+    trap = createFocusTrap(root, { onEscape: closeModal });
+  }
+}
+
+/**
+ * Перевести фокус в свежесобранное содержимое окна.
+ *
+ * Строго синхронно. Через requestAnimationFrame это делать нельзя: в фоновой
+ * (невидимой) вкладке кадры не планируются вовсе, и окно открывалось БЕЗ
+ * фокуса — клавиатурный пользователь оставался снаружи, а отложенный кадр,
+ * сработав позже, ещё и перехватывал фокус у поля с ошибкой. Разметка к этому
+ * моменту уже в DOM, поэтому ждать кадра незачем.
+ */
+function focusModal() {
+  if (!trap) return;
+  trap.focusFirst();
 }
 
 export function closeModal() {
@@ -93,6 +121,9 @@ export function closeModal() {
   launchRef?.reset();
   // Снять живой плеер камеры из закрытого окна (крепления больше нет в DOM).
   reconcileCameras();
+  // Освобождение возвращает фокус на элемент, которым окно открыли.
+  trap?.release();
+  trap = null;
 }
 
 /* ── Запуск печати ─────────────────────────────────────────────
@@ -117,6 +148,7 @@ export function openLaunchModal(taskId) {
   current = { kind: "launch", taskId };
   openShell();
   launchController().open(taskId);
+  focusModal();
 }
 
 /* ── Детали принтера ───────────────────────────────────────── */
@@ -132,19 +164,21 @@ function findLight(id) {
   return state?.lights?.find((l) => l.id === id) || null;
 }
 
+/* Действия окна собирает та же модель, что и карточку (printerActionModel):
+   расхождений между «что можно на карточке» и «что можно в окне» быть не может.
+   Отдельная тихая строка объясняет ПРИНЦИПИАЛЬНО недоступное — вместо
+   погашенной кнопки, которая не оживёт никогда. */
 function modalActions(p) {
-  const can = actionAvailability(p);
-  const filesTitle = p.filesSupported
-    ? "Файлы на принтере"
-    : "Просмотр файлов пока поддерживается только для Moonraker-принтеров";
+  const notes = [];
+  if (!p.filesSupported) {
+    notes.push("Просмотр файлов и удалённый запуск подвластны мне лишь для Moonraker-принтеров.");
+  }
+  if (!p.snapshotAvailable && p.camera === "none") {
+    notes.push("Камера этому принтеру не назначена — снимок делать нечем.");
+  }
   return `
-    <div class="modal-actions">
-      ${commonActionButtons(p, can)}
-      <button class="btn btn-sm" data-act="snapshot" data-id="${esc(p.id)}" ${can.canSnapshot ? "" : "disabled"}>◉ Снимок</button>
-      <button class="btn btn-sm" data-act="files" data-id="${esc(p.id)}" ${can.canFiles ? "" : "disabled"} title="${esc(filesTitle)}">🗂 Файлы</button>
-      ${p.interfaceUrl ? `<a class="btn btn-sm" href="${esc(p.interfaceUrl)}" target="_blank" rel="noopener">⧉ Интерфейс</a>` : ""}
-      ${p.latestSnapshotUrl ? `<a class="btn btn-sm" href="${API_BASE}${esc(p.latestSnapshotUrl)}" target="_blank" rel="noopener">🖼 Последний снимок</a>` : ""}
-    </div>`;
+    ${actionBar(p, { context: "modal" })}
+    ${notes.length ? `<p class="modal-note">${notes.map(esc).join(" ")}</p>` : ""}`;
 }
 
 function teleRows(p) {
@@ -204,11 +238,15 @@ export function openPrinterModal(id) {
   openShell();
   $("#modal-content").innerHTML = printerModalHtml(p, light);
   reconcileCameras();
+  focusModal();
 }
 
 /** Держит открытое окно принтера в согласии со свежим состоянием фермы. */
 export function syncModals() {
   if (!current || current.kind !== "printer" || root.hidden) return;
+  // Пока оператор держит открытым меню «⋯» внутри окна, пересобирать его
+  // содержимое нельзя: меню исчезло бы из-под курсора на очередном тике.
+  if (root.querySelector("[data-menu-host][data-open]")) return;
   const p = findPrinter(current.printerId);
   if (!p) {
     // Принтер пропал из конфигурации — окно больше нечем наполнять.
@@ -297,7 +335,7 @@ function filesListHtml(p, entries) {
     if (e.type === "directory") {
       return `
         <button type="button" class="file-row is-dir" data-files-nav="${esc(e.path)}">
-          <span class="file-ico">📁</span>
+          <span class="file-ico">${icon("folder")}</span>
           <span class="file-name">${esc(e.name)}</span>
           <span class="file-meta">папка</span>
         </button>`;
@@ -312,11 +350,11 @@ function filesListHtml(p, entries) {
       : blockedNote || `Запустить «${e.name}» на печать`;
     return `
       <div class="file-row">
-        <span class="file-ico">${e.printable ? "⬢" : "📄"}</span>
+        <span class="file-ico ${e.printable ? "file-ico-go" : ""}">${icon(e.printable ? "filePrintable" : "file")}</span>
         <span class="file-name">${esc(e.name)}</span>
         <span class="file-meta">${fmtFileMeta(e)}</span>
         <button type="button" class="btn btn-sm btn-primary file-start" data-files-print="${esc(e.path)}"
-          ${disabled ? "disabled" : ""} title="${esc(title)}">▶ Печать</button>
+          ${disabled ? "disabled" : ""} title="${esc(title)}">${icon("play")}<span>Печать</span></button>
       </div>`;
   });
 
@@ -343,9 +381,14 @@ export async function openFilesModal(printerId, path = "") {
 
   current = { kind: "files", printerId, path };
   openShell();
-  $("#modal-content").innerHTML = filesShellHtml(p, path, `<div class="files-note">Загружаю список файлов…</div>`);
+  // Скелет вместо строки «Загружаю…»: список встаёт на своё место без прыжка.
+  const skeleton = `<div class="files-list">${
+    Array.from({ length: 5 }, () => `<div class="file-row is-skeleton" aria-hidden="true"><span class="sk sk-dot"></span><span class="sk sk-line grow"></span></div>`).join("")
+  }</div><p class="files-note" role="status">Загружаю список файлов…</p>`;
+  $("#modal-content").innerHTML = filesShellHtml(p, path, skeleton);
   // Файловое окно без камеры: снять живой плеер, если он был в окне принтера.
   reconcileCameras();
+  focusModal();
 
   try {
     const query = path ? `?path=${encodeURIComponent(path)}` : "";
@@ -365,19 +408,34 @@ export async function openFilesModal(printerId, path = "") {
 async function startFileFromBrowser(printerId, filePath, btn) {
   const p = findPrinter(printerId);
   if (!p || !filePath) return;
-  // Подтверждение обязательно: запуск занимает принтер и греет столы-сопла.
-  if (!window.confirm(`Владыка, повелеваете начать печать «${filePath}» на «${p.name}»?`)) return;
 
-  btn.disabled = true;
+  // Подтверждение обязательно: запуск занимает принтер, греет стол и сопло и
+  // расходует материал. Своё окно вместо window.confirm — оно называет и файл,
+  // и машину, и последствия, а не спрашивает безымянное «OK / Cancel».
+  const ok = await confirmAction({
+    title: "Запустить печать файла",
+    object: `${filePath} — на «${p.name}»`,
+    body: "Принтер начнёт греться немедленно и приступит к печати этого файла.",
+    points: [
+      "Панель не проверяла этот файл — она не знает ни его длительности, ни материала",
+      "Убедитесь, что стол чист и свободен",
+      "Машина будет занята до конца печати или до отмены"
+    ],
+    cta: "Запустить печать",
+    tone: "warn"
+  });
+  if (!ok) return;
+
+  const restore = setBusy(btn, "Запускаю…");
   try {
     await apiPost(`/api/printers/${encodeURIComponent(printerId)}/print`, { file: filePath });
+    toast(`«${esc(p.name)}»: печать «${esc(filePath)}» начата по вашему велению`, "toast-ok");
     await deps.refresh();
-    toast(`«${esc(p.name)}»: печать «${esc(filePath)}» начата по вашему велению ▶`, "toast-ok");
     // Возвращаемся к деталям принтера — там прогресс и камера.
     openPrinterModal(printerId);
   } catch (err) {
     toast(`Простите, Владыка — печать не началась: ${esc(err.message || "причина неизвестна")}`, "toast-danger");
-    if (btn.isConnected) btn.disabled = false;
+    restore();
   }
 }
 
@@ -392,64 +450,90 @@ export function openJobForm() {
 
   current = { kind: "job" };
   openShell();
+  /* Ширина поля — часть его смысла. Поле на 1000 px под «0.4» или «2ч 30м»
+     врёт о том, сколько туда полагается вписать, и заставляет глаз бежать
+     через пустоту от подписи к значению. Классы f-xs/f-s/f-m/f-l задают
+     ширину по РОДУ ДАННЫХ (см. components.css).
+
+     Пояснения о поведении поля — постоянные подписи (.field-hint), а не
+     placeholder: placeholder исчезает с первой же буквы, и правило «без
+     принтера — уйдёт на проверку» пропадало ровно тогда, когда оператор
+     начинал заполнять форму. В placeholder остаются только ПРИМЕРЫ. */
   $("#modal-content").innerHTML = `
     <div class="modal-head"><h2 id="modal-title">Новое задание печати</h2></div>
     <form class="modal-form" id="job-form" novalidate>
-      <label class="field">
-        <span class="field-lbl">Название <b class="req">*</b></span>
-        <input class="input" name="title" required maxlength="120" placeholder="например, Кубок Владыки" />
-      </label>
-      <label class="field">
-        <span class="field-lbl">Принтер</span>
-        <input class="input" name="printer" list="job-printers" placeholder="без принтера — уйдёт на проверку" />
-        <datalist id="job-printers">${options}</datalist>
-      </label>
-      <div class="field-row">
+      <fieldset class="form-group">
+        <legend>Что печатаем</legend>
         <label class="field">
-          <span class="field-lbl">Материал</span>
-          <input class="input" name="material" maxlength="60" placeholder="PLA, смола…" />
+          <span class="field-lbl">Название <b class="req" aria-hidden="true">*</b><span class="sr-only">(обязательно)</span></span>
+          <input class="input f-l" name="title" required maxlength="120" placeholder="Кубок Владыки" />
+        </label>
+        <div class="field-row">
+          <label class="field">
+            <span class="field-lbl">Материал</span>
+            <input class="input f-s" name="material" maxlength="60" placeholder="PETG" />
+          </label>
+          <label class="field">
+            <span class="field-lbl">Оценка времени</span>
+            <input class="input f-xs" name="eta" maxlength="40" placeholder="2ч 30м" />
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset class="form-group">
+        <legend>Где и чем</legend>
+        <label class="field">
+          <span class="field-lbl">Принтер</span>
+          <input class="input f-m" name="printer" list="job-printers" placeholder="Creality K2 Plus" />
+          <datalist id="job-printers">${options}</datalist>
+          <span class="field-hint">Не указан — задание уйдёт на проверку, и принтер выберу я.</span>
         </label>
         <label class="field">
-          <span class="field-lbl">Оценка времени</span>
-          <input class="input" name="eta" maxlength="40" placeholder="2ч 30м" />
+          <span class="field-lbl">Файл на принтере</span>
+          <input class="input f-l" name="file" maxlength="160" placeholder="chalice.gcode" />
+          <span class="field-hint">Имя файла, уже лежащего на принтере. Без него задание нельзя запустить удалённо.</span>
         </label>
-      </div>
-      <label class="field">
-        <span class="field-lbl">Файл на принтере</span>
-        <input class="input" name="file" maxlength="160" placeholder="chalice.gcode — нужен для удалённого запуска" />
-        <span class="field-hint">Имя .gcode, уже загруженного на принтер. Без него задание нельзя запустить удалённо.</span>
-      </label>
+      </fieldset>
+
       <label class="field field-check">
         <input type="checkbox" name="night" />
-        <span>Пригодно для ночной печати</span>
+        <span>Пригодно для ночной печати<span class="field-hint">Задание сможет идти без присмотра в ночном окне.</span></span>
       </label>
+
+      <!-- Общий отказ стоит НАД действиями: сообщение под кнопками оператор
+           не видит вовсе. -->
+      ${formErrorHtml("job-error")}
       <div class="modal-actions">
-        <button type="button" class="btn btn-sm" data-modal-close>Отмена</button>
-        <button type="submit" class="btn btn-sm btn-primary">Добавить в очередь</button>
+        <button type="button" class="btn" data-modal-close>Отмена</button>
+        <button type="submit" class="btn btn-primary">Добавить в очередь</button>
       </div>
-      <div class="form-error" id="job-error" hidden></div>
     </form>`;
 
   const form = $("#job-form");
-  form.querySelector('input[name="title"]').focus();
+  wireBlurValidation(form, JOB_RULES);
   form.addEventListener("submit", onJobSubmit);
+  focusModal();
 }
+
+const JOB_RULES = {
+  title: { required: true, message: "Владыка, задание должно носить имя" }
+};
 
 async function onJobSubmit(e) {
   e.preventDefault();
   const form = e.currentTarget;
   const errBox = $("#job-error");
-  errBox.hidden = true;
+  showFormError(errBox, "");
 
-  const data = new FormData(form);
-  const title = String(data.get("title") || "").trim();
-  if (!title) {
-    errBox.textContent = "Владыка, задание должно носить имя — укажите название";
-    errBox.hidden = false;
+  if (validateForm(form, JOB_RULES) > 0) {
+    // Фокус уходит на проблемное поле, а не остаётся на кнопке отправки.
+    focusFirstInvalid(form);
+    showFormError(errBox, "Проверьте отмеченные поля — без них я не приму задание");
     return;
   }
 
-  const body = { title };
+  const data = new FormData(form);
+  const body = { title: String(data.get("title") || "").trim() };
   for (const key of ["printer", "material", "eta", "file"]) {
     const value = String(data.get(key) || "").trim();
     if (value) body[key] = value;
@@ -457,17 +541,17 @@ async function onJobSubmit(e) {
   if (data.get("night")) body.night = true;
 
   const submitBtn = form.querySelector('button[type="submit"]');
-  submitBtn.disabled = true;
+  const restore = setBusy(submitBtn, "Добавляю…");
   try {
     const res = await apiPost("/api/queue", body);
-    await deps.refresh();
-    closeModal();
     const label = res?.job?.title ? `«${esc(res.job.title)}»` : "Задание";
+    closeModal();
     toast(`${label} принято в очередь — я прослежу за ним лично, Владыка`, "toast-ok");
+    await deps.refresh();
   } catch (err) {
-    errBox.textContent = `Простите, Владыка — задание не принято: ${err.message || "причина неизвестна"}`;
-    errBox.hidden = false;
-    submitBtn.disabled = false;
+    showFormError(errBox, `Простите, Владыка — задание не принято: ${err.message || "причина неизвестна"}`);
+    restore();
+    errBox.focus?.();
   }
 }
 
@@ -495,7 +579,7 @@ const INFO = {
       <b>«Добавить задание»</b> и укажите имя этого файла в поле
       <b>«Файл на принтере»</b> — тогда я смогу запустить его удалённо из очереди.</p>
       <p>Файлы, уже покоящиеся на Moonraker-принтере (Creality K2), доступны сразу:
-      откройте принтер и нажмите <b>«🗂 Файлы»</b>.</p>`
+      откройте принтер и найдите <b>«Файлы на принтере»</b> в меню действий.</p>`
   },
   "files-unsupported": {
     title: "Файлы принтера",
@@ -527,6 +611,7 @@ export function openInfoModal(kind) {
     <div class="modal-head"><h2 id="modal-title">${esc(info.title)}</h2></div>
     <div class="modal-info">${info.body}</div>
     <div class="modal-actions">
-      <button type="button" class="btn btn-sm btn-primary" data-modal-close>Да будет так</button>
+      <button type="button" class="btn btn-primary" data-modal-close data-autofocus>Да будет так</button>
     </div>`;
+  focusModal();
 }

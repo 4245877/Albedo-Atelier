@@ -12,6 +12,7 @@ import { createInflightGuard } from "../../shared/inflight.js";
 import { createPoller } from "../../shared/polling.js";
 import { $, cssEscape, esc, toast } from "../../util.js";
 import { itemHtml, listBarHtml } from "./view.js";
+import { icon } from "../../shared/icons.js";
 
 const ACCEPT = ".stl,.3mf,.gcode";
 const MAX_PARALLEL = 3;
@@ -45,7 +46,7 @@ export function setupUploads() {
   body.innerHTML = `
     <div class="upload-drop" id="upload-drop" tabindex="0" role="button"
          aria-label="Загрузить файлы: перетащите сюда или выберите">
-      <div class="upload-drop-icon" aria-hidden="true">⇪</div>
+      <div class="upload-drop-icon" aria-hidden="true">${icon("upload", { cls: "ico-xl" })}</div>
       <div class="upload-drop-text">
         <b>Вверьте мне ваши файлы, Владыка</b>
         <span>перетащите сюда или <button type="button" class="upload-pick" id="upload-pick">выберите на диске</button></span>
@@ -365,7 +366,9 @@ function render() {
   $("#upload-counts").innerHTML = listBarHtml(items);
 
   const btn = $("#upload-collapse");
-  btn.textContent = listCollapsed ? `▸ Показать список (${items.length})` : "▾ Свернуть список";
+  btn.innerHTML = listCollapsed
+    ? `${icon("chevronRight")}<span>Показать список (${items.length})</span>`
+    : `${icon("chevronDown")}<span>Свернуть список</span>`;
   btn.setAttribute("aria-expanded", listCollapsed ? "false" : "true");
   box.classList.toggle("is-collapsed", listCollapsed);
   // Длинный список получает собственную прокрутку — страница из-за него больше

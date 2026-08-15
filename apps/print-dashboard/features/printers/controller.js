@@ -19,7 +19,9 @@
    ═══════════════════════════════════════════════════════════════ */
 
 import { apiDelete, apiGet, apiPatch, apiPost } from "../../api.js";
+import { confirmAction } from "../../shared/dialog.js";
 import { createInflightGuard } from "../../shared/inflight.js";
+import { isMenuOpen } from "../../shared/menu.js";
 import { createPoller } from "../../shared/polling.js";
 import { $, esc, toast } from "../../util.js";
 import { buildPrinterPayload } from "./formModel.js";
@@ -106,6 +108,8 @@ function onLoadError(err) {
 function isEditing() {
   const body = $("#hardware-body");
   if (!body) return false;
+  // Открытое меню «⋯» — тоже незавершённое действие: перерисовка снесла бы его.
+  if (isMenuOpen()) return true;
   const active = document.activeElement;
   if (active && body.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) return true;
   // Раскрытая панель настроек — тоже незавершённая работа оператора.
@@ -155,8 +159,12 @@ function wireDelegates() {
     const id = btn.dataset.id;
     if (btn.dataset.prnAction === "test") void testConnection(id);
     else if (btn.dataset.prnAction === "discover") void discoverHardware(id);
-    else if (btn.dataset.prnAction === "toggle") void toggleEnabled(id, btn.dataset.enabled !== "1");
-    else if (btn.dataset.prnAction === "remove") void removePrinter(id);
+    else if (btn.dataset.prnAction === "toggle") {
+      // Целевое состояние берём из состояния раздела, а не из атрибута кнопки:
+      // пункт меню живёт в перерисовываемой разметке и может отстать.
+      const printer = state.printers.find((p) => p.id === id);
+      void toggleEnabled(id, !printer?.enabled);
+    } else if (btn.dataset.prnAction === "remove") void removePrinter(id);
   });
 
   // Выбор протокола перестраивает форму добавления: у Bambu спрашиваем серийный
@@ -263,12 +271,26 @@ function discoverHardware(id) {
 }
 
 /* Удаление — единственное необратимое действие раздела, поэтому подтверждение
-   именное: у принтеров ферм имена похожи, и «вы уверены?» тут мало. */
-function removePrinter(id) {
+   именное: у принтеров фермы имена похожи («Bambu A1» / «Bambu A1 Combo»), и
+   безымянного «вы уверены?» тут мало. Оператор вводит имя машины — случайным
+   движением такое не совершить. */
+async function removePrinter(id) {
   const printer = state.printers.find((p) => p.id === id);
   const name = printer?.name || id;
-  if (!window.confirm(`Удалить «${name}» из фермы? История печати сохранится, но принтер исчезнет из опроса, очереди и планировщика.`)) {
-    return Promise.resolve();
-  }
+  const ok = await confirmAction({
+    title: "Удалить принтер",
+    object: name,
+    body: "Машина исчезнет из фермы немедленно.",
+    points: [
+      "Опрос, очередь и планировщик перестанут её видеть",
+      "Настройки подключения и учётные данные будут стёрты",
+      "История уже выполненных печатей сохранится"
+    ],
+    cta: "Удалить принтер",
+    tone: "danger",
+    irreversible: true,
+    requireText: name
+  });
+  if (!ok) return;
   return run(id, "remove", () => apiDelete(`${BASE}/${encodeURIComponent(id)}`), "Принтер удалён из фермы");
 }

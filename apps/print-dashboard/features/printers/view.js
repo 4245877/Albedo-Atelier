@@ -22,6 +22,8 @@
 import { esc } from "../../util.js";
 import { chip, panel } from "../../shared/chips.js";
 import { fmtDate } from "../../shared/format.js";
+import { icon, spinner } from "../../shared/icons.js";
+import { menuHtml } from "../../shared/menu.js";
 
 /* Какие учётные данные вообще осмысленны для протокола — приходит с backend
    (GET /options), здесь только запасной вариант на случай его недоступности. */
@@ -63,7 +65,7 @@ function sourceBadge(spec) {
 
 export function errorBanner(state) {
   if (!state.error) return "";
-  return `<div class="slice-panel sch-poll-error"><div class="slice-warn">⚠ Часть данных не обновилась (${esc(
+  return `<div class="slice-panel sch-poll-error"><div class="slice-warn">${icon("warn")}Часть данных не обновилась (${esc(
     state.error
   )}) — показаны последние полученные; повторю попытку автоматически.</div></div>`;
 }
@@ -115,21 +117,40 @@ function printerRow(printer, state) {
           <b>${esc(printer.name)}</b>
           <code>${esc(printer.id)}</code>
         </div>
+        <!-- Частые безопасные команды стоят открыто; необратимое удаление —
+             только через «⋯». Раньше «Удалить» стояла в том же ряду, что и
+             «Проверить связь», и отличалась от неё одним оттенком текста. -->
         <div class="prn-actions">
-          <button type="button" class="btn btn-sm" data-prn-action="discover" data-id="${esc(printer.id)}"
-            ${busy === "discover" ? "disabled" : ""}>
-            ${busy === "discover" ? "Опрашиваю…" : "Опросить принтер"}
-          </button>
           <button type="button" class="btn btn-sm" data-prn-action="test" data-id="${esc(printer.id)}"
             ${busy === "test" ? "disabled" : ""}>
-            ${busy === "test" ? "Проверяю…" : "Проверить связь"}
+            ${busy === "test" ? `${spinner()}<span>Проверяю…</span>` : `${icon("pulse")}<span>Проверить связь</span>`}
           </button>
-          <button type="button" class="btn btn-sm" data-prn-action="toggle" data-id="${esc(printer.id)}"
-            data-enabled="${printer.enabled ? "1" : "0"}" ${busy === "toggle" ? "disabled" : ""}>
-            ${printer.enabled ? "Отключить" : "Включить"}
+          <button type="button" class="btn btn-sm" data-prn-action="discover" data-id="${esc(printer.id)}"
+            ${busy === "discover" ? "disabled" : ""}>
+            ${busy === "discover" ? `${spinner()}<span>Опрашиваю…</span>` : `${icon("refresh")}<span>Опросить</span>`}
           </button>
-          <button type="button" class="btn btn-sm btn-danger" data-prn-action="remove" data-id="${esc(printer.id)}"
-            ${busy === "remove" ? "disabled" : ""}>Удалить</button>
+          ${menuHtml([
+            {
+              act: "toggle",
+              label: printer.enabled ? "Отключить от фермы" : "Включить в работу",
+              icon: printer.enabled ? "minus" : "plus",
+              disabled: busy === "toggle",
+              reason: busy === "toggle" ? "Выполняется…" : ""
+            },
+            {
+              act: "remove",
+              label: "Удалить принтер",
+              icon: "trash",
+              danger: true,
+              disabled: busy === "remove",
+              reason: busy === "remove" ? "Выполняется…" : ""
+            }
+          ], {
+            id: `prn-${printer.id}`,
+            dataId: printer.id,
+            label: `Ещё действия — ${printer.name}`,
+            attr: "data-prn-action"
+          })}
         </div>
       </div>
       <div class="sch-tags">${facts}</div>
@@ -268,7 +289,7 @@ function conflictNotes(specs) {
 
 function conflictNote(label, spec, format) {
   if (!spec?.overriddenManual) return "";
-  return `<div class="prn-conflict"><span aria-hidden="true">⚠</span><span>${esc(label)}: вручную задано «${esc(
+  return `<div class="prn-conflict"><span aria-hidden="true">${icon("warn")}</span><span>${esc(label)}: вручную задано «${esc(
     format(spec.overriddenManual)
   )}», но принтер сообщает «${esc(
     format(spec.value)
@@ -336,7 +357,7 @@ function testDetail(test) {
   if (test.online) {
     return `<div class="slice-meta">Принтер ответил: состояние «${esc(test.status)}»${when}.</div>`;
   }
-  return `<div class="slice-warn">⚠ Принтер не ответил${when}${
+  return `<div class="slice-warn">${icon("warn")}Принтер не ответил${when}${
     test.error ? `: ${esc(test.error)}` : ""
   }</div>`;
 }

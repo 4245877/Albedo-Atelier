@@ -72,12 +72,94 @@ html.modal-open { overflow: hidden; }
 }
 .modal-head h2 {
   margin: 0;
-  font: 600 24px/1.15 var(--font-display);
+  font: 600 var(--t-24)/1.15 var(--font-display);
   color: var(--ink);
   display: flex;
   align-items: center;
   gap: 10px;
 }
+
+/* Тихое объяснение того, что этот принтер не умеет В ПРИНЦИПЕ. Погашенной
+   кнопки для такого нет: она обещала бы действие, которое не появится. */
+.modal-note {
+  margin: 10px 0 0;
+  font-size: var(--t-12);
+  line-height: 1.5;
+  color: var(--ink-faint);
+  max-width: var(--measure);
+}
+
+/* ── Окно подтверждения опасного действия ──────────────────────
+   Живёт НАД обычным модальным слоем: отмена печати вызывается в том числе
+   из окна принтера, и подтверждение не имеет права оказаться за скрымом. */
+.confirm-backdrop { z-index: 250; align-items: center; }
+
+.modal-confirm { max-width: 520px; }
+.modal-confirm.tone-danger { border-color: var(--danger-line); }
+.modal-confirm.tone-warn { border-color: var(--warn-line); }
+
+.confirm-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+.confirm-head h2 {
+  margin: 0;
+  font: 600 var(--t-24)/1.2 var(--font-display);
+  color: var(--ink);
+}
+.confirm-mark {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--danger-ink);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-line);
+}
+.tone-warn .confirm-mark { color: var(--warn-ink); background: var(--warn-soft); border-color: var(--warn-line); }
+
+/* Объект действия назван отдельной строкой: «OK / Cancel» не говорит, ЧТО
+   именно сейчас исчезнет. */
+.confirm-object {
+  margin: 3px 0 0;
+  font-size: var(--t-14);
+  font-weight: 700;
+  color: var(--gold-on-soft);
+  overflow-wrap: anywhere;
+}
+
+.confirm-body {
+  font-size: var(--t-13);
+  line-height: 1.55;
+  color: var(--ink-soft);
+  max-width: var(--measure);
+}
+.confirm-body p { margin: 0 0 var(--s-2); }
+.confirm-points { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; }
+
+.confirm-irreversible {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: var(--s-3) 0 0;
+  padding: var(--s-2) 10px;
+  border-radius: var(--r-md);
+  background: var(--danger-soft);
+  color: var(--danger-ink);
+  font-weight: 700;
+}
+
+/* Ввод имени объекта — последний рубеж перед необратимым. */
+.confirm-verify { margin-top: var(--s-4); }
+.confirm-verify .field-lbl { text-transform: none; letter-spacing: 0; font-size: var(--t-13); color: var(--ink-soft); }
+.confirm-verify .field-lbl b { color: var(--ink); }
+
+.modal-confirm .modal-actions { margin-top: var(--s-4); }
+.modal-confirm .form-error { margin-top: var(--s-3); }
 
 .modal-printer {
   display: grid;
@@ -148,7 +230,11 @@ html.modal-open { overflow: hidden; }
   font: inherit;
 }
 .file-row.is-dir:hover { border-color: var(--btn-edge); }
-.file-ico { flex: 0 0 auto; }
+.file-ico { flex: 0 0 auto; display: grid; place-items: center; color: var(--ink-faint); font-size: 16px; }
+/* Запускаемый файл отмечен золотом — он и есть то, за чем сюда пришли. */
+.file-ico-go { color: var(--gold); }
+.file-row.is-skeleton { gap: 10px; }
+.file-row.is-skeleton .sk-line { height: 12px; margin: 0; }
 .file-name {
   flex: 1 1 auto;
   min-width: 0;

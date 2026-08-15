@@ -10,6 +10,7 @@
    разборе полёта и мешают при обычном запуске. */
 
 import { esc } from "../../util.js";
+import { icon } from "../../shared/icons.js";
 
 /* Состояния задачи → человеческая подпись и цвет. Совпадает с LaunchState на
    backend; неизвестное состояние показываем как есть, а не прячем.
@@ -235,7 +236,7 @@ export function launchModalHtml(preview, ui) {
     return `
       <div class="modal-head"><h2 id="modal-title">Печать запущена</h2></div>
       <div class="launch-done">
-        <div class="launch-done-mark">▶</div>
+        <div class="launch-done-mark">${icon("check", { cls: "ico-xl" })}</div>
         <div class="launch-sum-title">${esc(preview.displayTitle)}</div>
         <div class="launch-sum-sub">${esc(ui.done.printerName)}</div>
       </div>

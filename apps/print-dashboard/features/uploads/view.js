@@ -6,6 +6,7 @@
 import { esc } from "../../util.js";
 import { chip } from "../../shared/chips.js";
 import { fmtBytes, fmtDuration } from "../../shared/format.js";
+import { icon } from "../../shared/icons.js";
 
 const VERDICT = {
   schedulable: { label: "готово к планированию", cls: "ok" },
@@ -84,14 +85,14 @@ function analysisHtml(item, a, detailsOpen) {
       <div class="upload-analysis">
         <div class="upload-error">Анализ не удался — досадная оплошность: ${esc(a.error || "неизвестная ошибка")}</div>
         <div class="upload-actions">
-          <button type="button" class="btn btn-sm" data-reanalyze="${esc(item.artifact.id)}">↻ Повторить анализ</button>
+          <button type="button" class="btn btn-sm" data-reanalyze="${esc(item.artifact.id)}">${icon("refresh")}<span>Повторить анализ</span></button>
         </div>
       </div>`;
   }
 
   const rows = metaRows(a);
-  const warns = (a.warnings || []).map((w) => findingHtml(w, "upload-warn", "⚠")).join("");
-  const blocks = (a.blockers || []).map((b) => findingHtml(b, "upload-block", "⛔")).join("");
+  const warns = (a.warnings || []).map((w) => findingHtml(w, "upload-warn", "warn")).join("");
+  const blocks = (a.blockers || []).map((b) => findingHtml(b, "upload-block", "blocked")).join("");
 
   // Порядок намеренный: сначала вердикт и находки (почему файл нельзя печатать),
   // и только потом — таблица свойств. Свойства нужны при разборе, находки — всегда.
@@ -136,9 +137,12 @@ export function listBarHtml(items) {
 
 /* Находка = факт + (необязательно) что с этим делать. Подсказка идёт отдельной
    строкой: сообщение остаётся описанием причины, а не инструкцией. */
-function findingHtml(f, cls, icon) {
+/* Знак находки — SVG из общего набора, а не символ юникода: ⚠/⛔ покрыты
+   далеко не всеми шрифтами и на части систем рисовались пустым квадратом
+   либо чужим цветным эмодзи. */
+function findingHtml(f, cls, glyph) {
   const hint = f.hint ? `<span class="upload-hint">${esc(f.hint)}</span>` : "";
-  return `<li class="${cls}">${icon} ${esc(f.message)}${hint}</li>`;
+  return `<li class="${cls}">${icon(glyph)}<span>${esc(f.message)}${hint}</span></li>`;
 }
 
 /* Вердикт «заблокировано» сам по себе ничего не объясняет, а рядом ещё и висит

@@ -14,6 +14,7 @@
 import { esc } from "../../util.js";
 import { chip, panel } from "../../shared/chips.js";
 import { fmtDate } from "../../shared/format.js";
+import { icon } from "../../shared/icons.js";
 
 const WEEKDAYS = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
 
@@ -36,7 +37,7 @@ const OP_STATE = {
 
 export function errorBanner(state) {
   if (!state.error) return "";
-  return `<div class="slice-panel sch-poll-error"><div class="slice-warn">⚠ Часть данных не обновилась (${esc(state.error)}) — показаны последние полученные; повторю попытку автоматически.</div></div>`;
+  return `<div class="slice-panel sch-poll-error"><div class="slice-warn">${icon("warn")}Часть данных не обновилась (${esc(state.error)}) — показаны последние полученные; повторю попытку автоматически.</div></div>`;
 }
 
 /* ── Расписание оператора ──────────────────────────────────── */
@@ -56,7 +57,7 @@ export function scheduleHtml(state) {
      явно: именно оно fail-closed блокирует автоматическое продолжение. */
   const unresolvedNote = a.resolved
     ? ""
-    : `<div class="ops-unresolved"><span aria-hidden="true">⚠</span><span>${esc(
+    : `<div class="ops-unresolved"><span aria-hidden="true">${icon("warn")}</span><span>${esc(
         a.reason || "расписание не разобрано"
       )} — автоматическое продолжение очереди заблокировано (fail-closed).</span></div>`;
 
@@ -161,7 +162,7 @@ function exceptionsHtml(state, view) {
               <span class="slice-spacer"></span>
               <div class="row-actions">
                 <button type="button" class="btn btn-sm btn-icon" data-ops-action="drop-exception" data-id="${esc(e.id)}"
-                  title="Снять исключение" aria-label="Снять исключение">✕</button>
+                  title="Снять исключение" aria-label="Снять исключение">${icon("cross")}</button>
               </div>
             </div>
           </li>`
@@ -219,7 +220,7 @@ function absencesHtml(view) {
               <span class="slice-spacer"></span>
               <div class="row-actions">
                 <button type="button" class="btn btn-sm btn-icon" data-ops-action="drop-absence" data-id="${esc(a.id)}"
-                  title="Снять отсутствие" aria-label="Снять отсутствие">✕</button>
+                  title="Снять отсутствие" aria-label="Снять отсутствие">${icon("cross")}</button>
               </div>
             </div>
           </li>`
@@ -283,7 +284,7 @@ function operationRow(row) {
      единственное выделено; отмена стоит последней и подписана. */
   const actionable = op.state === "IN_PROGRESS" || row.ready;
   const actions = actionable
-    ? `<button type="button" class="btn btn-ok btn-sm" data-ops-action="complete" data-id="${esc(op.id)}">✓ выполнено</button>
+    ? `<button type="button" class="btn btn-ok btn-sm" data-ops-action="complete" data-id="${esc(op.id)}">${icon("check")}<span>Выполнено</span></button>
        <button type="button" class="btn btn-sm" data-ops-action="fail" data-id="${esc(op.id)}">не удалось</button>`
     : "";
 
@@ -306,7 +307,7 @@ function operationRow(row) {
           ${op.state === "READY" ? `<button type="button" class="btn btn-sm" data-ops-action="claim" data-id="${esc(op.id)}">взять в работу</button>` : ""}
           ${actions}
           <button type="button" class="btn btn-sm btn-icon btn-danger" data-ops-action="cancel-op" data-id="${esc(op.id)}"
-            title="Отменить операцию" aria-label="Отменить операцию">✕</button>
+            title="Отменить операцию" aria-label="Отменить операцию">${icon("cross")}</button>
         </div>
       </div>
       <div class="sch-tags">${tags}</div>

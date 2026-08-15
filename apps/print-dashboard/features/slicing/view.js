@@ -7,6 +7,7 @@ import { esc } from "../../util.js";
 import { chip } from "../../shared/chips.js";
 import { fmtDuration, fmtWhen } from "../../shared/format.js";
 import { createSetBlockReason, targetOptions } from "./formModel.js";
+import { icon } from "../../shared/icons.js";
 
 const TYPE_LABEL = { machine: "Принтер", process: "Печать", filament: "Филамент" };
 const STATUS = {
@@ -35,9 +36,9 @@ export function errorsHtml(state) {
   if (!state.errors.length) return "";
   return `
     <div class="slice-panel slice-errbox">
-      <div class="slice-block">⛔ Мне не покорились: ${state.errors.map((e) => esc(e)).join(", ")}.
+      <div class="slice-block">${icon("blocked")}Мне не покорились: ${state.errors.map((e) => esc(e)).join(", ")}.
         Показываю последние достоверные данные; я буду взывать к ним снова сама.</div>
-      <button type="button" class="btn btn-sm" data-slice-action="reload">↻ Обновить сейчас</button>
+      <button type="button" class="btn btn-sm" data-slice-action="reload">${icon("refresh")}<span>Обновить сейчас</span></button>
     </div>`;
 }
 
@@ -72,7 +73,7 @@ export function runtimeHtml(state) {
   const build = rt.cliBuild ? `<span class="slice-tag">сборка CLI ${esc(rt.cliBuild)}</span>` : "";
   const smoke = rt.smoke
     ? rt.smoke.ok
-      ? `<span class="slice-tag">✓ проверено слайсингом: ${Math.round((rt.smoke.gcodeBytes || 0) / 1024)} КБ G-code за ${rt.smoke.durationMs} мс</span>`
+      ? `<span class="slice-tag">${icon("check")} проверено слайсингом: ${Math.round((rt.smoke.gcodeBytes || 0) / 1024)} КБ G-code за ${rt.smoke.durationMs} мс</span>`
       : `<span class="slice-tag slice-tag-warn">пробный слайсинг не дал G-code</span>`
     : `<span class="slice-tag">слайсингом не проверено</span>`;
 
@@ -80,7 +81,7 @@ export function runtimeHtml(state) {
     ? `<details class="slice-details"><summary>Техническая причина (для администратора)</summary>
          <pre class="slice-pre">${esc(rt.detail)}</pre></details>`
     : "";
-  const err = !ok && rt.error ? `<div class="slice-block">⛔ ${esc(rt.error)}${detail}</div>` : "";
+  const err = !ok && rt.error ? `<div class="slice-block">${icon("blocked")}${esc(rt.error)}${detail}</div>` : "";
   const counts = r.profileCounts || {};
   const countRow = `
     <div class="slice-counts">
@@ -90,8 +91,8 @@ export function runtimeHtml(state) {
     </div>`;
 
   const missing = (r.missingParents || []).length
-    ? `<details class="slice-details"><summary>Не хватает базовых системных профилей (${r.missingParents.length}) — нажмите «↻ Импорт пресетов» или обновите каталог OrcaSlicer</summary>
-         <ul class="slice-findings">${r.missingParents.map((p) => `<li class="slice-warn">⚠ ${esc(p)}</li>`).join("")}</ul>
+    ? `<details class="slice-details"><summary>Не хватает базовых системных профилей (${r.missingParents.length}) — нажмите «Импорт пресетов» или обновите каталог OrcaSlicer</summary>
+         <ul class="slice-findings">${r.missingParents.map((p) => `<li class="slice-warn">${icon("warn")}${esc(p)}</li>`).join("")}</ul>
        </details>`
     : "";
 
@@ -103,10 +104,10 @@ export function runtimeHtml(state) {
   const inactiveCov = (r.coverage || []).filter((c) => c.hasAnyProfile && !c.hasActiveProfile);
   const coverage = [
     missingCov.length
-      ? `<div class="slice-block">⛔ Нет профиля принтера для: ${missingCov.map((c) => esc(c.printerName)).join(", ")}</div>`
+      ? `<div class="slice-block">${icon("blocked")}Нет профиля принтера для: ${missingCov.map((c) => esc(c.printerName)).join(", ")}</div>`
       : "",
     inactiveCov.length
-      ? `<div class="slice-warnbox">⚠ Только неактивные профили (карантин/невалидные), активного покрытия нет: ${inactiveCov.map((c) => esc(c.printerName)).join(", ")}</div>`
+      ? `<div class="slice-warnbox">${icon("warn")}Только неактивные профили (карантин/невалидные), активного покрытия нет: ${inactiveCov.map((c) => esc(c.printerName)).join(", ")}</div>`
       : ""
   ].join("");
 
@@ -116,8 +117,8 @@ export function runtimeHtml(state) {
         <b>Среда OrcaSlicer</b>
         ${badge}${net}${build}${smoke}
         <span class="slice-spacer"></span>
-        <button type="button" class="btn btn-sm" data-slice-action="reload">↻ Обновить</button>
-        <button type="button" class="btn btn-sm" data-slice-action="import">↻ Импорт пресетов</button>
+        <button type="button" class="btn btn-sm" data-slice-action="reload">${icon("refresh")}<span>Обновить</span></button>
+        <button type="button" class="btn btn-sm" data-slice-action="import">${icon("refresh")}<span>Импорт пресетов</span></button>
       </div>
       ${countRow}
       ${err}
@@ -155,8 +156,8 @@ function profileRow(p) {
   const findings = [...(p.blockers || []), ...(p.warnings || [])];
   const detail = findings.length
     ? `<ul class="slice-findings">
-         ${(p.blockers || []).map((b) => `<li class="slice-block-li">⛔ ${esc(b.message)}</li>`).join("")}
-         ${(p.warnings || []).map((w) => `<li class="slice-warn">⚠ ${esc(w.message)}</li>`).join("")}
+         ${(p.blockers || []).map((b) => `<li class="slice-block-li">${icon("blocked")}${esc(b.message)}</li>`).join("")}
+         ${(p.warnings || []).map((w) => `<li class="slice-warn">${icon("warn")}${esc(w.message)}</li>`).join("")}
        </ul>`
     : "";
   return `
@@ -189,8 +190,8 @@ function setRow(s) {
     : `<button type="button" class="btn btn-sm" data-slice-action="approve" data-id="${esc(s.id)}"${
         s.validation === "blocked" ? ` disabled title="${esc(blockedReason)}" aria-label="${esc(blockedReason)}"` : ""
       }>Утвердить</button>`;
-  const blockers = (s.blockers || []).map((b) => `<li class="slice-block-li">⛔ ${esc(b.message)}</li>`).join("");
-  const warnings = (s.warnings || []).map((w) => `<li class="slice-warn">⚠ ${esc(w.message)}</li>`).join("");
+  const blockers = (s.blockers || []).map((b) => `<li class="slice-block-li">${icon("blocked")}${esc(b.message)}</li>`).join("");
+  const warnings = (s.warnings || []).map((w) => `<li class="slice-warn">${icon("warn")}${esc(w.message)}</li>`).join("");
   const target = s.printerId ? `принтер ${esc(s.printerId)}` : s.printerClass ? `класс ${esc(s.printerClass)}` : "—";
   return `
     <li class="slice-item">
@@ -246,7 +247,7 @@ export function createSetHtml(state) {
   // отдавать пустую форму с невыбираемой целью нельзя.
   const blockReason = createSetBlockReason(coverage, missingActive);
   const note = blockReason
-    ? `<div class="slice-block">⛔ ${esc(blockReason)}</div>`
+    ? `<div class="slice-block">${icon("blocked")}${esc(blockReason)}</div>`
     : `<div class="slice-hint">В набор попадают только active-профили; неактивные показаны, но недоступны для выбора. Цель — ровно одна: конкретный принтер или класс взаимозаменяемых принтеров.</div>`;
   const disabledAttr = blockReason ? " disabled" : "";
 
@@ -317,18 +318,18 @@ function variantRow(state, v) {
 
   // Рендерим И предупреждения (cache-hit, неполный анализ), И блокеры — раньше
   // warnings терялись, и было не видно, что результат переиспользован из кэша.
-  const warnings = (v.warnings || []).map((w) => `<li class="slice-warn">⚠ ${esc(w.message)}</li>`).join("");
-  const blockers = (v.blockers || []).map((b) => `<li class="slice-block-li">⛔ ${esc(b.message)}</li>`).join("");
+  const warnings = (v.warnings || []).map((w) => `<li class="slice-warn">${icon("warn")}${esc(w.message)}</li>`).join("");
+  const blockers = (v.blockers || []).map((b) => `<li class="slice-block-li">${icon("blocked")}${esc(b.message)}</li>`).join("");
   const findings = blockers || warnings ? `<ul class="slice-findings">${blockers}${warnings}</ul>` : "";
 
-  const err = v.error && v.state === "failed" ? `<div class="slice-block">⛔ ${esc(v.error)}</div>` : "";
+  const err = v.error && v.state === "failed" ? `<div class="slice-block">${icon("blocked")}${esc(v.error)}</div>` : "";
 
   const when = fmtWhen(v.endedAt || v.updatedAt || v.createdAt);
   const timeRow = when ? `<div class="slice-when">Обновлено: ${esc(when)}</div>` : "";
 
   const rerun =
     v.state === "failed" || v.state === "blocked"
-      ? `<button type="button" class="btn btn-sm" data-slice-action="rerun" data-id="${esc(v.id)}">↻ Повторить</button>`
+      ? `<button type="button" class="btn btn-sm" data-slice-action="rerun" data-id="${esc(v.id)}">${icon("refresh")}<span>Повторить</span></button>`
       : "";
   return `
     <li class="slice-item">
@@ -376,10 +377,10 @@ function promoteHtml(state, v) {
         : chip(`анализ G-code: ${esc(analysis.verdict || "не пройден")}`, "error");
 
   const outBlockers = ((analysis && analysis.blockers) || [])
-    .map((b) => `<li class="slice-block-li">⛔ ${esc(b.message)}</li>`)
+    .map((b) => `<li class="slice-block-li">${icon("blocked")}${esc(b.message)}</li>`)
     .join("");
   const outWarnings = ((analysis && analysis.warnings) || [])
-    .map((w) => `<li class="slice-warn">⚠ ${esc(w.message)}</li>`)
+    .map((w) => `<li class="slice-warn">${icon("warn")}${esc(w.message)}</li>`)
     .join("");
   const outFindings = outBlockers || outWarnings
     ? `<ul class="slice-findings">${outBlockers}${outWarnings}</ul>`
@@ -404,7 +405,7 @@ function promoteHtml(state, v) {
       <div class="slice-meta">${analysisChip}</div>
       ${outFindings}
       <button type="button" class="btn btn-primary btn-sm"
-        data-slice-action="promote" data-id="${esc(v.id)}"${disabled}>＋ Добавить в очередь</button>
+        data-slice-action="promote" data-id="${esc(v.id)}"${disabled}>${icon("plus")}<span>Добавить в очередь</span></button>
     </div>`;
 }
 
@@ -448,7 +449,7 @@ function assignmentRow(state, row) {
   ].filter(Boolean);
 
   const stale = a.invalidatedAt
-    ? `<div class="slice-block">⛔ Назначение устарело${a.invalidatedReason ? `: ${esc(a.invalidatedReason)}` : ""}.
+    ? `<div class="slice-block">${icon("blocked")}Назначение устарело${a.invalidatedReason ? `: ${esc(a.invalidatedReason)}` : ""}.
          Требуется перепланирование.</div>`
     : "";
 
@@ -474,17 +475,17 @@ function assignmentRow(state, row) {
         один, и он проходит через LaunchService.
      2. При неразрешённой попытке кнопки запуска нет вовсе: nextAction=resolve
         приходит с backend, который единственный видит run. Раньше здесь стояло
-        зелёное «▶ Запустить» просто потому, что файл на принтере VERIFIED. */
+        зелёное «Запустить» просто потому, что файл на принтере VERIFIED. */
   let action = "";
   if (a.invalidatedAt) action = "";
   else if (row.nextAction === "prepare-file") {
-    action = `<button type="button" class="btn btn-sm" data-slice-action="prepare-file" data-id="${esc(a.id)}">↑ Подготовить файл</button>`;
+    action = `<button type="button" class="btn btn-sm" data-slice-action="prepare-file" data-id="${esc(a.id)}">${icon("upload")}<span>Подготовить файл</span></button>`;
   } else if (row.nextAction === "confirm-file") {
-    action = `<button type="button" class="btn btn-sm" data-slice-action="confirm-file" data-id="${esc(a.id)}">✓ Файл перенесён</button>`;
+    action = `<button type="button" class="btn btn-sm" data-slice-action="confirm-file" data-id="${esc(a.id)}">${icon("check")}<span>Файл перенесён</span></button>`;
   } else if (row.nextAction === "resolve") {
     action = `<button type="button" class="btn btn-sm" data-slice-action="resolve-launch" data-task="${esc(a.taskId)}">Запуск не подтверждён — разобраться</button>`;
   } else if (row.nextAction === "start") {
-    action = `<button type="button" class="btn btn-primary btn-sm" data-slice-action="open-launch" data-task="${esc(a.taskId)}">▶ Запустить</button>`;
+    action = `<button type="button" class="btn btn-primary btn-sm" data-slice-action="open-launch" data-task="${esc(a.taskId)}">${icon("play")}<span>Запустить</span></button>`;
   }
 
   return `
@@ -499,7 +500,7 @@ function assignmentRow(state, row) {
       </div>
       <div class="slice-facts">${facts.map((f) => `<span>${f}</span>`).join("")}</div>
       ${manual}${stale}
-      ${dev && dev.lastError ? `<div class="slice-block">⛔ ${esc(dev.lastError)}</div>` : ""}
+      ${dev && dev.lastError ? `<div class="slice-block">${icon("blocked")}${esc(dev.lastError)}</div>` : ""}
     </li>`;
 }
 
@@ -536,8 +537,8 @@ export function newSliceHtml(state) {
   const runtimeState = state.runtime?.runtime?.state;
   const runtimeLabel = (RUNTIME_STATE[runtimeState] || {}).label || "недоступен";
   const runtimeBlock = runtimeDown
-    ? `<div class="slice-block" id="slice-runtime-block">⛔ OrcaSlicer: ${esc(runtimeLabel)} — запуск невозможен${runtimeMsg ? `: ${esc(runtimeMsg)}` : ""}.
-         Восстановите среду (проверьте контейнер OrcaSlicer, затем ↻ Импорт пресетов) и повторите.</div>`
+    ? `<div class="slice-block" id="slice-runtime-block">${icon("blocked")}OrcaSlicer: ${esc(runtimeLabel)} — запуск невозможен${runtimeMsg ? `: ${esc(runtimeMsg)}` : ""}.
+         Восстановите среду (проверьте контейнер OrcaSlicer, затем «Импорт пресетов») и повторите.</div>`
     : "";
   // Причина блокировки доступна скринридеру через aria-describedby, а не только title.
   const disabledAttr = runtimeDown

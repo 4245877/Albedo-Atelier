@@ -1,12 +1,15 @@
 /* ── Общие блоки принтера: материал, телеметрия, панель действий ──
    Одна точка правды для карточки (render/printers.js) и модального окна
    (render/modals.js): строка филамента, температурные пары и общий набор
-   кнопок управления. Доступность действий решает printerView.actionAvailability
-   — здесь только разметка. */
+   кнопок управления. Состав и доступность действий решает
+   printerView.printerActionModel — здесь только разметка. */
 
+import { API_BASE } from "../api.js";
 import { esc } from "../util.js";
 import { fmtNozzle } from "../shared/format.js";
-import { actionAvailability } from "./printerView.js";
+import { icon } from "../shared/icons.js";
+import { menuHtml } from "../shared/menu.js";
+import { printerActionModel } from "./printerView.js";
 
 /**
  * Строка филамента: живой материал с принтера (тег «с принтера») либо
@@ -56,19 +59,40 @@ export function telemetryTempRows(p) {
   return rows;
 }
 
+/* ── Панель действий ───────────────────────────────────────────
+   Одно главное действие, одно вспомогательное, остальное — в «⋯».
+   Иерархия читается с одного взгляда, а разрушающее действие требует
+   осознанного движения (открыть меню), а не случайного попадания. */
+
+function actionButton(p, item, { primary = false } = {}) {
+  if (!item) return "";
+  const id = esc(p.id);
+  const cls = `btn btn-sm${primary ? " btn-primary" : ""}`;
+  if (item.href) {
+    // Ссылки бывают двух родов: абсолютный адрес самого принтера (interfaceUrl)
+    // и путь внутри нашего API (последний снимок) — второму нужен префикс.
+    const href = item.absolute ? esc(item.href) : `${API_BASE}${esc(item.href)}`;
+    return `<a class="${cls}" href="${href}" target="_blank" rel="noopener">${icon(item.icon)}<span>${esc(item.label)}</span></a>`;
+  }
+  // Причина недоступности живёт и в title (подсказка мышью), и в
+  // aria-describedby-подобном тексте меню; для тача важнее второе.
+  const title = item.disabled && item.reason ? ` title="${esc(item.reason)}"` : "";
+  const pressed = item.pressed !== undefined ? ` aria-pressed="${item.pressed}"` : "";
+  return `<button class="${cls}" data-act="${esc(item.act)}" data-id="${id}"${title}${pressed} ${
+    item.disabled ? "disabled" : ""
+  }>${icon(item.icon)}<span>${esc(item.label)}</span></button>`;
+}
+
 /**
- * Общий набор кнопок управления принтером (пауза/продолжить/отмена/подсветка/
- * снимок) с одинаковой логикой доступности и подсказок. Карточка и модальное
- * окно оборачивают его своими дополнительными кнопками (открыть/файлы/ссылки).
+ * Готовый ряд действий по модели printerActionModel.
+ * `context` — "card" или "modal": в окне принтера нет кнопки «Открыть».
  */
-export function commonActionButtons(p, can = actionAvailability(p)) {
-  const lightTitle = can.lightUnknown && can.lightSupported
-    ? ' title="Состояние подсветки неизвестно — команда будет отправлена вручную"'
-    : "";
+export function actionBar(p, { context = "card" } = {}) {
+  const model = printerActionModel(p, { context });
   return `
-    <button class="btn btn-sm" data-act="pause" data-id="${esc(p.id)}" ${can.canPause ? "" : "disabled"}>⏸ Пауза</button>
-    <button class="btn btn-sm" data-act="resume" data-id="${esc(p.id)}" ${can.canResume ? "" : "disabled"}>▶ Продолжить</button>
-    <button class="btn btn-sm btn-danger" data-act="cancel" data-id="${esc(p.id)}" ${can.canCancel ? "" : "disabled"}>✕ Отмена</button>
-    <button class="btn btn-sm" data-act="light-on" data-id="${esc(p.id)}"${lightTitle} ${can.canLightOn ? "" : "disabled"}>☀ Подсветка</button>
-    <button class="btn btn-sm" data-act="light-off" data-id="${esc(p.id)}"${lightTitle} ${can.canLightOff ? "" : "disabled"}>☾ Погасить</button>`;
+    <div class="printer-actions">
+      ${actionButton(p, model.primary, { primary: true })}
+      ${actionButton(p, model.secondary)}
+      ${menuHtml(model.menu, { id: `${context}-${p.id}`, dataId: p.id, label: `Ещё действия — ${p.name}` })}
+    </div>`;
 }

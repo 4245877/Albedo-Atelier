@@ -1,8 +1,9 @@
 import { API_BASE } from "../api.js";
-import { $, esc, emptyRow } from "../util.js";
+import { $, esc, emptyState } from "../util.js";
 import { badge } from "../shared/chips.js";
 import { fmtLeft } from "../shared/format.js";
-import { commonActionButtons, materialBlock, telemetryTempRows } from "./printerParts.js";
+import { icon } from "../shared/icons.js";
+import { actionBar, materialBlock, telemetryTempRows } from "./printerParts.js";
 import {
   actionAvailability,
   jobLine,
@@ -24,14 +25,33 @@ const PRINTER_SVG = `
     <path d="M30 46 L70 46" stroke-dasharray="3 4" opacity=".8"/>
   </svg>`;
 
+/* Камеры нет вовсе — резервировать под это 16:9 нельзя: пустой прямоугольник
+   в треть карточки не сообщает ничего, ради чего стоило бы отдать столько
+   места. Остаётся одна тихая полоса, и она честно говорит, что делать. */
 export function camBlock(p, ctx) {
   if (p.camera === "none") {
-    return `<div class="cam"><div class="cam-offline">камера не настроена</div></div>`;
+    return `<div class="cam-strip cam-strip-none">
+      ${icon("camera")}<span>Камера не настроена</span>
+      <button type="button" class="cam-strip-fix" data-goto="hardware">Настроить</button>
+    </div>`;
   }
 
+  /* Связи нет. Полезнее показать ПОСЛЕДНИЙ КАДР — затемнённым и со временем,
+     когда он был снят, — чем перечёркнутую заглушку во весь блок: оператор
+     хотя бы видит, чем всё закончилось. Кадра нет — остаётся узкая полоса. */
   if (p.camera === "offline") {
-    return `<div class="cam"><div class="cam-offline">нет сигнала</div>
-      ${p.snapshotAt ? `<span class="cam-tag"><i class="dot"></i>снимок ${p.snapshotAt}</span>` : ""}</div>`;
+    if (p.latestSnapshotUrl) {
+      return `
+        <div class="cam cam-stale">
+          ${PRINTER_SVG}
+          <img class="cam-img" alt="Последний кадр камеры ${esc(p.name)}" loading="lazy"
+            src="${API_BASE}${esc(p.latestSnapshotUrl)}" onerror="this.remove()">
+          <span class="cam-tag cam-tag-stale">${icon("warn")}<span>Нет связи · кадр ${esc(p.snapshotAt || "—")}</span></span>
+        </div>`;
+    }
+    return `<div class="cam-strip cam-strip-offline">
+      ${icon("warn")}<span>Нет сигнала${p.snapshotAt ? ` · последний кадр ${esc(p.snapshotAt)}` : ""}</span>
+    </div>`;
   }
 
   // Live-трансляция (WebRTC через go2rtc): в разметку кладём только стабильную
@@ -59,7 +79,7 @@ export function camBlock(p, ctx) {
         ${PRINTER_SVG}
         <div class="cam-mount" data-cam-mjpeg-slot="${esc(slot)}" data-cam-mjpeg-src="${esc(src)}" data-cam-alt="Камера ${esc(p.name)}"></div>
         <div class="cam-state">подключение…</div>
-        <span class="cam-tag live"><i class="dot"></i>LIVE</span>
+        <span class="cam-tag live"><i class="dot"></i><span>LIVE</span></span>
         <span class="cam-flash" data-flash="${p.id}"></span>
       </div>`;
   }
@@ -72,7 +92,7 @@ export function camBlock(p, ctx) {
       <img class="cam-img" alt="Камера ${esc(p.name)}" loading="lazy"
         src="${API_BASE}/api/printers/${encodeURIComponent(p.id)}/camera.jpg?t=${encodeURIComponent(p.snapshotAt || Date.now())}"
         onerror="this.remove()">
-      <span class="cam-tag"><i class="dot"></i>снимок ${p.snapshotAt || "—"}</span>
+      <span class="cam-tag"><i class="dot"></i><span>снимок ${esc(p.snapshotAt || "—")}</span></span>
       <span class="cam-flash" data-flash="${p.id}"></span>
     </div>`;
 }
@@ -97,13 +117,8 @@ function teleBlock(p) {
 function printerCard(p, lightEntry) {
   const can = actionAvailability(p);
   // Решение автоматики подсветки (state.lights) — отдельно от фактического
-  // состояния лампы, которое показывают кнопки ☀/☾ и подсветка камеры.
+  // состояния лампы, которое показывает переключатель света и подсветка камеры.
   const lightLine = lightEntry ? `<div class="printer-light">${esc(lightPolicyLine(lightEntry))}</div>` : "";
-  const actions = `
-    <button class="btn btn-sm" data-act="open" data-id="${p.id}">Открыть</button>
-    ${commonActionButtons(p, can)}
-    <button class="btn btn-sm" data-act="snapshot" data-id="${p.id}"${p.snapshotAvailable ? "" : ' title="Для этой камеры снимок недоступен"'} ${can.canSnapshot ? "" : "disabled"}>◉ Снимок</button>
-    ${p.latestSnapshotUrl ? `<a class="btn btn-sm" href="${API_BASE}${esc(p.latestSnapshotUrl)}" target="_blank" rel="noopener" title="Открыть последний сохранённый снимок">🖼 Снимок</a>` : ""}`;
 
   const progressBlock = !can.busy ? "" : normalizeProgress(p.progress) != null ? `
     <div class="printer-progress">
@@ -130,7 +145,7 @@ function printerCard(p, lightEntry) {
         ${teleBlock(p)}
         ${materialBlock(p)}
         ${lightLine}
-        <div class="printer-actions">${actions}</div>
+        ${actionBar(p, { context: "card" })}
       </div>
     </article>`;
 }
@@ -141,21 +156,36 @@ export function renderPrinters(state) {
   $("#printers-meta").textContent =
     `${p.filter((x) => x.status === "printing").length} печатают · ${p.filter((x) => x.status === "idle").length} свободны · ${p.length} всего`;
   $("#printer-grid").innerHTML = p.map((x) => printerCard(x, lightsById.get(x.id))).join("") ||
-    `<div class="row"><div class="grow row-sub">В зале ещё нет ни одного принтера, Владыка — примите первого в разделе «Оборудование фермы», и я тотчас возьму его под надзор</div></div>`;
+    emptyState(
+      "В зале ещё нет ни одного принтера, Владыка. Примите первого — и я тотчас возьму его под надзор.",
+      { glyph: "printer", action: `<button type="button" class="btn btn-sm btn-primary" data-goto="hardware">Принять принтер</button>` }
+    );
 }
 
 export function renderCameras(state) {
   const cams = state.printers.filter((p) => p.camera !== "none");
   const online = cams.filter((p) => p.camera === "online");
   $("#cameras-meta").textContent = cams.length
-    ? `${online.length} online · ${cams.length - online.length} offline`
+    ? `${online.length} в эфире · ${cams.length - online.length} без связи`
     : "не настроены";
+
+  if (!cams.length) {
+    $("#cameras-body").innerHTML = emptyState(
+      "Ни один принтер не открыт моему взору — камеры не настроены.",
+      { glyph: "camera", action: `<button type="button" class="btn btn-sm" data-goto="hardware">Указать адрес камеры</button>` }
+    );
+    return;
+  }
+
+  // Превью — настоящая кнопка, а не кликабельный <div>: только так до неё
+  // добирается Tab, срабатывает Enter/Space и скринридер называет действие.
   $("#cameras-body").innerHTML = `
     <div class="cam-grid">
       ${cams.map((p) => `
-        <div class="cam-thumb" data-act="open" data-id="${p.id}" title="Открыть ${esc(p.name)}">
+        <button type="button" class="cam-thumb" data-act="open" data-id="${esc(p.id)}"
+          aria-label="Открыть ${esc(p.name)}">
           <span class="cam-thumb-name">${esc(p.name)}</span>
           ${camBlock(p, "thumb")}
-        </div>`).join("") || `<ul class="row-list" style="grid-column:1/-1">${emptyRow("Ни один принтер не открыт моему взору — камеры не настроены (snapshotUrl в конфигурации)")}</ul>`}
+        </button>`).join("")}
     </div>`;
 }

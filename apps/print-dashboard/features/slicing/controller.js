@@ -13,6 +13,7 @@ import { apiGet, apiPost } from "../../api.js";
 import { openLaunchModal } from "../../render/modals.js";
 import { $, toast, esc } from "../../util.js";
 import { buildCreateSetPayload, nextPollMs } from "./formModel.js";
+import { icon } from "../../shared/icons.js";
 import {
   createSetHtml,
   errorsHtml,
@@ -125,7 +126,7 @@ function renderConnectionError() {
   const body = $("#slicing-body");
   if (!body) return;
   body.innerHTML = `<div class="slice-loading">Backend безмолвствует, Владыка — раздел не покорился мне с первой попытки.
-    <button type="button" class="btn btn-sm" data-slice-action="reload">↻ Воззвать снова</button></div>`;
+    <button type="button" class="btn btn-sm" data-slice-action="reload">${icon("refresh")}<span>Воззвать снова</span></button></div>`;
 }
 
 let pollMs = null;

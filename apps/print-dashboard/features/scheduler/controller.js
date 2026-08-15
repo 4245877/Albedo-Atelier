@@ -17,6 +17,7 @@ import { createPoller } from "../../shared/polling.js";
 import { inputToIso } from "../../shared/format.js";
 import { $, esc, toast } from "../../util.js";
 import { createSnapshot, isSnapshotStale, paramsPayload } from "./editSnapshot.js";
+import { icon } from "../../shared/icons.js";
 import {
   addTaskHtml,
   compatibilityHtml,
@@ -34,6 +35,10 @@ const state = {
   plans: [],
   plan: null,
   night: null,
+  /* Какие строки матрицы совместимости раскрыты. Живёт в состоянии раздела, а
+     не в DOM: опрос перерисовывает разметку каждые 8 с, и раскрытая строка
+     иначе схлопывалась бы прямо во время чтения. */
+  expandedMatrix: new Set(),
   loaded: false,
   /* Ошибка последнего опроса — показывается ОТДЕЛЬНО от данных (баннер), а не
      затирает уже загруженное. Сбрасывается следующим успешным опросом. */
@@ -216,6 +221,21 @@ function wireDelegates() {
     const rowEl = btn.closest("[data-task]");
     const taskId = rowEl?.dataset.task;
 
+    if (action === "cell") {
+      // Раскрытие «задание × принтеры»: подробности причин недоступности.
+      const key = btn.dataset.task;
+      if (!key) return;
+      if (state.expandedMatrix.has(key)) state.expandedMatrix.delete(key);
+      else state.expandedMatrix.add(key);
+      const detail = $("#scheduler-body")?.querySelector(`[data-detail="${CSS.escape(key)}"]`);
+      if (detail) detail.hidden = !state.expandedMatrix.has(key);
+      // aria-expanded держим на всех ячейках этой строки: раскрывается строка.
+      $("#scheduler-body")
+        ?.querySelectorAll(`[data-mx-row="${CSS.escape(key)}"] .mx-cell`)
+        .forEach((c) => c.setAttribute("aria-expanded", String(state.expandedMatrix.has(key))));
+      return;
+    }
+
     if (action === "toggle-edit") {
       const form = rowEl?.querySelector('[data-sch-form="params"]');
       if (form) {
@@ -339,7 +359,7 @@ function markStaleForms() {
       banner = document.createElement("div");
       banner.className = "sch-stale slice-warn";
       banner.innerHTML =
-        `⚠ Владыка, задание изменили в другом окне — эта форма устарела, и сохранение честно вернёт конфликт. ` +
+        `${icon("warn")} Владыка, задание изменили в другом окне — эта форма устарела, и сохранение честно вернёт конфликт. ` +
         `<button type="button" class="btn btn-sm" data-sch-action="reload-form">Перечитать</button>`;
       form.prepend(banner);
     } else if (!stale && banner) {

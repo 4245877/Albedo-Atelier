@@ -73,9 +73,12 @@ test("dashboard boots in a real browser and renders the board from the API", { s
     };
 
     // Poll until the board rendered its printer cards (data-driven from /api/dashboard).
+    // `:not(.is-skeleton)` обязателен: до прихода данных в разметке стоят
+    // заглушки-скелеты той же геометрии (они и есть первый кадр), и без этого
+    // фильтра тест считал бы их за отрисованные принтеры.
     let cards = 0;
     for (let i = 0; i < 80; i++) {
-      cards = await evalValue("document.querySelectorAll('.printer-card').length");
+      cards = await evalValue("document.querySelectorAll('.printer-card:not(.is-skeleton)').length");
       if (cards >= 2) break;
       await new Promise((r) => setTimeout(r, 250));
     }

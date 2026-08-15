@@ -7,8 +7,9 @@ import {
   openLaunchModal,
   openPrinterModal
 } from "./render/modals.js";
-import { setActiveNav } from "./nav.js";
-import { esc, toast } from "./util.js";
+import { gotoSection } from "./nav.js";
+import { confirmAction } from "./shared/dialog.js";
+import { esc, setBusy, toast } from "./util.js";
 
 /* ── Действия (реальные вызовы backend) ────────────────────── */
 
@@ -34,14 +35,18 @@ export function installActions({ getState, refresh }) {
    * `key` защищает от повторной отправки того же действия, `el` блокирует кнопку
    * на время запроса.
    */
-  async function runAction(path, body, okMsg, okKind = "toast-ok", key, el) {
+  async function runAction(path, body, okMsg, okKind = "toast-ok", key, el, busyLabel = "Исполняю…") {
     if (key && inFlight.has(key)) return null;
     if (key) inFlight.add(key);
-    if (el) el.disabled = true;
+    // Кнопка не просто гаснет, а называет происходящее: немая погашенная
+    // кнопка неотличима от недоступной, и оператор жмёт её второй раз.
+    const restore = el ? setBusy(el, busyLabel) : () => {};
     try {
       const res = await apiPost(path, body);
-      await refresh();
+      // Тост показываем сразу по ответу backend — ждать полной перерисовки
+      // доски незачем: приказ уже принят.
       if (okMsg) toast(okMsg, okKind);
+      await refresh();
       return res;
     } catch (err) {
       // Ошибка исполнения — непростительная оплошность; Надзирательница честно
@@ -52,7 +57,7 @@ export function installActions({ getState, refresh }) {
       if (key) inFlight.delete(key);
       // refresh() перерисовывает доску и заменяет кнопку; снимаем блокировку
       // только если элемент ещё в DOM — иначе состояние задаёт перерисовка.
-      if (el && el.isConnected) el.disabled = false;
+      restore();
     }
   }
 
@@ -63,44 +68,65 @@ export function installActions({ getState, refresh }) {
     // для остальных протоколов openFilesModal честно объяснит, что не поддержано.
     files(p) { openFilesModal(p.id); },
 
-    pause(p, el) { runAction(`/api/printers/${p.id}/pause`, null, `«${esc(p.name)}» замер по вашему велению, Владыка ⏸`, "toast-ok", `pause:${p.id}`, el); },
+    pause(p, el) { runAction(`/api/printers/${p.id}/pause`, null, `«${esc(p.name)}» замер по вашему велению, Владыка`, "toast-ok", `pause:${p.id}`, el, "Останавливаю…"); },
 
-    resume(p, el) { runAction(`/api/printers/${p.id}/resume`, null, `«${esc(p.name)}» вновь трудится во славу Владыки ▶`, "toast-ok", `resume:${p.id}`, el); },
+    resume(p, el) { runAction(`/api/printers/${p.id}/resume`, null, `«${esc(p.name)}» вновь трудится во славу Владыки`, "toast-ok", `resume:${p.id}`, el, "Возобновляю…"); },
 
-    cancel(p, el) {
-      const jobLabel = p.job ? `«${p.job}»` : "текущего задания";
-      // Снимок identity берём В МОМЕНТ подтверждения (не после confirm —
-      // за время диалога состояние могло уехать): имя файла + канонический
+    async cancel(p, el) {
+      // Снимок identity берём В МОМЕНТ подтверждения (не после диалога —
+      // за это время состояние могло уехать): имя файла + канонический
       // runId. runId ловит даже повторную печать того же файла: backend
       // ответит 409 PRINT_IDENTITY_CONFLICT и ничего не отменит.
       const expectJob = p.job ?? null;
       const expectRunId = p.activeRunId ?? null;
-      if (!window.confirm(`Владыка, вы повелеваете отменить печать ${jobLabel} на «${p.name}»? Ваше слово — закон.`)) return;
+      const ok = await confirmAction({
+        title: "Отменить печать",
+        object: p.job ? `${p.job} — на «${p.name}»` : `Текущее задание на «${p.name}»`,
+        body: "Принтер прекратит работу немедленно, стол и сопло начнут остывать.",
+        points: [
+          "Начатая деталь будет испорчена — допечатать её с этого места нельзя",
+          "Израсходованный материал не вернётся",
+          "Задание останется в очереди и его можно будет запустить заново"
+        ],
+        cta: "Отменить печать",
+        tone: "danger",
+        irreversible: true
+      });
+      if (!ok) return;
       runAction(
         `/api/printers/${p.id}/cancel`,
         { job: expectJob, runId: expectRunId },
         `«${esc(p.name)}»: печать отменена — как вы и повелели`,
         "toast-danger",
         `cancel:${p.id}`,
-        el
+        el,
+        "Отменяю…"
       );
     },
 
-    "light-on"(p, el) {
-      // Целевое состояние уже достигнуто — не шлём команду и не засоряем ленту.
-      if (p.light === true) return;
-      runAction(`/api/printers/${p.id}/light`, { on: true }, `«${esc(p.name)}»: свет зажжён, дабы ничто не укрылось от вашего взора ☀`, "toast-ok", `light:${p.id}`, el);
-    },
-
-    "light-off"(p, el) {
-      if (p.light === false) return;
-      runAction(`/api/printers/${p.id}/light`, { on: false }, `«${esc(p.name)}»: свет погашен — тьма к лицу Назарику ☾`, "toast-ok", `light:${p.id}`, el);
+    /* Один орган управления вместо пары «Подсветить / Погасить»: состояние
+       лампы читается по самому переключателю, а не по тому, какая из двух
+       одинаковых кнопок сейчас погашена. */
+    light(p, el) {
+      const on = p.light !== true; // неизвестное состояние трактуем как «зажечь»
+      if (p.light === on) return;
+      runAction(
+        `/api/printers/${p.id}/light`,
+        { on },
+        on
+          ? `«${esc(p.name)}»: свет зажжён, дабы ничто не укрылось от вашего взора`
+          : `«${esc(p.name)}»: свет погашен — тьма к лицу Назарику`,
+        "toast-ok",
+        `light:${p.id}`,
+        el,
+        on ? "Зажигаю…" : "Гашу…"
+      );
     },
 
     snapshot(p, el) {
       // Вспышку и тост показываем только после успешного сохранения — при ошибке
       // (камера недоступна, go2rtc не отдал кадр) UI не должен «мигать» успехом.
-      runAction(`/api/printers/${p.id}/snapshot`, null, null, "toast-ok", `snapshot:${p.id}`, el).then((res) => {
+      runAction(`/api/printers/${p.id}/snapshot`, null, null, "toast-ok", `snapshot:${p.id}`, el, "Снимаю…").then((res) => {
         if (!res) return;
         const flash = document.querySelector(`[data-flash="${p.id}"]`);
         if (flash) {
@@ -108,7 +134,7 @@ export function installActions({ getState, refresh }) {
           void flash.offsetWidth;
           flash.classList.add("go");
         }
-        toast(`«${esc(p.name)}»: снимок запечатлён в архивах Назарика ◉`, "toast-ok");
+        toast(`«${esc(p.name)}»: снимок запечатлён в архивах Назарика`, "toast-ok");
       });
     },
   };
@@ -124,11 +150,9 @@ export function installActions({ getState, refresh }) {
 
     const goto = el.dataset.goto;
     if (goto) {
-      const target = document.getElementById(goto);
-      if (target) {
-        setActiveNav(goto); // мгновенная подсветка «вы здесь», далее ведёт scroll-spy
-        target.scrollIntoView({ behavior: "smooth", block: "start" });
-      }
+      // Переход сам переключает режим: ссылка в «Оборудование» из Зала обязана
+      // открыть «Работы», а не проскроллить к скрытой секции.
+      gotoSection(goto);
       return;
     }
 
@@ -139,7 +163,7 @@ export function installActions({ getState, refresh }) {
     if (act === "upload-file") { openInfoModal("upload-file"); return; }
     if (act === "settings") { openInfoModal("settings"); return; }
     if (act === "night-pick") {
-      runAction("/api/queue/night/pick", null, "Владыка, я избрала достойнейшее задание для ночного бдения ☾", "toast-ok", "night-pick", el);
+      runAction("/api/queue/night/pick", null, "Владыка, я избрала достойнейшее задание для ночного бдения", "toast-ok", "night-pick", el, "Подбираю…");
       return;
     }
     if (act === "night-start") {
@@ -156,9 +180,9 @@ export function installActions({ getState, refresh }) {
             artifactSha256: pick.artifactSha256 ?? null
           }
         : null;
-      runAction("/api/queue/night/start", preview, null, "toast-ok", "night-start", el).then((res) => {
+      runAction("/api/queue/night/start", preview, null, "toast-ok", "night-start", el, "Запускаю…").then((res) => {
         if (res?.candidate) {
-          toast(`Ночная печать «${esc(res.candidate.title)}» назначена на ${esc(String(res.window).split(" ")[0])} — я буду бдить, Владыка ☾`, "toast-ok");
+          toast(`Ночная печать «${esc(res.candidate.title)}» назначена на ${esc(String(res.window).split(" ")[0])} — я буду бдить, Владыка`, "toast-ok");
         }
       });
       return;
@@ -173,13 +197,15 @@ export function installActions({ getState, refresh }) {
       return;
     }
     if (act === "start-next") {
-      runAction("/api/queue/start-next", null, null, "toast-ok", "start-next", el).then((res) => {
+      runAction("/api/queue/start-next", null, null, "toast-ok", "start-next", el, "Запускаю…").then((res) => {
         if (res?.job) toast(`Задание «${esc(res.job.title)}» вверено «${esc(res.job.printer)}» — всё будет исполнено безупречно, Владыка`, "toast-ok");
       });
       return;
     }
     if (act === "rule") {
-      runAction(`/api/automations/${el.dataset.id}/toggle`, null, null, "toast-ok", `rule:${el.dataset.id}`, el).then((res) => {
+      // Переключатель — не кнопка с подписью: setBusy подменил бы его разметку,
+      // поэтому здесь занятость показывает только атрибут (см. .toggle[aria-busy]).
+      runAction(`/api/automations/${el.dataset.id}/toggle`, null, null, "toast-ok", `rule:${el.dataset.id}`, null).then((res) => {
         if (res?.automation) toast(`Правило «${esc(res.automation.name)}» ${res.automation.on ? "приведено в действие" : "остановлено"} по вашей воле`);
       });
       return;

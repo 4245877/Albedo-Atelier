@@ -69,6 +69,123 @@ export function actionAvailability(p) {
   };
 }
 
+/* ── Модель действий карточки принтера ─────────────────────────
+   Раньше карточка выкладывала восемь равновесных кнопок в один ряд («Открыть»,
+   «Пауза», «Продолжить», «Отмена», «Подсветка», «Погасить», «Снимок»,
+   «Снимок»): два действия назывались одинаково, две кнопки описывали одну
+   лампу, а разрушающая «Отмена» стояла вплотную к безобидным. Взгляду не за
+   что было зацепиться, и цена ошибки у соседних кнопок отличалась в тысячу раз.
+
+   Теперь у карточки ОДНО главное действие (оно зависит от состояния машины),
+   одно вспомогательное и меню «ещё» для всего остального.
+
+   Отдельно разведены два разных «нельзя»:
+     • НЕ ПОДДЕРЖИВАЕТСЯ — устройство этого не умеет в принципе (нет камеры,
+       протокол не отдаёт файлы). Такое действие не рисуется ВОВСЕ: погашенная
+       кнопка, которая не оживёт никогда, — это обещание, которого не будет.
+     • ВРЕМЕННО НЕДОСТУПНО — умеет, но не сейчас (принтер не в сети, не
+       печатает). Такое рисуется погашенным И называет причину. */
+
+/** Ярлык главного действия зависит от того, что с машиной происходит. */
+const PRIMARY_BY_STATUS = {
+  printing: { act: "pause", label: "Пауза", icon: "pause" },
+  paused: { act: "resume", label: "Продолжить", icon: "play" },
+  error: { act: "open", label: "Разобраться", icon: "warn" },
+  offline: { act: "open", label: "Диагностика", icon: "pulse" },
+  idle: { act: "open", label: "Открыть", icon: "eye" },
+  unknown: { act: "open", label: "Открыть", icon: "eye" },
+};
+
+/**
+ * Полная модель действий по принтеру.
+ *
+ * @param {object} p   payload принтера
+ * @param {{context?: "card"|"modal"}} opts
+ * @returns {{primary: object|null, secondary: object|null, menu: object[]}}
+ *   Каждый пункт: { act, label, icon, disabled, reason, danger, href }.
+ */
+export function printerActionModel(p, { context = "card" } = {}) {
+  const can = actionAvailability(p);
+  const offlineReason = "Принтер не в сети — команда не дойдёт";
+
+  /** Пункт меню; `supported: false` выбрасывает его из модели целиком. */
+  const item = (o) => (o.supported === false ? null : o);
+
+  const all = [
+    item({
+      act: "pause", label: "Пауза", icon: "pause",
+      disabled: !can.canPause,
+      reason: can.canPause ? "" : can.offline ? offlineReason : "Принтер сейчас не печатает",
+    }),
+    item({
+      act: "resume", label: "Продолжить", icon: "play",
+      disabled: !can.canResume,
+      reason: can.canResume ? "" : can.offline ? offlineReason : "Печать не поставлена на паузу",
+    }),
+    item({
+      act: "cancel", label: "Отменить печать", icon: "cancelPrint", danger: true,
+      disabled: !can.canCancel,
+      reason: can.canCancel ? "" : "Сейчас нечего отменять — принтер не занят заданием",
+    }),
+    // Подсветка — ОДИН переключатель вместо пары «Подсветить / Погасить»:
+    // состояние лампы видно по самой кнопке, а не по тому, какая из двух
+    // одинаковых сейчас погашена.
+    item({
+      supported: can.lightSupported,
+      act: "light",
+      label: p.light === true ? "Погасить свет" : "Зажечь свет",
+      icon: p.light === true ? "moon" : "sun",
+      disabled: can.offline,
+      reason: can.offline ? offlineReason : can.lightUnknown ? "Состояние лампы неизвестно — команда уйдёт вслепую" : "",
+      pressed: p.light === true,
+    }),
+    item({
+      supported: Boolean(p.snapshotAvailable),
+      act: "snapshot", label: "Сделать снимок", icon: "shutter",
+      disabled: can.offline,
+      reason: can.offline ? offlineReason : "",
+    }),
+    // Ссылка на уже сохранённый кадр — не команда: она никогда не называется
+    // так же, как «Сделать снимок» (прежде обе кнопки звались «Снимок»).
+    item({
+      supported: Boolean(p.latestSnapshotUrl),
+      act: "last-frame", label: "Последний кадр", icon: "frame",
+      href: p.latestSnapshotUrl, external: true,
+    }),
+    item({
+      supported: Boolean(p.filesSupported),
+      act: "files", label: "Файлы на принтере", icon: "files",
+      disabled: can.offline,
+      reason: can.offline ? offlineReason : "",
+    }),
+    item({
+      supported: Boolean(p.interfaceUrl),
+      act: "interface", label: "Веб-интерфейс", icon: "external",
+      href: p.interfaceUrl, external: true, absolute: true,
+    }),
+  ].filter(Boolean);
+
+  const byAct = (a) => all.find((x) => x.act === a) || null;
+  const spec = PRIMARY_BY_STATUS[p.status] || PRIMARY_BY_STATUS.unknown;
+
+  let primary = null;
+  if (spec.act === "open") {
+    // В окне принтера «Открыть» бессмысленно — оно уже открыто.
+    primary = context === "card"
+      ? { act: "open", label: spec.label, icon: spec.icon }
+      : byAct("snapshot") || byAct("files") || null;
+  } else {
+    primary = byAct(spec.act);
+  }
+
+  // Вспомогательное — то, за чем тянутся чаще всего: свет, затем снимок.
+  const secondary = [byAct("light"), byAct("snapshot"), context === "card" ? byAct("open") : null]
+    .filter((x) => x && x !== primary)[0] || null;
+
+  const menu = all.filter((x) => x !== primary && x !== secondary);
+  return { primary, secondary, menu };
+}
+
 /**
  * Прогресс к числу 0–100: null/undefined, пустая строка и NaN → null
  * («принтер не сообщает»), выход за диапазон обрезается.

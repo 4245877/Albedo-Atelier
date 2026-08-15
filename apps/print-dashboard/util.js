@@ -2,6 +2,8 @@
    Только DOM-помощники. Форматирование чисел/дат — shared/format.js,
    чипы/бейджи/панели — shared/chips.js, блоки принтера — render/printerParts.js. */
 
+import { icon, spinner } from "./shared/icons.js";
+
 export const $ = (sel) => document.querySelector(sel);
 
 export const esc = (s) =>
@@ -12,9 +14,55 @@ export function cssEscape(s) {
   return String(s).replace(/["\\]/g, "\\$&");
 }
 
-/** Пустое состояние секции: данных реально нет — не подставляем выдуманные. */
-export function emptyRow(text) {
-  return `<li class="row"><div class="grow row-sub">${esc(text)}</div></li>`;
+/* ── Пустые состояния ──────────────────────────────────────────
+   Пустое состояние в этом зале — не «нет данных», а реплика Надзирательницы:
+   она честно признаёт, что показывать нечего, и говорит, чем это исправить.
+   Отдельный примитив нужен, чтобы оно не выглядело ещё одной строкой списка,
+   но и не превращалось в плакат посреди рабочей карточки. */
+
+/**
+ * Пустое состояние секции: данных реально нет — не подставляем выдуманные.
+ * Возвращает `<li>` (живёт внутри `.row-list`).
+ */
+export function emptyRow(text, { glyph = "sigil", action = "" } = {}) {
+  return `<li class="row row-empty">${emptyInner(glyph, text, action)}</li>`;
+}
+
+/** То же, но самостоятельным блоком — вне списка. */
+export function emptyState(text, { glyph = "sigil", action = "" } = {}) {
+  return `<div class="row row-empty">${emptyInner(glyph, text, action)}</div>`;
+}
+
+function emptyInner(glyph, text, action) {
+  return `
+    <span class="empty-glyph" aria-hidden="true">${icon(glyph, { cls: "ico-lg" })}</span>
+    <div class="grow"><p class="empty-text">${esc(text)}</p></div>
+    ${action || ""}`;
+}
+
+/* ── Занятость органа управления ───────────────────────────────
+   Пока запрос в полёте, кнопка обязана СКАЗАТЬ, что происходит («Сохраняю…»),
+   а не просто погаснуть: немая погашенная кнопка неотличима от недоступной. */
+
+/**
+ * Переводит кнопку в состояние ожидания и возвращает функцию восстановления.
+ * `label` — что именно делается: «Сохраняю…», «Проверяю…», «Останавливаю…».
+ */
+export function setBusy(el, label) {
+  if (!el) return () => {};
+  const html = el.innerHTML;
+  const wasDisabled = el.disabled;
+  el.classList.add("is-busy");
+  el.disabled = true;
+  el.setAttribute("aria-busy", "true");
+  el.innerHTML = `${spinner()}<span>${esc(label)}</span>`;
+  return () => {
+    if (!el.isConnected) return;
+    el.classList.remove("is-busy");
+    el.disabled = wasDisabled;
+    el.removeAttribute("aria-busy");
+    el.innerHTML = html;
+  };
 }
 
 /* ── Тосты ─────────────────────────────────────────────────── */
@@ -39,10 +87,11 @@ export function toast(msg, kind = "", { ms } = {}) {
   // Отказ читается вслух немедленно: контейнер объявлен polite, и без role=alert
   // сообщение об ошибке ждало бы паузы в речи скринридера.
   if (kind === "toast-danger") el.setAttribute("role", "alert");
+  const mark = kind === "toast-danger" ? "warn" : kind === "toast-ok" ? "check" : "sigil";
   el.innerHTML =
-    `<span class="star" aria-hidden="true">❖</span>` +
+    `<span class="star" aria-hidden="true">${icon(mark, { cls: "ico-md" })}</span>` +
     `<span class="toast-msg">${msg}</span>` +
-    `<button type="button" class="toast-close" aria-label="Закрыть уведомление" title="Закрыть">✕</button>`;
+    `<button type="button" class="toast-close" aria-label="Закрыть уведомление">${icon("cross", { cls: "ico-sm" })}</button>`;
   stack.appendChild(el);
 
   // Живыми считаем только те, что ещё не уходят: иначе уже погашенные карточки

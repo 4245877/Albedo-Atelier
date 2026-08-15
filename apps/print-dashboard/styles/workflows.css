@@ -1685,3 +1685,173 @@
   .launch-confirm input,
   .launch-cand input { width: 20px; height: 20px; }
 }
+
+/* ═══ Матрица совместимости: причины на виду ══════════════════════
+   Ячейка теперь не только вердикт, но и первая причина; вся раскладка
+   раскрывается строкой ниже. Ширину держим в узде — иначе матрица из
+   четырёх принтеров уезжала бы за край даже на большом экране. */
+
+/* Первая колонка — заголовок строки (<th scope="row">), а не микро-метка
+   шапки: сбрасываем «капслок 10.5px», иначе имена заданий стали бы
+   нечитаемыми аббревиатурами. */
+.sch-matrix th.sch-cell-task {
+  font-size: var(--t-13);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink);
+  white-space: normal;
+  min-width: 200px;
+  border-bottom-color: var(--table-line);
+  vertical-align: top;
+}
+
+.sch-matrix .mx-td { vertical-align: top; white-space: normal; padding: 8px 10px; }
+.mx-none { color: var(--ink-faint); }
+
+/* Ячейка-кнопка: до причины добирается и Tab, и палец. */
+.mx-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  min-width: 170px;
+  max-width: 260px;
+  padding: 6px;
+  margin: -6px;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast), border-color var(--dur-fast);
+}
+.mx-cell:hover { background: var(--card-inner); border-color: var(--card-edge); }
+.mx-cell[aria-expanded="true"] { background: var(--gold-soft); border-color: var(--gold-line); }
+
+/* Первая причина — видимый текст, а не подсказка по наведению. Две строки:
+   дальше читать в раскрытой строке. */
+.mx-reason {
+  font-size: var(--t-11);
+  line-height: 1.35;
+  color: var(--ink-soft);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.mx-more {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--gold-on-soft);
+}
+
+.mx-detail > td {
+  padding: 0 10px 14px;
+  background: var(--card-inner);
+  white-space: normal;
+}
+.mx-detail-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 0 8px;
+}
+.mx-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: 10px;
+}
+.mx-card {
+  border: 1px solid var(--card-edge);
+  border-left-width: 3px;
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+  background: var(--card);
+  min-width: 0;
+}
+.mx-card-ok { border-left-color: var(--ok); }
+.mx-card-warn { border-left-color: var(--warn); }
+.mx-card-error { border-left-color: var(--danger); }
+.mx-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.mx-card-head b { font-size: var(--t-13); overflow-wrap: anywhere; }
+.mx-group + .mx-group { margin-top: 8px; }
+.mx-group .panel-sub { margin: 0 0 3px; }
+.slice-hint-li { color: var(--ink-faint); }
+
+/* ── Знаки находок ─────────────────────────────────────────────
+   Списки причин теперь начинаются с SVG-значка, а не с символа юникода:
+   выравнивание по первой строке, а не «висящий» глиф. */
+.slice-findings li,
+.upload-findings li {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.slice-findings li > .ico,
+.upload-findings li > .ico { margin-top: 2px; flex: none; }
+.slice-block,
+.slice-warnbox,
+.slice-warn { display: flex; align-items: flex-start; gap: 6px; }
+.slice-block > .ico,
+.slice-warnbox > .ico,
+.slice-warn > .ico { margin-top: 2px; flex: none; }
+/* Внутри списка эти же классы — уже flex-элементы строки, второй flex не нужен. */
+.slice-findings .slice-warn,
+.slice-findings .slice-block-li,
+.slice-findings .slice-error { display: flex; }
+
+/* ── Ширина рабочих полей по роду данных ───────────────────────
+   Прежняя сетка давала полю под «0.4» ту же ширину, что и полю под путь.
+   Сетка остаётся адаптивной, но минимальная дорожка стала меньше — узкие
+   поля больше не растягиваются до 300+ px просто потому, что «так легло». */
+.slice-form .slice-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+}
+/* Числовые и временные поля не имеют права занимать колонку целиком. */
+.slice-form input[type="number"],
+.sch-edit input[type="number"],
+.slice-form input[type="time"],
+.sch-edit input[type="time"] { max-width: 160px; }
+.slice-form input[type="datetime-local"],
+.sch-edit input[type="datetime-local"] { max-width: 260px; }
+
+/* ── Дата и время: формат назван явно ──────────────────────────
+   Нативный datetime-local в Chrome берёт порядок полей из языка ИНТЕРФЕЙСА
+   браузера, а не из lang страницы: у оператора с английским Chrome в русской
+   панели появлялось «mm/dd/yyyy». Управлять этим из CSS/HTML нельзя, поэтому
+   формат подписан рядом с полем — двусмысленности не остаётся. */
+.slice-form label:has(input[type="datetime-local"]) > .fld-head::after,
+.sch-edit label:has(input[type="datetime-local"])::after {
+  content: " · дата и время";
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+  text-transform: none;
+}
+.sch-edit label:has(input[type="time"])::after {
+  content: " · чч:мм";
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--ink-faint);
+}
+
+/* ── Ряд действий карточки машины ──────────────────────────────
+   «⋯» прижат к правому краю: разрушающее действие не соседствует с частыми. */
+.prn-actions { align-items: center; }
+.prn-actions .menu-host { margin-left: auto; }
+
+@media (max-width: 560px) {
+  .prn-actions { display: flex; flex-wrap: wrap; width: 100%; }
+  .prn-actions .btn { flex: 1 1 auto; }
+  .prn-actions .menu-host { margin-left: auto; }
+  .mx-cell { min-width: 140px; }
+}

@@ -101,7 +101,10 @@ const execState = (row) => ({ assignments: [row], printers, tasks: [] });
 test("«Исполнение» больше не дёргает /assignments/:id/start напрямую", () => {
   const html = executionHtml(execState(assignmentRow()));
 
-  assert.match(html, /▶ Запустить/, "кнопка запуска на месте");
+  // Подпись без глифа: знак — inline-SVG из общего набора (shared/icons.js),
+  // а не символ юникода, которого может не оказаться в шрифте оператора.
+  assert.match(html, /<span>Запустить<\/span>/, "кнопка запуска на месте");
+  assert.doesNotMatch(html, /[▶⏸✕☀☾⛔⚠]/, "в разметке не осталось глифов-эмодзи");
   assert.match(html, /data-slice-action="open-launch"/, "…но ведёт в общее окно запуска");
   assert.match(html, /data-task="task_1"/, "и адресует ЗАДАНИЕ, а не назначение");
   assert.doesNotMatch(

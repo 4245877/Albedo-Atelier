@@ -126,7 +126,7 @@ export function createLaunchController({ getContent, refresh, close }) {
       ui.done = { printerName: res.printerName || candidate.printerName };
       render();
       toast(
-        `Печать «${esc(preview.displayTitle)}» запущена на «${esc(ui.done.printerName)}» ▶`,
+        `Печать «${esc(preview.displayTitle)}» запущена на «${esc(ui.done.printerName)}»`,
         "toast-ok"
       );
       await refresh();

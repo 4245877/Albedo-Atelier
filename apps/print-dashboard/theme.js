@@ -14,6 +14,7 @@
    фактического облика; здесь — переключатель, живое обновление и мета-цвет.
    ═══════════════════════════════════════════════════════════════ */
 
+import { icon } from "./shared/icons.js";
 import { $, toast } from "./util.js";
 
 const KEY = "albedo-theme";
@@ -59,11 +60,13 @@ export function setNightWindow(start, end) {
 /* Цвет системной строки браузера (meta theme-color) под каждый облик. */
 const META = { dark: "#0d0b14", light: "#f4eef4" };
 
-/* Иконки режимов. Луна повторяет герб «ночной печати» — единый почерк. */
+/* Значки облика — из общего набора (shared/icons.js): один вес линии и одна
+   сетка со всеми остальными глифами зала. Луна повторяет герб «ночной
+   печати» — единый почерк. */
 const ICON = {
-  auto: `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7"/><path d="M10 6v4.2l2.8 1.7"/></svg>`,
-  light: `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="3.8"/><path d="M10 1.7v2.2M10 16.1v2.2M1.7 10h2.2M16.1 10h2.2M4.1 4.1l1.6 1.6M14.3 14.3l1.6 1.6M15.9 4.1l-1.6 1.6M5.7 14.3l-1.6 1.6"/></svg>`,
-  dark: `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15.8 12.4A6.6 6.6 0 1 1 8.6 4.1a5.6 5.6 0 0 0 7.2 8.3Z"/></svg>`,
+  auto: icon("clock", { cls: "ico-md" }),
+  light: icon("sun", { cls: "ico-md" }),
+  dark: icon("moon", { cls: "ico-md" }),
 };
 
 const LABEL = { auto: "Авто", light: "День", dark: "Ночь" };
@@ -141,8 +144,8 @@ function setMode(next, { announce = false } = {}) {
       mode === "auto"
         ? `Облик зала следует времени, Владыка · сейчас ${eff === "dark" ? "тьма" : "свет"}`
         : mode === "dark"
-          ? "Зал окутан тьмой Назарика ☾"
-          : "Зал озарён светом дня ☀";
+          ? "Зал окутан тьмой Назарика"
+          : "Зал озарён светом дня";
     // Смена облика видна сама по себе — подпись только подтверждает нажатие и
     // не задерживается в углу наравне с сообщениями о заданиях и отказах.
     toast(msg, "", { ms: 3500 });

@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════
    Albedo — Переиспользуемые компоненты: пилюли, списки-строки, бейджи,
-   кнопки, прогресс, тосты, фокус, формы.
+   кнопки, меню, прогресс, тосты, фокус, формы, скелеты.
    Часть разбиения styles.css; порядок подключения файлов в index.html
    воспроизводит исходный каскад: tokens-base → components → dashboard →
    theme → modals → workflows.
@@ -11,10 +11,10 @@
 .pill {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 13px;
-  border-radius: 999px;
-  font-size: 13px;
+  gap: var(--s-2);
+  padding: 6px var(--s-3);
+  border-radius: var(--r-pill);
+  font-size: var(--t-13);
   font-weight: 600;
   background: var(--card);
   border: 1px solid var(--card-edge);
@@ -22,10 +22,18 @@
   white-space: nowrap;
 }
 
-.pill-ok    { color: var(--ok-ink); background: var(--ok-soft); border-color: rgb(111 190 141 / 30%); }
-.pill-warn  { color: var(--warn-ink); background: var(--warn-soft); border-color: rgb(210 154 68 / 32%); }
-.pill-danger{ color: var(--danger-ink); background: var(--danger-soft); border-color: rgb(207 98 115 / 32%); }
-.pill-gold  { color: var(--gold-bright); background: var(--gold-soft); border-color: var(--gold-line); }
+.pill-ok    { color: var(--ok-ink); background: var(--ok-soft); border-color: var(--ok-line); }
+.pill-warn  { color: var(--warn-ink); background: var(--warn-soft); border-color: var(--warn-line); }
+.pill-danger{ color: var(--danger-ink); background: var(--danger-soft); border-color: var(--danger-line); }
+.pill-gold  { color: var(--gold-on-soft); background: var(--gold-soft); border-color: var(--gold-line); }
+
+/* Заглушка пилюли до первых данных — та же геометрия, никакого текста. */
+.pill-skeleton {
+  width: 148px;
+  height: 28px;
+  border-color: transparent;
+  background: var(--card-inner);
+}
 
 .dot {
   width: 8px;
@@ -40,20 +48,32 @@
 
 /* ── Общие списки-строки ────────────────────────────────────── */
 
-.row-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.row-list { display: flex; flex-direction: column; gap: var(--s-2); margin: 0; padding: 0; list-style: none; }
 
 .row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
+  /* Перенос обязателен: у строки бывают бейдж (nowrap) и кнопка действия, и
+     на 320 px их суммарная min-content ширина распирала строку до 345 px —
+     то есть тянула горизонтальную прокрутку всей страницы. Теперь при нехватке
+     места бейдж и кнопка честно уезжают на свою строку. */
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-3);
+  padding: 10px var(--s-3);
   background: var(--card-inner);
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  transition: border-color 0.2s, background 0.2s, transform 0.2s;
+  border-radius: var(--r-md);
+  transition: border-color var(--dur-fast), background var(--dur-fast);
 }
 
 .row:hover { border-color: var(--gold-line); background: rgb(244 238 226 / 6%); }
+
+/* Смысловой столбец строки не может быть уже 170 px: ниже этого текст
+   превращается в лестницу из двух слов. Он же задаёт точку переноса. */
+.row > .grow { flex: 1 1 170px; }
+
+/* Строка с собственным действием: кнопка не должна прижиматься к тексту. */
+.row-action { gap: var(--s-2) var(--s-4); }
 
 /* Растягивающийся столбец строки. min-width:0 обязателен, иначе длинный текст
    не даёт flex-элементу сжаться и выталкивает соседей за край (гориз. overflow).
@@ -62,20 +82,47 @@
 
 /* Заголовки/подписи приходят с backend (имена заданий, файлов, материалов) —
    длинный неразрывный токен обязан переноситься, иначе рвёт карточку по горизонтали. */
-.row-title { font-weight: 700; font-size: 14px; overflow-wrap: anywhere; }
-.row-sub { font-size: 12.5px; color: var(--ink-soft); margin-top: 1px; overflow-wrap: anywhere; }
+.row-title { font-weight: 700; font-size: var(--t-14); overflow-wrap: anywhere; }
+.row-title-plain { font-weight: 600; }
+.row-sub { font-size: var(--t-12); color: var(--ink-soft); margin-top: 1px; overflow-wrap: anywhere; }
+.row-sub-strong { color: var(--ink); }
+
+/* Причина, по которой строка не готова, — собственная заметная строка со
+   знаком, а не хвост приглушённой подписи через тире. */
+.row-reason {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 6px 0 0;
+  font-size: var(--t-13);
+  line-height: 1.45;
+  color: var(--danger-ink);
+  overflow-wrap: anywhere;
+}
+.row-reason .ico { margin-top: 2px; font-size: 14px; }
+.row-warn .row-reason { color: var(--warn-ink); }
+.row-blocked .row-reason { color: var(--blocked-ink); }
 
 .row-time {
-  font-size: 12px;
+  font-size: var(--t-12);
   color: var(--ink-faint);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 .row-danger { background: var(--danger-soft); }
-.row-danger:hover { border-color: rgb(207 98 115 / 38%); background: rgb(207 98 115 / 18%); }
+.row-danger:hover { border-color: var(--danger-line); background: rgb(207 98 115 / 18%); }
 .row-warn { background: var(--warn-soft); }
-.row-warn:hover { border-color: rgb(210 154 68 / 38%); background: rgb(210 154 68 / 18%); }
+.row-warn:hover { border-color: var(--warn-line); background: rgb(221 144 56 / 18%); }
+/* «Заблокировано» — не тревога, а запрет: приглушённый сливовый графит и
+   штриховка, которую не спутать с активной ошибкой. */
+.row-blocked {
+  background:
+    repeating-linear-gradient(135deg, rgb(142 117 144 / 7%) 0 6px, transparent 6px 12px),
+    var(--blocked-soft);
+  border-color: var(--blocked-line);
+}
+.row-blocked:hover { border-color: var(--blocked-line); background: var(--blocked-soft); }
 
 .row-icon {
   flex: none;
@@ -84,9 +131,46 @@
   display: grid;
   place-items: center;
   border-radius: 50%;
-  font-size: 13px;
+  font-size: var(--t-13);
+  color: var(--ink-soft);
   background: var(--card);
   border: 1px solid var(--card-edge);
+}
+.row-icon-danger { color: var(--danger-ink); border-color: var(--danger-line); background: var(--danger-soft); }
+.row-icon-warn { color: var(--warn-ink); border-color: var(--warn-line); background: var(--warn-soft); }
+
+/* ── Пустые состояния ───────────────────────────────────────────
+   Пустое состояние — не строка таблицы: у него свой знак, своя интонация и,
+   когда есть чем помочь, ровно одно действие. */
+.row-empty {
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-4) var(--s-4);
+  background: transparent;
+  border: 1px dashed var(--card-edge);
+}
+.row-empty:hover { background: transparent; border-color: var(--gold-line); }
+
+.empty-glyph {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--gold);
+  background: var(--gold-soft);
+  border: 1px solid var(--gold-line);
+}
+
+.empty-text {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--t-16);
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--ink-soft);
+  max-width: 56ch;
 }
 
 /* ── Бейджи ─────────────────────────────────────────────────── */
@@ -96,22 +180,29 @@
   align-items: center;
   gap: 6px;
   padding: 3px 9px;
-  border-radius: 999px;
-  font-size: 11.5px;
+  border-radius: var(--r-pill);
+  font-size: var(--t-11);
   font-weight: 700;
   letter-spacing: 0.03em;
   white-space: nowrap;
 }
 
 .badge .dot { width: 6px; height: 6px; }
+.badge .ico { font-size: 13px; }
 
-.badge-printing { color: var(--gold-bright); background: var(--gold-soft); }
+.badge-printing { color: var(--gold-on-soft); background: var(--gold-soft); }
 .badge-idle     { color: var(--ok-ink); background: var(--ok-soft); }
 .badge-paused   { color: var(--warn-ink); background: var(--warn-soft); }
 .badge-error    { color: var(--danger-ink); background: var(--danger-soft); }
-.badge-offline  { color: #a9a4bb; background: var(--offline-soft); }
+.badge-offline  { color: var(--offline-ink); background: var(--offline-soft); }
 .badge-amethyst { color: var(--amethyst-ink); background: var(--amethyst-soft); }
 .badge-plain    { color: var(--ink-soft); background: var(--card-inner); border: 1px solid var(--card-edge); }
+/* «Заблокировано»: собственная семантика, отдельная и от danger, и от warn. */
+.badge-blocked {
+  color: var(--blocked-ink);
+  background: var(--blocked-soft);
+  border: 1px solid var(--blocked-line);
+}
 
 /* ── Кнопки ─────────────────────────────────────────────────── */
 
@@ -119,25 +210,32 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 9px 16px;
-  border-radius: var(--radius-sm);
+  gap: 7px;
+  padding: 9px var(--s-4);
+  border-radius: var(--r-md);
   border: 1px solid var(--btn-edge);
   background: var(--btn-bg);
   color: var(--ink);
-  font: 700 13.5px var(--font-body);
+  font: 700 var(--t-13) / 1.2 var(--font-body);
   cursor: pointer;
-  transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s, border-color 0.18s, color 0.18s;
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    background var(--dur-fast),
+    border-color var(--dur-fast),
+    color var(--dur-fast);
 }
+
+.btn .ico { font-size: 15px; }
 
 /* :not([disabled]) — погашенная кнопка не отзывается на наведение вовсе:
    правило [disabled] ниже гасит только transform/box-shadow, а золото текста
    и рамки при равной специфичности просачивалось бы и на неживые кнопки. */
 .btn:not([disabled]):hover {
   transform: translateY(-1px);
-  box-shadow: 0 8px 20px -8px rgb(3 2 8 / 80%);
+  box-shadow: 0 6px 16px -8px rgb(3 2 8 / 80%);
   border-color: var(--gold-line);
-  color: var(--gold-bright);
+  color: var(--gold-on-soft);
 }
 .btn:not([disabled]):active { transform: translateY(0); box-shadow: none; }
 
@@ -157,30 +255,146 @@
 .btn-ghost { background: transparent; }
 
 .btn-danger { color: var(--danger-ink); }
-.btn-danger:not([disabled]):hover { border-color: rgb(207 98 115 / 40%); background: var(--danger-soft); color: var(--danger-ink); }
+.btn-danger:not([disabled]):hover { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger-ink); }
 
-.btn-sm { padding: 6px 11px; font-size: 12.5px; border-radius: 8px; }
+/* Сплошная разрушающая кнопка — только в окне подтверждения, где она и есть
+   решение. На доске разрушающее действие сплошным не бывает. */
+.btn-danger-solid {
+  background: linear-gradient(135deg, #c9536a, #a63c52);
+  border-color: #8e2f43;
+  color: #fff3f4;
+}
+.btn-danger-solid:not([disabled]):hover {
+  background: linear-gradient(135deg, #d76277, #b6465d);
+  color: #fff3f4;
+  border-color: #8e2f43;
+  box-shadow: 0 8px 22px -8px rgb(207 98 115 / 55%);
+}
 
-/* Кнопка-глиф (↑ ↓ ✕): квадратная, чтобы ряд иконок не выглядел набором
-   разноширокой мелочи. Подпись для скринридера — в aria-label/title. */
+.btn-sm { padding: 6px 11px; font-size: var(--t-12); border-radius: var(--r-sm); }
+
+/* Кнопка-глиф: квадратная, чтобы ряд иконок не выглядел набором разноширокой
+   мелочи. Подпись для скринридера — в aria-label/title. */
 .btn-icon {
   padding: 0;
   width: 30px;
   min-width: 30px;
   height: 30px;
-  font-size: 14px;
   line-height: 1;
 }
 .btn-icon.btn-sm { padding: 0; }
 
-.btn[disabled] { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; }
+/* ── Погашенное состояние ───────────────────────────────────────
+   Раньше это была одна строка `opacity: .4` на всей кнопке: в светлой теме
+   подпись давала 2.45:1 — то есть погашенную кнопку было физически трудно
+   ПРОЧИТАТЬ, а не только отличить от живой. Теперь у состояния собственные
+   цвета, и текст держит контраст ≥ 4.5:1 к своей подложке. */
+.btn[disabled],
+.btn[aria-disabled="true"] {
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+  background: var(--disabled-bg);
+  border-color: var(--disabled-edge);
+  color: var(--disabled-ink);
+  /* Золотая заливка primary не имеет права просачиваться в погашенное. */
+  background-image: none;
+}
+.btn[disabled] .ico,
+.btn[aria-disabled="true"] .ico { color: var(--disabled-icon); }
+
+/* ── Занятость ──────────────────────────────────────────────────
+   Кнопка в работе НАЗЫВАЕТ происходящее («Сохраняю…») и крутит собственный
+   индикатор. Немая погашенная кнопка неотличима от недоступной — и оператор
+   жмёт её второй раз. */
+.btn.is-busy {
+  cursor: progress;
+  color: var(--ink-soft);
+  background: var(--btn-bg);
+  border-color: var(--gold-line);
+}
+.btn-primary.is-busy { color: #221806; background: linear-gradient(135deg, #d9b65f, #ab8231); }
+.btn.is-busy .ico { color: inherit; }
+
+/* ── Меню «ещё» (⋯) ─────────────────────────────────────────── */
+
+.menu-host { position: relative; display: inline-flex; }
+
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  min-width: 232px;
+  max-width: min(320px, 86vw);
+  padding: 5px;
+  border: 1px solid var(--card-edge);
+  border-radius: var(--r-md);
+  background: linear-gradient(180deg, var(--card-top), var(--card-bot));
+  box-shadow: var(--shadow-pop);
+  animation: menu-in var(--dur-ui) var(--ease-out);
+}
+.menu[hidden] { display: none; }
+.menu.to-left { left: auto; right: 0; }
+.menu.to-top { top: auto; bottom: calc(100% + 6px); }
+
+@keyframes menu-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.menu-item {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  align-items: center;
+  gap: 4px 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--ink);
+  font: 600 var(--t-13) / 1.3 var(--font-body);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+.menu-item:hover,
+.menu-item:focus-visible { background: var(--gold-soft); color: var(--gold-on-soft); }
+.menu-ico { display: grid; place-items: center; color: var(--ink-faint); }
+.menu-item:hover .menu-ico, .menu-item:focus-visible .menu-ico { color: inherit; }
+.menu-label { min-width: 0; }
+/* Причина недоступности — вторая строка пункта: действие остаётся видимым,
+   но честно объясняет, почему сейчас недоступно. */
+.menu-reason {
+  grid-column: 2;
+  font-size: var(--t-11);
+  font-weight: 500;
+  color: var(--ink-faint);
+  line-height: 1.35;
+}
+.menu-item-danger { color: var(--danger-ink); }
+.menu-item-danger:hover,
+.menu-item-danger:focus-visible { background: var(--danger-soft); color: var(--danger-ink); }
+/* Разрушающее отделено волосяной линией — оно не продолжение списка. */
+.menu-item-danger { margin-top: 4px; border-top: 1px solid var(--card-edge); border-radius: 0 0 var(--r-sm) var(--r-sm); padding-top: 11px; }
+
+.menu-item.is-disabled,
+.menu-item[disabled] {
+  cursor: not-allowed;
+  color: var(--disabled-ink);
+  background: none;
+}
+.menu-item.is-disabled .menu-ico { color: var(--disabled-icon); }
+.menu-item.is-disabled:hover { background: none; color: var(--disabled-ink); }
 
 /* ── Прогресс ───────────────────────────────────────────────── */
 
 .progress {
   position: relative;
   height: 8px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: var(--track);
   overflow: hidden;
 }
@@ -208,6 +422,42 @@
 .progress.is-paused > i { background: linear-gradient(90deg, #6e6046, #8d7d57); }
 .progress.is-paused > i::after { animation: none; }
 
+/* ── Скелеты загрузки ───────────────────────────────────────────
+   Скелет повторяет ГЕОМЕТРИЮ будущего содержимого, поэтому приход данных не
+   двигает страницу. Мерцание мягкое и всегда в тон текущей поверхности —
+   яркая «бегущая полоса» на тёмной доске выглядела бы аварийной. */
+.sk {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--r-sm);
+  background: var(--card-inner);
+}
+.sk::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgb(244 238 226 / 7%), transparent);
+  animation: sk-sweep 1.6s ease-in-out infinite;
+}
+.sk-line { height: 12px; margin: 8px 0; }
+.sk-row { height: 54px; border-radius: var(--r-md); }
+.sk-cam { aspect-ratio: 16 / 8.4; border-radius: 0; }
+.sk-bar { height: 8px; border-radius: var(--r-pill); margin: 10px 0; }
+.sk-dot { width: 20px; height: 20px; border-radius: 50%; flex: none; }
+.sk-w-40 { width: 40%; }
+.sk-w-60 { width: 60%; }
+.sk-w-80 { width: 80%; }
+
+.is-skeleton { pointer-events: none; }
+.stat-tile.is-skeleton { background: var(--card-inner); border-color: transparent; }
+.stat-tile.is-skeleton .num,
+.stat-tile.is-skeleton .lbl { color: transparent; }
+
+@keyframes sk-sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
 
 /* ── Тосты ──────────────────────────────────────────────────── */
 
@@ -237,19 +487,21 @@
   align-items: flex-start;
   gap: 10px;
   padding: 12px 12px 12px 15px;
-  border-radius: 12px;
+  border-radius: var(--r-md);
   background: linear-gradient(180deg, #1d1830, #161226);
   border: 1px solid #33294a;
   border-left: 3px solid var(--gold);
-  box-shadow: var(--shadow-hover);
-  font-size: 13.5px;
+  box-shadow: var(--shadow-pop);
+  font-size: var(--t-13);
   font-weight: 600;
   line-height: 1.45;
   animation: toast-in 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
 }
 
 .toast.out { animation: toast-out 0.3s ease both; }
-.toast .star { flex: none; line-height: 1.45; }
+.toast .star { flex: none; color: var(--gold); margin-top: 1px; }
+.toast-ok .star { color: var(--ok-ink); }
+.toast-danger .star { color: var(--danger-ink); }
 /* Имена заданий и файлов приходят с backend: неразрывный токен обязан
    переноситься, иначе карточка расползается шире стопки. */
 .toast-msg { flex: 1; min-width: 0; overflow-wrap: anywhere; }
@@ -267,16 +519,15 @@
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: none;
   color: var(--ink-faint);
-  font: 700 12px var(--font-body);
   line-height: 1;
   cursor: pointer;
-  transition: color 0.18s, border-color 0.18s, background 0.18s;
+  transition: color var(--dur-fast), border-color var(--dur-fast), background var(--dur-fast);
 }
-.toast-close:hover { color: var(--gold-bright); border-color: var(--gold-line); background: var(--gold-soft); }
-.toast-danger .toast-close:hover { color: var(--danger-ink); border-color: rgb(207 98 115 / 40%); background: var(--danger-soft); }
+.toast-close:hover { color: var(--gold-on-soft); border-color: var(--gold-line); background: var(--gold-soft); }
+.toast-danger .toast-close:hover { color: var(--danger-ink); border-color: var(--danger-line); background: var(--danger-soft); }
 
 @media (pointer: coarse) {
   .toast-close { width: 38px; height: 38px; margin: -6px -6px 0 0; }
@@ -290,19 +541,38 @@
 
 /* ── Фокус и тактильный отклик (клавиатура + тач) ───────────── */
 
+/* Фокус — золотая нить Назарика: заметная, но не кричащая. Двойное кольцо
+   (тёмная подложка + золото) читается и на светлой, и на тёмной поверхности. */
 :focus-visible {
   outline: 2px solid var(--gold-bright);
   outline-offset: 2px;
+  border-radius: var(--r-sm);
 }
 
 .card-night :focus-visible { outline-color: var(--topaz); }
+
+/* Переход к содержимому — первое, что получает Tab на странице. */
+.skip-link {
+  position: fixed;
+  top: -60px;
+  left: 12px;
+  z-index: 400;
+  padding: 10px var(--s-4);
+  border-radius: var(--r-md);
+  background: var(--gold);
+  color: #221806;
+  font: 700 var(--t-13) var(--font-body);
+  text-decoration: none;
+  transition: top var(--dur-ui) var(--ease-out);
+}
+.skip-link:focus { top: 12px; }
 
 /* Отклик на нажатие для тач-устройств, где :hover не срабатывает, — только у
    реально кликабельного (кнопки, вкладки, превью камер): «нажимной» отклик на
    пассивных строках и плитках обещал бы действие, которого нет. */
 .nav-chip:active {
   transform: translateY(0) scale(0.96);
-  color: var(--gold-bright);
+  color: var(--gold-on-soft);
   border-color: var(--gold-line);
   background: var(--gold-soft);
 }
@@ -312,52 +582,191 @@
 
 /* ── Формы ─────────────────────────────────────────────────── */
 
-.modal-form { display: flex; flex-direction: column; gap: 14px; }
-.field { display: flex; flex-direction: column; gap: 6px; }
-.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-@media (max-width: 460px) { .field-row { grid-template-columns: 1fr; } }
-.field-lbl { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
-.field-lbl .req { color: var(--danger-ink); }
-.field-hint { font-size: 11.5px; color: var(--ink-faint); }
+.modal-form { display: flex; flex-direction: column; gap: var(--s-4); }
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.field-row { display: flex; flex-wrap: wrap; gap: var(--s-3) var(--s-4); align-items: flex-start; }
 
-.input {
-  width: 100%;
-  padding: 10px 12px;
+/* ── Ширина поля по РОДУ ДАННЫХ ─────────────────────────────────
+   Поле шириной 1000 px под «0.4» или «2ч 30м» врёт о том, сколько туда
+   полагается вписать, и гонит глаз через пустоту от подписи к значению.
+   Раньше все поля были `width: 100%` при любой ширине экрана.
+
+     xs — число, время      (0.4 · 2ч 30м · 22:00)
+     s  — IP, порт, короткий код
+     m  — название, имя
+     l  — путь, URL, длинное имя файла
+   Флекс-основа, а не жёсткая ширина: на узком экране поле честно сжимается. */
+.input { width: 100%; }
+.f-xs { flex: 0 1 120px; max-width: 120px; }
+.f-s  { flex: 0 1 210px; max-width: 210px; }
+.f-m  { flex: 0 1 320px; max-width: 320px; }
+.f-l  { flex: 1 1 480px; max-width: 520px; }
+.f-full { flex: 1 1 100%; max-width: none; }
+@media (max-width: 520px) {
+  /* На телефоне ширина по роду данных теряет смысл — экран и есть предел. */
+  .f-xs, .f-s, .f-m, .f-l { flex-basis: 100%; max-width: none; }
+}
+
+/* Смысловая группа полей: связь, учётные данные, поведение. Рамка тонкая —
+   это подсказка о родстве полей, а не коробка. */
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  margin: 0;
+  padding: var(--s-3) var(--s-4) var(--s-4);
+  border: 1px solid var(--card-edge);
+  border-radius: var(--r-md);
+  min-width: 0;
+}
+.form-group > legend {
+  padding: 0 6px;
+  font-size: var(--t-11);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--gold);
+}
+
+.field-lbl { font-size: var(--t-11); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
+.field-lbl .req { color: var(--danger-ink); }
+/* Подсказка о поведении поля — ПОСТОЯННАЯ подпись, а не placeholder:
+   placeholder исчезает с первой буквы, унося правило ровно тогда, когда
+   оператор начал заполнять форму. В placeholder остаются только примеры. */
+.field-hint { font-size: var(--t-11); line-height: 1.45; color: var(--ink-faint); max-width: 60ch; }
+
+.input,
+select.input {
+  padding: 9px var(--s-3);
   border: 1px solid var(--btn-edge);
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-md);
   background: var(--btn-bg);
   color: var(--ink);
-  font: 500 14px var(--font-body);
-  transition: border-color 0.18s, box-shadow 0.18s;
+  font: 500 var(--t-14) var(--font-body);
+  transition: border-color var(--dur-fast), box-shadow var(--dur-fast), background var(--dur-fast);
 }
 .input::placeholder { color: var(--ink-faint); }
+.input:hover { border-color: var(--edge-strong); }
 .input:focus {
   outline: none;
   border-color: var(--gold-line);
   box-shadow: 0 0 0 3px var(--gold-soft);
 }
 
-.field-check { flex-direction: row; align-items: center; gap: 9px; font-size: 13.5px; color: var(--ink-soft); }
-.field-check input { width: 16px; height: 16px; accent-color: var(--gold); }
+/* Ошибка поля: заметная рамка + собственная строка причины. Одного красного
+   контура мало — он не говорит, ЧТО не так. */
+.field.has-error .input,
+.input[aria-invalid="true"] {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, var(--btn-bg));
+}
+.field.has-error .input:focus,
+.input[aria-invalid="true"]:focus { box-shadow: 0 0 0 3px var(--danger-soft); }
 
-.form-error {
-  padding: 9px 12px;
-  border: 1px solid rgb(207 98 115 / 40%);
-  border-radius: var(--radius-sm);
-  background: var(--danger-soft);
+.field-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin: 0;
+  font-size: var(--t-12);
+  font-weight: 600;
+  line-height: 1.4;
   color: var(--danger-ink);
-  font-size: 13px;
 }
 
-.modal-info { font-size: 14px; line-height: 1.6; color: var(--ink-soft); display: flex; flex-direction: column; gap: 10px; }
+.field-check { flex-direction: row; align-items: flex-start; gap: 9px; font-size: var(--t-13); color: var(--ink-soft); }
+.field-check .field-hint { display: block; margin-top: 2px; }
+
+/* ── Собственные флажки и радио ─────────────────────────────────
+   Нативная семантика сохранена целиком (настоящий input, только визуально
+   подменённый): фокус, Space, чтение скринридером и связь с <label>
+   работают как прежде. Меняется лишь то, что рисует ОС, — иначе форма зала
+   выглядела набором чужих системных контролов Windows/macOS. */
+input[type="checkbox"],
+input[type="radio"] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  border: 1px solid var(--btn-edge);
+  background: var(--btn-bg);
+  cursor: pointer;
+  display: inline-grid;
+  place-content: center;
+  transition: border-color var(--dur-fast), background var(--dur-fast), box-shadow var(--dur-fast);
+}
+input[type="checkbox"] { border-radius: var(--r-sm); }
+input[type="radio"] { border-radius: 50%; }
+input[type="checkbox"]:hover,
+input[type="radio"]:hover { border-color: var(--gold-line); }
+
+input[type="checkbox"]::before {
+  content: "";
+  width: 11px;
+  height: 11px;
+  transform: scale(0);
+  transition: transform var(--dur-fast) var(--ease-out);
+  box-shadow: inset 1em 1em var(--gold-bright);
+  clip-path: polygon(14% 45%, 0 60%, 40% 100%, 100% 22%, 85% 8%, 38% 71%);
+}
+input[type="radio"]::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  transform: scale(0);
+  transition: transform var(--dur-fast) var(--ease-out);
+  box-shadow: inset 1em 1em var(--gold-bright);
+}
+input[type="checkbox"]:checked,
+input[type="radio"]:checked { border-color: var(--gold); background: var(--gold-soft); }
+input[type="checkbox"]:checked::before,
+input[type="radio"]:checked::before { transform: scale(1); }
+input[type="checkbox"]:disabled,
+input[type="radio"]:disabled { background: var(--disabled-bg); border-color: var(--disabled-edge); cursor: not-allowed; }
+
+/* ── Собственный select ─────────────────────────────────────────
+   Родная стрелка ОС — единственное, что здесь подменяется; сам <select>
+   остаётся нативным, поэтому список открывается системным (и на телефоне
+   это правильное поведение). */
+select,
+.slice-form select,
+.sch-edit select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20' fill='none' stroke='%23c9a24b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5.8 8 10 12.2 14.2 8'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 16px;
+  padding-right: 30px;
+}
+
+.form-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  padding: 10px var(--s-3);
+  border: 1px solid var(--danger-line);
+  border-radius: var(--r-md);
+  background: var(--danger-soft);
+  color: var(--danger-ink);
+  font-size: var(--t-13);
+  font-weight: 600;
+  line-height: 1.45;
+}
+.form-error[hidden] { display: none; }
+.form-error .ico { margin-top: 1px; font-size: 16px; }
+
+.modal-info { font-size: var(--t-14); line-height: 1.6; color: var(--ink-soft); display: flex; flex-direction: column; gap: 10px; max-width: var(--measure); }
 .modal-info p { margin: 0; }
 .modal-info code {
   padding: 1px 6px;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   background: var(--card-inner);
   border: 1px solid var(--card-edge);
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-  font-size: 12.5px;
-  color: var(--gold-bright);
+  font-family: var(--font-mono);
+  font-size: var(--t-12);
+  color: var(--gold-on-soft);
 }
-
