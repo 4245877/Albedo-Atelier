@@ -385,14 +385,28 @@ export function renderCritical(state) {
 
 /* ── 6 · Материалы ─────────────────────────────────────────── */
 
+/**
+ * Одна позиция склада.
+ *
+ * Полоса — доля от порога «мало», который задан для этой позиции на складе:
+ * полная полоса значит «запас на уровне порога и выше», а не «полная катушка»
+ * (сколько весит полная катушка, ферма не знает и выдумывать не станет).
+ * Цвет берём из вердикта склада (`status`) — пороги принадлежат складу, и
+ * пересчитывать их здесь своей дробью значило бы спорить с источником. Для
+ * старого backend без `status` остаётся прежняя эвристика по доле.
+ */
 function matItem(m) {
-  // full может быть 0/undefined (учёт неизвестен) — тогда не считаем уровень,
+  // full может быть 0/undefined (порог не задан) — тогда не считаем уровень,
   // чтобы не показать пустую полосу как «критический» остаток и не получить NaN.
   const full = Number(m.full) > 0 ? Number(m.full) : 0;
   const ratio = full ? Math.min(1, Math.max(0, m.have / full)) : 0;
-  const lvl = full ? (ratio < 0.18 ? "crit" : ratio < 0.4 ? "low" : "") : "";
+  const lvl = m.status
+    ? (m.status === "critical" ? "crit" : m.status === "low" ? "low" : "")
+    : full ? (ratio < 0.18 ? "crit" : ratio < 0.4 ? "low" : "") : "";
+  const title = m.grams != null ? ` title="${esc(`${m.grams} г на складе`)}"` : "";
+  const tone = lvl === "crit" ? "mat-low mat-crit" : m.low ? "mat-low" : "";
   return `
-    <div class="mat-item ${m.low ? "mat-low" : ""}">
+    <div class="mat-item ${tone}"${title}>
       <div class="grow">
         <div class="mat-name"><span class="swatch" style="background:${esc(m.swatch)}"></span>${esc(m.name)}</div>
         <div class="level mat-level ${lvl}"><i style="transform:scaleX(${ratio.toFixed(2)})"></i></div>
@@ -401,22 +415,71 @@ function matItem(m) {
     </div>`;
 }
 
+/**
+ * Мета секции. Четыре разных положения дел, которые раньше сливались в одно
+ * «учёт не подключён»: склад не настроен вовсе, настроен но ещё не отвечал,
+ * отвечал но сейчас молчит, и настоящий ответ с остатками.
+ */
+function materialsMeta(source, low) {
+  if (!source || source.kind !== "fulfillment") return "учёт не подключён";
+  if (source.pending) return "склад опрашивается";
+  if (!source.ok) return "склад безмолвствует";
+  if (source.stale) return "данные склада устарели";
+  return low > 0 ? `${low} заканчиваются` : "остатки в норме";
+}
+
+/** Пустое состояние блока остатков — причина всегда названа прямо. */
+function stockEmptyText(source) {
+  if (!source || source.kind !== "fulfillment") {
+    return "Остатки материалов мне пока неведомы — склад филамента не подключён к backend (FULFILLMENT_API_URL)";
+  }
+  if (source.pending) return "Опрашиваю склад, Владыка — остатки вот-вот будут известны";
+  if (!source.ok) {
+    return `Склад филамента безмолвствует, и я не стану гадать об остатках: ${source.error || "причина неизвестна"}`;
+  }
+  return "Склад отвечает, но полки пусты — ни одной позиции филамента не заведено";
+}
+
 export function renderMaterials(state) {
   const mats = state.materials;
-  const hasStock = mats.filament.length > 0 || mats.resin.length > 0;
-  const low = [...mats.filament, ...mats.resin].filter((m) => m.low);
-  $("#materials-meta").textContent = hasStock ? `${low.length} заканчиваются` : "учёт не подключён";
+  const source = mats.source;
+  const stock = [...mats.filament, ...mats.resin];
+  const low = stock.filter((m) => m.low).length;
+  $("#materials-meta").textContent = materialsMeta(source, low);
 
-  const perPrinter = state.printers
-    .map((p) => `<span class="badge badge-plain">${p.swatch ? `<span class="swatch" style="background:${esc(p.swatch)};width:9px;height:9px"></span>` : ""}${esc(p.name)}: ${esc(p.material || "не указан")}</span>`)
-    .join("") || `<span class="badge badge-plain">нет настроенных принтеров</span>`;
+  // Заправлено — по данным склада (привязка катушки, из которой спишется
+  // печать). Если склад её не знает, честно откатываемся к материалу из
+  // конфигурации принтера и говорим об этом в заголовке.
+  const loaded = mats.loaded || [];
+  const loadedHead = loaded.length ? "В принтерах (по складу)" : "В принтерах (по конфигурации)";
+  const loadedChips = loaded.length
+    ? loaded
+        .map((r) => `<span class="badge badge-plain"><span class="swatch" style="background:${esc(r.swatch)};width:9px;height:9px"></span>${esc(r.printer)}${r.slot ? ` · ${esc(r.slot)}` : ""}: ${esc([r.material, r.colorName].filter(Boolean).join(" "))}</span>`)
+        .join("")
+    : state.printers
+        .map((p) => `<span class="badge badge-plain">${p.swatch ? `<span class="swatch" style="background:${esc(p.swatch)};width:9px;height:9px"></span>` : ""}${esc(p.name)}: ${esc(p.material || "не указан")}</span>`)
+        .join("") || `<span class="badge badge-plain">нет настроенных принтеров</span>`;
 
-  const stockBlock = hasStock ? `
-    <div class="mat-cols">
-      <div><p class="sub-head">Филамент</p>${mats.filament.map(matItem).join("")}</div>
-      <div><p class="sub-head">Смола</p>${mats.resin.map(matItem).join("")}</div>
-    </div>` : `
-    <ul class="row-list">${emptyRow("Остатки материалов мне пока неведомы — учёт склада ещё не подключён к backend")}</ul>`;
+  // Смолу склад не ведёт — колонку показываем только если она действительно
+  // пришла, иначе пустая колонка врала бы про «смолы нет».
+  const cols = [
+    mats.filament.length ? `<div><p class="sub-head">Филамент</p>${mats.filament.map(matItem).join("")}</div>` : "",
+    mats.resin.length ? `<div><p class="sub-head">Смола</p>${mats.resin.map(matItem).join("")}</div>` : ""
+  ].filter(Boolean);
+
+  const stockBlock = cols.length
+    ? `<div class="${cols.length > 1 ? "mat-cols" : ""}">${cols.join("")}</div>`
+    : `<ul class="row-list">${emptyRow(stockEmptyText(source))}</ul>`;
+
+  // Остатки есть, но обновлялись давно — показываем их и сразу оговариваем это,
+  // чтобы никто не принял замерший склад за свежую правду.
+  const staleNote = cols.length && source && source.kind === "fulfillment" && (!source.ok || source.stale)
+    ? `<p class="mat-note">${esc(
+        source.ok
+          ? "Показаны последние известные остатки — склад давно не обновлял их"
+          : `Показаны последние известные остатки — склад сейчас безмолвствует: ${source.error || "причина неизвестна"}`
+      )}</p>`
+    : "";
 
   const needsBlock = (mats.queueNeeds || []).length ? `
     <div>
@@ -428,10 +491,11 @@ export function renderMaterials(state) {
 
   $("#materials-body").innerHTML = `
     ${stockBlock}
+    ${staleNote}
     ${needsBlock}
     <div>
-      <p class="sub-head">В принтерах (по конфигурации)</p>
-      <div class="chip-line">${perPrinter}</div>
+      <p class="sub-head">${esc(loadedHead)}</p>
+      <div class="chip-line">${loadedChips}</div>
     </div>
     ${mats.mismatch.map((m) => `
       <div class="row row-danger">

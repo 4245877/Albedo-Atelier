@@ -36,6 +36,7 @@ import { RunLifecycleService } from "../app/dispatch/runLifecycle";
 import { LaunchService } from "../app/launch/launchService";
 import { EventFeed } from "../app/eventFeed";
 import { FilamentConsumption } from "../app/filamentConsumption";
+import { FilamentStock } from "../app/filamentStock";
 import { FilamentSync } from "../app/filamentSync";
 import { MonitoringLease } from "../app/monitoringLease";
 import { ManualOperationService } from "../app/operations/manualOperationService";
@@ -123,6 +124,8 @@ export class FarmRuntime implements PrintServices {
   readonly inventory = new FulfillmentInventoryClient();
   readonly filament: FilamentConsumption;
   readonly filamentSync: FilamentSync;
+  /** Cached read of fulfillment's filament warehouse (balances + reel bindings). */
+  readonly filamentStock: FilamentStock;
   readonly automations: AutomationStore;
   /** "Operator is watching" lease renewed by the dashboard; in-memory only. */
   readonly monitoring = new MonitoringLease();
@@ -204,6 +207,10 @@ export class FarmRuntime implements PrintServices {
     // Same client as the deduction path: it pushes the live loaded reel so
     // fulfillment binds it to a stock position automatically (no manual entry).
     this.filamentSync = new FilamentSync(this.inventory, { events: this.events });
+    // …and the read direction of that same integration: the warehouse balances
+    // the «Материалы» card shows. Refreshed on the poll cadence, never from the
+    // dashboard request path.
+    this.filamentStock = new FilamentStock(this.inventory);
     this.poller = new PrinterPoller(
       () => this.enabledConfigs(),
       this.cameras,
@@ -216,6 +223,7 @@ export class FarmRuntime implements PrintServices {
       this.filamentSync,
       {
         monitoringLease: this.monitoring,
+        filamentStock: this.filamentStock,
         // Canonical-run reconciliation: every poll compares the SQLite runs
         // with the observed device state. Only when the store is already open —
         // the poll loop must never force a lazy DB open.
@@ -270,7 +278,8 @@ export class FarmRuntime implements PrintServices {
       this.snapshots,
       (job) => buildNightGateInfo(this.nightGateDeps(), job.id),
       (printerId) => this.activeRunForPrinter(printerId)?.id ?? null,
-      (printer) => this.specsFor(printer)
+      (printer) => this.specsFor(printer),
+      this.filamentStock
     );
 
     // Snapshot the whole durable state on every save. The queue section is no

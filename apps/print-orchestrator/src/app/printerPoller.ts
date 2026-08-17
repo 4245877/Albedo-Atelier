@@ -82,6 +82,11 @@ export class PrinterPoller {
     prev: PrinterLiveStatus | undefined,
     next: PrinterLiveStatus
   ) => void;
+  /** Warehouse-balance cache driven on the poll cadence (see constructor). */
+  private readonly filamentStock?: {
+    refreshIfDue(): void;
+    useLogger(logger: StoreLogger): void;
+  };
 
   constructor(
     private readonly enabledConfigs: () => PrinterConfig[],
@@ -111,6 +116,15 @@ export class PrinterPoller {
         prev: PrinterLiveStatus | undefined,
         next: PrinterLiveStatus
       ) => void;
+      /**
+       * The fulfillment warehouse cache, refreshed on the poll cadence (it
+       * throttles itself to its own, slower interval). Optional: without it the
+       * farm polls exactly as before and the materials card reports no source.
+       */
+      filamentStock?: {
+        refreshIfDue(): void;
+        useLogger(logger: StoreLogger): void;
+      };
     },
     /**
      * Hardware-profile discovery, driven on the poll cadence. Optional and
@@ -123,6 +137,7 @@ export class PrinterPoller {
     }
   ) {
     this.runObserver = lightPolicy?.runObserver;
+    this.filamentStock = lightPolicy?.filamentStock;
     this.today = new TodayCounters(initialToday);
     this.filament = filament ?? new FilamentConsumption(undefined, events);
     this.filamentSync = filamentSync ?? new FilamentSync(undefined);
@@ -142,6 +157,7 @@ export class PrinterPoller {
     this.lights.useLogger(logger);
     this.filament.useLogger(logger);
     this.filamentSync.useLogger(logger);
+    this.filamentStock?.useLogger(logger);
     this.discovery?.useLogger(logger);
     await this.pollOnce();
     this.pollTimer = setInterval(() => {
@@ -212,6 +228,10 @@ export class PrinterPoller {
       // Redeliver queued stock deductions in the poll cadence. Fire-and-forget:
       // it is self-guarded and must never delay or fail the poll loop.
       void this.filament.retryPending();
+      // Re-read the warehouse balances the materials card shows. Same contract:
+      // self-guarded, never awaited, and throttled internally to its own slower
+      // interval — telemetry must not wait on a neighbouring service.
+      this.filamentStock?.refreshIfDue();
       // Re-ask printers what hardware they are, for the ones whose profile has
       // gone stale. Same contract as above — self-guarded, never awaited — so a
       // device that is slow to describe itself cannot hold up telemetry.

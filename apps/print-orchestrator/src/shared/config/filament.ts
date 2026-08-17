@@ -41,6 +41,15 @@ const VARS = {
    */
   filamentRetryMaxAgeDays: envVar("FILAMENT_RETRY_MAX_AGE_DAYS", "filament", (n, raw) =>
     readPositiveInt(n, raw, 7)
+  ),
+  /**
+   * How often the filament warehouse (balances + reel bindings) is re-read from
+   * fulfillment for the dashboard's «Материалы» card. Stock moves on the scale
+   * of prints, not seconds, so a minute is plenty; the last answer is flagged
+   * stale after 3× this interval. Documented default: 60 s.
+   */
+  filamentStockRefreshMs: envVar("FILAMENT_STOCK_REFRESH_MS", "filament", (n, raw) =>
+    readPositiveInt(n, raw, 60 * 1000)
   )
 };
 
@@ -51,6 +60,7 @@ export function buildFilamentConfig(source: EnvSource) {
     fulfillmentServiceToken: VARS.fulfillmentServiceToken.read(source),
     filamentSyncRetryMs: VARS.filamentSyncRetryMs.read(source),
     filamentRetryQueueMax: VARS.filamentRetryQueueMax.read(source),
-    filamentRetryMaxAgeDays: VARS.filamentRetryMaxAgeDays.read(source)
+    filamentRetryMaxAgeDays: VARS.filamentRetryMaxAgeDays.read(source),
+    filamentStockRefreshMs: VARS.filamentStockRefreshMs.read(source)
   };
 }

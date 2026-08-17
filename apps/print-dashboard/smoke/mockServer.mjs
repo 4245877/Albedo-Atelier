@@ -70,7 +70,20 @@ const state = {
   lights: [],
   queue: [{ title: "Кронштейн", printer: "Creality K2", material: "PETG", eta: "3 ч", status: "ready", at: "22:00" }],
   night: { window: "21:30 – 07:30", windowStart: "21:30", windowEnd: "07:30", pick: 0, candidates: [] },
-  critical: [], materials: { filament: [], resin: [], queueNeeds: [], mismatch: [] },
+  critical: [],
+  materials: {
+    filament: [
+      { name: "PETG Чорний", swatch: "#26262b", have: 9.47, unit: "кг", full: 1, low: false, status: "ok", grams: 9469 },
+      { name: "TPU Чорний", swatch: "#26262b", have: 0, unit: "кг", full: 1, low: true, status: "critical", grams: 0 }
+    ],
+    resin: [],
+    queueNeeds: [{ text: "PETG — нужно 340 г, на складе 9.5 кг", status: "ok" }],
+    mismatch: [],
+    loaded: [
+      { printer: "Creality K2", slot: null, material: "PETG", colorName: "Чорний", swatch: "#26262b", updatedAt: "2026-07-13T14:11:05.266Z" }
+    ],
+    source: { kind: "fulfillment", ok: true, pending: false, stale: false, updatedAt: "2026-08-17T12:00:00.000Z", error: null }
+  },
   today: { done: 4, active: 1, failed: 0, hoursUsed: 11, hoursQueued: 4 },
   perf: { load: 33, free: 1, busy: 1, avgPrint: "2 ч", successRate: 92 },
   automations: [], automationLastRun: null, maintenance: [], plan: [],

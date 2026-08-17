@@ -392,6 +392,58 @@ Moonraker**, not the Creality WebSocket adapter — its config uses
 `SET_PIN PIN=LED VALUE=1/0` read back from `output_pin LED`. Creality
 **WebSocket** light control is not implemented for any model.
 
+## Filament warehouse (fulfillment)
+
+Fulfillment owns the filament warehouse; the orchestrator keeps **no copy of the
+stock**. One client (`src/infra/fulfillment/inventoryClient.ts`) is the only door
+between the two services, and it runs in both directions: writes (auto-consume,
+loaded-reel binding) and reads (the balances the dashboard's «Материалы» card
+shows). Everything is gated by the same `FULFILLMENT_API_URL` switch, so the farm
+still runs standalone.
+
+### Reading the shelf (the «Материалы» card)
+
+`FilamentStock` (`src/app/filamentStock.ts`) polls
+`GET /api/inventory/summary` + `GET /api/inventory/printer-filament` on its own
+cadence (`FILAMENT_STOCK_REFRESH_MS`, default 60 s) and caches the answer in
+memory — nothing is persisted, and the cache is rebuilt from fulfillment on the
+first poll after a restart. `GET /api/dashboard` reads that cache
+**synchronously**: a hot dashboard read never makes a call to a neighbouring
+service, and can never fail because that service is slow.
+
+The card distinguishes four states that used to render identically as «учёт не
+подключён» — the whole point of `materials.source`:
+
+| state | `source` | what the operator sees |
+| --- | --- | --- |
+| not configured | `kind: "none"` | «учёт не подключён», naming `FULFILLMENT_API_URL` |
+| first read in flight | `pending: true` | «склад опрашивается» |
+| configured, silent | `ok: false` + `error` | last known balances, flagged, with the reason |
+| answered | `ok: true` | the balances, `stale` once the answer ages past 3× the interval |
+
+A warehouse that is **down** must never render as a warehouse that is **empty**,
+and an empty shelf must never render as one that is absent. On an outage the
+previous balances are kept and labelled, never blanked; the outage also raises an
+operator warning and shows on the «Склад филамента» system row.
+
+What the projection (`src/app/readModels/buildMaterials.ts`) will and will not
+say:
+
+- **thresholds belong to fulfillment.** A position's level bar is scaled against
+  that position's own `lowStockG`, and its colour comes from fulfillment's
+  `status` — the orchestrator never re-derives «low» from a hardcoded fraction.
+- **resin stays empty.** Fulfillment tracks none, so the list is empty rather
+  than a zeroed column that would read as «we have no resin».
+- **queue demand counts only what was measured.** Jobs are grouped by material
+  (the queue names a material, never a colour) and matched against the sum of
+  that material's positions; jobs with no filament estimate are counted and
+  stated (`+N без оценки`) instead of silently lowering the total. With an
+  unreadable shelf the demand is reported alone — no shortage and no all-clear
+  is claimed against unknown stock.
+- **reel bindings are the truth about what is loaded**, better than the material
+  typed into a printer's config. Bindings for printers this farm does not have
+  are dropped (fulfillment keeps them as history; they name no machine here).
+
 ## Filament auto-consume
 
 When a print **completes** (never on cancel or error), the poller deducts the

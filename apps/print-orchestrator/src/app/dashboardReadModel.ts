@@ -6,7 +6,6 @@ import type {
   FeedEvent,
   LightControlView,
   MaintenanceRow,
-  MaterialMismatch,
   MaterialsSection,
   NightPrint,
   PerformanceSection,
@@ -27,9 +26,10 @@ import type { PrinterConfig, PrinterConfigSource } from "../infra/printers/confi
 import type { AutomationStore } from "./automationStore";
 import type { CameraService } from "./cameraService";
 import type { EventFeed } from "./eventFeed";
+import { FilamentStock } from "./filamentStock";
+import { buildMaterials } from "./readModels/buildMaterials";
 import {
   buildNightPlan,
-  materialsIncompatible,
   type NightGateDecision,
   type NightPlanEntry
 } from "./nightPlanner";
@@ -110,7 +110,16 @@ export class DashboardReadModel {
      * declared config alone.
      */
     private readonly specsOf: (printer: PrinterConfig) => ResolvedPrinterSpecs = (printer) =>
-      resolvePrinterSpecs(printer, null)
+      resolvePrinterSpecs(printer, null),
+    /**
+     * The cached view of fulfillment's filament warehouse. Optional so the read
+     * model stays constructible without the integration; the default is a
+     * disabled cache, which reports an unconnected source — the honest answer
+     * for a farm running standalone.
+     */
+    private readonly filamentStock: Pick<FilamentStock, "snapshot"> = new FilamentStock(
+      undefined
+    )
   ) {}
 
   private view(printer: PrinterConfig): PrinterView {
@@ -312,27 +321,21 @@ export class DashboardReadModel {
     return critical;
   }
 
+  /**
+   * The «Материалы» card. Stock is NOT the farm's own knowledge: fulfillment
+   * owns the filament warehouse, and the balances/reel bindings here are the
+   * last answer it gave (cached out of band by {@link FilamentStock} — this read
+   * never calls it over the network). Without that integration configured the
+   * card reports an unconnected source rather than an empty shelf; see
+   * `buildMaterials` for what is measured versus what is deliberately left out.
+   */
   getMaterials(): MaterialsSection {
-    // No stock tracking is connected: report no spools instead of fake ones.
-    // The per-printer loaded material (from config) is visible on the printer
-    // views themselves. What IS known is a contradiction between a queued
-    // job's declared material and its target printer's declared load — the
-    // same check that blocks night starts and start-next.
-    const mismatch: MaterialMismatch[] = [];
-    for (const job of this.queue.list()) {
-      if (job.status !== "ready") continue;
-      const printer = this.resolvePrinter(job.printer);
-      if (!printer) continue;
-      if (materialsIncompatible(job.material, printer.material)) {
-        mismatch.push({
-          job: job.title,
-          needs: job.material,
-          printer: printer.name,
-          loaded: printer.material
-        });
-      }
-    }
-    return { filament: [], resin: [], mismatch, queueNeeds: [] };
+    return buildMaterials({
+      stock: this.filamentStock.snapshot(),
+      queue: this.queue.list(),
+      resolvePrinter: (reference) => this.resolvePrinter(reference),
+      printers: this.enabledConfigs()
+    });
   }
 
   getToday(): TodaySection {
@@ -414,8 +417,42 @@ export class DashboardReadModel {
         name: "База данных",
         val: "SQLite — очередь и запуски; JSON — события и счётчики",
         ok: "ok"
-      }
+      },
+      this.warehouseComponent()
     ];
+  }
+
+  /**
+   * The fulfillment warehouse as a system component. Four distinct states —
+   * unconfigured, first read in flight, silent, answering — so "not configured"
+   * is never confused with "configured but silent": the farm runs standalone on
+   * purpose, and that is not a fault.
+   */
+  private warehouseComponent(): SystemComponent {
+    const stock = this.filamentStock.snapshot();
+    if (!stock.connected) {
+      return {
+        name: "Склад филамента",
+        val: "не подключён — задайте FULFILLMENT_API_URL",
+        ok: "warn"
+      };
+    }
+    if (stock.pending) {
+      return { name: "Склад филамента", val: "подключён · первое чтение", ok: "warn" };
+    }
+    if (!stock.ok) {
+      return {
+        name: "Склад филамента",
+        val: `нет ответа — ${stock.error ?? "причина неизвестна"}`,
+        ok: "err"
+      };
+    }
+    const updated = stock.fetchedAt ? ` · обновлено в ${hhmm(new Date(stock.fetchedAt))}` : "";
+    return {
+      name: "Склад филамента",
+      val: `${stock.positions.length} позиций · ${stock.reelsInUse} катушек в работе${updated}`,
+      ok: stock.stale ? "warn" : "ok"
+    };
   }
 
   getFeed(): FeedEvent[] {
@@ -441,6 +478,27 @@ export class DashboardReadModel {
         icon: "⚙",
         text: "Принтеры не настроены",
         hint: "добавьте config/printers.json или переменную PRINTERS_CONFIG_JSON",
+        level: "warn"
+      });
+    }
+
+    // A configured-but-silent warehouse is a real fault: the balances on the
+    // board are frozen and completion deductions are piling up in the retry
+    // queue. A warehouse that was never configured is not — the farm is meant
+    // to run standalone — so it produces no warning here.
+    const stock = this.filamentStock.snapshot();
+    if (stock.connected && !stock.ok && !stock.pending) {
+      warnings.push({
+        icon: "🧵",
+        text: "Склад филамента не отвечает",
+        hint: stock.error ?? "остатки на доске показаны по последнему известному состоянию",
+        level: "err"
+      });
+    } else if (stock.connected && stock.stale) {
+      warnings.push({
+        icon: "🧵",
+        text: "Остатки филамента давно не обновлялись",
+        hint: "данные склада устарели — проверьте связь с fulfillment",
         level: "warn"
       });
     }

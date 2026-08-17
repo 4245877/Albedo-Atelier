@@ -1180,6 +1180,14 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
 
 .mat-low .mat-qty { color: var(--warn-ink); }
 
+/* «Критично» — не тот же оттенок, что «мало»: при нулевом остатке полоса
+   схлопывается в ноль и цвет заливки не виден вовсе, так что весь сигнал
+   несёт число. Оно обязано отличать пустую позицию от подходящей к концу. */
+.mat-crit .mat-qty { color: var(--danger-ink); }
+
+/* Оговорка под остатками: цифры показаны, но склад их давно не подтверждал. */
+.mat-note { font-size: var(--t-12); color: var(--warn-ink); margin: var(--s-2) 0 0; }
+
 .level {
   height: 6px;
   border-radius: var(--r-pill);

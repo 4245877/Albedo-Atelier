@@ -18,13 +18,19 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-type RecordedRequest = { url: string; headers: Record<string, string>; body: unknown };
+type RecordedRequest = {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: unknown;
+};
 
 function mockFetch(status: number, body: unknown): RecordedRequest[] {
   const requests: RecordedRequest[] = [];
   globalThis.fetch = (async (input: any, init: any) => {
     requests.push({
       url: String(input),
+      method: String(init?.method ?? "GET"),
       headers: { ...(init?.headers ?? {}) },
       body: init?.body ? JSON.parse(init.body) : null,
     });
@@ -151,4 +157,102 @@ test("the token value never leaks into error messages or request bodies", async 
     false,
     "the token travels only in the header, never the payload"
   );
+});
+
+/*
+ * Warehouse reads. These feed the dashboard's «Материалы» card, so the contract
+ * that matters is that a partially-broken payload degrades into fewer rows —
+ * never into a NaN balance rendered as fact — and that an outage still throws
+ * (the caller must be able to tell "empty shelf" from "no answer").
+ */
+
+test("the warehouse reads are GETs that carry the service token and no body", async () => {
+  const requests = mockFetch(200, { filamentKg: 1, reelsInUse: 0, stock: [] });
+
+  await client().fetchStockSummary();
+
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].url, /\/api\/inventory\/summary$/);
+  assert.equal(requests[0].method, "GET");
+  assert.equal(requests[0].headers["x-service-token"], TOKEN);
+  assert.equal(requests[0].body, null);
+});
+
+test("fetchStockSummary converts the kilogram roll-up to grams and keeps the warehouse verdict", async () => {
+  mockFetch(200, {
+    filamentKg: 18.479,
+    reelsInUse: 2,
+    stock: [
+      {
+        id: "s1",
+        material: "PETG",
+        color: "black",
+        colorName: "Чорний",
+        label: "PETG Чорний",
+        stockG: 9469,
+        lowStockG: 1000,
+        criticalStockG: 300,
+        status: "ok",
+      },
+    ],
+  });
+
+  const summary = await client().fetchStockSummary();
+
+  assert.ok(summary);
+  assert.equal(summary.totalG, 18_479);
+  assert.equal(summary.reelsInUse, 2);
+  assert.equal(summary.positions.length, 1);
+  assert.equal(summary.positions[0].status, "ok");
+});
+
+test("a malformed position is dropped, never turned into a NaN balance", async () => {
+  mockFetch(200, {
+    filamentKg: "не число",
+    stock: [
+      { id: "broken", material: "", stockG: 100 },
+      { id: "s1", material: "PLA", color: "black", stockG: "оценочно", status: "странно" },
+    ],
+  });
+
+  const summary = await client().fetchStockSummary();
+
+  assert.ok(summary);
+  assert.equal(summary.totalG, 0, "an unparseable roll-up reads as 0, not NaN");
+  assert.equal(summary.positions.length, 1, "the nameless position is dropped");
+  assert.equal(summary.positions[0].stockG, 0);
+  assert.equal(summary.positions[0].status, "ok", "an unknown status is not invented into a warning");
+  assert.equal(summary.positions[0].label, "PLA black", "the label falls back to what is known");
+});
+
+test("fetchLoadedReels keeps the null slot of a single-spool printer distinct from slot 0", async () => {
+  mockFetch(200, {
+    items: [
+      { printerId: "k2", printerName: "K2", amsTray: null, stockId: "s1", material: "PETG", color: "black", updatedAt: "t" },
+      { printerId: "a1", printerName: "A1", amsTray: 0, stockId: "s2", material: "PLA", color: "white", updatedAt: "t" },
+      { printerId: "", material: "PLA" },
+    ],
+  });
+
+  const reels = await client().fetchLoadedReels();
+
+  assert.equal(reels?.length, 2, "the row binding no printer is dropped");
+  assert.equal(reels?.[0].amsTray, null);
+  assert.equal(reels?.[1].amsTray, 0);
+});
+
+test("an unreachable warehouse throws instead of reporting an empty shelf", async () => {
+  mockFetch(503, null);
+
+  await assert.rejects(
+    () => client().fetchStockSummary(),
+    (error: unknown) => error instanceof FulfillmentError && error.kind === "unreachable"
+  );
+});
+
+test("the reads are a no-op while the integration is disabled", async () => {
+  const disabled = new FulfillmentInventoryClient("", TOKEN);
+
+  assert.equal(await disabled.fetchStockSummary(), null);
+  assert.equal(await disabled.fetchLoadedReels(), null);
 });

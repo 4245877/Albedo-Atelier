@@ -103,6 +103,12 @@ function orderedRuntime(): OrderedRuntime {
       return [];
     },
     inventory: { enabled: false, hasServiceToken: false },
+    filamentStock: {
+      useLogger: () => {},
+      refresh: async () => {
+        order.push("filamentStock.refresh");
+      }
+    },
     deviceCommands: { useLogger: () => {} },
     poller: {
       start: async () => {
@@ -142,6 +148,10 @@ test("FarmLifecycle.start recovers durable state BEFORE starting the poll loop",
   assert.ok(
     order.indexOf("reloadPrinterConfig") < order.indexOf("poller.start"),
     "the printer config is read from the database and installed before the poll loop starts"
+  );
+  assert.ok(
+    order.indexOf("filamentStock.refresh") < order.indexOf("poller.start"),
+    "the warehouse cache is warmed before traffic, so the materials card never opens on a placeholder"
   );
 });
 

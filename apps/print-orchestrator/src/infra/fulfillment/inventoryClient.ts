@@ -2,10 +2,25 @@ import { env } from "../../shared/env";
 import { fetchWithTimeout, isTimeoutError } from "../../shared/fetchWithTimeout";
 
 /**
- * Server-side client for the fulfillment inventory API. When a print completes,
- * the orchestrator posts the consumed filament here and fulfillment deducts the
- * matching stock (resolving material/color from the printer's loaded reel and
- * converting mm→grams by material density on its side).
+ * Server-side client for the fulfillment inventory API. Fulfillment owns the
+ * filament warehouse; this client is the ONLY door between the two services, in
+ * both directions:
+ *
+ *  - writes — when a print completes the orchestrator posts the consumed
+ *    filament and fulfillment deducts the matching stock (resolving
+ *    material/color from the printer's loaded reel and converting mm→grams by
+ *    material density on its side), and it pushes the reel each printer reports
+ *    loaded so fulfillment can bind it to a stock position;
+ *  - reads — the warehouse balances and those reel bindings come back over
+ *    {@link fetchStockSummary} / {@link fetchLoadedReels}, which is what feeds
+ *    the dashboard's «Материалы» card. atelier keeps NO copy of the stock: it
+ *    caches the last answer for display (see FilamentStock) and says so plainly
+ *    when the warehouse is unreachable, rather than showing stale numbers as
+ *    fact.
+ *
+ * Read endpoints carry no body and are not admin-gated on the fulfillment side
+ * (its own dashboard fetches them same-origin); the service token is still sent
+ * on every request, so tightening that gate later needs no change here.
  *
  * Two quantity shapes, one per source of truth:
  *  - Moonraker/K2 reports extruded length, so we send `lengthMm` for the single
@@ -112,6 +127,60 @@ export type SyncLoadedFilamentResult = {
   previousStock?: { material?: string; color?: string; colorName?: string } | null;
 };
 
+/** Warehouse verdict on one stock position, computed against ITS OWN thresholds. */
+export type StockStatus = "ok" | "low" | "critical";
+
+/**
+ * One warehouse position (material × colour) as fulfillment reports it on
+ * `GET /api/inventory/summary`. Grams are the warehouse's native unit; the
+ * thresholds are per-position operator settings, so atelier must never
+ * re-derive "low"/"critical" from a hardcoded fraction — it reads
+ * {@link status}, which fulfillment computed from those very thresholds.
+ */
+export type FilamentStockPosition = {
+  id: string;
+  /** Uppercased material as stored ("PLA", "PETG", …). */
+  material: string;
+  /** Lowercased colour key as stored ("black", "yellow", `#rrggbb`, …). */
+  color: string;
+  /** Human colour name, already localized by fulfillment ("Чорний"). */
+  colorName: string;
+  /** `material colorName`, fulfillment's own display label for the position. */
+  label: string;
+  stockG: number;
+  lowStockG: number;
+  criticalStockG: number;
+  status: StockStatus;
+};
+
+/** The whole shelf plus its roll-ups, as returned by `GET /api/inventory/summary`. */
+export type FilamentStockSummary = {
+  /** Total grams on the shelf across every active position. */
+  totalG: number;
+  /** How many reels are currently bound to a printer. */
+  reelsInUse: number;
+  positions: FilamentStockPosition[];
+};
+
+/**
+ * One reel binding from `GET /api/inventory/printer-filament`: which warehouse
+ * position a printer (or one AMS slot of it) currently has loaded. This is the
+ * binding a completion deduction actually draws from, so it is the truthful
+ * answer to "what is in this machine" — better than the material typed into the
+ * printer's config.
+ */
+export type LoadedReel = {
+  printerId: string;
+  /** Live name from atelier, else the snapshot taken when the reel was bound. */
+  printerName: string | null;
+  /** AMS slot, or null for the printer-level reel of a single-spool machine. */
+  amsTray: number | null;
+  stockId: string;
+  material: string;
+  color: string;
+  updatedAt: string;
+};
+
 /**
  * How a failed call should be treated by the caller:
  *  - `rejected` — fulfillment's handler received the request and said no (no
@@ -148,6 +217,61 @@ function safeJson(text: string): any {
   }
 }
 
+/** Finite number or the fallback — a malformed field must never become NaN. */
+function num(value: unknown, fallback = 0): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function str(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+/** Whitelist-parse of a position's status; anything unexpected reads as "ok". */
+function stockStatus(value: unknown): StockStatus {
+  return value === "low" || value === "critical" ? value : "ok";
+}
+
+/**
+ * Reads one warehouse position out of the summary payload, tolerating a
+ * fulfillment build that adds or renames fields around the ones we use. A row
+ * without a material is dropped by the caller — a nameless position cannot be
+ * matched to a queued job, and rendering it would just be noise.
+ */
+function toPosition(raw: any): FilamentStockPosition | null {
+  const material = str(raw?.material).trim();
+  if (!material) return null;
+  const color = str(raw?.color).trim();
+  const colorName = str(raw?.colorName).trim() || color;
+  return {
+    id: str(raw?.id),
+    material,
+    color,
+    colorName,
+    label: str(raw?.label).trim() || [material, colorName].filter(Boolean).join(" "),
+    stockG: Math.max(0, num(raw?.stockG)),
+    lowStockG: Math.max(0, num(raw?.lowStockG)),
+    criticalStockG: Math.max(0, num(raw?.criticalStockG)),
+    status: stockStatus(raw?.status)
+  };
+}
+
+/** Reads one reel binding; a row without a printer id binds nothing and is dropped. */
+function toLoadedReel(raw: any): LoadedReel | null {
+  const printerId = str(raw?.printerId).trim();
+  if (!printerId) return null;
+  const amsTray = raw?.amsTray === null || raw?.amsTray === undefined ? null : num(raw.amsTray, 0);
+  return {
+    printerId,
+    printerName: str(raw?.printerName).trim() || null,
+    amsTray,
+    stockId: str(raw?.stockId),
+    material: str(raw?.material).trim(),
+    color: str(raw?.color).trim(),
+    updatedAt: str(raw?.updatedAt)
+  };
+}
+
 export class FulfillmentInventoryClient {
   private readonly baseUrl: string;
   private readonly serviceToken: string;
@@ -176,26 +300,31 @@ export class FulfillmentInventoryClient {
   }
 
   /**
-   * The one POST path both endpoints share: the service token is attached HERE,
-   * centrally, so every request — first delivery and queue redelivery alike —
-   * carries the same `x-service-token` header. Response taxonomy:
-   * 401/403 → `auth`; other 4xx with a JSON `{ error }` body → `rejected`
-   * (fulfillment reached the handler and refused); 5xx / bodyless / network /
-   * timeout → `unreachable` (processing unknown, retry is safe).
+   * The one path EVERY endpoint shares, read and write alike: the service token
+   * is attached HERE, centrally, so every request — first delivery, queue
+   * redelivery, warehouse read — carries the same `x-service-token` header.
+   * Response taxonomy: 401/403 → `auth`; other 4xx with a JSON `{ error }` body
+   * → `rejected` (fulfillment reached the handler and refused); 5xx / bodyless /
+   * network / timeout → `unreachable` (processing unknown, retry is safe).
    */
-  private async post(path: string, body: Record<string, unknown>): Promise<unknown> {
+  private async request(
+    method: "GET" | "POST",
+    path: string,
+    body?: Record<string, unknown>
+  ): Promise<unknown> {
     const url = `${this.baseUrl}${path}`;
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {};
+    if (body) headers["Content-Type"] = "application/json";
     if (this.serviceToken) headers["x-service-token"] = this.serviceToken;
 
     try {
       const res = await fetchWithTimeout(url, {
-        method: "POST",
+        method,
         timeoutMs: TIMEOUT_MS,
         headers,
         // Undefined fields are dropped by JSON.stringify, so each call carries
         // only the quantity/hints its source actually has.
-        body: JSON.stringify(body),
+        ...(body ? { body: JSON.stringify(body) } : {}),
       });
 
       const text = await res.text();
@@ -231,6 +360,10 @@ export class FulfillmentInventoryClient {
           : String(error);
       throw new FulfillmentError(`склад филамента недоступен (${reason})`);
     }
+  }
+
+  private post(path: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.request("POST", path, body);
   }
 
   /**
@@ -279,5 +412,46 @@ export class FulfillmentInventoryClient {
     });
 
     return (json as SyncLoadedFilamentResult) ?? { resolved: false };
+  }
+
+  /**
+   * The warehouse shelf: every active material × colour position with its
+   * balance and fulfillment's own low/critical verdict. Returns `null` when the
+   * integration is disabled; throws {@link FulfillmentError} when fulfillment
+   * refuses or is unreachable — the caller decides how to show an outage (it
+   * must never be shown as an empty shelf).
+   *
+   * The payload is parsed defensively (see {@link toPosition}): an unexpected
+   * or partially-broken row is dropped, never turned into a NaN balance.
+   */
+  async fetchStockSummary(): Promise<FilamentStockSummary | null> {
+    if (!this.enabled) return null;
+
+    const json = (await this.request("GET", "/api/inventory/summary")) as any;
+    const rows: unknown[] = Array.isArray(json?.stock) ? json.stock : [];
+    const positions = rows
+      .map(toPosition)
+      .filter((position): position is FilamentStockPosition => position !== null);
+
+    return {
+      // fulfillment reports the roll-up in kilograms; grams are the unit every
+      // balance here is kept in, so convert once at the boundary.
+      totalG: Math.max(0, num(json?.filamentKg) * 1000),
+      reelsInUse: Math.max(0, Math.round(num(json?.reelsInUse))),
+      positions
+    };
+  }
+
+  /**
+   * Which warehouse position each printer (or AMS slot) currently has loaded —
+   * the bindings the completion deduction draws from. Returns `null` when the
+   * integration is disabled; throws {@link FulfillmentError} on refusal/outage.
+   */
+  async fetchLoadedReels(): Promise<LoadedReel[] | null> {
+    if (!this.enabled) return null;
+
+    const json = (await this.request("GET", "/api/inventory/printer-filament")) as any;
+    const rows: unknown[] = Array.isArray(json?.items) ? json.items : [];
+    return rows.map(toLoadedReel).filter((reel): reel is LoadedReel => reel !== null);
   }
 }

@@ -116,14 +116,32 @@ export interface CriticalEvent {
   level: EventLevel;
 }
 
+/** The warehouse's verdict on one position, computed from ITS OWN thresholds. */
+export type MaterialStockStatus = "ok" | "low" | "critical";
+
 export interface MaterialStock {
   name: string;
   swatch: string;
   have: number;
   unit: string;
+  /**
+   * The 100%-mark of the level bar: the position's own "low stock" threshold,
+   * in {@link unit}. So a full bar means "at or above the threshold the operator
+   * set for this position", not "a full spool" — the farm has no idea how large
+   * a full spool is, and inventing one would make the bar fiction. 0 when the
+   * warehouse defines no threshold, which the UI renders as no bar at all.
+   */
   full: number;
   low?: boolean;
   need?: number;
+  /**
+   * The warehouse's own low/critical verdict. Authoritative — the UI must
+   * colour the level by THIS, never by a hardcoded fraction of {@link full},
+   * because the thresholds are per-position operator settings.
+   */
+  status?: MaterialStockStatus;
+  /** Exact balance in the warehouse's native unit, for tooltips/diagnostics. */
+  grams?: number;
 }
 
 export interface MaterialMismatch {
@@ -138,11 +156,53 @@ export interface MaterialQueueNeed {
   status: "warn" | "ok";
 }
 
+/**
+ * One reel the warehouse says is loaded in a printer — the binding a completed
+ * print actually deducts from. Distinct from the `material` typed into the
+ * printer's config: this is what the two services agreed is physically there.
+ */
+export interface MaterialLoadedReel {
+  /** Printer name as the farm knows it (falls back to the warehouse snapshot). */
+  printer: string;
+  /** "AMS-слот 1" for a multi-slot machine, null for the single printer-level reel. */
+  slot: string | null;
+  material: string;
+  /** Human colour name from the warehouse ("Чорний"); empty when it has none. */
+  colorName: string;
+  swatch: string;
+  /** ISO time the binding was last written. */
+  updatedAt: string;
+}
+
+/**
+ * Where the balances came from and whether they can be trusted right now. The
+ * UI needs all four to tell the operator the truth: an unconfigured integration,
+ * a warehouse outage, an aged answer and a genuinely empty shelf are four
+ * different situations that used to render identically as "учёт не подключён".
+ */
+export interface MaterialsSource {
+  /** `fulfillment` once FULFILLMENT_API_URL is configured; `none` otherwise. */
+  kind: "fulfillment" | "none";
+  /** Whether the last warehouse read succeeded. */
+  ok: boolean;
+  /** Configured, but the first read has not finished yet (just after a restart). */
+  pending: boolean;
+  /** Whether the last successful read is older than the farm should trust. */
+  stale: boolean;
+  /** ISO time of the last successful read; null until one lands. */
+  updatedAt: string | null;
+  /** Operator-facing reason the last read failed; null while healthy. */
+  error: string | null;
+}
+
 export interface MaterialsSection {
   filament: MaterialStock[];
   resin: MaterialStock[];
   mismatch: MaterialMismatch[];
   queueNeeds: MaterialQueueNeed[];
+  /** Reel bindings from the warehouse; empty when it knows of none. */
+  loaded: MaterialLoadedReel[];
+  source: MaterialsSource;
 }
 
 /**

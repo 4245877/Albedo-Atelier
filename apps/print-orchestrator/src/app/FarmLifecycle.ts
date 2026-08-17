@@ -167,6 +167,14 @@ export class FarmLifecycle {
     }
 
     runtime.deviceCommands.useLogger(logger);
+    // Warm the warehouse cache before the first board render, so «Материалы»
+    // shows real balances immediately instead of a "первое чтение" placeholder
+    // that a restart would flash on every operator's screen. Bounded by the
+    // client's own request timeout and never fatal: the poll loop refreshes it
+    // anyway, and a warehouse that is down must not hold up the farm.
+    runtime.filamentStock.useLogger(logger);
+    await runtime.filamentStock.refresh();
+
     await runtime.poller.start(logger);
   }
 
