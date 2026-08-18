@@ -12,3 +12,8 @@ apps/print-orchestrator/data/
 # this host (mounted read-only into the orchestrator container); commit the
 # scrubbed printers.example.json instead.
 apps/print-orchestrator/config/printers.json
+
+# Deploy state written by scripts/deploy.sh: the flock lock file, the build log
+# and the recorded previous-image tags a `deploy.sh rollback` returns to. Host
+# specific — never committed.
+.deploy/

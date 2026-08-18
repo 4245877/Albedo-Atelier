@@ -16,6 +16,17 @@ services:
       GO2RTC_WEBRTC_CANDIDATE: "${GO2RTC_WEBRTC_CANDIDATE:?set GO2RTC_WEBRTC_CANDIDATE in .env (see .env.example — host LAN ip:8555)}"
     volumes:
       - ./apps/print-orchestrator/config/go2rtc.yaml:/config/go2rtc.yaml:ro
+    healthcheck:
+      # go2rtc's own API — this asks "is the bridge process serving", NOT "is the
+      # K2 reachable": a printer that is off must not mark the service unhealthy.
+      # Without it, a deploy could only observe "the container is running", which
+      # stays true for a go2rtc that failed to parse its config and answers
+      # nothing. wget is present in the image (busybox userland).
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:1984/api"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     ports:
       # go2rtc HTTP API. The browser reaches it same-origin via the dashboard's
       # /go2rtc/ nginx proxy (internal go2rtc:1984), so it does not need to be on

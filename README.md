@@ -4,19 +4,89 @@ Workspace for Atelier services.
 
 ## Albedo — Зал Верховного Надзора
 
-Start the local stack:
+Start the local stack (first time on a fresh host):
 
 ```bash
-docker compose up -d --build
+cp .env.example .env    # fill in the deployment values
+./ops/ensure-print-farm-network.sh
+./scripts/deploy.sh
 ```
 
 ### Updating a running deployment
 
-Do **not** put `docker compose down` in front of the rebuild. `down` removes the
+```bash
+./scripts/deploy.sh
+```
+
+That is the whole command. It runs preflight → build → `up -d` → health checks →
+HTTP verification, and **never** takes the running farm down before the new
+images exist.
+
+Do **not** put `docker compose down` in front of a rebuild. `down` removes the
 running containers *before* the new images exist, so any build failure — most
 commonly `no space left on device`, since the `production-orca` target pulls in
 the heavy GTK/WebKit layers — leaves the farm fully offline instead of merely
-un-updated. Build first, swap second:
+un-updated. `up -d` recreates only the services whose image or config actually
+changed, so `down` buys nothing even on the happy path.
+
+What the script adds over `build && up -d` by hand:
+
+| stage | what it protects against |
+|---|---|
+| preflight | daemon down, wrong directory, missing `.env` or an unresolvable compose config, missing `print-farm` network, **not enough disk or inodes to build**, prints in flight |
+| build | a build that fills the disk is cancelled by a watchdog *before* it starves the running containers; remote images are pulled here, not mid-swap |
+| up | `--no-build` (the images are already verified); refuses to swap the orchestrator while a print is running unless `--allow-active-prints` |
+| health | waits for every container's healthcheck, fails fast on a crash loop, dumps `ps` + logs + the last healthcheck output on failure |
+| HTTP | dashboard `/`, orchestrator `/health` and `/ready` through the published port (read from compose, not hardcoded) |
+
+Other subcommands:
+
+```bash
+./scripts/deploy.sh preflight   # checks only — changes nothing
+./scripts/deploy.sh status      # containers, health, restarts, disk
+./scripts/deploy.sh reclaim     # free disk safely: build cache + dangling images
+./scripts/deploy.sh rollback    # re-point compose at the previous images
+./scripts/deploy.sh --cleanup   # deploy, then reclaim
+./scripts/deploy.sh --help
+```
+
+Cleanup is a **flag on a successful deploy**, not part of every run: the build
+cache is what makes the next build cheap, and pruning it *before* a build only
+makes that build need more disk, not less. Reclaim after you are green, or when
+preflight tells you the disk is too tight.
+
+`reclaim` only ever runs `docker builder prune -a` (build cache) and
+`docker image prune` (untagged images). **No Docker volume is ever touched** by
+any part of this script — `docker volume prune`, `docker system prune --volumes`
+and `docker compose down -v` would delete `orchestrator-data`, which holds
+`queue.db` (the print queue, runs, and the printer inventory *including device
+credentials*). Never run them here.
+
+**Why a no-op deploy is really a no-op.** The build runs with
+`--provenance=false`. BuildKit's default provenance attestation makes the
+exported image a manifest *list* whose digest embeds build metadata, so a
+fully-cached rebuild still produces a new image id — and compose, comparing ids,
+would recreate every built container on every deploy. That restart is not free:
+it loses the in-memory run identity of prints already in flight (no filament
+auto-deduction, no duration metric for them). With provenance off, running
+`./scripts/deploy.sh` twice in a row leaves all three containers untouched.
+(The `build.provenance` key in `compose.yml` is silently ignored by Compose v5 —
+it has to be the CLI flag, which is why it lives in the script.)
+
+**Git is not part of a deploy.** Pull, review, then deploy — the script records
+the commit it built from and warns when the working tree is dirty.
+
+**Rollback.** Before building, the script tags the images the running containers
+came from as `<image>:previous` (a tag, so `docker image prune` cannot reclaim
+them) and records them in `.deploy/state.env`. `./scripts/deploy.sh rollback`
+re-points `:latest` at those and recreates the containers. It is *not* automatic:
+the orchestrator's SQLite migrations are **forward-only** (no `down`), so if the
+failed deploy already migrated `queue.db`, the older image may not understand the
+new schema — check for `migration` lines in the logs first, and restore a backup
+of the `orchestrator-data` volume if one ran. `--rollback-on-failure` opts into
+doing it automatically for deploys that carry no migration.
+
+The equivalent by hand, if you ever need it without the script:
 
 ```bash
 df -h /                 # 1. preflight: a production-orca build wants ~3 GB free
@@ -24,9 +94,8 @@ docker compose build    # 2. build — on failure the old stack keeps serving
 docker compose up -d    # 3. swap: recreates only the services whose image changed
 ```
 
-`up -d` recreates changed services in place, so the `down` step buys nothing even
-on the happy path. If a build fails on disk space, reclaim it with
-`docker builder prune -a` (build cache only) — never `docker volume prune` or
+If a build fails on disk space, reclaim it with `docker builder prune -a`
+(build cache only) — never `docker volume prune` or
 `docker system prune --volumes`, which would delete `orchestrator-data` whenever
 the containers happen to be stopped.
 
