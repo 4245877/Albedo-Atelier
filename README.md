@@ -7,9 +7,28 @@ Workspace for Atelier services.
 Start the local stack:
 
 ```bash
-docker compose down
 docker compose up -d --build
 ```
+
+### Updating a running deployment
+
+Do **not** put `docker compose down` in front of the rebuild. `down` removes the
+running containers *before* the new images exist, so any build failure — most
+commonly `no space left on device`, since the `production-orca` target pulls in
+the heavy GTK/WebKit layers — leaves the farm fully offline instead of merely
+un-updated. Build first, swap second:
+
+```bash
+df -h /                 # 1. preflight: a production-orca build wants ~3 GB free
+docker compose build    # 2. build — on failure the old stack keeps serving
+docker compose up -d    # 3. swap: recreates only the services whose image changed
+```
+
+`up -d` recreates changed services in place, so the `down` step buys nothing even
+on the happy path. If a build fails on disk space, reclaim it with
+`docker builder prune -a` (build cache only) — never `docker volume prune` or
+`docker system prune --volumes`, which would delete `orchestrator-data` whenever
+the containers happen to be stopped.
 
 Dashboard (the entry point):
 
