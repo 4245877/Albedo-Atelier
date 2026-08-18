@@ -40,6 +40,10 @@ services:
 
   print-orchestrator:
     build:
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-}
+        BUILD_TIME: ${BUILD_TIME:-}
+        GIT_DIRTY: ${GIT_DIRTY:-0}
       context: ./apps/print-orchestrator
       # The lean base image (no OrcaSlicer GTK/WebKit/GL system libraries).
       # Mounting a host OrcaSlicer runtime needs the `production-orca` image
@@ -122,8 +126,27 @@ services:
       # settings match what the CLI produces (probe warns on a mismatch).
       ORCA_SLICER_VERSION: ${ORCA_SLICER_VERSION:-2.3.0}
       ORCA_SLICER_NETWORK_ISOLATED: ${ORCA_SLICER_NETWORK_ISOLATED:-}
-    env_file:
-      - .env
+      # ── Values that used to arrive via `env_file: .env` ─────────────────────
+      # `env_file` injected the WHOLE file into this container: every deploy-only
+      # knob (COMPOSE_FILE, DEPLOY_*), every compose-only value (DASHBOARD_BIND,
+      # ORCA_HOST_DIR) and every OTHER service's settings (K2_CAMERA_SOURCE,
+      # GO2RTC_WEBRTC_CANDIDATE) — all of it visible in `docker inspect` and
+      # `docker compose config`. Worse, it was open-ended: any variable a future
+      # operator adds to .env for an unrelated tool would silently land in the
+      # orchestrator's environment too.
+      #
+      # These four are the ones this service actually consumes, so they are named
+      # explicitly and nothing else rides along.
+      #
+      # The control-API bearer token (see SECURITY.md); the dashboard's nginx is
+      # given the same value so it can authenticate its proxied calls.
+      ORCHESTRATOR_API_TOKEN: ${ORCHESTRATOR_API_TOKEN:-}
+      # Substituted into config/printers.json `${VAR}` placeholders at load time,
+      # so they must be present in the CONTAINER's environment, not just the host's.
+      BAMBU_A1_SERIAL: ${BAMBU_A1_SERIAL:-}
+      BAMBU_A1_ACCESS_CODE: ${BAMBU_A1_ACCESS_CODE:-}
+      # Legacy fixed night window; the scheduler migrates it into LIGHT_* mode.
+      NIGHT_PRINT_WINDOW: ${NIGHT_PRINT_WINDOW:-}
     volumes:
       # Slicer profiles + the printers.json SEED. Printers themselves are edited
       # in the dashboard and stored in the database on the volume below; this
@@ -173,6 +196,12 @@ services:
 
   print-dashboard:
     build:
+      # Build identity, forwarded into OCI labels (never into a filesystem
+      # layer). deploy.sh exports these; a manual `docker compose build` simply
+      # gets empty strings and an image that honestly reports "unknown".
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-}
+        BUILD_TIME: ${BUILD_TIME:-}
       context: ./apps/print-dashboard
     container_name: atelier-print-dashboard
     depends_on:

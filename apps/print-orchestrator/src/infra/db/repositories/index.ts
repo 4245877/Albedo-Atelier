@@ -1,5 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
+import { probeDatabase } from "../database";
+
 import type { PrintQueueStore, Repositories } from "../../../domain/print/repositories";
 import { SqliteAppMetaRepository } from "./appMetaRepository";
 import { SqliteArtifactAnalysisRepository } from "./artifactAnalysisRepository";
@@ -91,6 +93,11 @@ export class SqlitePrintQueueStore implements PrintQueueStore {
     } finally {
       this.transactionDepth -= 1;
     }
+  }
+
+
+  probe(): { ok: boolean; error?: string } {
+    return probeDatabase(this.db);
   }
 
   close(): void {

@@ -24,6 +24,7 @@ export function collectMetrics(reads: Pick<DashboardReadModel, "getMetricsSnapsh
     { name: "uptime_seconds", help: "Seconds since the service started", type: "gauge", value: m.uptimeSeconds },
     { name: "last_poll_age_seconds", help: "Seconds since the last successful printer poll", type: "gauge", value: m.lastPollAgeSeconds },
     { name: "degraded", help: "1 when any printer is offline/errored or the config is broken", type: "gauge", value: m.degraded },
+    { name: "db_ok", help: "1 when queue.db answers a cheap probe, 0 when it does not", type: "gauge", value: m.dbOk },
     { name: "printers_total", help: "Enabled printers in the config", type: "gauge", value: m.printersTotal },
     { name: "printers_online", help: "Printers currently reachable", type: "gauge", value: m.printersOnline },
     { name: "printers_printing", help: "Printers currently printing", type: "gauge", value: m.printersPrinting },

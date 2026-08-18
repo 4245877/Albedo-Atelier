@@ -23,7 +23,9 @@ export type EnvGroup =
   | "lights"
   | "filament"
   | "security"
-  | "compose";
+  | "compose"
+  /** Consumed by scripts/deploy.sh, never by the service itself. */
+  | "deploy";
 
 export interface RegisteredEnvVar {
   name: string;

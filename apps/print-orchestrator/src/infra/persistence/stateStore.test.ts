@@ -94,6 +94,7 @@ function sampleState(): PersistedState {
         firstFailedAtMs: 1_720_000_000_000
       }
     ],
+    unreconciledConsumes: [],
     filamentCarry: {
       "creality-k2:main": { lengthMm: 120.5 },
       "bambu-a1-combo:t0": { grams: 0.6 }

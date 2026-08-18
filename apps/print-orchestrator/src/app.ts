@@ -9,6 +9,7 @@ import { registerSecurity } from "./http/security";
 import { getHealth } from "./infra/observability/health";
 import { collectMetrics, METRICS_CONTENT_TYPE } from "./infra/observability/metrics";
 import { getReadiness } from "./infra/observability/ready";
+import { getVersion } from "./infra/observability/version";
 import { farmStore } from "./app/farmStore";
 import { registerAutomationRoutes } from "./modules/automation/routes";
 import { registerDashboardRoutes } from "./modules/dashboard/routes";
@@ -20,6 +21,12 @@ import { registerPrinterRoutes } from "./modules/printers/routes";
 import { registerQueueRoutes } from "./modules/queue/routes";
 import { env } from "./shared/env";
 import { loggerConfig } from "./shared/logger";
+
+/**
+ * Mirrors package.json's `version`. A literal rather than a JSON import so the
+ * plain `tsc` build (no bundler, no resolveJsonModule) stays unchanged.
+ */
+const APP_VERSION = "0.1.0";
 
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -89,6 +96,12 @@ export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
   });
 
   app.get("/health", async () => getHealth());
+
+  // Which build is this? Unauthenticated on purpose and deliberately free of
+  // configuration detail: it exposes only the commit, build time and version,
+  // which is exactly what an operator (and `deploy.sh status`) needs to tell a
+  // partial deploy from a complete one.
+  app.get("/version", async () => getVersion(env.serviceName, APP_VERSION));
 
   // Real readiness: 503 until the first poll completes, or if the poll loop
   // goes stale. A merely degraded farm still returns 200.

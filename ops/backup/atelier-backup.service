@@ -1,0 +1,17 @@
+[Unit]
+Description=Atelier — backup of queue.db, artifacts and deployment secrets
+Documentation=file:%h/apps/atelier/ops/backup/README.md
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/apps/atelier
+# --db is the hourly line: a consistent queue.db snapshot in under a second.
+# The daily full set (artifacts + secrets) is driven by atelier-backup-full.timer.
+ExecStart=%h/apps/atelier/ops/backup/backup.sh --db
+# A backup that fails silently is indistinguishable from no backup, so let the
+# non-zero exit surface in `systemctl status` / `journalctl` rather than
+# swallowing it.
+SuccessExitStatus=0
+Nice=10
+IOSchedulingClass=idle

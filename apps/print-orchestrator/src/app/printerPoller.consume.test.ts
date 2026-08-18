@@ -442,6 +442,12 @@ test("Bambu: no start snapshot (started before boot) skips deduction", async () 
   const inventory = recordingInventory();
   // First observation is already 'printing' → treated as a baseline, so no run
   // identity / AMS start snapshot is captured. On completion there is nothing to diff.
+  //
+  // With no canonical run available to adopt either (no adoptRun wired here), the
+  // reported cause is the MISSING RUN rather than missing telemetry — which is
+  // the accurate diagnosis: the AMS data is present, it is the baseline to diff
+  // it against that a restart destroyed. The debt is also recorded durably now,
+  // instead of living only in the capped event feed.
   const sequence = [
     baseStatus({ status: "printing", stateText: "RUNNING", amsTrays: [tray(0, 100)] }),
     baseStatus({ status: "idle", stateText: "FINISH", progressPct: 100, amsTrays: [tray(0, 80)] })
@@ -451,7 +457,10 @@ test("Bambu: no start snapshot (started before boot) skips deduction", async () 
   await pollTimes(poller, 2);
 
   assert.equal(inventory.calls.length, 0);
-  assert.match(feedText(events), /нет данных о расходе филамента/);
+  assert.match(feedText(events), /не отслеживалась \(перезапуск во время печати\)/);
+  const owed = poller.filament.listUnreconciled();
+  assert.equal(owed.length, 1, "the skipped deduction is recorded as an outstanding debt");
+  assert.equal(owed[0].printerId, bambuConfig().id);
 });
 
 test("Moonraker: a print started before boot skips deduction (no tracked run)", async () => {

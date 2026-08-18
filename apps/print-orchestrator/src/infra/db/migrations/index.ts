@@ -43,6 +43,75 @@ export const MIGRATIONS: readonly Migration[] = [
 const MIGRATIONS_TABLE = "schema_migrations";
 
 /**
+ * The newest schema version this build of the image knows how to speak.
+ *
+ * Derived from the registry rather than hand-maintained, so it cannot drift.
+ */
+export const KNOWN_MAX_SCHEMA_VERSION: number = MIGRATIONS.reduce(
+  (max, migration) => (migration.version > max ? migration.version : max),
+  0
+);
+
+/**
+ * Raised when the database has been migrated by a NEWER image than this one.
+ *
+ * Migrations are forward-only, so this situation is not recoverable by starting
+ * anyway: the running code would be reading and writing a schema it was never
+ * compiled against.
+ */
+export class SchemaTooNewError extends Error {
+  readonly databaseVersion: number;
+  readonly knownVersion: number;
+
+  constructor(databaseVersion: number, knownVersion: number) {
+    super(
+      `database schema is newer than this application image: queue.db is at ` +
+        `migration ${databaseVersion}, but this build only knows up to ` +
+        `${knownVersion}. Migrations are forward-only, so this image cannot ` +
+        `safely read or write this database. Deploy the newer image again, or ` +
+        `restore a backup taken before the migration ` +
+        `(ops/backup/restore.sh --set <set> --to-production --i-mean-it).`
+    );
+    this.name = "SchemaTooNewError";
+    this.databaseVersion = databaseVersion;
+    this.knownVersion = knownVersion;
+  }
+}
+
+/**
+ * Refuse to run against a schema from the future.
+ *
+ * Without this, `runMigrations` simply skipped every recorded version it did not
+ * recognise (`if (appliedVersions.has(...)) continue` never looks the other
+ * way), so rolling back to an older image after a migration started CLEANLY and
+ * then misbehaved at runtime — inserting without a column that is now NOT NULL,
+ * or writing to a table the newer schema had renamed. Silent divergence is the
+ * worst possible outcome for a database with no backup; an honest refusal to
+ * start is visible to `wait_for_health`, which already treats a crash-loop as a
+ * failed deploy.
+ */
+export function assertSchemaNotNewerThanImage(db: DatabaseSync, logger: StoreLogger = {}): void {
+  const tableExists = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`)
+    .get(MIGRATIONS_TABLE);
+  // A fresh database has no migration bookkeeping yet — nothing to compare.
+  if (!tableExists) return;
+
+  const row = db.prepare(`SELECT MAX(version) AS max FROM ${MIGRATIONS_TABLE}`).get() as
+    | { max: number | null }
+    | undefined;
+  const databaseVersion = row?.max ?? 0;
+
+  if (databaseVersion > KNOWN_MAX_SCHEMA_VERSION) {
+    logger.error?.(
+      { databaseVersion, knownVersion: KNOWN_MAX_SCHEMA_VERSION },
+      "database schema is newer than this application image — refusing to start"
+    );
+    throw new SchemaTooNewError(databaseVersion, KNOWN_MAX_SCHEMA_VERSION);
+  }
+}
+
+/**
  * Brings `db` up to the latest schema and returns the names of the migrations
  * it actually applied (empty when already current).
  *
@@ -60,6 +129,9 @@ export function runMigrations(db: DatabaseSync, logger: StoreLogger = {}): strin
        applied_at TEXT NOT NULL
      )`
   );
+
+  // Before touching anything: is this database from the future?
+  assertSchemaNotNewerThanImage(db, logger);
 
   const appliedVersions = new Set(
     (db.prepare(`SELECT version FROM ${MIGRATIONS_TABLE}`).all() as { version: number }[]).map(

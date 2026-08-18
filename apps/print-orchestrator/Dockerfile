@@ -66,6 +66,33 @@ CMD ["node", "--experimental-sqlite", "--disable-warning=ExperimentalWarning", "
 # too). Selected ONLY by compose.orca.yml (`target: production-orca`) together
 # with the ORCA_HOST_DIR mount; the default deployment ships the lean image.
 # Kept lean with --no-install-recommends; apt lists removed to shrink the layer.
+# ── Build identity ──────────────────────────────────────────────────────────
+# Surfaced three ways, because each answers a different question:
+#   * OCI labels -> `docker image inspect`, "what is in this image"
+#   * ENV        -> `GET /version`, "what is actually running"
+#   * deploy.sh  -> reads the label of the image a container was started from
+#
+# DECLARED LAST, and this position is load-bearing. An `ARG` invalidates the
+# build cache for every instruction that FOLLOWS it, so declaring these near the
+# top would rebuild `pnpm install --prod` and the apt layer on every commit —
+# turning a metadata change into a new rootfs. deploy.sh decides "did anything
+# really change?" by comparing rootfs layers and uses that answer to avoid
+# recreating the orchestrator mid-print, so a churning rootfs would silently
+# disable that protection (and make every deploy a slow one).
+#
+# Down here, only image CONFIG changes: the image id moves, the layers do not.
+# Verified: two builds of the same tree with different GIT_COMMIT produce
+# identical `RootFS.Layers` and a correctly-updated revision label.
+ARG GIT_COMMIT=""
+ARG BUILD_TIME=""
+ARG GIT_DIRTY="0"
+LABEL org.opencontainers.image.revision="$GIT_COMMIT"
+LABEL org.opencontainers.image.created="$BUILD_TIME"
+LABEL org.opencontainers.image.title="atelier-print-orchestrator"
+ENV GIT_COMMIT=$GIT_COMMIT
+ENV BUILD_TIME=$BUILD_TIME
+ENV GIT_DIRTY=$GIT_DIRTY
+
 FROM production AS production-orca
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

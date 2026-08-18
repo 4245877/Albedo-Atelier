@@ -1,0 +1,13 @@
+[Unit]
+Description=Atelier — daily full backup
+
+[Timer]
+# 04:10 local: after the lite-forest window (03:30) so two backup jobs do not
+# contend for the same disk, and inside the quiet part of the night.
+OnCalendar=*-*-* 04:10:00
+RandomizedDelaySec=600
+Persistent=true
+Unit=atelier-backup-full.service
+
+[Install]
+WantedBy=timers.target

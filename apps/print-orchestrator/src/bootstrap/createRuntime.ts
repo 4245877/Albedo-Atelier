@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { NotFoundError } from "../core/errors";
+import type { AmsTraySnapshot } from "../infra/printers/status/types";
 import type { PrintQueueStore } from "../domain/print/repositories";
 import type { PrintRun } from "../domain/print/types";
 import { env, slicing, uploads } from "../shared/env";
@@ -60,6 +61,32 @@ import {
   type SchedulerPrinterRef
 } from "../app/scheduling/schedulerService";
 import { classifyDispatchError } from "../app/startGuard";
+
+/**
+ * Where the AMS start snapshot is stored on the canonical run.
+ *
+ * `PrintRun.metadata` rather than a new column: this is a few hundred bytes of
+ * device telemetry attached to one run, it is read only by the recovery path,
+ * and it needs no indexing or constraints — none of which would justify a
+ * migration and a schema change on every deployment.
+ */
+const AMS_BASELINE_KEY = "amsStart";
+
+/**
+ * Read the persisted AMS baseline back off a run's metadata.
+ *
+ * Deliberately defensive: metadata is untyped JSON that older rows will not have
+ * at all, so anything unexpected degrades to "no baseline" (the deduction is
+ * then flagged for manual reconciliation) instead of throwing inside the poll
+ * loop.
+ */
+function readAmsBaseline(metadata: unknown): AmsTraySnapshot[] | null {
+  if (!metadata || typeof metadata !== "object") return null;
+  const raw = (metadata as Record<string, unknown>)[AMS_BASELINE_KEY];
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  return raw as AmsTraySnapshot[];
+}
+
 
 /** Paths a runtime may override (tests pass isolated temp files). */
 export interface RuntimeOptions {
@@ -202,7 +229,10 @@ export class FarmRuntime implements PrintServices {
       this.events,
       persist,
       persisted.pendingConsumes,
-      { initialCarry: persisted.filamentCarry }
+      {
+        initialCarry: persisted.filamentCarry,
+        initialUnreconciled: persisted.unreconciledConsumes
+      }
     );
     // Same client as the deduction path: it pushes the live loaded reel so
     // fulfillment binds it to a stock position automatically (no manual entry).
@@ -229,6 +259,35 @@ export class FarmRuntime implements PrintServices {
         // the poll loop must never force a lazy DB open.
         runObserver: (id, prev, next) => {
           if (this.printQueueStoreRef) this.runLifecycleRef?.observe(id, prev, next);
+        },
+        // Restart recovery: the canonical run in SQLite survives a restart, the
+        // poller's in-memory identity does not. This lets the poller rebuild
+        // that identity — the same run id (so the deduction idempotency key is
+        // unchanged), the real start time (so duration is not lost) and the AMS
+        // baseline captured when the print began.
+        adoptRun: (printerId) => {
+          if (!this.printQueueStoreRef) return null;
+          const run = this.activeRunForPrinter(printerId);
+          if (!run) return null;
+          if (run.state !== "RUNNING" && run.state !== "PAUSED") return null;
+          const startedAtMs = run.startedAt ? Date.parse(run.startedAt) : NaN;
+          return {
+            id: run.id,
+            file: run.file,
+            startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : null,
+            amsStart: readAmsBaseline(run.metadata)
+          };
+        },
+        persistAmsBaseline: (printerId, amsStart) => {
+          const store = this.printQueueStoreRef;
+          if (!store) return;
+          const run = this.activeRunForPrinter(printerId);
+          if (!run) return;
+          store.repositories.printRuns.update({
+            ...run,
+            metadata: { ...run.metadata, [AMS_BASELINE_KEY]: amsStart },
+            updatedAt: new Date().toISOString()
+          });
         }
       },
       // Hardware discovery on the poll cadence. Like the run observer, it only
@@ -279,7 +338,11 @@ export class FarmRuntime implements PrintServices {
       (job) => buildNightGateInfo(this.nightGateDeps(), job.id),
       (printerId) => this.activeRunForPrinter(printerId)?.id ?? null,
       (printer) => this.specsFor(printer),
-      this.filamentStock
+      this.filamentStock,
+      // Readiness must reflect the database, not just the poll loop: poll
+      // failures are swallowed by a logging try/catch, so a dead queue.db used
+      // to leave /ready answering 200 while dispatch was completely broken.
+      () => this.printQueueStoreRef?.probe() ?? { ok: false, error: "queue store not open" }
     );
 
     // Snapshot the whole durable state on every save. The queue section is no
@@ -292,7 +355,8 @@ export class FarmRuntime implements PrintServices {
       automations: this.automations.serialize(),
       snapshots: this.snapshots.serialize(),
       pendingConsumes: this.filament.serialize(),
-      filamentCarry: this.filament.serializeCarry()
+      filamentCarry: this.filament.serializeCarry(),
+      unreconciledConsumes: this.filament.serializeUnreconciled()
     }));
   }
 

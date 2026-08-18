@@ -20,12 +20,14 @@ type PrintRun = {
   printId: string;
   file: string | null;
   /**
-   * Wall-clock (Date.now()) when this print run was observed to start. The
-   * anchor for the "average print duration" metric — present only for runs the
-   * poller itself watched begin, so a print already running at startup or one
-   * revived across a restart has none and is excluded from the average. Held in
-   * memory only (like the rest of PrintRun): after a restart there is no known
-   * start, so the run cannot be timed and is intentionally not counted.
+   * Wall-clock (Date.now()) when this print run started. The anchor for the
+   * "average print duration" metric.
+   *
+   * No longer memory-only: when the poller finds a printer already printing and
+   * has no in-memory run for it (the situation after ANY restart — deploy, OOM,
+   * host reboot), it hydrates this from the canonical `PrintRun.startedAt`
+   * already in SQLite. A restart mid-print therefore no longer erases the
+   * duration of an 8-hour job.
    */
   startedAtMs: number;
   /** AMS tray `remain` snapshot at print start (Bambu), diffed at completion. */
@@ -76,6 +78,15 @@ export class PrinterPoller {
 
   /** Per-printer identity of the in-flight print, for stable idempotent deduction. */
   private printRuns = new Map<string, PrintRun>();
+  /** Canonical-run rehydration hook (see constructor). */
+  private readonly adoptRun?: (printerId: string) => {
+    id: string;
+    file: string | null;
+    startedAtMs: number | null;
+    amsStart?: AmsTraySnapshot[] | null;
+  } | null;
+  /** Durable AMS-baseline writer (see constructor). */
+  private readonly persistAmsBaseline?: (printerId: string, amsStart: AmsTraySnapshot[]) => void;
   /** Canonical-run reconciliation hook (see constructor). */
   private readonly runObserver?: (
     printerId: string,
@@ -125,6 +136,26 @@ export class PrinterPoller {
         refreshIfDue(): void;
         useLogger(logger: StoreLogger): void;
       };
+      /**
+       * Canonical-run lookup used to REHYDRATE in-memory run identity after a
+       * restart. Returns the durable run currently active on this printer, or
+       * null. Without it the poller behaves exactly as before (and loses run
+       * identity across a restart), so it is optional.
+       */
+      adoptRun?: (printerId: string) => {
+        id: string;
+        file: string | null;
+        startedAtMs: number | null;
+        amsStart?: AmsTraySnapshot[] | null;
+      } | null;
+      /**
+       * Persist the AMS baseline onto the canonical run, so it can be recovered
+       * by {@link adoptRun} after a restart. The snapshot is a few hundred bytes
+       * of JSON and is what makes Bambu consumption reconstructible: `remain` is
+       * absolute, so start-snapshot minus end-snapshot is the real usage no
+       * matter how many times the process restarted in between.
+       */
+      persistAmsBaseline?: (printerId: string, amsStart: AmsTraySnapshot[]) => void;
     },
     /**
      * Hardware-profile discovery, driven on the poll cadence. Optional and
@@ -138,6 +169,8 @@ export class PrinterPoller {
   ) {
     this.runObserver = lightPolicy?.runObserver;
     this.filamentStock = lightPolicy?.filamentStock;
+    this.adoptRun = lightPolicy?.adoptRun;
+    this.persistAmsBaseline = lightPolicy?.persistAmsBaseline;
     this.today = new TodayCounters(initialToday);
     this.filament = filament ?? new FilamentConsumption(undefined, events);
     this.filamentSync = filamentSync ?? new FilamentSync(undefined);
@@ -200,6 +233,12 @@ export class PrinterPoller {
         enabled.map(async (printer) => {
           const status = await this.statusProvider(printer);
           const prev = this.statuses.get(printer.id);
+          // Before anything else: if this printer is mid-print but we hold no
+          // in-memory identity for it, recover it from the canonical run. This
+          // is the restart path — `recordTransition` mints a run only on a
+          // not-printing → printing EDGE, which by definition never arrives for
+          // a print that was already running when the process started.
+          this.hydrateRunFromCanonical(printer, status);
           this.recordTransition(printer, prev, status);
           // A run that started without an AMS snapshot (partial start report)
           // adopts the first full report that arrives while it is still active.
@@ -329,6 +368,63 @@ export class PrinterPoller {
    * only while the run is active, so a report from a later state can never be
    * mistaken for this print's start.
    */
+  /**
+   * Rebuild in-memory run identity for a print that is already in flight.
+   *
+   * The canonical `PrintRun` in SQLite survives a restart; the poller's map does
+   * not. Without this, a completion observed after a restart reached
+   * `consumeForPrint` with `run === undefined`, which skipped filament
+   * auto-deduction entirely (leaving only a feed warning nobody reads) and
+   * recorded the completion with no duration.
+   *
+   * Using the canonical run's own id as `printId` is what makes the deduction
+   * idempotency key survive the restart too: the same physical print keeps the
+   * same key, so a completion cannot be deducted twice by two different process
+   * lifetimes.
+   */
+  private hydrateRunFromCanonical(printer: PrinterConfig, status: PrinterLiveStatus): void {
+    if (!this.adoptRun) return;
+    if (status.status !== "printing" && status.status !== "paused") return;
+    if (this.printRuns.has(printer.id)) return;
+
+    let canonical: ReturnType<NonNullable<typeof this.adoptRun>>;
+    try {
+      canonical = this.adoptRun(printer.id);
+    } catch (error) {
+      this.logger.error?.({ err: error, printer: printer.id }, "canonical run lookup failed");
+      return;
+    }
+    if (!canonical) return;
+
+    this.printRuns.set(printer.id, {
+      printId: canonical.id,
+      file: canonical.file ?? status.currentFile ?? null,
+      // Fall back to "now" only when the canonical row has no start time at all;
+      // that yields an understated duration rather than none, and never a
+      // negative one.
+      startedAtMs: canonical.startedAtMs ?? Date.now(),
+      amsStart: canonical.amsStart ?? null
+    });
+    this.logger.info?.(
+      {
+        printer: printer.id,
+        run: canonical.id,
+        recoveredStart: canonical.startedAtMs !== null,
+        recoveredAmsBaseline: Boolean(canonical.amsStart)
+      },
+      "adopted canonical print run after restart"
+    );
+    if (!canonical.amsStart && printer.protocol === "bambu") {
+      // No baseline to diff against: the next full AMS report backfills it, and
+      // if the print ends first the deduction is recorded as owed rather than
+      // silently dropped.
+      this.logger.warn?.(
+        { printer: printer.id, run: canonical.id },
+        "adopted run has no AMS baseline — consumption may need manual reconciliation"
+      );
+    }
+  }
+
   private backfillAmsStart(printer: PrinterConfig, status: PrinterLiveStatus): void {
     if (printer.protocol !== "bambu" || !status.amsTrays) return;
     if (status.status !== "printing" && status.status !== "paused") return;
@@ -336,10 +432,29 @@ export class PrinterPoller {
     if (!run || run.amsStart) return;
 
     run.amsStart = status.amsTrays;
+    this.saveAmsBaseline(printer, status.amsTrays);
     this.logger.info?.(
       { printer: printer.id, job: run.file, trays: status.amsTrays.length },
       "AMS start snapshot backfilled from the first full report after start"
     );
+  }
+
+  /**
+   * Write the AMS baseline onto the canonical run so it outlives this process.
+   *
+   * Never allowed to disturb polling: a failure here costs the recoverability of
+   * one deduction, while a throw would cost the whole poll cycle.
+   */
+  private saveAmsBaseline(printer: PrinterConfig, amsStart: AmsTraySnapshot[]): void {
+    if (!this.persistAmsBaseline) return;
+    try {
+      this.persistAmsBaseline(printer.id, amsStart);
+    } catch (error) {
+      this.logger.error?.(
+        { err: error, printer: printer.id },
+        "could not persist the AMS baseline — consumption may need manual reconciliation after a restart"
+      );
+    }
   }
 
   // ── Transition tracking (real events only) ──────────────────────────────
@@ -420,6 +535,9 @@ export class PrinterPoller {
         startedAtMs: Date.now(),
         amsStart
       });
+      // Mirror the baseline into durable storage immediately. Everything in the
+      // map above is lost on restart; this is what lets it be rebuilt.
+      if (amsStart) this.saveAmsBaseline(printer, amsStart);
       if (printer.protocol === "bambu" && !amsStart) {
         this.logger.warn?.(
           { printer: printer.id, job },

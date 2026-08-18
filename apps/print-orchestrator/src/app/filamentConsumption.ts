@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { PrinterConfig } from "../infra/printers/config";
 import type { PrinterLiveStatus } from "../infra/printers/status";
 import { bambuMeasurableTrayCount, bambuTrayUsage } from "../infra/printers/status/bambuUsage";
@@ -58,11 +59,37 @@ export type PendingConsume = {
  */
 export type FilamentCarry = Record<string, { grams?: number; lengthMm?: number }>;
 
+/**
+ * A completed print whose filament could NOT be deducted automatically, kept
+ * until an operator clears it.
+ *
+ * This exists because the previous behaviour — a single line pushed into the
+ * event feed — was indistinguishable from no record at all: the feed is capped
+ * and unacknowledged, so the debt scrolled away and the warehouse silently
+ * drifted from reality by a spool at a time. A durable row survives restarts and
+ * can be listed, which is the difference between "we owe a deduction" and "we
+ * used to know we owed a deduction".
+ */
+export type UnreconciledConsume = {
+  /** Stable id so a UI can acknowledge exactly one entry. */
+  id: string;
+  printerId: string;
+  printerName: string;
+  /** The print's file, when known. */
+  job: string | null;
+  /** ISO timestamp of when the debt was recorded. */
+  observedAt: string;
+  /** Why automatic deduction could not happen — shown verbatim to the operator. */
+  reason: string;
+};
+
 /** Why a queued deduction was finally dropped (metric + operator event reason). */
 export type PendingDropReason = "overflow" | "expired" | "rejected";
 
 /** First retry delay; doubles per failed attempt up to {@link RETRY_MAX_DELAY_MS}. */
 const RETRY_BASE_DELAY_MS = 60 * 1000;
+/** Cap on stored manual-deduction debts, so a persistent fault cannot grow state.json without bound. */
+const MAX_UNRECONCILED = 200;
 const RETRY_MAX_DELAY_MS = 30 * 60 * 1000;
 
 /**
@@ -157,6 +184,8 @@ export function buildConsumeItems(
 export class FilamentConsumption {
   private logger: StoreLogger = {};
   private pending: PendingConsume[];
+  /** Debts awaiting a manual deduction; persisted with the farm state. */
+  private unreconciled: UnreconciledConsume[];
   private retrying = false;
   private carry: Map<string, { grams: number; lengthMm: number }>;
   private dropped: Record<PendingDropReason, number> = {
@@ -180,6 +209,8 @@ export class FilamentConsumption {
     initialPending: PendingConsume[] = [],
     options: {
       initialCarry?: FilamentCarry;
+      /** Unreconciled deductions restored from the persisted farm state. */
+      initialUnreconciled?: UnreconciledConsume[];
       /** Queue cap; defaults to env FILAMENT_RETRY_QUEUE_MAX. */
       maxPending?: number;
       /** Give-up age; defaults to env FILAMENT_RETRY_MAX_AGE_DAYS. */
@@ -189,6 +220,7 @@ export class FilamentConsumption {
     } = {}
   ) {
     this.pending = [...initialPending];
+    this.unreconciled = [...(options?.initialUnreconciled ?? [])];
     this.carry = new Map(
       Object.entries(options.initialCarry ?? {}).map(([key, value]) => [
         key,
@@ -216,6 +248,44 @@ export class FilamentConsumption {
   /** The retry queue for persistence (a fresh array; entries are not copied). */
   serialize(): PendingConsume[] {
     return [...this.pending];
+  }
+
+  /** Unreconciled deductions for persistence and for the operator-facing read. */
+  serializeUnreconciled(): UnreconciledConsume[] {
+    return [...this.unreconciled];
+  }
+
+  /** Every outstanding manual-deduction debt, newest first. */
+  listUnreconciled(): UnreconciledConsume[] {
+    return [...this.unreconciled].reverse();
+  }
+
+  /** Operator acknowledgement: the debt has been settled by hand. */
+  clearUnreconciled(id: string): boolean {
+    const before = this.unreconciled.length;
+    this.unreconciled = this.unreconciled.filter((entry) => entry.id !== id);
+    return this.unreconciled.length !== before;
+  }
+
+  /**
+   * Record that a print finished without a recoverable deduction. Bounded, so a
+   * persistent fault cannot grow the state file without limit — the OLDEST entry
+   * is dropped, because the newest debt is the one most likely still actionable.
+   */
+  private recordUnreconciled(
+    printer: { id: string; name: string },
+    job: string | null,
+    reason: string
+  ): void {
+    this.unreconciled.push({
+      id: randomUUID(),
+      printerId: printer.id,
+      printerName: printer.name,
+      job,
+      observedAt: new Date().toISOString(),
+      reason
+    });
+    while (this.unreconciled.length > MAX_UNRECONCILED) this.unreconciled.shift();
   }
 
   /** The sub-gram carry for persistence (only non-zero amounts are written). */
@@ -263,6 +333,33 @@ export class FilamentConsumption {
   ): void {
     if (!this.inventory?.enabled) return;
 
+    // A completed print with no tracked run — one that was already printing when
+    // this process started and could NOT be re-adopted from the canonical record
+    // (see PrinterPoller.hydrateRunFromCanonical) — has no reliable idempotency
+    // anchor. Its device-reported total (Moonraker length) spans the whole job,
+    // and a synthetic `printer:date:file` key would collide for two untracked
+    // prints of the same file on the same day and under-deduct. So it is still
+    // not deducted automatically — but the debt is now RECORDED DURABLY instead
+    // of only announced in the event feed, which is capped and unacknowledged
+    // and therefore scrolled the obligation away.
+    //
+    // Checked before the measurement below on purpose: whether the device
+    // happened to give us measurable data does not change the fact that a print
+    // completed whose filament nobody deducted.
+    if (!run) {
+      this.recordUnreconciled(
+        printer,
+        job,
+        "печать не отслеживалась (перезапуск во время печати) — автосписание пропущено"
+      );
+      this.events.push(
+        "⚠",
+        `<b>${printer.name}</b>: склад — печать${job ? ` «${job}»` : ""} не отслеживалась (перезапуск во время печати), автосписание пропущено — спишите вручную`,
+        "err"
+      );
+      return;
+    }
+
     const items = buildConsumeItems(printer, prev, next, run?.amsStart ?? null);
     if (items.length === 0) {
       // Warn only when the device gave us nothing to measure (uncalibrated trays
@@ -276,24 +373,6 @@ export class FilamentConsumption {
           "err"
         );
       }
-      return;
-    }
-
-    // A completed print with no tracked run — one that was already printing when
-    // this process started, or was revived across a restart — has no reliable
-    // idempotency anchor. Its device-reported total (Moonraker length) spans the
-    // whole job, and a synthetic `printer:date:file` key would collide for two
-    // untracked prints of the same file on the same day and under-deduct. Matching
-    // the documented restart behaviour (README “Restart cost”: such prints skip
-    // auto-deduction), skip it and tell the operator to deduct by hand rather
-    // than guess. A tracked run always carries a printId, so the deduction below
-    // stays idempotent.
-    if (!run) {
-      this.events.push(
-        "⚠",
-        `<b>${printer.name}</b>: склад — печать${job ? ` «${job}»` : ""} не отслеживалась (перезапуск во время печати), автосписание пропущено — спишите вручную`,
-        "err"
-      );
       return;
     }
 

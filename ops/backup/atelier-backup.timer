@@ -1,0 +1,15 @@
+[Unit]
+Description=Atelier — hourly queue.db snapshot
+
+[Timer]
+OnCalendar=hourly
+# Spread away from the top of the hour: the disk-alert timer and the print
+# scheduler both fire there.
+RandomizedDelaySec=300
+# A host that was off (or a timer that was masked) still gets one run rather
+# than silently skipping the whole outage.
+Persistent=true
+Unit=atelier-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -6,7 +6,13 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, test } from "node:test";
 
 import { openDatabase } from "../database";
-import { MIGRATIONS, runMigrations } from "./index";
+import {
+  assertSchemaNotNewerThanImage,
+  KNOWN_MAX_SCHEMA_VERSION,
+  MIGRATIONS,
+  runMigrations,
+  SchemaTooNewError
+} from "./index";
 
 let dir: string;
 
@@ -99,4 +105,54 @@ test("foreign keys and state CHECK constraints are enforced at the storage layer
   } finally {
     db.close();
   }
+});
+
+// ── Schema compatibility guard (AT-013) ─────────────────────────────────────
+// A database migrated by a NEWER image must not be opened by an older one.
+// Before the guard existed, runMigrations() silently ignored unknown recorded
+// versions and started normally, leaving the old code to read and write a
+// schema it was never compiled against.
+test("refuses to start when the database schema is newer than the image", () => {
+  const db = new DatabaseSync(":memory:");
+  runMigrations(db);
+
+  // Simulate a future image having applied one more migration than we know.
+  const future = KNOWN_MAX_SCHEMA_VERSION + 1;
+  db.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(
+    future,
+    `${future}_from_a_newer_image`,
+    new Date().toISOString()
+  );
+
+  assert.throws(
+    () => runMigrations(db),
+    (error: unknown) => {
+      assert.ok(error instanceof SchemaTooNewError, "expected SchemaTooNewError");
+      assert.equal(error.databaseVersion, future);
+      assert.equal(error.knownVersion, KNOWN_MAX_SCHEMA_VERSION);
+      // The message has to name the actual problem: an operator reading only
+      // this line must understand that the IMAGE is old, not the database bad.
+      assert.match(error.message, /schema is newer than this application image/i);
+      return true;
+    }
+  );
+  db.close();
+});
+
+test("the guard does not fire on an equal or older schema", () => {
+  const db = new DatabaseSync(":memory:");
+  runMigrations(db);
+  // Same version: fine (this is the ordinary restart case).
+  assert.doesNotThrow(() => runMigrations(db));
+  // Older recorded max than the image knows: also fine — that is just a
+  // database that has yet to receive the newest migrations.
+  db.prepare("DELETE FROM schema_migrations WHERE version = ?").run(KNOWN_MAX_SCHEMA_VERSION);
+  assert.doesNotThrow(() => assertSchemaNotNewerThanImage(db));
+  db.close();
+});
+
+test("a database with no migration bookkeeping is not rejected", () => {
+  const db = new DatabaseSync(":memory:");
+  assert.doesNotThrow(() => assertSchemaNotNewerThanImage(db));
+  db.close();
 });

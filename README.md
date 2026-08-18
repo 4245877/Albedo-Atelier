@@ -9,8 +9,25 @@ Start the local stack (first time on a fresh host):
 ```bash
 cp .env.example .env    # fill in the deployment values
 ./ops/ensure-print-farm-network.sh
+./ops/backup/install-timers.sh   # scheduled backups — do this BEFORE the first deploy
 ./scripts/deploy.sh
 ```
+
+**`COMPOSE_FILE` decides which system you get.** `.env.example` ships it active:
+
+```
+COMPOSE_FILE=compose.yml:compose.orca.yml
+```
+
+Without it, compose builds the **lean** image, `/opt/orca` is never mounted, and
+slicing is dead — while every container reports healthy and the deploy prints a
+full success. Preflight now refuses that combination outright when
+`ORCA_SLICER_CMD` is configured, rather than reporting it as an `ok` line. Comment
+it out only for a deliberately lean host, and unset `ORCA_SLICER_CMD` there too.
+
+**Disk.** A cold `production-orca` build needs **4096 MB** free on the Docker data
+filesystem (lean: 2048 MB); preflight enforces it. See
+[Reclaiming disk safely](#reclaiming-disk-safely).
 
 ### Updating a running deployment
 
@@ -77,19 +94,46 @@ it has to be the CLI flag, which is why it lives in the script.)
 the commit it built from and warns when the working tree is dirty.
 
 **Rollback.** Before building, the script tags the images the running containers
-came from as `<image>:previous` (a tag, so `docker image prune` cannot reclaim
-them) and records them in `.deploy/state.env`. `./scripts/deploy.sh rollback`
-re-points `:latest` at those and recreates the containers. It is *not* automatic:
-the orchestrator's SQLite migrations are **forward-only** (no `down`), so if the
-failed deploy already migrated `queue.db`, the older image may not understand the
-new schema — check for `migration` lines in the logs first, and restore a backup
-of the `orchestrator-data` volume if one ran. `--rollback-on-failure` opts into
-doing it automatically for deploys that carry no migration.
+came from as `<image>:previous`, and — **only after a deploy passes health and
+HTTP verification** — tags that verified build `<image>:last-known-good` and
+records its image ID in `.deploy/state.env`.
+
+That ordering is the point. `:last-known-good` moves *after* proof, never before
+a build, so:
+
+* a failed deploy never becomes the rollback target;
+* two failed deploys in a row cannot promote the first failure;
+* a no-op deploy does not consume the target.
+
+`./scripts/deploy.sh rollback` re-points `:latest` at the recorded
+last-known-good, **verifies the recorded image ID still matches the tag** (and
+refuses if something re-tagged it), checks for prints in flight, recreates the
+containers, and then runs the same health + HTTP checks a deploy does. It prints
+`ROLLBACK VERIFIED` only after those pass and exits non-zero with
+`ROLLBACK FAILED` if they do not.
+
+Rollback is *not* automatic. The orchestrator's SQLite migrations are
+**forward-only** (no `down`), so if the failed deploy already migrated
+`queue.db`, the older image cannot safely run against the new schema — it now
+**refuses to start** rather than corrupting data silently (see
+[Schema compatibility](#schema-compatibility)). `--rollback-on-failure` opts into
+automatic rollback and is **blocked automatically** when the deploy applied a
+migration; recover from a backup instead.
+
+### Rollback limitations
+
+* One step back only — `:last-known-good` holds a single generation.
+* It restores **running containers, not the checkout**; the working tree stays
+  on the new code.
+* It cannot undo a migration. That is what the pre-deploy snapshot in
+  `.deploy/db-snapshots/` and the scheduled backups are for.
+* A host that has never completed a verified deploy has no target; the first run
+  adopts the currently-running healthy stack and says so.
 
 The equivalent by hand, if you ever need it without the script:
 
 ```bash
-df -h /                 # 1. preflight: a production-orca build wants ~3 GB free
+df -h /                 # 1. preflight: production-orca needs 4096 MB free (lean: 2048)
 docker compose build    # 2. build — on failure the old stack keeps serving
 docker compose up -d    # 3. swap: recreates only the services whose image changed
 ```
@@ -118,12 +162,159 @@ printer/queue/automation actions) and the `/health`, `/ready`, `/metrics` probes
 
 ### Persistence
 
-The orchestrator's mutable state — the operator queue, the event feed,
-today's counters and filament deductions still awaiting delivery to the
-fulfillment warehouse — is written to a JSON file on the `orchestrator-data`
-Docker volume (`/app/data/state.json`), so it survives `docker compose down`
-and container recreation. Live telemetry is not persisted (it is re-polled). See the
-service README for details and `STATE_FILE_PATH`.
+Durable state lives on the `orchestrator-data` Docker volume, in two places with
+different jobs:
+
+| Path | Holds | Notes |
+|---|---|---|
+| `/app/data/queue.db` | **The queue and the domain model** — tasks, assignments, plans, runs, bed cycles, slicing, the operator schedule, and the **printer inventory including device credentials** | SQLite, WAL. The source of truth. |
+| `/app/data/state.json` | Event feed, today's counters, filament deductions awaiting delivery, sub-gram carry, and **unreconciled deductions** owed after an untracked print | Written temp-file + atomic rename |
+| `/app/data/artifacts/` | Uploaded files as content-addressed blobs (`sha256/<2>/<64>`) | Immutable; referenced by `queue.db` |
+| `/app/data/snapshots/` | Camera stills | Non-critical |
+
+The queue has **not** lived in `state.json` since the SQLite cutover; that file
+now carries the feed, counters and deduction bookkeeping. Live telemetry is not
+persisted (it is re-polled).
+
+Both survive container recreation. Neither survives losing the volume — see
+[Backup and restore](#backup-and-restore).
+
+### Schema compatibility
+
+Migrations are forward-only and run before the service accepts traffic. Since the
+schema guard was added, an image also **refuses to start against a database
+migrated by a newer image**, with an explicit message, instead of quietly
+ignoring the migration versions it does not recognise and then reading and
+writing a schema it was never compiled against. A crash-loop is visible to
+`deploy.sh`; silent divergence is not.
+
+### Which version is running?
+
+```bash
+./scripts/deploy.sh status                       # per-service revision
+curl -s localhost:8090/api/print-orchestrator/version | jq
+docker image inspect atelier-print-dashboard:latest \
+  --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+```
+
+Images carry `org.opencontainers.image.revision` and the orchestrator serves
+`GET /version` (commit, build time, dirty flag). This is what makes a **partial
+deploy** — orchestrator updated, dashboard not — visible; health checks alone
+stay green through one.
+
+Build identity is stored in image *config* (labels/env), never written into a
+filesystem layer, so it cannot make an otherwise-unchanged rebuild look like a
+content change — which would defeat the mid-print recreation guard below.
+
+### Backup and restore
+
+`queue.db` holds the queue, every run, and the **printer inventory including
+device credentials**; `artifacts/` holds the blobs those rows point at; `.env`
+holds the only copy of the Bambu LAN access code outside the database. Losing the
+volume without a backup means re-provisioning the farm by hand.
+
+`ops/backup/` provides this. It is scheduled with **systemd user timers**
+(the host has no passwordless sudo); `loginctl enable-linger` is what makes them
+run at boot and with nobody logged in.
+
+```bash
+./ops/backup/install-timers.sh          # install + enable both timers
+systemctl --user list-timers 'atelier-backup*'
+journalctl --user -u atelier-backup.service -n 50
+```
+
+| Unit | Cadence | Contents |
+|---|---|---|
+| `atelier-backup.timer` | hourly | `queue.db` + `state.json` |
+| `atelier-backup-full.timer` | daily 04:10 | the above + `artifacts/`, `snapshots/`, `.env`, `go2rtc.yaml` |
+
+Manual runs:
+
+```bash
+./ops/backup/backup.sh --full
+./ops/backup/verify.sh --all
+./ops/backup/restore.sh --to-dir /tmp/atelier-restore-test    # rehearsal, never production
+```
+
+**How it stays consistent.** `queue.db` is snapshotted with `VACUUM INTO` on a
+**read-only** handle — correct on a live WAL database, where `cp queue.db` is
+not. `artifacts/` is copied **after** that snapshot, never before: uploads commit
+the blob to content-addressed storage before inserting the row that references it
+(`ingest.ts:84` vs `:112`) and committed blobs are immutable, so a later copy is
+a superset of what the snapshot needs. The reverse order could reference a blob
+copied too early to exist. Every blob the snapshot references is then **verified
+present**, so the guarantee is checked rather than asserted. This is not an
+atomic volume snapshot and is not claimed to be one.
+
+**Restore is verified before it is trusted:** `restore.sh` refuses to restore a
+set that does not pass `verify.sh`, and writes to a scratch directory unless you
+explicitly pass `--to-production --i-mean-it` (which additionally refuses to run
+while the orchestrator is up).
+
+**Retention** is per tier (48 hourly / 14 daily / 8 weekly by default, in
+`ops/backup/backup.conf`). Pruning only ever deletes inside the backup tree, and
+every path passes a guard that rejects system paths, the Docker data root and the
+git checkout.
+
+**Security.** The backup root is `0700`, `.env` copies are `0600`, and secrets
+never reach stdout, the journal or the manifest.
+
+> **Where the backups live.** `ops/backup/config.sh` prefers a dedicated disk,
+> located by filesystem **UUID** (`BACKUP_DISK_UUID`) rather than by mountpoint —
+> an absent mount otherwise leaves an empty directory on the root disk that looks
+> perfectly writable. When that disk is not mounted it falls back to
+> `~/atelier-backups` and every run prints a **DEGRADED** warning, because a
+> same-disk backup protects against volume loss, operator error and filesystem
+> corruption — but **not** against losing the disk, host death, theft, fire or a
+> root compromise. A second disk in the same chassis is still not an off-host
+> backup.
+
+### Reboot and recovery
+
+The stack comes back by itself: `docker.service` is enabled and all three
+containers use `restart: unless-stopped`. **No manual `docker compose up -d` is
+needed after a reboot.**
+
+The daemon's restart policy does not honour `depends_on`, so the dashboard may
+start before the orchestrator. That is handled in nginx by resolving upstreams at
+request time (`resolver 127.0.0.11`) instead of once at config-parse time — which
+previously made nginx refuse to start at all (`[emerg] host not found in
+upstream`) and crash-loop until the orchestrator appeared.
+
+After an unexpected restart mid-print, see
+[Restart cost](#printer-inventory) — run identity is recovered. A run the farm
+could not reconcile is left `UNKNOWN` and its printer is **held** (blocked for
+the queue) until a human resolves it; that is deliberate, since an unobserved
+ending is never assumed to be a success.
+
+### Reclaiming disk safely
+
+```bash
+./scripts/deploy.sh reclaim           # untagged images only — KEEPS the build cache
+./scripts/deploy.sh reclaim --cache   # also drops the build cache
+```
+
+`--cache` is a last resort: it reclaims roughly a gigabyte and makes the next
+build **cold**, which then needs ~4 GB. On a tight disk that turns a slow deploy
+into an impossible one. Nothing in this script ever touches a Docker volume.
+
+Usually the biggest win is not Docker at all:
+
+```bash
+du -sh ~/.vscode-server/cli/servers/* ~/.vscode-server/bin/*
+```
+
+Stale VS Code server versions accumulate at ~700 MB each. Delete only versions
+that are not running (check with `ps` / `/proc/*/maps` first).
+
+**Never** run these here — they delete the volume holding `queue.db` whenever the
+containers happen to be stopped:
+
+```
+docker system prune -a --volumes
+docker volume prune
+docker compose down -v
+```
 
 ### Ports & security
 
@@ -254,11 +445,20 @@ is set and, for an env reference, which variable it names — never the value. A
 edit that omits a credential keeps the stored one, so the form can be submitted
 whole without the browser ever holding a secret.
 
-**Restart cost.** Recreating the orchestrator container keeps the queue,
-event feed and today's counters (`orchestrator-data` volume), but in-memory
-print-run identity is lost: prints already running are still tracked, yet
-their completion skips filament auto-deduction and the average-duration
-metric. Prefer deploying while no print is mid-run when that matters.
+**Restart cost.** Recreating the orchestrator keeps the queue, event feed and
+today's counters (`orchestrator-data` volume). Print-run identity is now
+**recovered** as well: on the first poll after a restart the poller re-adopts the
+canonical `PrintRun` from SQLite, restoring the run id (so the filament
+idempotency key is unchanged and nothing can be deducted twice), the real
+`startedAt` (so duration is not lost) and the AMS baseline captured when the
+print began — which is persisted with the run precisely so it can be recovered.
+
+When a run genuinely cannot be re-adopted (for example a print that began before
+the farm ever knew about it), the completion still skips auto-deduction, but the
+debt is now recorded **durably** as an unreconciled deduction in `state.json`
+rather than only announced once in the capped event feed. `deploy.sh` also
+refuses to recreate the orchestrator while prints are in flight, and fails closed
+when it cannot determine whether any are.
 
 Package manager: **pnpm** (`corepack enable`). The dashboard is static assets;
 `apps/print-orchestrator` is the only Node project.

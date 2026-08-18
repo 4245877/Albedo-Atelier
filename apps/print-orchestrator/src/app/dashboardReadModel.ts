@@ -119,7 +119,14 @@ export class DashboardReadModel {
      */
     private readonly filamentStock: Pick<FilamentStock, "snapshot"> = new FilamentStock(
       undefined
-    )
+    ),
+    /**
+     * Cheap liveness probe of the database (a `SELECT 1`-class query). Optional
+     * so the read model stays constructible in tests without a store; the
+     * default reports "ok", which keeps existing behaviour for callers that do
+     * not wire a database in.
+     */
+    private readonly probeDatabase: () => { ok: boolean; error?: string } = () => ({ ok: true })
   ) {}
 
   private view(printer: PrinterConfig): PrinterView {
@@ -169,9 +176,18 @@ export class DashboardReadModel {
     const lastPollAgeSeconds = lastPollAt === null ? null : Math.round((now - lastPollAt) / 1000);
     const staleThresholdSec = Math.max(30, Math.round((env.printerPollIntervalMs * 3) / 1000));
 
+    // Checked FIRST and weighted above everything else: the poll loop writes
+    // through a try/catch that only logs, so a broken database still refreshes
+    // lastPollAt and the old readiness logic would keep answering 200 while
+    // every queue request returned 500 and dispatch was dead.
+    const database = this.probeDatabase();
+
     let status: FarmReadiness["status"];
     let ready: boolean;
-    if (lastPollAt === null) {
+    if (!database.ok) {
+      status = "db_unavailable";
+      ready = false;
+    } else if (lastPollAt === null) {
       status = "starting";
       ready = false;
     } else if (lastPollAgeSeconds !== null && lastPollAgeSeconds > staleThresholdSec) {
@@ -196,7 +212,8 @@ export class DashboardReadModel {
       printers: {
         total: enabled.length,
         online: enabled.filter((p) => this.poller.getStatus(p.id)?.online).length
-      }
+      },
+      database
     };
   }
 
@@ -210,6 +227,7 @@ export class DashboardReadModel {
       uptimeSeconds: Math.round((Date.now() - this.startedAt) / 1000),
       lastPollAgeSeconds: lastPollAt === null ? null : Math.round((Date.now() - lastPollAt) / 1000),
       degraded: this.getService().status === "degraded" ? 1 : 0,
+      dbOk: this.probeDatabase().ok ? 1 : 0,
       printersTotal: enabled.length,
       printersOnline: enabled.filter((p) => this.poller.getStatus(p.id)?.online).length,
       printersPrinting: views.filter((p) => p.status === "printing").length,

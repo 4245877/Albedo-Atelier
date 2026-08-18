@@ -46,5 +46,54 @@ export function openDatabase(dbPath: string, logger: StoreLogger = {}): Database
     logger.info?.({ applied, path: dbPath }, "queue database migrations applied");
   }
 
+  // One integrity check at open, never per request. On a file this size it costs
+  // single-digit milliseconds, and it is the only thing that distinguishes "the
+  // database opened" from "the database is intact" — a corrupted page deep in a
+  // table is invisible until the query that touches it runs, potentially days
+  // later. Loud on failure, silent-but-recorded on success.
+  runStartupIntegrityCheck(db, dbPath, logger);
+
   return db;
+}
+
+/**
+ * `PRAGMA integrity_check` at startup. Deliberately NOT fatal: a corrupted
+ * database that still serves most reads is more useful to an operator than a
+ * container that refuses to boot, and the loud log plus the `db_ok` metric make
+ * the condition impossible to miss. (Contrast with a schema from the future,
+ * which IS fatal — that one silently corrupts data if allowed to proceed.)
+ */
+function runStartupIntegrityCheck(db: DatabaseSync, dbPath: string, logger: StoreLogger): void {
+  try {
+    const rows = db.prepare("PRAGMA integrity_check").all() as { integrity_check: string }[];
+    const result = rows.map((row) => row.integrity_check).join("; ");
+    if (result === "ok") {
+      logger.info?.({ path: dbPath }, "queue database integrity check passed");
+    } else {
+      logger.error?.(
+        { path: dbPath, result },
+        "QUEUE DATABASE INTEGRITY CHECK FAILED — restore a backup (ops/backup/restore.sh)"
+      );
+    }
+  } catch (error) {
+    logger.error?.({ err: error, path: dbPath }, "queue database integrity check could not run");
+  }
+}
+
+/**
+ * The cheap per-request database probe behind `/ready` and the `db_ok` metric.
+ *
+ * Intentionally trivial — one prepared statement against the migration
+ * bookkeeping table. It answers "can this process still talk to its database",
+ * which is what readiness needs; it is NOT an integrity check and must never
+ * become one, because `/ready` is polled by the Docker healthcheck every few
+ * seconds.
+ */
+export function probeDatabase(db: DatabaseSync): { ok: boolean; error?: string } {
+  try {
+    db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get();
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }

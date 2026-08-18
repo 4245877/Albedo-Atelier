@@ -17,3 +17,6 @@ apps/print-orchestrator/config/printers.json
 # and the recorded previous-image tags a `deploy.sh rollback` returns to. Host
 # specific — never committed.
 .deploy/
+
+# Host-specific backup configuration (paths and retention, never secrets).
+ops/backup/backup.conf

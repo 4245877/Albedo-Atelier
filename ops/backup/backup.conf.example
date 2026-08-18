@@ -1,0 +1,30 @@
+# Atelier backup configuration. Copy to backup.conf and edit.
+#   cp ops/backup/backup.conf.example ops/backup/backup.conf
+# backup.conf is gitignored: it names host-specific paths, never secrets.
+
+# ── Where backups go ────────────────────────────────────────────────────────
+# The dedicated backup disk, identified by FILESYSTEM UUID (`lsblk -f`).
+# Identified by UUID rather than by mountpoint on purpose: if the disk is not
+# mounted, the mountpoint is just an empty directory on the ROOT filesystem that
+# looks perfectly writable — and the backup would silently land on the very disk
+# it is supposed to survive. With a UUID, "not present" is detectable.
+#
+# Leave empty until the disk is actually attached and mounted.
+BACKUP_DISK_UUID=""
+
+# Used when the dedicated disk is not mounted. Same physical disk as production:
+# every run prints a DEGRADED warning, because this protects against Docker
+# volume loss, operator error and filesystem corruption — but NOT against losing
+# the disk, host death, theft, fire or a root compromise.
+BACKUP_ROOT_FALLBACK="${HOME}/atelier-backups"
+
+# ── Retention, in whole backup sets ─────────────────────────────────────────
+# Sized for the fallback (root-disk) case: a full set is ~15 MB today, so this is
+# a few hundred MB. Raise generously once a dedicated disk is in use.
+RETAIN_HOURLY=48
+RETAIN_DAILY=14
+RETAIN_WEEKLY=8
+
+# Refuse to write a backup that would leave the filesystem below this many MB.
+# A backup must never be the thing that fills the disk under a running print.
+BACKUP_MIN_FREE_MB=1024

@@ -234,5 +234,11 @@ export interface PrintQueueStore {
    * Not reentrant — do not nest.
    */
   transaction<T>(fn: () => T): T;
+  /**
+   * Cheap liveness probe for `/ready` and the `db_ok` metric: can this process
+   * still talk to its database? Never an integrity check — the Docker
+   * healthcheck calls the endpoint behind this every few seconds.
+   */
+  probe(): { ok: boolean; error?: string };
   close(): void;
 }

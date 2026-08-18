@@ -3,7 +3,12 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 
 import type { FeedEvent, QueueJob } from "../../domain/dashboard/types";
-import type { ConsumePayload, FilamentCarry, PendingConsume } from "../../app/filamentConsumption";
+import type {
+  ConsumePayload,
+  FilamentCarry,
+  PendingConsume,
+  UnreconciledConsume
+} from "../../app/filamentConsumption";
 import { isObject } from "../../shared/isObject";
 import { MAX_FEED } from "../../app/eventFeed";
 import type { StoreLogger } from "../../shared/logger";
@@ -70,6 +75,13 @@ export interface PersistedState {
    * restarts. See FilamentConsumption. Missing in older files → empty.
    */
   filamentCarry: FilamentCarry;
+  /**
+   * Completed prints whose filament could not be deducted automatically and are
+   * waiting for a manual deduction. Durable on purpose: the feed entry that used
+   * to be the only record is capped and unacknowledged, so the debt vanished.
+   * Missing in older files → empty.
+   */
+  unreconciledConsumes: UnreconciledConsume[];
 }
 
 const CURRENT_VERSION = 1 as const;
@@ -83,7 +95,8 @@ export function emptyState(): PersistedState {
     automations: { states: {}, lastRun: null },
     snapshots: [],
     pendingConsumes: [],
-    filamentCarry: {}
+    filamentCarry: {},
+    unreconciledConsumes: []
   };
 }
 
@@ -163,6 +176,12 @@ function normalize(raw: unknown): PersistedState {
       .filter((entry): entry is PendingConsume => entry !== null);
   }
 
+  if (Array.isArray(raw.unreconciledConsumes)) {
+    base.unreconciledConsumes = raw.unreconciledConsumes
+      .map(normalizeUnreconciled)
+      .filter((entry): entry is UnreconciledConsume => entry !== null);
+  }
+
   if (isObject(raw.filamentCarry)) {
     for (const [key, value] of Object.entries(raw.filamentCarry)) {
       if (!key || !isObject(value)) continue;
@@ -177,6 +196,22 @@ function normalize(raw: unknown): PersistedState {
   }
 
   return base;
+}
+
+/** A stored debt is only restored when it carries the fields an operator needs to act on. */
+function normalizeUnreconciled(raw: unknown): UnreconciledConsume | null {
+  if (!isObject(raw)) return null;
+  const id = toStr(raw.id);
+  const printerId = toStr(raw.printerId);
+  if (!id || !printerId) return null;
+  return {
+    id,
+    printerId,
+    printerName: toStr(raw.printerName) || printerId,
+    job: typeof raw.job === "string" && raw.job ? raw.job : null,
+    observedAt: toStr(raw.observedAt) || new Date(0).toISOString(),
+    reason: toStr(raw.reason)
+  };
 }
 
 function toPositiveFinite(value: unknown): number | undefined {

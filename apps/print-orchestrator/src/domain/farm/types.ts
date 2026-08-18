@@ -9,12 +9,19 @@
 export interface FarmReadiness {
   /** false → the service should return 503. */
   ready: boolean;
-  status: "ready" | "degraded" | "starting" | "stale";
+  status: "ready" | "degraded" | "starting" | "stale" | "db_unavailable";
   service: string;
   startedAt: string;
   lastPollAt: string | null;
   lastPollAgeSeconds: number | null;
   printers: { total: number; online: number };
+  /**
+   * Can the service actually reach its own database? SQLite is the source of
+   * truth for the queue, runs and the printer inventory, so a healthy poll loop
+   * over an unreadable database is not readiness — it is a green light in front
+   * of a farm that cannot dispatch anything.
+   */
+  database: { ok: boolean; error?: string };
 }
 
 /** Real farm counters exposed as Prometheus metrics. */
@@ -23,6 +30,8 @@ export interface FarmMetrics {
   uptimeSeconds: number;
   lastPollAgeSeconds: number | null;
   degraded: number;
+  /** 1 when a cheap probe of queue.db succeeded, 0 when it did not. */
+  dbOk: number;
   printersTotal: number;
   printersOnline: number;
   printersPrinting: number;
