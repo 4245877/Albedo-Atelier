@@ -33,8 +33,9 @@ layout — it is what the install script writes.
 pnpm run slicing:vendor:check
 
 # 2. install the whole transitive closure from an OrcaSlicer install. Use the
-#    SAME release the bundles were pinned to (02.03.00.62 / 2.3.x) so resolved
-#    values match what the CLI produces:
+#    release each preset was exported against, so resolved values match what the
+#    preset author saw (see "Why the Creality K2 parents come from v2.3.2" below —
+#    the K2 chain is NOT in the 2.3.0 tree):
 node scripts/install-orca-vendor-profiles.mjs \
   --orca-resources ~/opt/orca-2.3.0/squashfs-root/resources/profiles
 
@@ -61,31 +62,46 @@ image has no mount, which is why the closure below is installed and committed.
 
 ## What is installed here
 
-The closure the shipped `catalog.v1.json` needs — 16 files across two vendors:
+The closure the shipped `catalog.v1.json` needs — 24 files across two vendors:
 
 | Vendor | Kind | Profiles |
 | --- | --- | --- |
 | BBL | machine | `Bambu Lab A1 0.4 nozzle` → `fdm_bbl_3dp_001_common` → `fdm_machine_common` |
 | BBL | process | `0.20mm Standard @BBL A1`, `0.20mm Strength @BBL A1` → `fdm_process_bbl_0.20` → `fdm_process_bbl_common` → `fdm_process_common` |
 | BBL | filament | `Bambu PLA Basic @BBL A1` → `Bambu PLA Basic @base` → `fdm_filament_pla` → `fdm_filament_common` |
+| Creality | machine | `Creality K2 0.2 nozzle`, `Creality K2 0.4 nozzle` → `fdm_creality_common` → `fdm_machine_common` |
+| Creality | process | `0.08mm SuperDetail @Creality K2 0.2 nozzle` → `fdm_process_common_klipper` → `fdm_process_creality_common` → `fdm_process_common` |
 | Creality | filament | `Creality Generic PLA @K2-all` → `Creality Generic PLA` → `fdm_filament_pla` → `fdm_filament_common` |
+
+### Why the Creality K2 parents come from v2.3.2, not 2.3.0
+
+The pinned runtime (2.3.0) ships **`Creality K2 Plus`** and no plain `Creality K2`
+— which is why these three parents were unresolvable for a while and their nine
+dependants sat quarantined. They are not absent from OrcaSlicer, only from *that*
+release: upstream added the plain-K2 family in **v2.3.2**, exactly the release the
+K2 bundles declare in their own `version` field (`2.3.2.74`). So the closure above
+was installed from `v2.3.2`, i.e. from the release the presets were authored
+against — which is what "the same release" means for a *preset's* parents.
+
+Mixing is safe here because it was checked rather than assumed: the shared bases
+(`fdm_machine_common`, `fdm_creality_common`, `fdm_process_common_klipper`) are
+byte-identical between 2.3.0 and 2.3.2, and the two process bases differ in exactly
+one key (`enable_prime_tower`, `0` → `1`). Nothing BBL-scoped is touched, so no
+Bambu profile's resolved bytes move.
 
 ## Deliberately still missing
 
-Two parents do **not** exist in OrcaSlicer 2.3.x at all — that release ships
-`Creality K2 Plus`, never a plain `Creality K2`:
+Nothing. Every parent the catalog and the stored revisions reference resolves —
+`pnpm run slicing:vendor:check` exits 0 and `GET /api/print/slicing/runtime`
+reports an empty `missingParents`.
 
-| Missing parent | Referenced by |
-| --- | --- |
-| `Creality K2 0.2 nozzle` | machine `Creality K2 PETG 0.4 FAST` |
-| `0.08mm SuperDetail @Creality K2 0.2 nozzle` | processes `Creality K2 0.4*`, `… - Copy` |
+One preset is nevertheless still quarantined, and no vendor file can change that:
+machine `Creality K2 PETG 0.4 FAST` declares `nozzle_diameter: ["0.4"]` on
+`printer_variant: "0.2"`. That contradiction is inside the operator's own export
+(the printer reports a 0.4 mm nozzle), so it is fixed by re-exporting the preset
+from OrcaSlicer with the printer bound to its 0.4-nozzle variant — never by
+loosening validation.
 
-Those six K2 presets were exported from a different OrcaSlicer build and stay
-quarantined **on purpose**: their parents are genuinely absent, so nothing can
-know what they resolve to. That is a real unresolved dependency, not a packaging
-gap — do not "fix" it by loosening validation. To use them, install the build that
-provides those profiles and re-run the script against its `resources/profiles`.
-
-> The system profiles are pinned to a specific OrcaSlicer version (`02.03.00.62`
-> for these bundles). Always install parents from the **same** release the slicing
-> worker is pinned to (`ORCA_SLICER_VERSION`).
+> The system profiles are pinned to a specific OrcaSlicer version. Always install a
+> parent from the release its dependent preset was exported against, and diff the
+> shared bases against `ORCA_SLICER_VERSION`'s tree when the two differ.

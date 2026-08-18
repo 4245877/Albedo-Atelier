@@ -14,7 +14,7 @@ const REAL_CATALOG = path.resolve(__dirname, "../../../config/slicers/orca");
 
 // ── Against the real vendored catalog (config/slicers/orca) ───────────────────
 
-test("imports the real catalog: the installed vendor closure resolves 15 of 21 profiles", async () => {
+test("imports the real catalog: the installed vendor closure resolves 20 of 21 profiles", async () => {
   const store = openPrintQueueStore(":memory:");
   try {
     const service = new PresetImportService(store, new OrcaCatalogSource(REAL_CATALOG));
@@ -22,8 +22,8 @@ test("imports the real catalog: the installed vendor closure resolves 15 of 21 p
 
     assert.equal(result.totalProfiles, 21);
     assert.equal(result.counts.invalid, 0);
-    assert.equal(result.counts.active, 15);
-    assert.equal(result.counts.quarantined, 6);
+    assert.equal(result.counts.active, 20);
+    assert.equal(result.counts.quarantined, 1);
     assert.equal(result.inserted, 21);
 
     // Source archives hash to what the catalog recorded (immutability).
@@ -33,9 +33,14 @@ test("imports the real catalog: the installed vendor closure resolves 15 of 21 p
     // filament resolves through the vendor/ system parents.
     const active = result.profiles.filter((p) => p.status === "active").map((p) => p.name).sort();
     assert.deepEqual(active, [
+      "0.08mm SuperDetail @Creality K2 0.2 nozzle - Copy",
       "@BBL A1 0.4 PLA",
       "Bambu Lab A1 0.4 PETG",
       "Creality",
+      "Creality K2 0.4",
+      "Creality K2 0.4 Balance",
+      "Creality K2 0.4 FAST",
+      "Creality K2 0.4 FAST1",
       "Creality PLA",
       "ENYONE PLA",
       "PETG 0.4mm @BBL A1",
@@ -50,22 +55,22 @@ test("imports the real catalog: the installed vendor closure resolves 15 of 21 p
       "VVM PETG 0.8@BBL A1"
     ]);
 
-    // Only two parents remain unresolvable, and for a real reason: OrcaSlicer 2.3.x
-    // ships `Creality K2 Plus`, never a plain `Creality K2`. Those presets came from
-    // a different build, so their six dependants stay honestly quarantined.
-    assert.deepEqual(result.missingParents, [
-      "0.08mm SuperDetail @Creality K2 0.2 nozzle",
-      "Creality K2 0.2 nozzle"
-    ]);
+    // Every parent resolves. The plain `Creality K2` family (never shipped by 2.3.0,
+    // which only carries `Creality K2 Plus`) was added upstream in v2.3.2 — the exact
+    // release these presets declare (`version: 2.3.2.74`) — and its closure is now
+    // installed under vendor/Creality, so nothing is left dangling.
+    assert.deepEqual(result.missingParents, []);
 
-    // The replacement bundle is imported byte-for-byte. Its machine profile keeps
-    // the exported 0.4-nozzle vs 0.2-variant/parent contradiction and remains quarantined.
+    // The replacement bundle is imported byte-for-byte. Its parent now resolves, but
+    // the profile keeps the contradiction the operator exported into it — 0.4 mm of
+    // declared nozzle against a "0.2" printer_variant — so it stays quarantined on
+    // that alone. Installing a parent must never paper over a self-contradiction.
     const k2 = result.profiles.find((p) => p.name === "Creality K2 PETG 0.4 FAST");
     assert.ok(k2);
     assert.equal(k2.status, "quarantined");
     const codes = k2.blockers.map((b) => b.code);
-    assert.ok(codes.includes("missing_parent"));
-    assert.ok(codes.includes("nozzle_variant_mismatch"));
+    assert.ok(!codes.includes("missing_parent"));
+    assert.deepEqual(codes, ["nozzle_variant_mismatch"]);
     assert.ok(!codes.includes("nozzle_parent_mismatch"));
   } finally {
     store.close();
@@ -154,26 +159,31 @@ test("A1 PETG filament and both A1 process families resolve through their BBL pa
   }
 });
 
-test("the six Creality K2 presets stay quarantined — their parents exist nowhere", async () => {
+test("the Creality K2 processes resolve through the installed v2.3.2 0.2-nozzle parent", async () => {
   const store = openPrintQueueStore(":memory:");
   try {
     const result = await new PresetImportService(store, new OrcaCatalogSource(REAL_CATALOG)).import();
     const quarantined = result.profiles.filter((p) => p.status === "quarantined").map((p) => p.name).sort();
-    assert.deepEqual(quarantined, [
-      "0.08mm SuperDetail @Creality K2 0.2 nozzle - Copy",
-      "Creality K2 0.4",
-      "Creality K2 0.4 Balance",
-      "Creality K2 0.4 FAST",
-      "Creality K2 0.4 FAST1",
-      "Creality K2 PETG 0.4 FAST"
-    ]);
-    // The diagnostic must say what is missing and where we looked — the difference
-    // between "install the parents" and "this build has no such profile".
+    // Only the self-contradicting machine profile is left; every process resolved.
+    assert.deepEqual(quarantined, ["Creality K2 PETG 0.4 FAST"]);
+
     const k2 = result.profiles.find((p) => p.name === "Creality K2 0.4");
-    const missing = k2?.blockers.find((b) => b.code === "missing_parent");
-    assert.ok(missing);
-    assert.match(missing.message, /«0\.08mm SuperDetail @Creality K2 0\.2 nozzle» \(process\)/);
-    assert.match(missing.message, /vendor\/ или resources\/profiles/);
+    assert.equal(k2?.status, "active");
+    assert.deepEqual(k2?.blockers, []);
+
+    // It must resolve through the *Creality* chain — a same-named parent from
+    // another vendor would silently merge the wrong base settings.
+    const rev = store.repositories.profileRevisions
+      .list("process")
+      .find((r) => r.name === "Creality K2 0.4");
+    assert.equal(rev?.metadata.vendor, "Creality");
+    assert.deepEqual(rev?.metadata.inheritanceChain, [
+      "fdm_process_common",
+      "fdm_process_creality_common",
+      "fdm_process_common_klipper",
+      "0.08mm SuperDetail @Creality K2 0.2 nozzle",
+      "Creality K2 0.4"
+    ]);
   } finally {
     store.close();
   }
@@ -188,11 +198,8 @@ test("the shipped vendor/ closure alone resolves the catalog — no slicer runti
   try {
     fs.cpSync(REAL_CATALOG, tmp, { recursive: true });
     const result = await new PresetImportService(store, new OrcaCatalogSource(tmp, [])).import();
-    assert.equal(result.counts.active, 15);
-    assert.deepEqual(result.missingParents, [
-      "0.08mm SuperDetail @Creality K2 0.2 nozzle",
-      "Creality K2 0.2 nozzle"
-    ]);
+    assert.equal(result.counts.active, 20);
+    assert.deepEqual(result.missingParents, []);
   } finally {
     store.close();
     fs.rmSync(tmp, { recursive: true, force: true });

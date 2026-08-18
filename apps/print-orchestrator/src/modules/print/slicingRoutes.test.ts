@@ -59,7 +59,7 @@ after(async () => {
   fs.rmSync(TMP, { recursive: true, force: true });
 });
 
-test("POST /slicing/presets/import imports the real catalog (15 active, 6 quarantined)", async () => {
+test("POST /slicing/presets/import imports the real catalog (20 active, 1 quarantined)", async () => {
   const res = await app.inject({
     method: "POST",
     url: "/api/print/slicing/presets/import",
@@ -67,18 +67,16 @@ test("POST /slicing/presets/import imports the real catalog (15 active, 6 quaran
   });
   assert.equal(res.statusCode, 200);
   const { result } = res.json();
-  // The vendor/ closure resolves every Bambu A1 chain and the Creality filaments.
-  assert.equal(result.counts.active, 15);
-  // Only the six Creality K2 presets stay quarantined: their parents
-  // (`Creality K2 0.2 nozzle`, `0.08mm SuperDetail @Creality K2 0.2 nozzle`) do not
-  // exist in OrcaSlicer 2.3.x at all — a real unresolved dependency, not a gap.
-  assert.equal(result.counts.quarantined, 6);
+  // The vendor/ closure resolves every Bambu A1 chain and the whole Creality K2 one.
+  assert.equal(result.counts.active, 20);
+  // One preset stays quarantined, and not for a missing dependency: the operator's
+  // `Creality K2 PETG 0.4 FAST` export declares a 0.4 mm nozzle on a "0.2"
+  // printer_variant. That contradiction is the profile's own, so no installed parent
+  // can clear it.
+  assert.equal(result.counts.quarantined, 1);
   assert.equal(result.counts.invalid, 0);
   assert.equal(result.sourceIntegrity.ok, true);
-  assert.deepEqual(result.missingParents, [
-    "0.08mm SuperDetail @Creality K2 0.2 nozzle",
-    "Creality K2 0.2 nozzle"
-  ]);
+  assert.deepEqual(result.missingParents, []);
 });
 
 test("GET /slicing/runtime honestly reports no runtime + the profile counts", async () => {
@@ -87,13 +85,10 @@ test("GET /slicing/runtime honestly reports no runtime + the profile counts", as
   const body = res.json();
   assert.equal(body.runtime.available, false);
   assert.ok(body.runtime.error, "expected an honest diagnostic");
-  assert.equal(body.profileCounts.active, 15);
-  assert.equal(body.profileCounts.quarantined, 6);
+  assert.equal(body.profileCounts.active, 20);
+  assert.equal(body.profileCounts.quarantined, 1);
   assert.ok(Array.isArray(body.coverage));
-  assert.deepEqual(body.missingParents, [
-    "0.08mm SuperDetail @Creality K2 0.2 nozzle",
-    "Creality K2 0.2 nozzle"
-  ]);
+  assert.deepEqual(body.missingParents, []);
 });
 
 test("GET /slicing/profiles lists all 21 revisions; ?type filters", async () => {
@@ -134,8 +129,10 @@ test("creating a set with a quarantined member is blocked, and approval is refus
     name: string;
     status: string;
   }>;
+  // The catalog's only quarantined revision is a machine, so that is the offending
+  // member here; the other two are active. One bad member is all the rule needs.
   const machine = profiles.find((p) => p.type === "machine" && p.status === "quarantined");
-  const process = profiles.find((p) => p.type === "process" && p.status === "quarantined");
+  const process = profiles.find((p) => p.type === "process" && p.status === "active");
   const filament = profiles.find((p) => p.type === "filament" && p.status === "active");
   assert.ok(machine && process && filament);
 
