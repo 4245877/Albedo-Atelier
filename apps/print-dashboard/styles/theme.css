@@ -257,10 +257,14 @@
 :root[data-theme="light"] .feather.f4 { color: rgb(109 76 120 / 34%); }
 :root[data-theme="light"] .feather.f5 { color: rgb(26 20 34 / 20%); }
 
+/* Центры совпадают с ночным свечением (dashboard.css): дорожка стала
+   вертикальнее, и оба ореола должны стоять за головой, а не за грудью.
+   Форма `closest-side` с нулём ДО грани здесь была изначально — потому
+   дневная тема прямоугольной рамкой вокруг портрета и не страдала. */
 :root[data-theme="light"] .aura-glow {
   background:
-    radial-gradient(closest-side, rgb(109 76 120 / 20%), transparent 72%),
-    radial-gradient(closest-side at 70% 30%, rgb(184 144 31 / 18%), transparent 70%);
+    radial-gradient(closest-side at 50% 42%, rgb(109 76 120 / 20%), rgb(109 76 120 / 0%) 72%),
+    radial-gradient(closest-side at 56% 24%, rgb(184 144 31 / 18%), rgb(184 144 31 / 0%) 70%);
 }
 
 /* Портрет днём — тушь по фарфору, а не свечение из тьмы: ночная сепия увела бы
