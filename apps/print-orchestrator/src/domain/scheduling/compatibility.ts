@@ -27,8 +27,65 @@ import { resolveEta, type EtaEstimate } from "./eta";
 
 export type CompatibilityVerdict = "compatible" | "review" | "blocked";
 
+/**
+ * The **closed** vocabulary of preflight reasons.
+ *
+ * It used to be a bare `string`, and the dispatch layer translated it into its
+ * own SCREAMING_SNAKE codes through a lookup ending in `?? MAINTENANCE_BLOCKED`.
+ * Three codes were never added to that lookup — `printer_fault`,
+ * `printer_media_missing` and `launch_unconfirmed` — so each arrived at the
+ * operator as "принтер на обслуживании", and, worse, inherited that code's
+ * override policy: `MAINTENANCE_BLOCKED` is overridable, and the three it was
+ * standing in for must never be. An operator could therefore wave through a
+ * printer displaying a start-blocking fault, a printer with no SD card, and —
+ * the dangerous one — a printer still holding an *unconfirmed previous launch*,
+ * which is precisely the guard that stops one model being printed twice.
+ *
+ * Declaring the vocabulary here makes the translation table exhaustive by
+ * construction: `PREFLIGHT_CODE_MAP` is typed `Record<PreflightReasonCode, …>`,
+ * so adding a reason without deciding what it means downstream does not compile.
+ */
+export const PREFLIGHT_REASON = {
+  PINNED_ELSEWHERE: "pinned_elsewhere",
+  MAINTENANCE: "maintenance",
+  PRINTER_FAULT: "printer_fault",
+  PRINTER_MEDIA_MISSING: "printer_media_missing",
+  PRINTER_ERROR: "printer_error",
+  PRINTER_OFFLINE: "printer_offline",
+  PRINTER_BUSY: "printer_busy",
+  LAUNCH_UNCONFIRMED: "launch_unconfirmed",
+  TELEMETRY_MISSING: "telemetry_missing",
+  TELEMETRY_STALE: "telemetry_stale",
+  SLICING_UNAVAILABLE: "slicing_unavailable",
+  PROFILESET_QUARANTINED: "profileset_quarantined",
+  PROFILESET_UNAPPROVED: "profileset_unapproved",
+  PROFILESET_UNKNOWN: "profileset_unknown",
+  SLICE_MISSING: "slice_missing",
+  TASK_MATERIAL_UNKNOWN: "task_material_unknown",
+  PRINTER_MATERIAL_UNKNOWN: "printer_material_unknown",
+  MATERIAL_MISMATCH: "material_mismatch",
+  PRINTER_NOZZLE_UNKNOWN: "printer_nozzle_unknown",
+  TASK_NOZZLE_UNKNOWN: "task_nozzle_unknown",
+  NOZZLE_MISMATCH: "nozzle_mismatch",
+  BUILD_VOLUME_CONFLICT: "build_volume_conflict",
+  BUILD_VOLUME_UNKNOWN: "build_volume_unknown",
+  DIMENSIONS_UNKNOWN: "dimensions_unknown",
+  MODEL_SCALE_UNKNOWN: "model_scale_unknown",
+  TOO_LARGE: "too_large",
+  GCODE_FLAVOR_MISMATCH: "gcode_flavor_mismatch",
+  AMS_UNSUPPORTED: "ams_unsupported",
+  AMS_UNKNOWN: "ams_unknown",
+  AMS_MAPPING_AMBIGUOUS: "ams_mapping_ambiguous",
+  MANUAL_START_ONLY: "manual_start_only",
+  BED_AWAITING_CLEARANCE: "bed_awaiting_clearance",
+  BED_UNKNOWN: "bed_unknown",
+  MODEL_OFF_BED: "model_off_bed"
+} as const;
+
+export type PreflightReasonCode = (typeof PREFLIGHT_REASON)[keyof typeof PREFLIGHT_REASON];
+
 export interface CompatibilityReason {
-  code: string;
+  code: PreflightReasonCode;
   message: string;
 }
 
@@ -60,12 +117,36 @@ export interface CompatibilityTaskInput {
    * `true` when there are no dimensions at all (nothing to mis-scale).
    */
   dimensionsScaleKnown: boolean;
+  /**
+   * Where the printed body actually SITS, in the file's own machine
+   * coordinates, in millimetres — or null when the file does not place it.
+   *
+   * Only a *sliced* file has an answer: a model (STL/3MF) carries no bed
+   * position, because the slicer chooses one. For third-party G-code the
+   * position is the file's, and {@link dimensions} alone cannot judge it — a
+   * 100 × 100 part is a comfortable fit on a 256 mm bed and completely off it if
+   * it was sliced at X 200…300 for a larger machine. Size answers "could this
+   * printer make it"; placement answers "would it hit the frame".
+   */
+  placement: { min: Dimensions; max: Dimensions } | null;
   /** Required nozzle diameter (from slice/profile/analysis) in mm; null when unknown. */
   requiredNozzleMm: number | null;
   /** G-code flavor / firmware the file or machine profile targets; null when unknown. */
   gcodeFlavor: string | null;
-  /** Whether the work needs multi-material / AMS mapping. null = unknown. */
+  /**
+   * Whether the work needs multi-material / AMS mapping. null = unknown.
+   *
+   * Derived from the analysed tool count (see the scheduler's evidence
+   * provider), not from an operator flag: a file that selects `T0` and `T1` is
+   * multi-material whether or not anyone ticked a box.
+   */
   amsRequired: boolean | null;
+  /**
+   * How many physical extruders/filaments the file actually uses, when the
+   * analysis could tell. Carried alongside {@link amsRequired} so a refusal can
+   * say "задание использует 3 инструмента" rather than "нужен AMS".
+   */
+  toolCount: number | null;
   /**
    * True when this is un-sliced source (STL / generic 3MF) that needs an approved
    * printer-specific slice before it can print; false for a ready G-code task.
@@ -140,6 +221,16 @@ export interface CompatibilityEvidence {
   telemetryAgeMs: number | null;
   /** Maintenance blockers preventing use (empty = none). */
   maintenanceBlockers: string[];
+  /**
+   * Whether an unambiguous filament→tool slot mapping has been decided for this
+   * job, or `null`/absent when none has.
+   *
+   * Deliberately not a boolean flag someone can set optimistically: the only
+   * value that authorises an automatic multi-material start is the explicit
+   * string `"resolved"`, and nothing in the system produces it yet. Absent means
+   * absent, and absent refuses.
+   */
+  amsSlotMapping?: "resolved" | null;
   /** Verified slice ETA (seconds), or null. */
   sliceEtaS: number | null;
   /** G-code-analysis ETA (seconds), or null. */
@@ -226,9 +317,9 @@ export function evaluateCompatibility(
   const blockers: CompatibilityReason[] = [];
   const reviews: CompatibilityReason[] = [];
   const warnings: CompatibilityReason[] = [];
-  const block = (code: string, message: string): void => void blockers.push({ code, message });
-  const review = (code: string, message: string): void => void reviews.push({ code, message });
-  const warn = (code: string, message: string): void => void warnings.push({ code, message });
+  const block = (code: PreflightReasonCode, message: string): void => void blockers.push({ code, message });
+  const review = (code: PreflightReasonCode, message: string): void => void reviews.push({ code, message });
+  const warn = (code: PreflightReasonCode, message: string): void => void warnings.push({ code, message });
 
   // ── Pin ─────────────────────────────────────────────────────────────────────
   if (task.pinnedPrinterId && task.pinnedPrinterId !== printer.id) {
@@ -342,6 +433,30 @@ export function evaluateCompatibility(
       `Модель ${fmtDims(task.dimensions)} не помещается в область ${fmtDims(printer.buildVolume)} (с отступом ${safetyMarginMm(config)} мм)`
     );
   }
+  // Absolute placement, for a file that carries machine coordinates.
+  //
+  // Checked separately from the size, and *after* it, because it answers a
+  // different question. The size check asks whether this printer could make the
+  // part at all; this asks whether the part, as this file positions it, is over
+  // the bed. A G-code sliced for a 350 mm machine can place a 100 mm part at
+  // X 200…300 — a comfortable fit by size, and a crash into the frame of a
+  // 256 mm A1. Nothing downstream would catch it: the firmware clips or crashes,
+  // and either way the plate is lost.
+  //
+  // The caller only supplies a placement it can vouch for (the slicer's own
+  // object markers), so a purge line drawn off the front edge is never mistaken
+  // for the model being off the bed.
+  if (task.placement !== null && printer.buildVolume !== null) {
+    const outside = axesOutsideBed(task.placement, printer.buildVolume);
+    if (outside.length > 0) {
+      block(
+        "model_off_bed",
+        `Модель расположена за пределами стола по ${outside.join(", ")}: ` +
+          `${fmtBox(task.placement)} при рабочей области ${fmtDims(printer.buildVolume)}`
+      );
+    }
+  }
+
   // Deliberately *not* part of the chain above: whether the numbers are proven
   // millimetres is independent of whether they happen to fit. A box that fits
   // only *if* it is millimetres — and nothing proved it is — must still be an
@@ -364,9 +479,32 @@ export function evaluateCompatibility(
   }
 
   // ── AMS / extruder mapping ────────────────────────────────────────────────────
+  //
+  // A multi-material job needs two separate things to be true, and only the first
+  // was ever checked: the printer must HAVE multi-material feeding, and something
+  // must have decided WHICH filament goes to which tool.
+  //
+  // Nothing decides the second. The Bambu start payload builds its `ams_mapping`
+  // from "the first loaded tray wins" — an honest placeholder that is correct for
+  // a single-material print and silently wrong for any other: every tool of a
+  // three-colour model would be fed from tray 1. The job passes every check and
+  // prints in the wrong filament, which is the failure no downstream check can
+  // catch, because nothing about it is anomalous until the part comes off the bed.
+  //
+  // So an unresolved mapping refuses the *automatic* path. It is not in the
+  // non-overridable set: an operator who understands that the whole model will
+  // print from one tray may say so explicitly, and that is recorded.
   if (task.amsRequired === true) {
     if (printer.ams === false) block("ams_unsupported", "Нужен AMS/мультиматериал, а принтер его не поддерживает");
     else if (printer.ams === null) review("ams_unknown", "Поддержка AMS принтером неизвестна");
+    if (evidence.amsSlotMapping !== "resolved") {
+      const tools = task.toolCount !== null ? `${task.toolCount} инструментов` : "несколько инструментов";
+      block(
+        "ams_mapping_ambiguous",
+        `Задание использует ${tools}, а раскладка филаментов по слотам не определена — ` +
+          "печать пошла бы одним материалом; подтвердите запуск вручную или нарежьте под один материал"
+      );
+    }
   }
 
   // ── Upload / start capability ─────────────────────────────────────────────────
@@ -423,4 +561,38 @@ export function evaluateCompatibility(
 function fmtDims(d: Dimensions): string {
   const r = (n: number): number => Math.round(n * 10) / 10;
   return `${r(d.x)}×${r(d.y)}×${r(d.z)} мм`;
+}
+
+/**
+ * Tolerance, in mm, for a box that touches the bed's edge.
+ *
+ * The analysed box is the *extrusion outline*, so it sits half a line width
+ * proud of the model on each side, and a part deliberately placed flush with the
+ * edge reads as a hair over it. Wide enough to absorb that, far too narrow to
+ * hide a part that is genuinely off the bed.
+ */
+const BED_EDGE_TOLERANCE_MM = 1;
+
+/** The axes on which `box` leaves the printable area, named for the operator. */
+function axesOutsideBed(
+  box: { min: Dimensions; max: Dimensions },
+  bed: Dimensions
+): string[] {
+  const out: string[] = [];
+  for (const axis of ["x", "y", "z"] as const) {
+    const min = box.min[axis];
+    const max = box.max[axis];
+    if (!Number.isFinite(min) || !Number.isFinite(max)) continue;
+    // The bed's origin is its front-left corner, which is what a `buildVolume`
+    // expressed as a size means: the printable range is 0…size on every axis.
+    if (min < -BED_EDGE_TOLERANCE_MM || max > bed[axis] + BED_EDGE_TOLERANCE_MM) {
+      out.push(axis.toUpperCase());
+    }
+  }
+  return out;
+}
+
+function fmtBox(box: { min: Dimensions; max: Dimensions }): string {
+  const at = (d: Dimensions) => `${Math.round(d.x)}×${Math.round(d.y)}×${Math.round(d.z)}`;
+  return `${at(box.min)} … ${at(box.max)} мм`;
 }

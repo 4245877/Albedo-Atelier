@@ -81,7 +81,37 @@ export type UnreconciledConsume = {
   observedAt: string;
   /** Why automatic deduction could not happen — shown verbatim to the operator. */
   reason: string;
+  /**
+   * The slicer's own figure for this job, in grams, when one is known.
+   *
+   * An **orientation, not a measurement**, and labelled as such everywhere it
+   * surfaces. It is what the slicer expected to extrude, which is the right
+   * starting number for an operator writing off a spool by hand — and exactly
+   * the wrong number to post to the warehouse automatically, because nothing
+   * observed it. The two are kept apart by {@link ConsumptionConfidence}: this
+   * field can never become a deduction without a human.
+   */
+  estimatedGrams: number | null;
 };
+
+/**
+ * How well a consumption figure is known. The distinction is the whole point of
+ * the accounting: `remain`-based grams and Klipper's extruded length are things
+ * a device *observed*, while a slicer's estimate is a thing software *predicted*,
+ * and only the first may be deducted without a person.
+ *
+ * `remain` itself is measured but coarse — quantised to 1 %, so ~10 g on a 1 kg
+ * spool and ~2.5 g on a 250 g AMS-Lite spool. It is reported as `measured`
+ * because it is an observation of the physical spool, not because it is precise;
+ * the sub-gram carry exists precisely because it is not.
+ */
+export type ConsumptionConfidence =
+  /** A device observed it (AMS remain-drop, Klipper `filament_used`). */
+  | "measured"
+  /** A slicer predicted it. Never deducted automatically. */
+  | "estimated"
+  /** Nothing observed and nothing predicted. */
+  | "none";
 
 /** Why a queued deduction was finally dropped (metric + operator event reason). */
 export type PendingDropReason = "overflow" | "expired" | "rejected";
@@ -120,6 +150,12 @@ export interface CompletedRun {
   printId: string;
   /** AMS tray `remain` snapshot at print start (Bambu), diffed at completion. */
   amsStart: AmsTraySnapshot[] | null;
+  /**
+   * What the slicer said this job would use, in grams, when the queue knows.
+   * Carried only so an unmeasurable print can leave the operator a starting
+   * number; never a deduction — see {@link ConsumptionConfidence}.
+   */
+  estimatedGrams?: number | null;
 }
 
 /**
@@ -275,7 +311,8 @@ export class FilamentConsumption {
   private recordUnreconciled(
     printer: { id: string; name: string },
     job: string | null,
-    reason: string
+    reason: string,
+    estimatedGrams: number | null = null
   ): void {
     this.unreconciled.push({
       id: randomUUID(),
@@ -283,7 +320,8 @@ export class FilamentConsumption {
       printerName: printer.name,
       job,
       observedAt: new Date().toISOString(),
-      reason
+      reason,
+      estimatedGrams
     });
     while (this.unreconciled.length > MAX_UNRECONCILED) this.unreconciled.shift();
   }
@@ -360,16 +398,33 @@ export class FilamentConsumption {
       return;
     }
 
-    const items = buildConsumeItems(printer, prev, next, run?.amsStart ?? null);
+    const items = buildConsumeItems(printer, prev, next, run.amsStart ?? null);
     if (items.length === 0) {
-      // Warn only when the device gave us nothing to measure (uncalibrated trays
-      // or a missing start snapshot) — not when it measured a print too small to
-      // move the 1 % `remain`, which is a legitimate ~0 g no-op.
-      const endTrays = next.amsTrays ?? prev.amsTrays;
-      if (printer.protocol === "bambu" && bambuMeasurableTrayCount(run?.amsStart ?? null, endTrays) === 0) {
+      // Nothing was deducted. The question is whether that is because the print
+      // was too small to move the 1 % `remain` — a legitimate ~0 g no-op — or
+      // because the device gave us nothing to measure at all.
+      //
+      // The second case used to produce ONLY a feed line, and the feed is capped
+      // and unacknowledged: the obligation scrolled away and the warehouse drifted
+      // by a spool at a time. It is the ordinary case for this farm's A1, which
+      // feeds from an external spool with no `tray_weight`, so there is nothing
+      // to turn a remain-drop into grams with. That is now a durable debt, with
+      // the slicer's own figure attached as an ORIENTATION for whoever writes it
+      // off — never posted as a deduction, because nothing observed it.
+      if (!this.measuredSomething(printer, prev, next, run)) {
+        const estimate = run.estimatedGrams ?? null;
+        const hint =
+          estimate !== null ? ` по расчёту слайсера ≈ ${estimate.toFixed(1)} г (оценка, не замер)` : "";
+        this.recordUnreconciled(
+          printer,
+          job,
+          `принтер не сообщил расход филамента — автосписание невозможно${hint}`,
+          estimate
+        );
         this.events.push(
           "⚠",
-          `<b>${printer.name}</b>: склад — нет данных о расходе филамента${job ? ` для «${job}»` : ""}, списание пропущено`,
+          `<b>${printer.name}</b>: склад — нет данных о расходе филамента${job ? ` для «${job}»` : ""}` +
+            `, списание пропущено${hint} — спишите вручную`,
           "err"
         );
       }
@@ -377,6 +432,32 @@ export class FilamentConsumption {
     }
 
     this.dispatchItems(printer, items, run.printId, job);
+  }
+
+  /**
+   * Whether the device produced a usable *measurement* for this print, whatever
+   * it came to.
+   *
+   * The distinction this draws is between "measured, and the answer was
+   * approximately zero" and "there was nothing to measure". Only the second is a
+   * debt: the first is a real observation of a print too small to move a 1 %
+   * `remain`, and recording it as an obligation would bury the real ones under
+   * one row per test cube.
+   */
+  private measuredSomething(
+    printer: PrinterConfig,
+    prev: PrinterLiveStatus,
+    next: PrinterLiveStatus,
+    run: CompletedRun
+  ): boolean {
+    if (printer.protocol === "bambu") {
+      const endTrays = next.amsTrays ?? prev.amsTrays;
+      return bambuMeasurableTrayCount(run.amsStart ?? null, endTrays) > 0;
+    }
+    // Klipper reports a cumulative extruded length; its presence IS the
+    // measurement, and a genuine 0 mm means the job extruded nothing.
+    const usedMm = next.filamentUsedMm ?? prev.filamentUsedMm;
+    return usedMm !== null && Number.isFinite(usedMm);
   }
 
   /**
@@ -422,7 +503,7 @@ export class FilamentConsumption {
       return "deducted";
     }
 
-    const outcome = classifyPrintOutcome(next);
+    const { outcome } = classifyPrintOutcome(next);
     const usedMm = next.filamentUsedMm;
     if (
       (outcome === "completed" || outcome === "cancelled") &&

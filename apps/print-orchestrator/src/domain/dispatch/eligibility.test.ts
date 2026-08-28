@@ -30,9 +30,11 @@ function task(over: Partial<CompatibilityTaskInput> = {}): CompatibilityTaskInpu
     pinnedPrinterId: null,
     dimensions: { x: 100, y: 100, z: 100 },
     dimensionsScaleKnown: true,
+    placement: null,
     requiredNozzleMm: 0.4,
     gcodeFlavor: "klipper",
     amsRequired: null,
+    toolCount: null,
     needsSlicing: false,
     ...over
   };
@@ -109,7 +111,9 @@ function facts(mode: DispatchMode, over: Partial<DispatchFacts> = {}): DispatchF
     },
     currentAnalyzerVersion: "1.0.0",
     deviceFileIdentity: "name+size",
-    printerLabels: ["Creality K2", "K2 Plus"],
+    printerModel: "Creality K2 Plus",
+    printerClass: "k2plus",
+    printerName: "K2 у окна",
     printerProtocol: "moonraker",
     remoteStartSupported: true,
     liveStatus: { online: true, status: "idle" },
@@ -234,13 +238,83 @@ test("a file sliced for another printer blocks the start", () => {
   assert.ok(blockerCodes(result).includes(REASON.TARGET_PRINTER_MISMATCH));
 });
 
-test("the printer's name, model and class all count as a legitimate declared target", () => {
-  for (const declared of ["Creality K2", "K2 Plus", "k2plus", "K2-Plus"]) {
+/*
+ * The declared target is compared against the machine's MODEL and CLASS, with
+ * the farm's one model rule. Two things this file used to get wrong, and both
+ * were the same substring test: a printer's free-text *name* could establish
+ * hardware identity, and `"K2"` matched `"K2 Plus"` because one contains the
+ * other. A K2 Plus file on a K2 is a different bed and different nozzle limits.
+ */
+
+test("the model and the class are legitimate declared targets, in any spelling", () => {
+  for (const declared of ["Creality K2 Plus", "K2 Plus", "k2plus", "K2-Plus", "K2  plus"]) {
     const result = evaluate("manual", {
       facts: { analysis: { ...facts("manual").analysis!, declaredTargetPrinter: declared } }
     });
     assert.equal(result.status, "eligible", `${declared}: ${JSON.stringify(result.reasons)}`);
   }
+});
+
+test("a NEIGHBOURING model is refused, however similar the name", () => {
+  // Every one of these passed the old substring test against a "K2 Plus".
+  for (const declared of ["Creality K2", "K2", "K2 Max", "K2 Plus Combo X"]) {
+    const result = evaluate("manual", {
+      facts: { analysis: { ...facts("manual").analysis!, declaredTargetPrinter: declared } }
+    });
+    assert.ok(
+      blockerCodes(result).includes(REASON.TARGET_PRINTER_MISMATCH),
+      `«${declared}» must not be accepted onto a K2 Plus`
+    );
+  }
+});
+
+test("the operator's own name for the printer never establishes what machine it is", () => {
+  const result = evaluate("manual", {
+    facts: {
+      printerName: "Creality K2",
+      analysis: { ...facts("manual").analysis!, declaredTargetPrinter: "Creality K2" }
+    }
+  });
+  assert.ok(
+    blockerCodes(result).includes(REASON.TARGET_PRINTER_MISMATCH),
+    "a printer called «Creality K2» that IS a K2 Plus must still refuse a K2 file"
+  );
+});
+
+test("an unconfigured model cannot be compared, and says so instead of «mismatch»", () => {
+  const result = evaluate("manual", {
+    facts: {
+      printerModel: null,
+      printerClass: null,
+      printerName: "Принтер у окна",
+      analysis: { ...facts("manual").analysis!, declaredTargetPrinter: "Creality K2 Plus" }
+    }
+  });
+  assert.ok(blockerCodes(result).includes(REASON.TARGET_PRINTER_UNKNOWN));
+  assert.ok(!blockerCodes(result).includes(REASON.TARGET_PRINTER_MISMATCH));
+});
+
+test("a model that is only a vendor word is not an identity either", () => {
+  // "Creality" normalises to nothing at all — there is no model in it to compare.
+  const result = evaluate("manual", {
+    facts: {
+      printerModel: "Creality",
+      printerClass: null,
+      analysis: { ...facts("manual").analysis!, declaredTargetPrinter: "Creality K2 Plus" }
+    }
+  });
+  assert.ok(blockerCodes(result).includes(REASON.TARGET_PRINTER_UNKNOWN));
+});
+
+test("the class alone can confirm a class-scoped file", () => {
+  const result = evaluate("manual", {
+    facts: {
+      printerModel: null,
+      printerClass: "k2plus",
+      analysis: { ...facts("manual").analysis!, declaredTargetPrinter: "K2 Plus" }
+    }
+  });
+  assert.equal(result.status, "eligible", JSON.stringify(result.reasons));
 });
 
 test("an unknown target printer blocks a NIGHT start (attended is only a warning)", () => {
@@ -620,7 +694,9 @@ test("hard rules are never overridable", () => {
 const CONTAINER = {
   file: "chalice-1a2b3c4d.gcode.3mf",
   printerProtocol: "bambu",
-  printerLabels: ["Bambu Lab A1", "Bambu Lab A1 Combo"],
+  printerModel: "Bambu Lab A1 Combo",
+  printerClass: null,
+  printerName: "A1",
   deviceArtifact: {
     state: "VERIFIED",
     transferMode: "adapter_upload",

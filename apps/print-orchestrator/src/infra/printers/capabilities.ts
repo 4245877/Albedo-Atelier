@@ -56,14 +56,16 @@ export interface PrinterCapabilities {
 
 const CAPABILITIES: Readonly<Record<PrinterProtocol, PrinterCapabilities>> = {
   // Klipper/Moonraker HTTP: `/server/files/upload`, `/server/files/directory`
-  // (which reports `size`), `/printer/print/start`. Delete (`DELETE
-  // /server/files/gcodes/<path>`) exists in the API but is not implemented here,
-  // so it is declared `false` rather than assumed.
+  // (which reports `size`), `/printer/print/start`, `DELETE
+  // /server/files/gcodes/<path>`.
   moonraker: {
     supportsUpload: true,
     supportsFileListing: true,
     supportsRemoteStart: true,
-    supportsFileDelete: false,
+    // `DELETE /server/files/gcodes/<path>` — implemented in `files/moonraker.ts`.
+    // It was declared `false` while only the upload half existed, which is why a
+    // K2's G-code root grew without bound.
+    supportsFileDelete: true,
     fileVerification: "name_and_size",
     startableExtensions: [".gcode", ".gco", ".g"],
     deviceFileExtension: ".gcode"

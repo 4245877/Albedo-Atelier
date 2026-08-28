@@ -1,6 +1,7 @@
 import path from "node:path";
 import { Worker } from "node:worker_threads";
 
+import { analysisBudgetMs, AnalysisTimeoutError } from "../analysisBudget";
 import type { AnalyzerInput, AnalyzerLimits, AnalyzerResult } from "./index";
 
 /** Reply shape the {@link analyzeWorker} posts back. */
@@ -37,9 +38,15 @@ function defaultWorker(): { workerPath: string; execArgv: string[] } {
  * even a synchronous XML/3MF parse — so the deadline is real, the analysis slot
  * is genuinely freed, and no background parse lingers after the promise settles.
  * One worker per call, so a `concurrency` of N means at most N live workers.
+ *
+ * `baseTimeoutMs` is the **floor**, not the whole budget: the real deadline is
+ * {@link analysisBudgetMs} of the input's size, so a large healthy file is not
+ * failed for being large. A file that does exceed it is rejected with
+ * {@link AnalysisTimeoutError}, which says so in those words instead of joining
+ * the pile of reasons that mean "this file is bad".
  */
 export function analyzeInWorker(
-  timeoutMs: number,
+  baseTimeoutMs: number,
   options: WorkerHostOptions = {}
 ): (input: AnalyzerInput, limits: AnalyzerLimits) => Promise<AnalyzerResult> {
   const base = defaultWorker();
@@ -48,6 +55,7 @@ export function analyzeInWorker(
 
   return (input, limits) =>
     new Promise<AnalyzerResult>((resolve, reject) => {
+      const timeoutMs = analysisBudgetMs(input.sizeBytes, baseTimeoutMs);
       const worker = new Worker(workerPath, { workerData: { input, limits }, execArgv });
       let settled = false;
 
@@ -62,7 +70,7 @@ export function analyzeInWorker(
       };
 
       const timer = setTimeout(() => {
-        finish(() => reject(new Error("Анализ превысил лимит времени")));
+        finish(() => reject(new AnalysisTimeoutError(timeoutMs, input.sizeBytes)));
       }, timeoutMs);
 
       worker.once("message", (reply: WorkerReply) => {

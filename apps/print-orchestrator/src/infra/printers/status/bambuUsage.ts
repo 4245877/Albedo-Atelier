@@ -22,6 +22,24 @@ import type { ActiveFilament, AmsTraySnapshot } from "./types";
  * "usage → consume items" seam in the poller.
  */
 
+/**
+ * The slot index Bambu itself uses for the **external spool** — the filament
+ * path an A1/P1 feeds from when it is not printing through the AMS.
+ *
+ * 254 is the vendor's own number: it is what `ams.tray_now` reports while the
+ * external spool is feeding, and what `ams_mapping` expects for "not an AMS
+ * slot". It cannot collide with a real tray, whose index is `unit*4 + id` and
+ * so tops out at 15 for the four AMS units the protocol allows.
+ *
+ * Treating the external spool as a tray is the whole fix for a hole that ran the
+ * length of the chain: `parseAmsTrays` returned `null` for a printer with no
+ * AMS, so an external-spool print produced no baseline snapshot, no consumption
+ * measurement, and no reel binding for the loaded filament. This farm's A1 Combo
+ * reports zero AMS units and feeds externally, which means every print it has
+ * ever run took that path.
+ */
+export const EXTERNAL_SPOOL_TRAY = 254;
+
 /** One tray's measured consumption for a finished print. */
 export interface BambuTrayUsage {
   /** Global tray index (matches {@link AmsTraySnapshot.tray}). */
@@ -52,18 +70,18 @@ function clampPct(value: number | null): number | null {
 }
 
 /**
- * Reads the per-tray AMS snapshot out of a (merged) Bambu `print` payload.
- * Returns null when the device reports no AMS (e.g. printing from the external
- * spool), and skips fully empty slots so only loaded trays are tracked.
+ * Reads the **loaded reels** out of a (merged) Bambu `print` payload: every AMS
+ * tray, plus the external spool as {@link EXTERNAL_SPOOL_TRAY}.
+ *
+ * Returns null only when the device reports neither — not merely when it has no
+ * AMS. Empty slots are skipped, so the list is what is actually loaded.
  */
 export function parseAmsTrays(print: Record<string, unknown>): AmsTraySnapshot[] | null {
   const ams = print.ams;
-  if (!isObject(ams) || !Array.isArray(ams.ams)) return null;
-
-  const trayNow = firstText(ams.tray_now);
+  const trayNow = isObject(ams) ? firstText(ams.tray_now) : "";
   const trays: AmsTraySnapshot[] = [];
 
-  for (const unit of ams.ams) {
+  for (const unit of isObject(ams) && Array.isArray(ams.ams) ? ams.ams : []) {
     if (!isObject(unit) || !Array.isArray(unit.tray)) continue;
     const unitId = firstFiniteNumber(unit.id) ?? 0;
 
@@ -93,25 +111,58 @@ export function parseAmsTrays(print: Record<string, unknown>): AmsTraySnapshot[]
     }
   }
 
+  const external = parseExternalSpoolTray(print, trayNow);
+  if (external) trays.push(external);
+
   return trays.length > 0 ? trays : null;
 }
 
 /**
- * Reads the external spool (`vt_tray`) as an active-filament candidate: what the
- * A1/P1 feeds from when printing without the AMS. Returns null when there is no
- * `vt_tray` object or it carries no usable material/colour/remain.
+ * The external spool (`vt_tray`) as a tray snapshot, so every rule that already
+ * knows how to measure and bind a tray applies to it unchanged — the remain-drop
+ * consumption, the measurable-tray count, and the loaded-reel sync.
+ *
+ * `tray_weight` is usually absent on a non-RFID spool, which leaves
+ * `nominalWeightG` null and therefore leaves the spool *unmeasurable*. That is
+ * the honest outcome, and it is what the unreconciled-debt path exists for: an
+ * estimate is not a measurement, and this must never manufacture one.
  */
-export function parseVtTray(print: Record<string, unknown>): ActiveFilament | null {
+export function parseExternalSpoolTray(
+  print: Record<string, unknown>,
+  trayNow: string
+): AmsTraySnapshot | null {
   const vt = print.vt_tray;
   if (!isObject(vt)) return null;
 
   const material = firstText(vt.tray_type) || null;
   const color = normalizeTrayColor(vt.tray_color);
   const remainPct = clampPct(firstFiniteNumber(vt.remain));
+  const weight = firstFiniteNumber(vt.tray_weight);
+  const nominalWeightG = weight !== null && weight > 0 ? weight : null;
 
-  if (!material && color === null && remainPct === null) return null;
+  if (!material && color === null && remainPct === null && nominalWeightG === null) return null;
 
-  return { material, color, tray: null, remainPct };
+  return {
+    tray: EXTERNAL_SPOOL_TRAY,
+    material,
+    color,
+    remainPct,
+    nominalWeightG,
+    // A printer with no AMS at all reports no `tray_now`; the external spool is
+    // then the only path there is, so it is what is feeding.
+    active: trayNow === "" || Number(trayNow) === EXTERNAL_SPOOL_TRAY
+  };
+}
+
+/**
+ * Reads the external spool as an active-filament candidate. Kept as its own
+ * entry point for the display path, which reports an AMS *slot* number and must
+ * not present 254 as one.
+ */
+export function parseVtTray(print: Record<string, unknown>): ActiveFilament | null {
+  const tray = parseExternalSpoolTray(print, "");
+  if (!tray) return null;
+  return { material: tray.material, color: tray.color, tray: null, remainPct: tray.remainPct };
 }
 
 /**
@@ -129,7 +180,9 @@ export function resolveActiveFilament(
     return {
       material: active.material,
       color: active.color,
-      tray: active.tray,
+      // The external spool is a tray for accounting, but it is not an AMS slot,
+      // and showing "лоток 254" to an operator would be nonsense.
+      tray: active.tray === EXTERNAL_SPOOL_TRAY ? null : active.tray,
       remainPct: active.remainPct
     };
   }

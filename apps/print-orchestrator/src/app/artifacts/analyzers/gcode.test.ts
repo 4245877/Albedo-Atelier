@@ -295,3 +295,226 @@ test("a trailing-point value (X5.) is read rather than dropped", async () => {
   const bbox = r.data.bbox as { max: number[] };
   assert.deepEqual(bbox.max.slice(0, 2), [5, 7]);
 });
+
+// ── Duration formats ─────────────────────────────────────────────────────────
+//
+// Every slicer in scope writes a day component once a print passes 24 hours, and
+// dropping it turned a 26-hour job into a 2-hour one. That number is the ETA the
+// scheduler fits into the night window, so the error did not stay in the parser:
+// a multi-day print was planned as if it finished before dawn.
+
+const DURATIONS: { form: string; text: string; seconds: number }[] = [
+  { form: "PrusaSlicer h/m/s", text: "1h 5m 12s", seconds: 3912 },
+  { form: "days present", text: "1d 2h 3m 4s", seconds: 93784 },
+  { form: "days, sparse", text: "2d 5m", seconds: 173100 },
+  { form: "days only", text: "3d", seconds: 259200 },
+  { form: "many days", text: "10d 23h 59m 59s", seconds: 950399 },
+  { form: "minutes and seconds", text: "45m 12s", seconds: 2712 },
+  { form: "spelled out", text: "2 hours 5 minutes", seconds: 7500 },
+  { form: "spelled out with days", text: "1 day 2 hours", seconds: 93600 },
+  { form: "plural days spelled out", text: "2 days 30 minutes", seconds: 174600 },
+  { form: "seconds only", text: "42s", seconds: 42 },
+  { form: "nothing parseable", text: "unknown", seconds: NaN }
+];
+
+test("estimated printing time: every slicer duration form, days included", async () => {
+  for (const { form, text, seconds } of DURATIONS) {
+    const r = await run(
+      `dur-${DURATIONS.indexOf(DURATIONS.find((d) => d.form === form)!)}.gcode`,
+      makeGcode({ header: [`; estimated printing time (normal mode) = ${text}`] })
+    );
+    if (Number.isNaN(seconds)) {
+      assert.equal(r.estimatedDurationS, null, `«${text}» (${form}) must not invent a duration`);
+    } else {
+      assert.equal(r.estimatedDurationS, seconds, `«${text}» (${form})`);
+    }
+  }
+});
+
+test("a day in the estimate reaches estimatedDurationS, not just the parser", async () => {
+  const r = await run(
+    "multiday.gcode",
+    makeGcode({ header: ["; estimated printing time (normal mode) = 1d 2h 3m 4s"] })
+  );
+  // 93 784 s = 26 h 3 m 4 s. Reading it as 7 384 s (2 h 3 m 4 s) is the bug: it
+  // would fit a 26-hour print into an 8-hour night window.
+  assert.equal(r.estimatedDurationS, 93784);
+});
+
+// ── Filament usage, per slicer dialect ───────────────────────────────────────
+//
+// PrusaSlicer/SuperSlicer/Orca write `key [unit] = value`; BambuStudio writes
+// `total filament weight [g] : value` — a different noun AND a different
+// separator. Reading only the first dialect left every BambuStudio file with no
+// weight at all, which is the estimate the consumption reconciliation leans on.
+
+const FILAMENT_FORMS: { slicer: string; lines: string[]; g: number | null; mm: number | null }[] = [
+  {
+    slicer: "PrusaSlicer",
+    lines: ["; filament used [mm] = 8763.13", "; filament used [g] = 26.15"],
+    g: 26.15,
+    mm: 8763.13
+  },
+  {
+    slicer: "PrusaSlicer (total)",
+    lines: ["; total filament used [mm] = 8763.13", "; total filament used [g] = 26.15"],
+    g: 26.15,
+    mm: 8763.13
+  },
+  {
+    slicer: "BambuStudio",
+    lines: ["; total filament weight [g] : 128.44", "; total filament length [mm] : 41234.5"],
+    g: 128.44,
+    mm: 41234.5
+  },
+  {
+    slicer: "OrcaSlicer (colon form)",
+    lines: ["; filament used [g] : 12.5", "; filament used [mm] : 4100"],
+    g: 12.5,
+    mm: 4100
+  },
+  {
+    slicer: "Cura (metres, no bracketed unit)",
+    lines: [";Filament used: 3.8073m"],
+    g: null,
+    mm: 3807.3
+  },
+  {
+    slicer: "volume only — neither field may be invented",
+    lines: ["; filament used [cm3] = 21.08"],
+    g: null,
+    mm: null
+  }
+];
+
+test("filament usage is read in every slicer dialect, and only from its own unit", async () => {
+  for (const form of FILAMENT_FORMS) {
+    const r = await run(
+      `fil-${FILAMENT_FORMS.indexOf(form)}.gcode`,
+      // `header` replaces the fixture's own usage lines, so each dialect stands alone.
+      makeGcode({ header: form.lines })
+    );
+    assert.equal(r.estimatedFilamentG, form.g, `${form.slicer}: grams`);
+    assert.equal(r.data.filamentUsedMm, form.mm, `${form.slicer}: millimetres`);
+  }
+});
+
+// ── Parser equivalence and cost ──────────────────────────────────────────────
+
+test("axis values parse bit-identically to the language's own number parser", async () => {
+  // The hot loop reads a decimal without materialising a string. That is only
+  // safe if it is *correctly rounded*, so it is checked against Number() itself
+  // over every shape a slicer emits — including the ones it must decline.
+  const { readAxis } = await import("./gcode");
+  const samples = [
+    "0", "1", "-1", "+1", "5.", "-5.", ".5", "-.5", ".03338", "0.03338",
+    "123.456", "-123.456", "0.1", "0.2", "0.3", "255.9999", "-0",
+    "12345678901234", "1.2345678901234",
+    // Past the exact-mantissa window: these take the string fallback, and must
+    // still agree with the language.
+    "123456789012345678901234.5", "0.0000000000000000001",
+    "999999999999999999", "0.1234567890123456789"
+  ];
+  for (const sample of samples) {
+    const expected = Number(sample);
+    const actual = readAxis(`G1 X${sample}`, "x");
+    assert.ok(Object.is(actual, expected), `X${sample}: ${actual} ≠ ${expected}`);
+  }
+  // Scientific notation is deliberately NOT in the grammar — no slicer emits it,
+  // and the trailing junk rule applies: `X1e3` is the value 1, as it always was.
+  assert.equal(readAxis("G1 X1e3", "x"), 1);
+  // Random differential sweep — the exact-mantissa path must never diverge.
+  let seed = 20260828;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  for (let i = 0; i < 5000; i += 1) {
+    const digits = 1 + Math.floor(rnd() * 8);
+    const frac = Math.floor(rnd() * 7);
+    const text = `${rnd() < 0.5 ? "-" : ""}${(rnd() * 10 ** digits).toFixed(frac)}`;
+    assert.equal(readAxis(`G1 Y${text}`, "y"), Number(text), `Y${text}`);
+  }
+});
+
+test("an axis letter only counts at the start of a word, and the first one wins", async () => {
+  const { readAxis } = await import("./gcode");
+  assert.equal(readAxis("G1 X10 Y20", "x"), 10);
+  assert.equal(readAxis("G1 X10 X20", "x"), 10, "first occurrence wins");
+  assert.equal(readAxis("M117 MAX", "a".replace("a", "x") as "x"), null, "not an axis word");
+  assert.equal(readAxis("G1 X12abc", "x"), 12, "trailing junk is ignored");
+  assert.equal(readAxis("G1 Xfoo", "x"), null, "a letter is not a number");
+  assert.equal(readAxis("G1 X-", "x"), null, "a bare sign is not a number");
+  assert.equal(readAxis("X5", "x"), null, "the command word itself is never an axis");
+  assert.equal(readAxis("G1\tX7", "x"), 7, "a tab separates words too");
+});
+
+test("CRLF, lone CR and a missing final newline all yield the same analysis", async () => {
+  const lines = makeGcode().split("\n");
+  const lf = lines.join("\n");
+  const crlf = lines.join("\r\n");
+  const cr = lines.join("\r");
+  const noTrailing = lf.replace(/\n+$/, "");
+  const [a, b, c, d] = await Promise.all([
+    run("lf.gcode", lf),
+    run("crlf.gcode", crlf),
+    run("cr.gcode", cr),
+    run("notrail.gcode", noTrailing)
+  ]);
+  for (const [name, other] of [["crlf", b], ["cr", c], ["no trailing newline", d]] as const) {
+    assert.deepEqual(other.data.bbox, a.data.bbox, `${name}: bbox`);
+    assert.equal(other.data.motionCommands, a.data.motionCommands, `${name}: motion commands`);
+    assert.equal(other.estimatedDurationS, a.estimatedDurationS, `${name}: duration`);
+  }
+});
+
+test("a chunk boundary inside a CRLF pair does not split or lose a line", async () => {
+  // The reader holds a trailing \r back until the next chunk decides whether it
+  // is a lone break or half a pair. Without that, a forbidden command landing on
+  // the wrong side of a 1 MB boundary could be read as two half-lines.
+  const filler = Array.from({ length: 200_000 }, (_, i) => `G1 X${i % 100} Y${i % 90} E.01`);
+  const gcode = makeGcode({ moves: [...filler, "M502", ...filler] });
+  const r = await run("boundary.gcode", gcode.replace(/\n/g, "\r\n"));
+  assert.ok(
+    r.blockers.some((b) => b.code === "gcode_forbidden_command" && /M502/.test(b.message)),
+    "the forbidden command is still seen across the chunk boundary"
+  );
+});
+
+test("a 50 MB G-code is analysed well inside the analysis budget", async (t) => {
+  // The regression this pins: the parser compiled four regexes per motion command
+  // and put every line through the microtask queue, so a 50 MB OrcaSlicer file
+  // took ~50 s against a 30 s budget. Every large upload came back
+  // `analysis: failed` for a reason that had nothing to do with the file.
+  //
+  // The bound is deliberately loose (CI hardware varies); the failure it catches
+  // is an order-of-magnitude regression, not a few percent.
+  const header = [
+    "; generated by OrcaSlicer 2.3.0",
+    "; printer_model = Bambu Lab A1",
+    "; filament_type = PLA",
+    "; printable_area = 0x0,256x0,256x256,0x256"
+  ];
+  const path = `${dir}/huge.gcode`;
+  const out = fs.createWriteStream(path);
+  out.write(`${header.join("\n")}\nG21\nG90\nM83\n`);
+  const block: string[] = [];
+  for (let i = 0; i < 2000; i += 1) {
+    block.push(`G1 X${(60 + (i % 120)).toFixed(3)} Y${(60 + ((i * 13) % 120)).toFixed(3)} E.03338`);
+  }
+  const chunk = `${block.join("\n")}\n`;
+  const rounds = Math.ceil((50 * 1024 * 1024) / Buffer.byteLength(chunk));
+  for (let i = 0; i < rounds; i += 1) {
+    if (!out.write(chunk)) await new Promise<void>((r) => out.once("drain", () => r()));
+  }
+  await new Promise<void>((r) => out.end(() => r()));
+  const sizeMb = fs.statSync(path).size / 1048576;
+  assert.ok(sizeMb >= 50, `fixture is ${sizeMb.toFixed(1)} MB`);
+
+  const started = Date.now();
+  const r = await analyzeGcode(path);
+  const elapsed = Date.now() - started;
+  t.diagnostic(`${sizeMb.toFixed(1)} MB analysed in ${elapsed} ms`);
+  assert.equal(r.data.motionCommands, rounds * 2000);
+  assert.ok(
+    elapsed < 25_000,
+    `analysing ${sizeMb.toFixed(1)} MB took ${elapsed} ms — the 30 s analysis budget is at risk`
+  );
+});

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -15,6 +16,12 @@ import { ArtifactService } from "../artifacts/artifactService";
 import { ProfileService, type SlicerPrinterRef } from "./profileService";
 import { SliceService } from "./sliceService";
 import { FAKE_ORCA_GCODE, FakeOrcaRunner } from "./testkit/fakeOrcaRunner";
+import {
+  boxVertices,
+  make3mfModel,
+  make3mfPackage,
+  makeModelSettingsConfig
+} from "../artifacts/testkit/fixtures";
 
 const LIMITS = {
   zipMaxEntries: 1000,
@@ -779,4 +786,270 @@ test("the slice hands the runner the probe result it already took (single gate p
   // needs to re-probe (the real runner asserts the no-second-`--version` in its own test).
   assert.ok(runner.lastProbed);
   assert.equal(runner.lastProbed?.available, true);
+});
+
+// ── The confirmed scale must reach the slicer, not only the size check ───────
+//
+// The divergence: the scheduler sized an STL as `sizeRaw × mmPerUnit` (an
+// operator's "these numbers are inches") while the slicer got the file
+// untouched. A 2-inch cube was checked as 50.8 mm — against the bed, the build
+// volume, the plan — and printed as 2 mm. Nothing compared the two.
+
+/** The STL fixture is a 10 × 10 × `seed` triangle, in whatever unit it means. */
+const STL_BOX = { x: 10, y: 10, z: 5 };
+
+/** Records the operator's unit confirmation on an uploaded artifact. */
+function confirmScale(artifactId: string, units: string, scaleFactor = 1): void {
+  artifacts.confirmModelScale(artifactId, { units, scaleFactor, actor: "miha" });
+}
+
+test("an unconfirmed STL is sliced at its raw numbers — the same ones the checks hold", async () => {
+  runner.sourceBox = STL_BOX;
+  const artifactId = await uploadModel();
+  const setId = await approvedSet();
+
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  assert.equal(runner.lastScaleFactor, 1, "nothing confirmed is not a licence to invent a factor");
+  assert.equal(slice.getVariant(variant.id).state, "ready");
+});
+
+test("a confirmed INCH scale reaches the slicer, and the slice comes out at the checked size", async () => {
+  runner.sourceBox = STL_BOX;
+  const artifactId = await uploadModel();
+  confirmScale(artifactId, "inch");
+  const setId = await approvedSet();
+
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  assert.equal(runner.lastScaleFactor, 25.4, "the confirmation must travel to the slicer");
+  const done = slice.getVariant(variant.id);
+  assert.equal(done.state, "ready", done.error ?? "");
+  const size = (done.dimensions as { size: number[] } | null)?.size;
+  assert.ok(size);
+  // 10 in × 25.4 = 254 mm, not the raw 10.
+  assert.ok(Math.abs(size[0] - 254) < 3, `X came out ${size[0]}, expected ≈254`);
+  assert.ok(Math.abs(size[1] - 254) < 3, `Y came out ${size[1]}, expected ≈254`);
+});
+
+test("a slicer that IGNORES the scale is caught — the variant is blocked, never shipped", async () => {
+  // The reason the effect is checked and not just the cause: the transform now
+  // depends on an external program's argument handling, and a build that dropped
+  // `--scale` would look exactly like success.
+  runner.sourceBox = STL_BOX;
+  runner.honoursScale = false;
+  const artifactId = await uploadModel();
+  confirmScale(artifactId, "inch");
+  const setId = await approvedSet();
+
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  const done = slice.getVariant(variant.id);
+  assert.equal(done.state, "blocked", "a 10 mm slice for a 254 mm model must never be dispatchable");
+  assert.match(done.error ?? "", /масштаб модели не был применён/);
+  assert.ok(done.blockers.some((b) => b.code === "slice_scale_mismatch"));
+});
+
+test("a millimetre model is unaffected: no factor, no mismatch", async () => {
+  runner.sourceBox = STL_BOX;
+  const artifactId = await uploadModel();
+  confirmScale(artifactId, "millimeter");
+  const setId = await approvedSet();
+
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  assert.equal(runner.lastScaleFactor, 1);
+  assert.equal(slice.getVariant(variant.id).state, "ready");
+});
+
+test("a stale confirmation does not scale the slice — it reverts to raw, like the checks", async () => {
+  runner.sourceBox = STL_BOX;
+  const artifactId = await uploadModel();
+  confirmScale(artifactId, "inch");
+  // Re-ingesting different bytes under the same artifact invalidates the
+  // confirmation: it was bound to the content hash.
+  const other = await artifacts.ingest({ source: Readable.from(binaryStl(9)), fileName: "cube.stl" });
+  await artifacts.whenIdle();
+  assert.notEqual(other.artifact.id, artifactId, "content-addressed: different bytes, different artifact");
+
+  const setId = await approvedSet();
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+  assert.equal(runner.lastScaleFactor, 25.4, "this artifact's own confirmation still stands");
+  assert.equal(slice.getVariant(variant.id).state, "ready");
+});
+
+// ── Multi-plate projects ────────────────────────────────────────────────────
+//
+// `--slice 0` slices EVERY plate, so a two-plate project leaves two outputs in
+// the work dir and the runner picked one by file mtime — an arbitrary plate,
+// shipped as the operator's model, with the other silently dropped. mtime can
+// also tie on a coarse filesystem, so the same slice could resolve differently
+// between runs.
+
+/** A 3MF holding two plates, each with its own object. */
+function multiPlate3mf(): Buffer {
+  const xml = make3mfModel({
+    unit: "millimeter",
+    objects: [
+      { id: "1", vertices: boxVertices(10) },
+      { id: "2", vertices: boxVertices(30, 30, 30, [500, 0, 0]) }
+    ],
+    items: [{ objectid: "1" }, { objectid: "2" }]
+  });
+  return make3mfPackage(xml, [
+    {
+      name: "Metadata/model_settings.config",
+      data: makeModelSettingsConfig([
+        { index: 1, objectIds: ["1"] },
+        { index: 2, objectIds: ["2"] }
+      ])
+    }
+  ]);
+}
+
+test("a multi-plate project is refused with an action, never sliced into one arbitrary plate", async () => {
+  const res = await artifacts.ingest({ source: Readable.from(multiPlate3mf()), fileName: "project.3mf" });
+  await artifacts.whenIdle();
+  const analysis = store.repositories.artifactAnalyses.latestForArtifact(res.artifact.id);
+  assert.equal((analysis?.data.geometry as { multiPlate: boolean }).multiPlate, true);
+
+  const setId = await approvedSet();
+  const variant = await slice.createSlice({ artifactId: res.artifact.id, profileSetId: setId });
+  await slice.whenIdle();
+
+  const done = slice.getVariant(variant.id);
+  assert.equal(done.state, "blocked");
+  assert.match(done.error ?? "", /2 пластин/);
+  assert.match(done.error ?? "", /Экспортируйте нужную пластину/);
+  assert.equal(runner.sliceCount, 0, "the slicer is never even asked");
+});
+
+test("a single-plate 3MF is sliced normally — the refusal is scoped to real projects", async () => {
+  const xml = make3mfModel({
+    unit: "millimeter",
+    objects: [{ id: "1", vertices: boxVertices(20) }],
+    items: [{ objectid: "1" }]
+  });
+  const res = await artifacts.ingest({
+    source: Readable.from(make3mfPackage(xml, [])),
+    fileName: "single.3mf"
+  });
+  await artifacts.whenIdle();
+
+  const setId = await approvedSet();
+  const variant = await slice.createSlice({ artifactId: res.artifact.id, profileSetId: setId });
+  await slice.whenIdle();
+
+  assert.equal(slice.getVariant(variant.id).state, "ready");
+  assert.equal(runner.sliceCount, 1);
+});
+
+// ── Artifact format ─────────────────────────────────────────────────────────
+//
+// The output artifact's `kind` is derived from its NAME, and the name was
+// hard-coded `.gcode` whatever the slicer produced. A `.gcode.3mf` container
+// would have been filed as plain G-code — and the delivery layer wraps a slice
+// in a Bambu plate package, so it would have been wrapped a second time.
+
+test("the output artifact keeps the format the slicer actually produced", async () => {
+  const artifactId = await uploadModel();
+  const setId = await approvedSet();
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  const done = slice.getVariant(variant.id);
+  const out = store.repositories.artifacts.getById(done.outputArtifactId as string);
+  assert.equal(out?.name, "cube.gcode");
+  assert.equal(out?.kind, "gcode");
+  const analysis = store.repositories.artifactAnalyses.latestForArtifact(out!.id);
+  assert.equal(analysis?.detectedFormat, "gcode", "and the CONTENT agrees with the name");
+});
+
+test("a slicer that returns a container instead of G-code is blocked, not double-wrapped", async () => {
+  // The delivery layer builds the Bambu `.gcode.3mf` from the slice's bytes at
+  // the transport boundary. A slice that is already a container would be wrapped
+  // again, and every rule that read it — ETA, command policy, bounding box —
+  // would have been reading a ZIP header.
+  runner.gcode = "";
+  const container = make3mfPackage(
+    make3mfModel({ unit: "millimeter", objects: [{ id: "1", vertices: boxVertices(10) }], items: [{ objectid: "1" }] }),
+    []
+  );
+  runner.onSlice = async (req) => {
+    await fsp.writeFile(req.outputPath, container);
+  };
+  // The fake writes the container itself; suppress its own G-code write.
+  runner.sourceBox = null;
+
+  const artifactId = await uploadModel();
+  const setId = await approvedSet();
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  const done = slice.getVariant(variant.id);
+  assert.equal(done.state, "blocked");
+  assert.ok(
+    done.blockers.some((b) => b.code === "output_not_gcode"),
+    `expected an output_not_gcode blocker, got ${JSON.stringify(done.blockers)}`
+  );
+});
+
+// ── Work dirs orphaned by an unclean shutdown ───────────────────────────────
+//
+// The per-slice cleanup is a `finally`, which covers everything the process
+// survives. It cannot cover SIGKILL, an OOM kill, a host reset, or a container
+// replaced mid-slice — each of which leaves a `slice-*` directory holding a
+// staged model and up to three profile JSONs. This farm's disk budget has no
+// room for an unbounded pile of them.
+
+/** A work dir as an unclean shutdown would leave it, aged `ageMs` into the past. */
+function orphanWorkDir(name: string, ageMs: number): string {
+  const dir = path.join(TMP, "work", name);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "model.stl"), "leftover");
+  const when = new Date(Date.now() - ageMs);
+  fs.utimesSync(dir, when, when);
+  return dir;
+}
+
+test("recover() removes slice work dirs an unclean shutdown left behind", () => {
+  const old = orphanWorkDir("slice-abandoned", 6 * 60 * 60 * 1000);
+  slice.recover();
+  assert.equal(fs.existsSync(old), false, "an hours-old work dir is provably not in use");
+});
+
+test("recover() never touches a work dir that could still be in use", () => {
+  // Another orchestrator process may be slicing into a directory beside ours.
+  // Deleting it mid-slice turns a running job into an unexplainable failure, so
+  // anything younger than the slice budget plus a wide margin is left alone.
+  const fresh = orphanWorkDir("slice-in-flight", 0);
+  const recent = orphanWorkDir("slice-recent", 30 * 60 * 1000);
+  slice.recover();
+  assert.equal(fs.existsSync(fresh), true, "a directory being written to right now");
+  assert.equal(fs.existsSync(recent), true, "and one well inside the budget");
+});
+
+test("the sweep only ever touches its own directories", () => {
+  const dir = path.join(TMP, "work");
+  const foreign = path.join(dir, "not-ours");
+  fs.mkdirSync(foreign, { recursive: true });
+  const when = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  fs.utimesSync(foreign, when, when);
+  const loose = path.join(dir, "slice-notes.txt");
+  fs.writeFileSync(loose, "x");
+  fs.utimesSync(loose, when, when);
+
+  slice.recover();
+  assert.equal(fs.existsSync(foreign), true, "a directory this service did not create");
+  assert.equal(fs.existsSync(loose), true, "and a file, even one matching the prefix");
+});
+
+test("a sweep failure never stops the service from starting", () => {
+  fs.rmSync(path.join(TMP, "work"), { recursive: true, force: true });
+  assert.doesNotThrow(() => slice.recover());
 });

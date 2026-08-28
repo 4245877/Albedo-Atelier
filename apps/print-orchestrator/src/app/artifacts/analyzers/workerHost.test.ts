@@ -6,6 +6,7 @@ import { afterEach, test } from "node:test";
 
 import { analyzeInWorker } from "./workerHost";
 import type { AnalyzerInput, AnalyzerLimits } from "./index";
+import { AnalysisTimeoutError } from "../analysisBudget";
 
 /*
  * The analyzer runs in a worker thread so a timeout can genuinely TERMINATE it —
@@ -67,7 +68,7 @@ test("a timeout TERMINATES a synchronously-blocking worker (does not just reject
   const started = Date.now();
   await assert.rejects(
     analyze(input(tempFile("m.stl", "x")), LIMITS),
-    (e: unknown) => e instanceof Error && /превысил лимит/.test(e.message)
+    (e: unknown) => e instanceof AnalysisTimeoutError
   );
   const elapsed = Date.now() - started;
   // If termination worked, this resolved near the 300 ms budget, not never. The

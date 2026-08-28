@@ -13,7 +13,8 @@ import {
 import type { AuditEntityType, BedCycle, Metadata, PrintRun } from "../../domain/print/types";
 import type { PrinterLiveStatus } from "../../infra/printers/status";
 import type { StoreLogger } from "../../shared/logger";
-import { classifyPrintOutcome } from "../printOutcome";
+import { sameJobFile } from "../../infra/printers/files/jobIdentity";
+import { classifyPrintOutcome, describeAmbiguousEnding } from "../printOutcome";
 
 /**
  * What an operator (or a verified mechanism) asserts when a bed is cleared. There
@@ -40,15 +41,6 @@ export function startRefusalReason(status: PrinterLiveStatus): string | null {
 
 /** Run states in which no print has been observed running yet. */
 const UNSTARTED_RUN_STATES = new Set<PrintRun["state"]>(["PENDING", "UNKNOWN"]);
-
-/** Loose filename match — devices may report a path while the run holds a basename. */
-function sameFile(a: string | null, b: string | null): boolean {
-  if (!a || !b) return false;
-  if (a === b) return true;
-  const baseA = a.split(/[\\/]/).pop() ?? a;
-  const baseB = b.split(/[\\/]/).pop() ?? b;
-  return baseA === baseB;
-}
 
 /**
  * Keeps the canonical SQLite {@link PrintRun}s reconciled with the *observed*
@@ -98,6 +90,15 @@ export class RunLifecycleService {
       logger?: StoreLogger;
       /** Opened/closed alongside the bed cycle when wired; optional for tests. */
       operations?: BedOperationsPort;
+      /**
+       * Invited to free the printer's storage once a run is terminal.
+       *
+       * Fire-and-forget and deliberately advisory: reclaiming space is
+       * housekeeping, and a printer that cannot be reached must never hold up
+       * closing a run. The reclaim itself re-checks every safety condition
+       * against fresh rows, so a stale call is harmless.
+       */
+      reclaimStorage?: (printerId: string) => void;
     } = {}
   ) {}
 
@@ -141,7 +142,7 @@ export class RunLifecycleService {
 
     const busy = next.status === "printing" || next.status === "paused";
     if (busy) {
-      if (sameFile(next.currentFile, run.file)) {
+      if (sameJobFile(next.currentFile, run.file)) {
         if (run.state === "PENDING" || run.state === "UNKNOWN") {
           // Positive evidence: the dispatched print IS running. Attach — never mint
           // a second run for a print that survived a restart/reconnect.
@@ -200,18 +201,18 @@ export class RunLifecycleService {
     if (run.state === "RUNNING" || run.state === "PAUSED") {
       const watchedEnd = prev && prev.online && (prev.status === "printing" || prev.status === "paused");
       if (watchedEnd) {
-        const outcome = classifyPrintOutcome(next);
-        if (outcome === "cancelled") {
+        const verdict = classifyPrintOutcome(next);
+        if (verdict.outcome === "cancelled") {
           this.completeRun(run.id, "CANCELLED", {});
-        } else if (outcome === "completed") {
+        } else if (verdict.outcome === "completed") {
           this.completeRun(run.id, "SUCCEEDED", {});
         } else {
-          this.transitionRun(
-            run,
-            "UNKNOWN",
-            {},
-            "печать завершилась без явного признака успеха/отмены — требуется проверка"
-          );
+          // Including a print that stopped at 99.5 %: high progress is not a
+          // terminal state, and recording it as one would complete the task,
+          // release the assignment and open a bed clearance for a part that was
+          // never finished. The message carries the progress so the operator
+          // resolving it can see how far it got.
+          this.transitionRun(run, "UNKNOWN", {}, describeAmbiguousEnding(verdict));
         }
       } else {
         // Reconnect/restart found the printer already idle: the ending was not
@@ -246,7 +247,7 @@ export class RunLifecycleService {
         continue; // poller observation will complete or flag it
       }
       const guard = repos.startGuards.get(run.printerId);
-      const guardIsOurs = guard !== null && (guard.runId === run.id || sameFile(guard.file, run.file));
+      const guardIsOurs = guard !== null && (guard.runId === run.id || sameJobFile(guard.file, run.file));
       if (run.state === "PENDING" && !guardIsOurs) {
         // The durable guard is written BEFORE the physical command leaves; its
         // absence proves the command was never sent. Safe to unwind.
@@ -279,7 +280,7 @@ export class RunLifecycleService {
     if (
       status &&
       (status.status === "printing" || status.status === "paused") &&
-      sameFile(status.currentFile, run.file)
+      sameJobFile(status.currentFile, run.file)
     ) {
       throw new JobError(
         `Принтер сейчас печатает «${status.currentFile}» — разрешать эту печать вручную нельзя`
@@ -559,7 +560,7 @@ export class RunLifecycleService {
       // The dispatched start is confirmed and durably RUNNING — the guard has
       // done its job and is released with the same evidence.
       const guard = repos.startGuards.get(current.printerId);
-      if (guard && (guard.runId === current.id || sameFile(guard.file, current.file))) {
+      if (guard && (guard.runId === current.id || sameJobFile(guard.file, current.file))) {
         repos.startGuards.delete(current.printerId);
       }
     });
@@ -575,7 +576,7 @@ export class RunLifecycleService {
     outcome: "SUCCEEDED" | "FAILED" | "CANCELLED",
     options: { reason?: string; actor?: string } = {}
   ): PrintRun {
-    return this.store.transaction(() => {
+    const closed = this.store.transaction(() => {
       const repos = this.store.repositories;
       const iso = this.nowIso();
       const run = repos.printRuns.getById(runId);
@@ -664,13 +665,20 @@ export class RunLifecycleService {
       }
 
       const guard = repos.startGuards.get(run.printerId);
-      if (guard && (guard.runId === run.id || sameFile(guard.file, run.file))) {
+      if (guard && (guard.runId === run.id || sameJobFile(guard.file, run.file))) {
         repos.startGuards.delete(run.printerId);
       }
       return saved;
     });
-  }
 
+    // The file this run printed is now, in principle, disposable. The reclaim
+    // re-checks every safety condition against fresh rows — including that no
+    // active run still names the file and the device is not printing it — so
+    // this is only an invitation, and it is fire-and-forget: a printer that
+    // cannot be reached must never hold up closing a run.
+    this.options.reclaimStorage?.(closed.printerId);
+    return closed;
+  }
   private unwindNeverSent(run: PrintRun): void {
     this.unwindUnstarted(run, "рестарт до отправки команды", {
       only: "PENDING",
@@ -750,7 +758,7 @@ export class RunLifecycleService {
       }
     }
     const guard = repos.startGuards.get(current.printerId);
-    if (guard && (guard.runId === current.id || sameFile(guard.file, current.file))) {
+    if (guard && (guard.runId === current.id || sameJobFile(guard.file, current.file))) {
       repos.startGuards.delete(current.printerId);
     }
     const task = repos.tasks.getById(current.taskId);

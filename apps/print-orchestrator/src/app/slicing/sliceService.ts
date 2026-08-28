@@ -9,7 +9,10 @@ import { recordAuditEvent } from "../audit";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import { assertTransition } from "../../domain/print/states";
 import type { ArtifactAnalysis, AuditEntityType, Metadata } from "../../domain/print/types";
+import { readModelScale, resolveSliceScale } from "../../domain/print/modelScale";
+import type { Dimensions } from "../../domain/scheduling/compatibility";
 import { computeCacheKey } from "../../domain/slicing/cacheKey";
+import { verifySlicedScale } from "../../domain/slicing/scaleVerification";
 import { validateProfileSet } from "../../domain/slicing/compatibility";
 import { finding } from "../../domain/slicing/findings";
 import { evaluateSliceOutput } from "../../domain/slicing/outputGate";
@@ -307,6 +310,7 @@ export class SliceService {
 
   /** Re-queues every unfinished variant on startup (crash recovery). */
   recover(): number {
+    this.sweepStaleWorkDirs();
     const repos = this.store.repositories;
     const unfinished = repos.sliceVariants.listUnfinished();
     for (const variant of unfinished) {
@@ -324,6 +328,70 @@ export class SliceService {
       this.logger.info?.({ recovered: unfinished.length }, "unfinished slice variants re-queued");
     }
     return unfinished.length;
+  }
+
+  /**
+   * Removes slice work directories left behind by a process that never got to
+   * run its `finally`.
+   *
+   * The per-slice cleanup is a `finally`, which covers everything the process
+   * survives — a slicer failure, a timeout, a thrown error. It cannot cover the
+   * cases that skip user code entirely: SIGKILL, an OOM kill, a host reset, a
+   * container replaced mid-slice. Each of those leaves a `slice-*` directory
+   * holding a staged model and up to three profile JSONs, and this farm's disk
+   * budget has no room for an unbounded pile of them (the deploy already fails a
+   * cold build for want of margin).
+   *
+   * **The staleness rule is the careful part.** Another orchestrator process may
+   * be slicing *right now* into a directory next to ours, and deleting its work
+   * dir mid-slice would corrupt a running job into an unexplainable failure. So
+   * age is the criterion, and the threshold is derived from the slice timeout
+   * rather than picked: no slice can legitimately still be running after its own
+   * wall-clock budget has elapsed, plus a wide margin for a process that is
+   * merely slow to clean up. Anything younger is left alone, even if it looks
+   * abandoned — a directory that is not provably dead is not swept.
+   *
+   * Never throws: a sweep failure must not stop the service from starting.
+   */
+  private sweepStaleWorkDirs(): void {
+    const cutoffMs = Date.now() - this.staleWorkDirAgeMs();
+    let removed = 0;
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(this.options.tmpRoot);
+    } catch (error) {
+      this.logger.warn?.({ err: error, tmpRoot: this.options.tmpRoot }, "slice work dir sweep skipped");
+      return;
+    }
+    for (const name of entries) {
+      // Only ever our own directories: `mkdtemp(join(tmpRoot, "slice-"))`.
+      if (!name.startsWith("slice-")) continue;
+      const dir = path.join(this.options.tmpRoot, name);
+      try {
+        const stat = fs.statSync(dir);
+        if (!stat.isDirectory()) continue;
+        // `mtime` moves as the slice writes into the directory, so a long slice
+        // that is still producing output keeps refreshing its own claim on it.
+        if (stat.mtimeMs > cutoffMs) continue;
+        fs.rmSync(dir, { recursive: true, force: true });
+        removed += 1;
+      } catch (error) {
+        this.logger.warn?.({ err: error, dir }, "could not remove stale slice work dir");
+      }
+    }
+    if (removed > 0) {
+      this.logger.info?.({ removed }, "removed slice work dirs orphaned by an unclean shutdown");
+    }
+  }
+
+  /**
+   * How old a work dir must be before it is provably not in use: the slice
+   * timeout plus an hour of margin, floored at an hour so a very short
+   * configured timeout cannot make the sweep aggressive.
+   */
+  private staleWorkDirAgeMs(): number {
+    const HOUR = 60 * 60 * 1000;
+    return Math.max(this.options.timeoutMs + HOUR, HOUR);
   }
 
   // ── Worker body (the pipeline) ───────────────────────────────────────────────
@@ -406,6 +474,34 @@ export class SliceService {
       return;
     }
 
+    const sourceAnalysis = repos.artifactAnalyses.latestForArtifact(artifact.id);
+
+    // What the slicer must multiply the model's own numbers by — the SAME answer
+    // the size checks use, resolved once in the domain so the two can never
+    // diverge. An STL whose unit nobody has established is refused here rather
+    // than sliced at whatever its raw numbers happen to mean: that divergence is
+    // invisible until the finished part comes off the bed.
+    const sourceGeometry = readSourceGeometry(sourceAnalysis);
+
+    // A project holding several plates is several prints. `--slice 0` slices ALL
+    // of them, and the runner then had to choose one of the outputs by file
+    // mtime — an arbitrary plate, shipped as if it were the model the operator
+    // prepared, with the rest silently dropped. The scheduler already refuses to
+    // *size* such a package (a box spanning several plates is the size of
+    // nothing that will ever be printed); this refuses to *make* one, and says
+    // which action resolves it.
+    if (sourceGeometry.plateCount > 1) {
+      this.block(
+        variant.id,
+        "multi_plate_project",
+        `В файле ${sourceGeometry.plateCount} пластин — это несколько разных печатей. ` +
+          "Экспортируйте нужную пластину отдельным файлом и нарежьте её."
+      );
+      return;
+    }
+
+    const scale = resolveSliceScale(sourceGeometry.fileDeclaresUnit, readModelScale(artifact));
+
     // Creating the isolated work dir can itself fail (tmpRoot removed/unwritable);
     // that error propagates to runSlice so the variant never gets stuck `running`.
     const workDir = await fsp.mkdtemp(path.join(this.options.tmpRoot, "slice-"));
@@ -424,15 +520,28 @@ export class SliceService {
       const outputPath = path.join(workDir, "output.gcode");
       // Hand the runner the runtime status we just probed so it does not spawn a
       // second `--version` for the same slice (the gate still runs — once).
-      await this.runner.slice(
-        { modelPath, machineJsonPath, processJsonPath, filamentJsonPath, outputPath, workDir },
+      const run = await this.runner.slice(
+        {
+          modelPath,
+          machineJsonPath,
+          processJsonPath,
+          filamentJsonPath,
+          outputPath,
+          workDir,
+          scaleFactor: scale.factor
+        },
         { timeoutMs: this.options.timeoutMs, probed: runtime }
       );
 
       // Stage + register + analyse the output with the EXISTING artifact pipeline.
-      const outName = outputName(artifact.name);
+      //
+      // The name carries the extension the SLICER produced, not a fixed
+      // `.gcode`: the artifact's `kind` is derived from this name, so forcing
+      // one would file a `.gcode.3mf` container as plain G-code and hand the
+      // delivery layer a package to wrap a second time.
+      const outName = outputName(artifact.name, run.outputPath);
       const { artifact: outArtifact, analysis } = await this.artifacts.ingestOutputFile({
-        filePath: outputPath,
+        filePath: run.outputPath,
         fileName: outName,
         metadata: { sliceVariantId: variant.id, taskId: variant.taskId, sourceArtifactId: artifact.id }
       });
@@ -440,7 +549,10 @@ export class SliceService {
       // The output analysis — not merely the fact a file appeared — decides the
       // variant's terminal state.
       const current = repos.sliceVariants.getById(variant.id) ?? variant;
-      this.store.transaction(() => this.finalizeOutput(current, outArtifact.id, analysis));
+      const expectedMm = scaleDimensions(sourceGeometry.sizeRaw, scale.factor);
+      this.store.transaction(() =>
+        this.finalizeOutput(current, outArtifact.id, analysis, expectedMm)
+      );
     } finally {
       await fsp.rm(workDir, { recursive: true, force: true }).catch((error) => {
         this.logger.error?.({ err: error, workDir }, "failed to clean up slice work dir");
@@ -529,7 +641,13 @@ export class SliceService {
    * output artifact stays linked for inspection, but an unsafe or unverified file
    * can never go `ready`, be dispatched, or be re-served from cache as ready.
    */
-  private finalizeOutput(variant: SliceVariant, outputArtifactId: string, analysis: ArtifactAnalysis): void {
+  private finalizeOutput(
+    variant: SliceVariant,
+    outputArtifactId: string,
+    analysis: ArtifactAnalysis,
+    /** The size the checks say this model is, in mm; null when it is not known. */
+    expectedMm: Dimensions | null = null
+  ): void {
     const estimates = {
       outputArtifactId,
       outputAnalysisId: analysis.id,
@@ -538,6 +656,27 @@ export class SliceService {
       filamentMm: numberOrNull(analysis.data.filamentUsedMm),
       dimensions: readBbox(analysis.data)
     };
+
+    // Did the slicer actually produce the size we checked? Passing `--scale`
+    // fixes the cause; this catches the effect, because the transform now
+    // depends on an external program's argument handling and a build that
+    // ignored the flag would look exactly like success.
+    const scaleCheck = verifySlicedScale(expectedMm, readBboxSize(analysis.data));
+    if (!scaleCheck.ok) {
+      this.transition(variant, "blocked", "orca", "scale_mismatch", {
+        ...estimates,
+        warnings: analysis.warnings,
+        blockers: [finding("slice_scale_mismatch", scaleCheck.reason ?? "размер нарезки не совпадает")],
+        error: scaleCheck.reason,
+        endedAt: this.nowIso()
+      });
+      this.logger.error?.(
+        { variantId: variant.id, output: outputArtifactId, reason: scaleCheck.reason },
+        "slice output rejected — produced geometry does not match the checked size"
+      );
+      return;
+    }
+
     const gate = evaluateSliceOutput(analysis);
     if (gate.ok) {
       this.transition(variant, "ready", "orca", "sliced", {
@@ -626,9 +765,18 @@ export class SliceService {
 }
 
 /** Derives an output filename from the source (cube.stl → cube.gcode). */
-function outputName(sourceName: string): string {
-  const base = sourceName.replace(/\.[^.]+$/, "");
-  return `${base || "output"}.gcode`;
+/**
+ * The output artifact's name: the source's stem plus the extension the slicer
+ * actually produced.
+ *
+ * `kindForName` reads this name to decide the artifact's kind, so it has to
+ * describe the bytes. It used to be hard-coded `.gcode`.
+ */
+function outputName(sourceName: string, producedPath: string): string {
+  const base = sourceName.replace(/\.[^.]+$/, "") || "output";
+  const lower = producedPath.toLowerCase();
+  const ext = [".gcode.3mf", ".3mf", ".gcode", ".gco", ".g"].find((e) => lower.endsWith(e));
+  return `${base}${ext ?? ".gcode"}`;
 }
 
 /** A safe basename for the temp model file (never a path, never empty). */
@@ -643,6 +791,63 @@ function numberOrNull(value: unknown): number | null {
 }
 
 /** Lifts the analyzer's bbox payload into the variant's dimensions object. */
+/**
+ * The source model's geometry as the checks read it: whether the file declared
+ * its own unit, and its raw box.
+ *
+ * Deliberately reads the same `geometry` block the scheduler's evidence resolver
+ * does, so "the size that was checked" and "the size that was sliced" come from
+ * one statement about the file rather than two readings of it.
+ */
+function readSourceGeometry(analysis: ArtifactAnalysis | null): {
+  fileDeclaresUnit: boolean;
+  sizeRaw: Dimensions | null;
+  /** How many plates the package holds; 1 for an ordinary model, 0 when unknown. */
+  plateCount: number;
+} {
+  const geometry = analysis?.data?.geometry;
+  if (!geometry || typeof geometry !== "object" || Array.isArray(geometry)) {
+    return { fileDeclaresUnit: false, sizeRaw: null, plateCount: 0 };
+  }
+  const record = geometry as Record<string, unknown>;
+  const plateCount = typeof record.plateCount === "number" ? record.plateCount : 0;
+  return {
+    plateCount: record.multiPlate === true ? Math.max(plateCount, 2) : plateCount,
+    fileDeclaresUnit: record.scaleKnown === true,
+    // When the file declared its unit the analyzer already produced millimetres,
+    // and that is the box the checks use; otherwise the raw numbers are what the
+    // confirmed factor multiplies.
+    sizeRaw: dimensionsOf(record.scaleKnown === true ? record.sizeMm : record.sizeRaw)
+  };
+}
+
+/** `[x,y,z]` (or `{x,y,z}`) of positive finite numbers, else null. */
+function dimensionsOf(value: unknown): Dimensions | null {
+  const triple = Array.isArray(value)
+    ? value
+    : value && typeof value === "object"
+      ? [(value as Record<string, unknown>).x, (value as Record<string, unknown>).y, (value as Record<string, unknown>).z]
+      : null;
+  if (!triple || triple.length < 3) return null;
+  const [x, y, z] = triple;
+  if (typeof x !== "number" || typeof y !== "number" || typeof z !== "number") return null;
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+  return x > 0 && y > 0 && z > 0 ? { x, y, z } : null;
+}
+
+/** The expected millimetre size: the source box times the factor the slicer got. */
+function scaleDimensions(size: Dimensions | null, factor: number): Dimensions | null {
+  if (!size || !Number.isFinite(factor) || factor <= 0) return null;
+  return { x: size.x * factor, y: size.y * factor, z: size.z * factor };
+}
+
+/** The `size` triple out of an analysis's bbox block. */
+function readBboxSize(data: Metadata): Dimensions | null {
+  const bbox = data.bbox;
+  if (!bbox || typeof bbox !== "object" || Array.isArray(bbox)) return null;
+  return dimensionsOf((bbox as Record<string, unknown>).size);
+}
+
 function readBbox(data: Metadata): Metadata | null {
   const bbox = data.bbox;
   if (bbox !== null && typeof bbox === "object" && !Array.isArray(bbox)) {

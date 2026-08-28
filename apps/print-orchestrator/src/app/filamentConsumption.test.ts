@@ -11,6 +11,7 @@ import {
   type InventoryConsumer,
   type PendingConsume
 } from "./filamentConsumption";
+import { EXTERNAL_SPOOL_TRAY } from "../infra/printers/status/bambuUsage";
 
 /*
  * Direct unit tests for the completion→deduction mapping. `buildConsumeItems`
@@ -86,7 +87,9 @@ function tray(t: number, remainPct: number | null, over: Partial<AmsTraySnapshot
     material: over.material ?? "PLA",
     color: over.color ?? "#FF0000",
     remainPct,
-    nominalWeightG: over.nominalWeightG ?? 1000,
+    // `??` would swallow an explicit null, and "this spool has no declared
+    // weight" is exactly what the external-spool cases need to express.
+    nominalWeightG: "nominalWeightG" in over ? (over.nominalWeightG ?? null) : 1000,
     active: over.active ?? false
   };
 }
@@ -751,4 +754,159 @@ test("Bambu completion with unmeasurable trays warns once that deduction was ski
   assert.equal(inventory.calls.length, 0);
   const feed = events.list().map((event) => event.text).join("\n");
   assert.match(feed, /нет данных о расходе филамента/);
+});
+
+// ── The external spool, and the difference between measured and estimated ────
+//
+// Bambu's `parseAmsTrays` used to return null for a printer with no AMS, so an
+// external-spool print produced no baseline, no measurement, no reel binding —
+// and, because the "nothing to deduct" branch only pushed a feed line, no
+// durable record either. The feed is capped and unacknowledged, so the warehouse
+// drifted by a spool at a time. This farm's A1 Combo reports zero AMS units and
+// feeds externally, which means every print it has run took that path.
+
+test("an external spool WITH a known weight is measured like any other tray", async () => {
+  const inventory = recordingInventory();
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed());
+  const external = (remainPct: number) =>
+    tray(EXTERNAL_SPOOL_TRAY, remainPct, { nominalWeightG: 1000, material: "PLA" });
+
+  consumption.consumeForPrint(
+    printer(),
+    status(),
+    status({ amsTrays: [external(88)] }),
+    { printId: "run-x", amsStart: [external(95)] },
+    "cube.3mf"
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(inventory.calls.length, 1);
+  assert.equal(inventory.calls[0].amsTray, EXTERNAL_SPOOL_TRAY);
+  assert.equal(inventory.calls[0].grams, 70, "7 % of a 1 kg spool");
+  assert.equal(consumption.listUnreconciled().length, 0, "a measured print owes nothing");
+});
+
+test("an unmeasurable print records a DURABLE debt, not just a feed line", async () => {
+  // The ordinary external spool: no `tray_weight`, so a remain-drop cannot be
+  // turned into grams. Nothing observed it, so nothing may be deducted — but the
+  // obligation must survive the feed scrolling away.
+  const inventory = recordingInventory();
+  const events = new EventFeed();
+  const consumption = new FilamentConsumption(inventory.client, events);
+  const external = (remainPct: number) =>
+    tray(EXTERNAL_SPOOL_TRAY, remainPct, { nominalWeightG: null, material: "PLA" });
+
+  consumption.consumeForPrint(
+    printer(),
+    status(),
+    status({ amsTrays: [external(88)] }),
+    { printId: "run-y", amsStart: [external(95)], estimatedGrams: 128.44 },
+    "cube.3mf"
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(inventory.calls.length, 0, "an estimate is never posted to the warehouse");
+  const debts = consumption.listUnreconciled();
+  assert.equal(debts.length, 1);
+  assert.equal(debts[0].printerId, "a1");
+  assert.equal(debts[0].job, "cube.3mf");
+  assert.equal(debts[0].estimatedGrams, 128.44, "the slicer's figure is kept as an orientation");
+  assert.match(debts[0].reason, /оценка, не замер/, "and is labelled as one");
+  assert.match(feed(events), /спишите вручную/);
+});
+
+test("with no slicer figure either, the debt is recorded with no number invented", async () => {
+  const consumption = new FilamentConsumption(recordingInventory().client, new EventFeed());
+  consumption.consumeForPrint(
+    printer(),
+    status(),
+    status({ amsTrays: [tray(EXTERNAL_SPOOL_TRAY, 88, { nominalWeightG: null })] }),
+    { printId: "run-z", amsStart: [tray(EXTERNAL_SPOOL_TRAY, 95, { nominalWeightG: null })] },
+    null
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  const debts = consumption.listUnreconciled();
+  assert.equal(debts.length, 1);
+  assert.equal(debts[0].estimatedGrams, null, "«we do not know» is not «zero»");
+});
+
+test("a print too small to move `remain` is a measurement of ~0, not a debt", async () => {
+  // The distinction that keeps the debt list usable: this WAS measured, and the
+  // answer was approximately nothing. One row per test cube would bury the real
+  // obligations.
+  const inventory = recordingInventory();
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed());
+  consumption.consumeForPrint(
+    printer(),
+    status(),
+    status({ amsTrays: [tray(0, 80, { nominalWeightG: 1000 })] }),
+    { printId: "run-tiny", amsStart: [tray(0, 80, { nominalWeightG: 1000 })] },
+    "tiny.3mf"
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(inventory.calls.length, 0);
+  assert.equal(consumption.listUnreconciled().length, 0, "measured-as-zero is not an obligation");
+});
+
+test("Moonraker: a reported length is a measurement even when it is zero", async () => {
+  const consumption = new FilamentConsumption(recordingInventory().client, new EventFeed());
+  consumption.consumeForPrint(
+    printer({ id: "k2", protocol: "moonraker" }),
+    status(),
+    status({ filamentUsedMm: 0 }),
+    { printId: "run-k", amsStart: null },
+    "vase.gcode"
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(consumption.listUnreconciled().length, 0);
+});
+
+test("Moonraker: no length reported at all IS a debt", async () => {
+  const consumption = new FilamentConsumption(recordingInventory().client, new EventFeed());
+  consumption.consumeForPrint(
+    printer({ id: "k2", protocol: "moonraker" }),
+    status(),
+    status({ filamentUsedMm: null }),
+    { printId: "run-k2", amsStart: null, estimatedGrams: 42 },
+    "vase.gcode"
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  const debts = consumption.listUnreconciled();
+  assert.equal(debts.length, 1);
+  assert.equal(debts[0].estimatedGrams, 42);
+});
+
+test("a multi-tray print deducts per slot and leaves no debt", async () => {
+  const inventory = recordingInventory();
+  const consumption = new FilamentConsumption(inventory.client, new EventFeed());
+  consumption.consumeForPrint(
+    printer(),
+    status(),
+    status({
+      amsTrays: [
+        tray(0, 90, { nominalWeightG: 1000, material: "PLA" }),
+        tray(1, 70, { nominalWeightG: 1000, material: "PETG" }),
+        tray(2, 50, { nominalWeightG: 1000, material: "ABS" })
+      ]
+    }),
+    {
+      printId: "run-multi",
+      amsStart: [
+        tray(0, 95, { nominalWeightG: 1000, material: "PLA" }),
+        tray(1, 72, { nominalWeightG: 1000, material: "PETG" }),
+        tray(2, 50, { nominalWeightG: 1000, material: "ABS" })
+      ]
+    },
+    "three-colour.3mf"
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // Two slots dropped; the third did not move and is correctly not deducted.
+  assert.equal(inventory.calls.length, 2);
+  assert.deepEqual(
+    inventory.calls.map((c) => [c.amsTray, c.grams]),
+    [[0, 50], [1, 20]]
+  );
+  assert.equal(consumption.listUnreconciled().length, 0);
 });

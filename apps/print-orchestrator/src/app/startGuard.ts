@@ -1,3 +1,4 @@
+import { sameJobFile } from "../infra/printers/files/jobIdentity";
 import { isTimeoutError } from "../shared/fetchWithTimeout";
 import { PrinterCommandError, type PrinterLiveStatus } from "../infra/printers/status";
 import type { StartGuard } from "../domain/print/types";
@@ -60,15 +61,6 @@ export function classifyDispatchError(error: unknown): DispatchOutcome {
  */
 export type GuardDecision = "already-running" | "busy-other" | "held";
 
-/** Loose filename match — the device may report a path while the guard holds a basename. */
-function sameFile(a: string | null, b: string): boolean {
-  if (!a) return false;
-  if (a === b) return true;
-  const baseA = a.split(/[\\/]/).pop() ?? a;
-  const baseB = b.split(/[\\/]/).pop() ?? b;
-  return baseA === baseB;
-}
-
 /**
  * Decides, from an existing guard and a freshly-read device status, whether a
  * new start for `targetFile` may proceed. Pure and total — the single place the
@@ -81,7 +73,7 @@ export function reconcileStartGuard(
 ): GuardDecision {
   const busy = status.status === "printing" || status.status === "paused";
   if (busy) {
-    if (sameFile(status.currentFile, guard.file) || sameFile(status.currentFile, targetFile)) {
+    if (sameJobFile(status.currentFile, guard.file) || sameJobFile(status.currentFile, targetFile)) {
       return "already-running";
     }
     return "busy-other";

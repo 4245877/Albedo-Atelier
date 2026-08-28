@@ -95,6 +95,10 @@ interface Harness {
   /** Files the fake device holds, per printer. */
   onDevice: Map<string, { path: string; size: number }[]>;
   uploads: { printerId: string; remotePath: string; size: number }[];
+  /** Files the fake device delete removed, in order. */
+  deletes: { printerId: string; remotePath: string }[];
+  /** Set to make the fake delete fail (device unreachable / refusing). */
+  deleteFails: boolean;
   listCalls: number;
   startCalls: { printerId: string; file: string }[];
   uploadMode: UploadMode;
@@ -124,10 +128,12 @@ async function makeHarness(tmp: string): Promise<Harness> {
 
   const onDevice = new Map<string, { path: string; size: number }[]>();
   const uploads: Harness["uploads"] = [];
+  const deletes: Harness["deletes"] = [];
   const startCalls: Harness["startCalls"] = [];
   const state = {
     uploadMode: "ok" as UploadMode,
     listingFails: false,
+    deleteFails: false,
     listCalls: 0,
     hold: false,
     waiters: [] as (() => void)[]
@@ -186,6 +192,12 @@ async function makeHarness(tmp: string): Promise<Harness> {
           uploads.push({ printerId: printer.id, remotePath, size: bytes.byteLength });
           return { remotePath, sizeBytes: bytes.byteLength };
       }
+    },
+    deleteFile: async (printer, remotePath) => {
+      if (state.deleteFails) throw new Error("устройство недоступно");
+      const files = onDevice.get(printer.id) ?? [];
+      onDevice.set(printer.id, files.filter((f) => f.path !== remotePath));
+      deletes.push({ printerId: printer.id, remotePath });
     },
     now: () => new Date(ISO)
   });
@@ -247,6 +259,7 @@ async function makeHarness(tmp: string): Promise<Harness> {
     dispatch: new DispatchService(deps),
     onDevice,
     uploads,
+    deletes,
     startCalls,
     get listCalls() {
       return state.listCalls;
@@ -262,6 +275,12 @@ async function makeHarness(tmp: string): Promise<Harness> {
     },
     set listingFails(value: boolean) {
       state.listingFails = value;
+    },
+    get deleteFails() {
+      return state.deleteFails;
+    },
+    set deleteFails(value: boolean) {
+      state.deleteFails = value;
     },
     gate: {
       get hold() {
@@ -986,4 +1005,131 @@ test("an adapter that cannot upload is never asked to — its declared capabilit
   assert.equal(prepared.deviceArtifact.transferMode, "manual_file_transfer");
   assert.equal(prepared.deviceArtifact.state, "NOT_PRESENT");
   assert.ok(calls.includes("k2"));
+});
+
+// ── Reclaiming printer storage ──────────────────────────────────────────────
+//
+// `deleteBambuFile` existed and was called from nowhere, so nothing had ever
+// removed a file from a printer: every package this farm prepared is still on
+// the A1's card, and a K2's G-code root grows the same way. The card fills, and
+// the failure it produces is an upload error during a launch — as far from its
+// cause as a failure can be.
+//
+// The narrow part is what makes a file reclaimable. Deleting one a job still
+// needs is worse than keeping one it does not.
+
+/** Moves an assignment to a terminal state, as closing a run does. */
+function releaseAssignment(assignment: Assignment): void {
+  const repos = h.store.repositories;
+  const current = repos.assignments.getById(assignment.id)!;
+  repos.assignments.update({ ...current, state: "RELEASED", updatedAt: ISO });
+}
+
+test("a delivered file whose assignment is finished is removed from the printer", async () => {
+  const { assignment } = assignReadySlice();
+  await h.devices.prepare(assignment.id);
+  assert.equal((h.onDevice.get("k2") ?? []).length, 1);
+
+  releaseAssignment(assignment);
+  const result = await h.devices.reclaim({ printerId: "k2" });
+
+  assert.equal(result.deleted, 1);
+  assert.deepEqual(h.deletes, [{ printerId: "k2", remotePath: DEVICE_FILE }]);
+  assert.deepEqual(h.onDevice.get("k2"), [], "the card really is freed");
+  assert.equal(recordFor(assignment)?.state, "NOT_PRESENT", "and the record says so");
+});
+
+test("a file whose assignment is still live is NEVER removed", async () => {
+  const { assignment } = assignReadySlice();
+  await h.devices.prepare(assignment.id);
+
+  const result = await h.devices.reclaim({ printerId: "k2" });
+  assert.equal(result.deleted, 0);
+  assert.equal(result.kept, 1);
+  assert.deepEqual(h.deletes, []);
+  assert.equal(recordFor(assignment)?.state, "VERIFIED", "still the file a start would use");
+});
+
+test("a file the printer is PRINTING is never removed, whatever the rows say", async () => {
+  // The dangerous case: deleting from the card a printer is streaming from.
+  const { assignment, taskId } = assignReadySlice();
+  await h.devices.prepare(assignment.id);
+  await h.dispatch.startAssignment(assignment.id, { mode: "manual" });
+  releaseAssignment(assignment);
+
+  const result = await h.devices.reclaim({ printerId: "k2" });
+  assert.equal(result.deleted, 0, "an active run still names this file");
+  assert.deepEqual(h.deletes, []);
+  assert.ok(h.store.repositories.printRuns.findActiveByPrinter("k2"), `run for ${taskId}`);
+});
+
+test("a superseded delivery is reclaimable whatever its assignment is doing", async () => {
+  const { assignment } = assignReadySlice();
+  await h.devices.prepare(assignment.id);
+  const record = recordFor(assignment)!;
+  h.store.repositories.deviceArtifacts.update({
+    ...record,
+    state: "STALE",
+    lastError: "перенарезано",
+    updatedAt: ISO
+  });
+
+  const result = await h.devices.reclaim({ printerId: "k2" });
+  assert.equal(result.deleted, 1, "nothing can start from a stale delivery, so it may go");
+});
+
+test("a delete that fails leaves the record alone, to be retried", async () => {
+  const { assignment } = assignReadySlice();
+  await h.devices.prepare(assignment.id);
+  releaseAssignment(assignment);
+
+  h.deleteFails = true;
+  const first = await h.devices.reclaim({ printerId: "k2" });
+  assert.equal(first.failed, 1);
+  assert.equal(first.deleted, 0);
+  assert.equal(recordFor(assignment)?.state, "VERIFIED", "the record still describes the device");
+
+  h.deleteFails = false;
+  const second = await h.devices.reclaim({ printerId: "k2" });
+  assert.equal(second.deleted, 1, "the sweep is idempotent and safe to repeat");
+});
+
+test("reclaiming twice deletes once — the second pass finds nothing to do", async () => {
+  const { assignment } = assignReadySlice();
+  await h.devices.prepare(assignment.id);
+  releaseAssignment(assignment);
+
+  await h.devices.reclaim({ printerId: "k2" });
+  const again = await h.devices.reclaim({ printerId: "k2" });
+  assert.equal(again.deleted, 0);
+  assert.equal(h.deletes.length, 1);
+});
+
+test("an adapter that cannot delete keeps its files, and says so rather than failing", async () => {
+  // Creality WS has no file API at all: the honest outcome is "kept".
+  const devices = new DeviceArtifactService({
+    store: h.store,
+    storage: h.storage,
+    resolvePrinter: (id) => PRINTERS.find((p) => p.id === id),
+    listFiles: async () => ({ path: "", entries: [] }),
+    uploadFile: async () => ({ remotePath: "x", sizeBytes: 0 }),
+    // No deleteFile at all — a runtime without the capability wired.
+    now: () => new Date(ISO)
+  });
+  const { assignment } = assignReadySlice();
+  await h.devices.prepare(assignment.id);
+  releaseAssignment(assignment);
+
+  const result = await devices.reclaim({ printerId: "k2" });
+  assert.equal(result.deleted, 0);
+  assert.ok(result.kept >= 1);
+});
+
+test("reclaim with no printer named sweeps every printer that has reclaimable files", async () => {
+  const { assignment } = assignReadySlice();
+  await h.devices.prepare(assignment.id);
+  releaseAssignment(assignment);
+
+  const result = await h.devices.reclaim();
+  assert.equal(result.deleted, 1);
 });

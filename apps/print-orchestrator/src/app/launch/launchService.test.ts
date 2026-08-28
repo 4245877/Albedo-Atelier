@@ -97,6 +97,8 @@ interface Knobs {
    * that *names* its refusal now takes.
    */
   classify: "unknown" | "rejected";
+  /** Telemetry age per printer; stale telemetry is a manual-mode blocker. */
+  telemetryAgeMs: Record<string, number>;
   /** Faults the scheduler's view of each printer reports. */
   faults: Record<string, PrinterFault[]>;
   /** Media readability per printer; null = the device does not report it. */
@@ -146,6 +148,7 @@ async function makeHarness(tmp: string): Promise<Harness> {
     failStart: null,
     classify: "unknown",
     faults: {},
+    telemetryAgeMs: {},
     mediaPresent: {}
   };
 
@@ -202,7 +205,7 @@ async function makeHarness(tmp: string): Promise<Harness> {
       ams: false,
       faults: knobs.faults[p.id] ?? [],
       mediaPresent: knobs.mediaPresent[p.id] ?? null,
-      telemetryAgeMs: 1_000,
+      telemetryAgeMs: knobs.telemetryAgeMs[p.id] ?? 1_000,
       materialRemainingSufficient: null,
       printingTimeLeftMs: null,
       activeRunState: null
@@ -926,4 +929,100 @@ test("recovery after a restart holds the unconfirmed run and keeps the exit visi
   const preview = h.launch.preview(task.id);
   assert.equal(preview.state, "unconfirmed", "state survives the restart as itself");
   assert.ok(preview.unresolvedRunId, "and so does the operator's way out");
+});
+
+// ── The `review` verdict's way out ──────────────────────────────────────────
+//
+// The dispatch layer has always had an audited override for warnings a named
+// human may accept. The launch path — the only UI that starts prints — never
+// passed it, so a task the gate marked `review` showed the operator a refusal
+// listing things they could vouch for and no way to vouch for them.
+
+/*
+ * A material mismatch is the case this exercises: a hard refusal by default, and
+ * exactly the sort of thing a person at the machine can settle — they just
+ * swapped the spool and telemetry has not caught up. Not a physical hazard, so
+ * not in `NON_OVERRIDABLE`.
+ */
+function materialMismatch(): void {
+  h.knobs.material["bambu-a1"] = "PLA"; // the job needs PETG
+}
+
+test("without an override, a soft blocker still refuses the launch", async () => {
+  const { task } = seedQueuedBambuJob();
+  bedClear();
+  materialMismatch();
+
+  const refused = await h.launch
+    .launch(task.id, { printerId: "bambu-a1" })
+    .catch((error: Error) => error);
+  assert.ok(refused instanceof Error);
+  assert.match(refused.message, /материал/i);
+  assert.deepEqual(h.startCalls, [], "nothing was sent to the printer");
+});
+
+test("a soft warning can be accepted by a named operator, and the launch proceeds", async () => {
+  const { task } = seedQueuedBambuJob();
+  bedClear();
+  materialMismatch();
+
+  const outcome = await h.launch.launch(task.id, {
+    printerId: "bambu-a1",
+    override: { codes: ["MATERIAL_MISMATCH"], reason: "катушку только что заменил на PETG" },
+    actor: "miha"
+  });
+  assert.equal(outcome.printerId, "bambu-a1");
+  assert.ok(outcome.steps.includes("override_accepted"));
+  assert.equal(h.startCalls.length, 1, "and the print really starts");
+});
+
+test("who accepted what, and why, is recorded", async () => {
+  const { task } = seedQueuedBambuJob();
+  bedClear();
+  materialMismatch();
+
+  await h.launch.launch(task.id, {
+    printerId: "bambu-a1",
+    override: { codes: ["MATERIAL_MISMATCH"], reason: "катушку только что заменил на PETG" },
+    actor: "miha"
+  });
+
+  const entries = h.store.repositories.audit.list(200);
+  const override = entries.find((e) => JSON.stringify(e.detail ?? {}).includes("только что заменил"));
+  assert.ok(override, "an override with no trace is not an audited decision");
+  assert.equal(override.actor, "miha", "the accountable operator, not «system»");
+});
+
+test("an override can NEVER clear a hard safety blocker", async () => {
+  const { task } = seedQueuedBambuJob();
+  // The bed is deliberately left un-cleared: a part is still on the plate.
+  const refused = await h.launch
+    .launch(task.id, {
+      printerId: "bambu-a1",
+      override: { codes: ["BED_NOT_CLEAR", "BED_STATE_UNKNOWN"], reason: "я уверен" },
+      actor: "miha"
+    })
+    .catch((error: Error) => error);
+
+  assert.ok(refused instanceof Error, "an occupied bed is a physical fact, not a warning");
+  assert.deepEqual(h.startCalls, [], "and nothing was sent to the printer");
+});
+
+test("the preview says which problems a human may accept, and which they may not", () => {
+  const { task } = seedQueuedBambuJob();
+  materialMismatch();
+  const preview = h.launch.preview(task.id);
+
+  const problems = preview.candidates.flatMap((c) => c.problems);
+  assert.ok(problems.length > 0, "the fixture must actually produce problems");
+  for (const problem of problems) {
+    // A blocker is never offered as acceptable, whatever its code.
+    if (problem.kind === "blocker") {
+      assert.equal(problem.overridable, false, `${problem.code} is a blocker`);
+    }
+    // And a hard safety code is never acceptable even as a review.
+    if (problem.code === "bed_awaiting_clearance" || problem.code === "bed_unknown") {
+      assert.equal(problem.overridable, false, `${problem.code} must never be waivable`);
+    }
+  }
 });

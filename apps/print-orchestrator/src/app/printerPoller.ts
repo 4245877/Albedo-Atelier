@@ -32,6 +32,12 @@ type PrintRun = {
   startedAtMs: number;
   /** AMS tray `remain` snapshot at print start (Bambu), diffed at completion. */
   amsStart: AmsTraySnapshot[] | null;
+  /**
+   * The slicer's own figure for this job in grams, captured at start. An
+   * orientation for an operator reconciling a print the device could not
+   * measure — never a deduction.
+   */
+  estimatedGrams: number | null;
 };
 
 /**
@@ -87,6 +93,8 @@ export class PrinterPoller {
   } | null;
   /** Durable AMS-baseline writer (see constructor). */
   private readonly persistAmsBaseline?: (printerId: string, amsStart: AmsTraySnapshot[]) => void;
+  /** The slicer's expected grams for the job now on a printer (see constructor). */
+  private readonly estimatedGramsFor?: (printerId: string) => number | null;
   /** Canonical-run reconciliation hook (see constructor). */
   private readonly runObserver?: (
     printerId: string,
@@ -156,6 +164,17 @@ export class PrinterPoller {
        * matter how many times the process restarted in between.
        */
       persistAmsBaseline?: (printerId: string, amsStart: AmsTraySnapshot[]) => void;
+      /**
+       * What the slicer said the print now starting on this printer would use,
+       * in grams, or null when the queue does not know.
+       *
+       * Carried so a print the device cannot measure — an external spool with no
+       * `tray_weight` is the ordinary case on this farm's A1 — leaves the
+       * operator a durable debt with a starting number on it, instead of a feed
+       * line that scrolls away. It is never deducted: see
+       * `ConsumptionConfidence` in filamentConsumption.ts.
+       */
+      estimatedGramsFor?: (printerId: string) => number | null;
     },
     /**
      * Hardware-profile discovery, driven on the poll cadence. Optional and
@@ -171,6 +190,7 @@ export class PrinterPoller {
     this.filamentStock = lightPolicy?.filamentStock;
     this.adoptRun = lightPolicy?.adoptRun;
     this.persistAmsBaseline = lightPolicy?.persistAmsBaseline;
+    this.estimatedGramsFor = lightPolicy?.estimatedGramsFor;
     this.today = new TodayCounters(initialToday);
     this.filament = filament ?? new FilamentConsumption(undefined, events);
     this.filamentSync = filamentSync ?? new FilamentSync(undefined);
@@ -403,7 +423,8 @@ export class PrinterPoller {
       // that yields an understated duration rather than none, and never a
       // negative one.
       startedAtMs: canonical.startedAtMs ?? Date.now(),
-      amsStart: canonical.amsStart ?? null
+      amsStart: canonical.amsStart ?? null,
+      estimatedGrams: this.readEstimatedGrams(printer.id)
     });
     this.logger.info?.(
       {
@@ -445,6 +466,21 @@ export class PrinterPoller {
    * Never allowed to disturb polling: a failure here costs the recoverability of
    * one deduction, while a throw would cost the whole poll cycle.
    */
+  /**
+   * The slicer's expected grams for the job on this printer. Never throws — an
+   * orientation number is a nice-to-have that must not break the poll loop.
+   */
+  private readEstimatedGrams(printerId: string): number | null {
+    if (!this.estimatedGramsFor) return null;
+    try {
+      const grams = this.estimatedGramsFor(printerId);
+      return typeof grams === "number" && Number.isFinite(grams) && grams > 0 ? grams : null;
+    } catch (error) {
+      this.logger.warn?.({ err: error, printer: printerId }, "slicer filament estimate lookup failed");
+      return null;
+    }
+  }
+
   private saveAmsBaseline(printer: PrinterConfig, amsStart: AmsTraySnapshot[]): void {
     if (!this.persistAmsBaseline) return;
     try {
@@ -533,7 +569,8 @@ export class PrinterPoller {
         printId: randomUUID(),
         file: job,
         startedAtMs: Date.now(),
-        amsStart
+        amsStart,
+        estimatedGrams: this.readEstimatedGrams(printer.id)
       });
       // Mirror the baseline into durable storage immediately. Everything in the
       // map above is lost on restart; this is what lets it be rebuilt.
@@ -560,10 +597,9 @@ export class PrinterPoller {
       const run = this.printRuns.get(printer.id);
       this.printRuns.delete(printer.id);
 
-      const outcome = classifyPrintOutcome(next);
+      const { outcome } = classifyPrintOutcome(next);
       if (outcome === "cancelled") {
-        // Explicit cancellation wins over the ≥99 % progress heuristic — but a
-        // cancelled print still consumed real filament, and the device data
+        // A cancelled print still consumed real filament, and the device data
         // (AMS remain drop / extruded length) measures exactly what was used,
         // so the deduction is posted the same as for a completion.
         this.filament.consumeForPrint(printer, prev, next, run, job);

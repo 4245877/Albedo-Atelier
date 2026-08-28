@@ -210,7 +210,14 @@ function normalizeUnreconciled(raw: unknown): UnreconciledConsume | null {
     printerName: toStr(raw.printerName) || printerId,
     job: typeof raw.job === "string" && raw.job ? raw.job : null,
     observedAt: toStr(raw.observedAt) || new Date(0).toISOString(),
-    reason: toStr(raw.reason)
+    reason: toStr(raw.reason),
+    // Absent on rows written before the estimate was carried, and absent on any
+    // print whose slicer figure was never known. Null, not zero: "we do not know
+    // how much" and "it used nothing" are different statements to an operator.
+    estimatedGrams:
+      typeof raw.estimatedGrams === "number" && Number.isFinite(raw.estimatedGrams)
+        ? raw.estimatedGrams
+        : null
   };
 }
 

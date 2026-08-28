@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   bambuMeasurableTrayCount,
+  EXTERNAL_SPOOL_TRAY,
   bambuTrayUsage,
   normalizeTrayColor,
   parseAmsTrays,
@@ -103,10 +104,80 @@ test("parseAmsTrays indexes trays globally across AMS units", () => {
   assert.equal(trays![1].active, true);
 });
 
-test("parseAmsTrays returns null when there is no AMS or no loaded trays", () => {
+test("parseAmsTrays returns null only when NOTHING is loaded — no AMS and no spool", () => {
   assert.equal(parseAmsTrays({}), null);
   assert.equal(parseAmsTrays({ ams: { ams: [] } }), null);
   assert.equal(parseAmsTrays({ ams: { ams: [{ id: "0", tray: [{ id: "0" }] }] } }), null);
+  // An empty external spool is not a loaded reel either.
+  assert.equal(parseAmsTrays({ vt_tray: {} }), null);
+  assert.equal(parseAmsTrays({ vt_tray: { tray_type: "", remain: -1 } }), null);
+});
+
+// ── The external spool as a first-class tray ────────────────────────────────
+//
+// `parseAmsTrays` used to return null for any printer without an AMS, which is
+// this farm's A1 Combo on every print it has ever run: no baseline snapshot, no
+// consumption measurement, and no loaded-reel binding for the filament actually
+// in the machine.
+
+test("a printer with NO AMS still reports its external spool as a loaded reel", () => {
+  const trays = parseAmsTrays({
+    vt_tray: { tray_type: "PLA", tray_color: "00AE42FF", remain: 78, tray_weight: "1000" }
+  });
+  assert.ok(trays, "an external spool is a loaded reel");
+  assert.equal(trays.length, 1);
+  assert.equal(trays[0].tray, EXTERNAL_SPOOL_TRAY);
+  assert.equal(trays[0].material, "PLA");
+  assert.equal(trays[0].color, "#00AE42");
+  assert.equal(trays[0].remainPct, 78);
+  assert.equal(trays[0].nominalWeightG, 1000);
+  assert.equal(trays[0].active, true, "with no AMS there is no other path it could be feeding from");
+});
+
+test("an external spool with no declared weight is loaded but NOT measurable", () => {
+  // The ordinary non-RFID spool. It must appear (so it can be bound to a reel)
+  // and it must not produce grams (so nothing is invented).
+  const trays = parseAmsTrays({ vt_tray: { tray_type: "PETG", remain: 60 } });
+  assert.ok(trays);
+  assert.equal(trays[0].nominalWeightG, null);
+  const later = parseAmsTrays({ vt_tray: { tray_type: "PETG", remain: 52 } });
+  assert.deepEqual(bambuTrayUsage(trays, later), [], "no weight, no grams — never a guess");
+  assert.equal(bambuMeasurableTrayCount(trays, later), 0);
+});
+
+test("an external spool WITH a weight is measured by the same remain rule as an AMS tray", () => {
+  const start = parseAmsTrays({ vt_tray: { tray_type: "PLA", remain: 95, tray_weight: "1000" } });
+  const end = parseAmsTrays({ vt_tray: { tray_type: "PLA", remain: 88, tray_weight: "1000" } });
+  assert.deepEqual(bambuTrayUsage(start, end), [
+    { tray: EXTERNAL_SPOOL_TRAY, grams: 70, material: "PLA", color: null }
+  ]);
+});
+
+test("AMS trays and the external spool coexist, with tray_now choosing the active one", () => {
+  const print = {
+    ams: {
+      tray_now: String(EXTERNAL_SPOOL_TRAY),
+      ams: [{ id: "0", tray: [{ id: "0", tray_type: "PLA", remain: 40, tray_weight: "1000" }] }]
+    },
+    vt_tray: { tray_type: "PETG", remain: 90, tray_weight: "1000" }
+  };
+  const trays = parseAmsTrays(print);
+  assert.ok(trays);
+  assert.deepEqual(trays.map((t) => t.tray), [0, EXTERNAL_SPOOL_TRAY]);
+  assert.equal(trays[0].active, false);
+  assert.equal(trays[1].active, true, "the printer says it is feeding externally");
+  // …and an AMS slot that IS feeding keeps the external spool inactive.
+  const viaAms = parseAmsTrays({ ...print, ams: { ...print.ams, tray_now: "0" } });
+  assert.equal(viaAms?.[0].active, true);
+  assert.equal(viaAms?.[1].active, false);
+});
+
+test("the external spool is never presented to the operator as an AMS slot number", () => {
+  const print = { vt_tray: { tray_type: "PLA", tray_color: "FF0000FF", remain: 70 } };
+  const active = resolveActiveFilament(print, parseAmsTrays(print));
+  assert.equal(active?.material, "PLA");
+  assert.equal(active?.tray, null, "«лоток 254» is not a thing an operator can look at");
+  assert.equal(active?.remainPct, 70);
 });
 
 // ── parseVtTray / resolveActiveFilament ────────────────────────────────────

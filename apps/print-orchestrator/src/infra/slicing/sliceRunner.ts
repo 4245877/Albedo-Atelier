@@ -100,6 +100,16 @@ export interface SliceRequest {
   outputPath: string;
   /** An isolated, already-created working directory for this slice. */
   workDir: string;
+  /**
+   * Multiplier the slicer must apply to the model's own numbers.
+   *
+   * 1 (or omitted) when the file declares its own unit and the slicer will read
+   * it. Otherwise the operator's confirmed `mmPerUnit` — the ONLY thing that
+   * makes an STL's unit-less numbers millimetres, and therefore the thing that
+   * has to reach the slicer, not just the size check. See
+   * {@link file://../../domain/print/modelScale.ts resolveSliceScale}.
+   */
+  scaleFactor?: number;
 }
 
 export interface SliceRunOutput {

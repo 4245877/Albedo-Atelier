@@ -1,6 +1,7 @@
 import { requireReady } from "../capabilities";
 import type { PrinterConfig } from "../config";
 import { BAMBU_PLATE_GCODE_PATH } from "../files/bambuPackage";
+import { anyNamesJob, jobNameStem } from "../files/jobIdentity";
 import { getBambuRawPrint, publishBambuRequest, requestBambuFullReport } from "./bambu";
 import { parseBambuFaults, parseBambuMediaPresent, startBlockingFaults } from "./bambuFaults";
 import { firstText } from "./mapper";
@@ -62,7 +63,7 @@ import { PrinterCommandError, type PrinterFault } from "./types";
  * dashboard's launch timeout); a client that gives up first turns the server's
  * verdict into a phantom failure, which is precisely what it did.
  */
-const START_CONFIRM_TIMEOUT_MS = 45_000;
+export const START_CONFIRM_TIMEOUT_MS = 45_000;
 const START_POLL_INTERVAL_MS = 1_000;
 
 /** Bambu `gcode_state` values that mean a job is under way. */
@@ -150,10 +151,9 @@ export function buildBambuStartPayload(
   printer: PrinterConfig,
   remotePath: string
 ): { payload: Record<string, unknown>; subtaskName: string } {
-  const subtaskName = (remotePath.split("/").pop() ?? remotePath).replace(
-    /\.(gcode\.3mf|3mf|gcode)$/i,
-    ""
-  );
+  // The same normalization the confirmation compares by — derived once, so the
+  // name we announce and the name we look for can never drift apart.
+  const subtaskName = jobNameStem(remotePath);
   const payload = /\.3mf$/i.test(remotePath)
     ? projectFilePayload(printer, remotePath, subtaskName)
     : gcodeFilePayload(remotePath);
@@ -318,22 +318,10 @@ export async function confirmBambuStart(
  * comparison ignores the container extension the device may or may not include.
  */
 function namesJob(print: Record<string, unknown>, subtaskName: string): boolean {
-  const wanted = normalizeJobName(subtaskName);
-  if (!wanted) return false;
-  for (const field of [print.subtask_name, print.gcode_file, print.filename, print.task_name]) {
-    const reported = normalizeJobName(firstText(field));
-    if (reported && (reported === wanted || reported.includes(wanted) || wanted.includes(reported))) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function normalizeJobName(value: string): string {
-  return (value.split("/").pop() ?? value)
-    .replace(/\.(gcode\.3mf|3mf|gcode)$/i, "")
-    .trim()
-    .toLowerCase();
+  return anyNamesJob(
+    [print.subtask_name, print.gcode_file, print.filename, print.task_name].map(firstText),
+    subtaskName
+  );
 }
 
 /** The device's fault codes as it displays them, appended to a refusal message. */

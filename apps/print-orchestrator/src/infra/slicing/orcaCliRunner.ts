@@ -486,12 +486,19 @@ export class OrcaCliRunner implements SliceRunner {
     if (!produced) {
       throw new SliceProcessError("OrcaSlicer не создал выходной файл");
     }
-    if (produced !== req.outputPath) {
-      await fsp.rename(produced, req.outputPath);
+    // The caller names the output `…/output.gcode`, but the extension the SLICER
+    // chose is a statement about the bytes: a machine profile that emits a
+    // `.gcode.3mf` plate package produced a ZIP container, not G-code. Renaming
+    // it to `.gcode` would file a container under a format nothing verified, and
+    // the artifact's `kind` is derived from that name. So the produced extension
+    // is preserved and reported, and the caller decides what to do about it.
+    const outputPath = withProducedExtension(req.outputPath, produced);
+    if (produced !== outputPath) {
+      await fsp.rename(produced, outputPath);
     }
 
     return {
-      outputPath: req.outputPath,
+      outputPath,
       stdout: result.stdout,
       stderr: result.stderr,
       exitCode: result.exitCode,
@@ -501,12 +508,19 @@ export class OrcaCliRunner implements SliceRunner {
 
   /** The exact argv this worker drives the CLI with — shared by slices and the smoke. */
   private sliceArgs(req: Omit<SliceRequest, "outputPath">): string[] {
+    const scale = req.scaleFactor;
     return [
       ...(this.config.baseArgs ?? []),
       "--load-settings",
       `${req.machineJsonPath};${req.processJsonPath}`,
       "--load-filaments",
       req.filamentJsonPath,
+      // The transform goes BEFORE `--slice`: the CLI applies model options in
+      // argv order, so a scale after the slice command would arrive too late.
+      // Omitted entirely at 1 so an ordinary millimetre model's argv is unchanged.
+      ...(typeof scale === "number" && Number.isFinite(scale) && scale > 0 && scale !== 1
+        ? ["--scale", String(scale)]
+        : []),
       "--slice",
       "0",
       "--outputdir",
@@ -539,7 +553,7 @@ export class OrcaCliRunner implements SliceRunner {
     );
   }
 
-  /** Finds the sliced artifact the CLI produced in the work dir (newest .gcode/.3mf). */
+  /** Finds the sliced artifact the CLI produced in the work dir. */
   private async locateOutput(req: SliceRequest): Promise<string | null> {
     if (fs.existsSync(req.outputPath)) return req.outputPath;
     let entries: string[];
@@ -557,17 +571,28 @@ export class OrcaCliRunner implements SliceRunner {
       .filter((name) => /\.(gcode|gcode\.3mf|3mf)$/i.test(name) && !inputs.has(name))
       .map((name) => path.join(req.workDir, name));
     if (candidates.length === 0) return null;
-    // Newest by mtime — the just-written slice.
-    let best: { path: string; mtime: number } | null = null;
-    for (const p of candidates) {
-      try {
-        const stat = await fsp.stat(p);
-        if (!best || stat.mtimeMs > best.mtime) best = { path: p, mtime: stat.mtimeMs };
-      } catch {
-        /* skip */
-      }
-    }
-    return best?.path ?? null;
+    if (candidates.length === 1) return candidates[0];
+
+    // More than one output, and no principled way to tell which is the print.
+    //
+    // This used to take the newest by mtime, which is not a choice — it is a
+    // coin toss with a clock. The case that produces it is a multi-plate
+    // project: `--slice 0` slices every plate, so the work dir holds one file
+    // per plate and "newest" means "whichever the filesystem finished last".
+    // Shipping one of those as the operator's model silently drops the rest and
+    // may print a completely different plate; mtime can also tie outright on a
+    // filesystem with coarse timestamps, making the result unstable between runs
+    // of the very same slice.
+    //
+    // The caller refuses multi-plate projects up front, so reaching here means
+    // the slicer produced something this code does not understand. Naming the
+    // files is more useful than guessing among them.
+    throw new SliceProcessError(
+      `OrcaSlicer создал несколько выходных файлов (${candidates
+        .map((p) => path.basename(p))
+        .sort()
+        .join(", ")}) — невозможно определить, какой из них печатать`
+    );
   }
 
   /**
@@ -694,4 +719,21 @@ function describeExit(result: CliResult, modelName?: string): string {
 function tail(text: string, max = 400): string {
   const trimmed = text.trim();
   return trimmed.length > max ? `…${trimmed.slice(-max)}` : trimmed;
+}
+
+/**
+ * `requested` with the extension of `produced`.
+ *
+ * Longest match wins, so a `.gcode.3mf` container keeps its whole double
+ * extension instead of being split at `.3mf`. An extension nothing recognises is
+ * left as the caller asked, because inventing one is how a container ends up
+ * filed as G-code.
+ */
+function withProducedExtension(requested: string, produced: string): string {
+  const lower = produced.toLowerCase();
+  const known = [".gcode.3mf", ".3mf", ".gcode", ".gco", ".g"];
+  const ext = known.find((candidate) => lower.endsWith(candidate));
+  if (!ext) return requested;
+  const stem = requested.replace(/\.(gcode\.3mf|3mf|gcode|gco|g)$/i, "");
+  return `${stem}${ext}`;
 }

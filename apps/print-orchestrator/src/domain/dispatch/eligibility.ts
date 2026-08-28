@@ -26,13 +26,15 @@
  */
 
 import { gcodeFlavorFitsProtocol } from "../shared/gcodeFlavor";
+import { normalizePrinterModel, printerModelsMatchStrict } from "../slicing/printerModel";
 import {
   evaluateCompatibility,
   type CompatibilityConfig,
   type CompatibilityEvidence,
   type CompatibilityPrinterInput,
   type CompatibilityResult,
-  type CompatibilityTaskInput
+  type CompatibilityTaskInput,
+  type PreflightReasonCode
 } from "../scheduling/compatibility";
 import { evaluateNightWindowFit, type NightWindowFit } from "../scheduling/nightWindow";
 import {
@@ -128,12 +130,26 @@ export interface DispatchFacts {
 
   // ── Printer here-and-now ──────────────────────────────────────────────────
   /**
-   * Names a sliced file may legitimately declare as its target for this printer:
-   * its model, its name and its interchangeability class. A file declaring
-   * anything outside this set is refused (§2.1 "target printer or printer class
-   * inside G-code/3MF").
+   * The machine's **model** — the only field that establishes what hardware this
+   * is (`"Bambu Lab A1"`, `"Creality K2"`). Null/empty when unconfigured.
+   *
+   * Split from the other two on purpose. These used to be one `printerLabels`
+   * array, compared against a file's declared target by substring, and the mix
+   * was wrong twice over: an operator's free-text *name* ("A1 у окна", "принтер
+   * Пети") is decoration and must never establish hardware identity, and the
+   * substring test made `"Bambu Lab A1"` match a printer labelled `"Bambu Lab A1
+   * mini"` — a different bed, different nozzle limits, and a file that would be
+   * accepted onto it.
    */
-  printerLabels: string[];
+  printerModel: string | null;
+  /**
+   * The interchangeability **class** a class-scoped slice may target (every
+   * "Creality K2" is class `k2`). A legitimate second identity for the same
+   * comparison, and kept separate because it answers a different question.
+   */
+  printerClass: string | null;
+  /** The operator-facing name. Shown in refusals, never compared. */
+  printerName: string | null;
   /** Transport/firmware family (moonraker | bambu | creality); null when unknown. */
   printerProtocol: string | null;
   remoteStartSupported: boolean;
@@ -224,10 +240,22 @@ export interface DispatchEligibility extends EligibilityResult {
 /**
  * Maps a preflight `CompatibilityReason.code` onto a stable dispatch reason code.
  * Preflight codes are lower-case and scheduler-facing; the dispatch contract uses
- * the SCREAMING_SNAKE vocabulary the UI/audit/tests key off. Anything unmapped
- * keeps its meaning but is reported under a conservative generic code.
+ * the SCREAMING_SNAKE vocabulary the UI/audit/tests key off.
+ *
+ * `Record<PreflightReasonCode, …>` is the point of the type: this used to be
+ * `Record<string, …>` read through a `?? REASON.MAINTENANCE_BLOCKED`, and three
+ * codes were simply never added — `printer_fault`, `printer_media_missing` and
+ * `launch_unconfirmed`. Each therefore reached the operator as "принтер на
+ * обслуживании", *and* inherited that code's override policy: MAINTENANCE_BLOCKED
+ * is overridable, so a printer displaying a start-blocking fault, a printer with
+ * no SD card, and a printer still holding an unconfirmed previous launch could
+ * all be waved through from the launch screen. The last of those is the guard
+ * against printing one model twice.
+ *
+ * With the vocabulary closed, adding a preflight reason without deciding what it
+ * means here is a compile error rather than a silent downgrade.
  */
-const PREFLIGHT_CODE_MAP: Record<string, ReasonCode> = {
+const PREFLIGHT_CODE_MAP: Record<PreflightReasonCode, ReasonCode> = {
   pinned_elsewhere: REASON.PINNED_ELSEWHERE,
   maintenance: REASON.MAINTENANCE_BLOCKED,
   printer_error: REASON.PRINTER_ERROR,
@@ -256,7 +284,14 @@ const PREFLIGHT_CODE_MAP: Record<string, ReasonCode> = {
   manual_start_only: REASON.REMOTE_START_UNSUPPORTED,
   bed_awaiting_clearance: REASON.BED_NOT_CLEAR,
   bed_unknown: REASON.BED_STATE_UNKNOWN,
-  printer_busy: REASON.PRINTER_BUSY
+  printer_busy: REASON.PRINTER_BUSY,
+  // The three that were missing. Each has its own non-overridable code now, so
+  // the operator reads the actual cause and cannot tick past it.
+  printer_fault: REASON.PRINTER_FAULT,
+  printer_media_missing: REASON.PRINTER_MEDIA_MISSING,
+  launch_unconfirmed: REASON.LAUNCH_UNCONFIRMED,
+  ams_mapping_ambiguous: REASON.AMS_MAPPING_AMBIGUOUS,
+  model_off_bed: REASON.MODEL_OFF_BED
 };
 
 /**
@@ -312,7 +347,7 @@ export function evaluateDispatchEligibility(
     input.preflight.config
   );
 
-  const reasons: EligibilityReason[] = [...liftPreflight(preflight, facts.mode)];
+  const reasons: EligibilityReason[] = [...liftPreflight(preflight, facts)];
   const push = (r: EligibilityReason): void => void reasons.push(r);
 
   pushQueueShape(facts, push);
@@ -333,18 +368,33 @@ export function evaluateDispatchEligibility(
 
 // ── Rule groups ───────────────────────────────────────────────────────────────
 
-/** Preflight verdicts, translated; `review` escalates to `blocker` for the codes above. */
-function liftPreflight(preflight: CompatibilityResult, mode: DispatchMode): EligibilityReason[] {
+/**
+ * Preflight verdicts, translated; `review` escalates to `blocker` for the codes
+ * above.
+ *
+ * One fact is deliberately not lifted twice. The preflight `maintenance` blocker
+ * and this layer's {@link REASON.MANUAL_OPERATION_REQUIRED} are the *same*
+ * physical intervention seen at two altitudes: the planner needs it as "this
+ * printer is held" so it stops placing jobs there, while the dispatch reports
+ * each operation individually, by name and state, and equally non-overridably.
+ * Showing both puts two lines in front of the operator for one half-removed
+ * nozzle, so the less specific one stands down whenever the more specific one is
+ * present. Nothing is weakened: the refusal below is the stricter of the two.
+ */
+function liftPreflight(preflight: CompatibilityResult, facts: DispatchFacts): EligibilityReason[] {
+  const mode = facts.mode;
+  const supersededByOperations = facts.blockingOperations.length > 0;
   const out: EligibilityReason[] = [];
   for (const b of preflight.blockers) {
-    out.push(reason(mapCode(b.code), "blocker", b.message, { stage: "preflight", code: b.code }));
+    if (b.code === "maintenance" && supersededByOperations) continue;
+    out.push(reason(mapPreflightCode(b.code), "blocker", b.message, { stage: "preflight", code: b.code }));
   }
   for (const r of preflight.reviews) {
-    const code = mapCode(r.code);
+    const code = mapPreflightCode(r.code);
     out.push(reason(code, reviewSeverity(code, mode), r.message, { stage: "preflight", code: r.code }));
   }
   for (const w of preflight.warnings) {
-    const code = mapCode(w.code);
+    const code = mapPreflightCode(w.code);
     // A G-code flavor the firmware does not speak is advisory when *planning*
     // but a refusal when actually sending the file to that firmware.
     const severity: "warning" | "blocker" =
@@ -539,24 +589,32 @@ function pushDeclaredTarget(
   push: (r: EligibilityReason) => void
 ): void {
   const declared = a.declaredTargetPrinter?.trim();
-  const labels = f.printerLabels.filter((l) => l.trim().length > 0);
   if (declared) {
-    if (labels.length === 0) {
+    // Model first, class second — the two identities a file may legitimately
+    // declare. The comparison is the farm's ONE model rule
+    // (`printerModelsMatchStrict`), which normalises vendor spelling and kit
+    // suffixes ("Bambu Lab A1 Combo" IS an A1) while keeping every other token
+    // significant, so `A1` ≠ `A1 mini` and `K2` ≠ `K2 Plus`.
+    const identities = [f.printerModel, f.printerClass].filter(
+      (v): v is string => typeof v === "string" && normalizePrinterModel(v).length > 0
+    );
+    const shownAs = f.printerModel?.trim() || f.printerName?.trim() || "—";
+    if (identities.length === 0) {
       push(
         reason(
           REASON.TARGET_PRINTER_UNKNOWN,
           "blocker",
-          `файл собран для «${declared}», но модель принтера неизвестна — сверить не с чем`,
-          { declared }
+          `файл собран для «${declared}», но модель принтера не указана — сверить не с чем`,
+          { declared, printerName: f.printerName }
         )
       );
-    } else if (!labels.some((label) => modelsMatch(declared, label))) {
+    } else if (!identities.some((identity) => printerModelsMatchStrict(declared, identity))) {
       push(
         reason(
           REASON.TARGET_PRINTER_MISMATCH,
           "blocker",
-          `файл собран для «${declared}», а запускается на «${labels[0]}»`,
-          { declared, labels }
+          `файл собран для «${declared}», а запускается на «${shownAs}»`,
+          { declared, model: f.printerModel, printerClass: f.printerClass }
         )
       );
     }
@@ -584,13 +642,6 @@ function pushDeclaredTarget(
 }
 
 /** Model labels compared loosely: case/space-insensitive containment either way. */
-function modelsMatch(a: string, b: string): boolean {
-  const na = a.toLowerCase().replace(/[\s_-]+/g, "");
-  const nb = b.toLowerCase().replace(/[\s_-]+/g, "");
-  if (!na || !nb) return false;
-  return na === nb || na.includes(nb) || nb.includes(na);
-}
-
 function pushDeviceFile(f: DispatchFacts, push: (r: EligibilityReason) => void): void {
   switch (f.deviceFileIdentity) {
     case "missing":
@@ -1102,8 +1153,17 @@ function dedupe(reasons: readonly EligibilityReason[]): EligibilityReason[] {
   return [...byKey.values()];
 }
 
-function mapCode(code: string): ReasonCode {
-  return PREFLIGHT_CODE_MAP[code] ?? REASON.MAINTENANCE_BLOCKED;
+/**
+ * A preflight code in the dispatch vocabulary.
+ *
+ * The map is exhaustive by type, so the fallback is unreachable through the
+ * normal path; it exists for a value that reached here from outside the type
+ * system (a persisted row, a hand-built test input) and is deliberately *not*
+ * a plausible-looking code. `PREFLIGHT_REASON_UNMAPPED` is non-overridable:
+ * a refusal nobody has taught this layer to read is an unknown critical.
+ */
+export function mapPreflightCode(code: string): ReasonCode {
+  return PREFLIGHT_CODE_MAP[code as PreflightReasonCode] ?? REASON.PREFLIGHT_REASON_UNMAPPED;
 }
 
 export type { CompatibilityResult };

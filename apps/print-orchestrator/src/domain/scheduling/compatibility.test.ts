@@ -16,9 +16,11 @@ function task(over: Partial<CompatibilityTaskInput> = {}): CompatibilityTaskInpu
     pinnedPrinterId: null,
     dimensions: { x: 100, y: 100, z: 100 },
     dimensionsScaleKnown: true,
+    placement: null,
     requiredNozzleMm: 0.4,
     gcodeFlavor: "klipper",
     amsRequired: null,
+    toolCount: null,
     needsSlicing: false,
     ...over
   };
@@ -301,4 +303,159 @@ test("a genuinely occupied printer is still reported as busy", () => {
   );
   assert.ok(result.warnings.some((w) => w.code === "printer_busy"));
   assert.ok(!result.blockers.some((b) => b.code === "launch_unconfirmed"));
+});
+
+// ── Multi-material: the analyzer counted tools all along, nobody read it ──────
+//
+// `toolCount` was computed by the G-code analyzer (Bambu's pseudo-tools already
+// filtered out) and consumed by nothing, because `amsRequired` was hard-coded
+// `null` in the evidence provider. A three-colour model therefore passed every
+// check on a machine whose start payload maps every tool to the first loaded
+// tray — it would have printed, in one filament, with nothing anomalous to see.
+
+test("a multi-tool job is refused while no filament→slot mapping exists", () => {
+  const r = evaluateCompatibility(
+    task({ amsRequired: true, toolCount: 3 }),
+    printer({ ams: true }),
+    evidence({ amsSlotMapping: null })
+  );
+  const blocker = r.blockers.find((b) => b.code === "ams_mapping_ambiguous");
+  assert.ok(blocker, "an unresolved mapping must refuse the automatic start");
+  assert.match(blocker.message, /3 инструментов/);
+  assert.equal(r.verdict, "blocked");
+});
+
+test("a resolved mapping lets a multi-tool job through", () => {
+  const r = evaluateCompatibility(
+    task({ amsRequired: true, toolCount: 2 }),
+    printer({ ams: true }),
+    evidence({ amsSlotMapping: "resolved" })
+  );
+  assert.equal(r.blockers.find((b) => b.code === "ams_mapping_ambiguous"), undefined);
+});
+
+test("a single-tool job is untouched by the AMS rules", () => {
+  for (const tools of [1, null]) {
+    const r = evaluateCompatibility(
+      task({ amsRequired: tools === 1 ? false : null, toolCount: tools }),
+      printer({ ams: null }),
+      evidence({})
+    );
+    assert.deepEqual(
+      r.blockers.filter((b) => b.code.startsWith("ams_")),
+      [],
+      `toolCount ${String(tools)} must not raise an AMS refusal`
+    );
+    assert.deepEqual(r.reviews.filter((b) => b.code.startsWith("ams_")), []);
+  }
+});
+
+test("a multi-tool job on a printer with no AMS is refused for BOTH reasons", () => {
+  const r = evaluateCompatibility(
+    task({ amsRequired: true, toolCount: 4 }),
+    printer({ ams: false }),
+    evidence({})
+  );
+  const codes = r.blockers.map((b) => b.code);
+  assert.ok(codes.includes("ams_unsupported"), "the machine cannot feed several filaments");
+  assert.ok(codes.includes("ams_mapping_ambiguous"), "and nothing decided which goes where");
+});
+
+// ── Maintenance: the branch that could never fire ────────────────────────────
+
+test("a blocking intervention on the printer reaches the planner as a maintenance blocker", () => {
+  const r = evaluateCompatibility(
+    task({}),
+    printer({}),
+    evidence({ maintenanceBlockers: ["замена сопла (IN_PROGRESS)"] })
+  );
+  const blocker = r.blockers.find((b) => b.code === "maintenance");
+  assert.ok(blocker, "the planner must stop placing jobs on a machine under service");
+  assert.match(blocker.message, /замена сопла/);
+  assert.equal(r.verdict, "blocked");
+});
+
+// ── Absolute placement on the bed ───────────────────────────────────────────
+//
+// The size check asks whether this printer could make the part; it cannot ask
+// whether the part is over the plate. A third-party G-code sliced for a 350 mm
+// machine can place a 100 mm part at X 200…300 — a comfortable fit by size, and
+// a crash into the frame of a 256 mm A1.
+
+const A1_BED = { x: 256, y: 256, z: 256 };
+const box = (min: [number, number, number], max: [number, number, number]) => ({
+  min: { x: min[0], y: min[1], z: min[2] },
+  max: { x: max[0], y: max[1], z: max[2] }
+});
+
+test("a part that FITS by size but sits off the bed is blocked", () => {
+  const r = evaluateCompatibility(
+    task({ dimensions: { x: 100, y: 100, z: 50 }, placement: box([200, 20, 0], [300, 120, 50]) }),
+    printer({ buildVolume: A1_BED }),
+    evidence({})
+  );
+  const blocker = r.blockers.find((b) => b.code === "model_off_bed");
+  assert.ok(blocker, "100 mm fits 256 mm — but not at X 200…300");
+  assert.match(blocker.message, /X/);
+  assert.equal(r.blockers.find((b) => b.code === "too_large"), undefined, "it is not too large");
+  assert.equal(r.verdict, "blocked");
+});
+
+test("a part placed on the bed passes", () => {
+  const r = evaluateCompatibility(
+    task({ dimensions: { x: 100, y: 100, z: 50 }, placement: box([20, 20, 0], [120, 120, 50]) }),
+    printer({ buildVolume: A1_BED }),
+    evidence({})
+  );
+  assert.equal(r.blockers.find((b) => b.code === "model_off_bed"), undefined);
+});
+
+test("every axis is checked, in both directions", () => {
+  const cases: [string, ReturnType<typeof box>][] = [
+    ["past the right edge", box([200, 20, 0], [300, 120, 50])],
+    ["past the back edge", box([20, 200, 0], [120, 300, 50])],
+    ["taller than the machine", box([20, 20, 0], [120, 120, 400])],
+    ["left of the origin", box([-60, 20, 0], [40, 120, 50])],
+    ["in front of the origin", box([20, -60, 0], [120, 40, 50])],
+    ["below the plate", box([20, 20, -30], [120, 120, 20])]
+  ];
+  for (const [name, placement] of cases) {
+    const r = evaluateCompatibility(
+      task({ dimensions: { x: 100, y: 100, z: 50 }, placement }),
+      printer({ buildVolume: A1_BED }),
+      evidence({})
+    );
+    assert.ok(r.blockers.some((b) => b.code === "model_off_bed"), name);
+  }
+});
+
+test("a part flush with the edge is not blocked by the extrusion outline", () => {
+  // The analysed box is the extrusion outline, half a line width proud of the
+  // model. A part deliberately placed against the edge must not be refused.
+  const r = evaluateCompatibility(
+    task({ dimensions: { x: 256, y: 256, z: 10 }, placement: box([-0.4, -0.4, 0], [256.4, 256.4, 10]) }),
+    printer({ buildVolume: A1_BED }),
+    evidence({})
+  );
+  assert.equal(r.blockers.find((b) => b.code === "model_off_bed"), undefined);
+});
+
+test("no placement and no build volume are each an honest silence, not a refusal", () => {
+  const noPlacement = evaluateCompatibility(
+    task({ dimensions: { x: 100, y: 100, z: 50 }, placement: null }),
+    printer({ buildVolume: A1_BED }),
+    evidence({})
+  );
+  assert.equal(noPlacement.blockers.find((b) => b.code === "model_off_bed"), undefined);
+
+  const noBed = evaluateCompatibility(
+    task({ dimensions: null, placement: box([900, 900, 0], [999, 999, 9]) }),
+    printer({ buildVolume: null }),
+    evidence({})
+  );
+  assert.equal(
+    noBed.blockers.find((b) => b.code === "model_off_bed"),
+    undefined,
+    "an unknown bed cannot judge a placement — other rules refuse the unknown"
+  );
 });

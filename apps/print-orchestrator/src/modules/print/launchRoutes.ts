@@ -21,7 +21,7 @@ import { ValidationError } from "../../core/errors";
  *   GET  /launch/:taskId?printer=…   launch preview (candidates, ranking, checks)
  *
  * Actions (guarded by the shared CSRF/token middleware):
- *   POST /launch/:taskId             body: { printerId?, confirmations?[], idempotencyKey?, operator? }
+ *   POST /launch/:taskId             body: { printerId?, confirmations?[], override?, idempotencyKey?, operator? }
  */
 export function registerLaunchRoutes(
   app: FastifyInstance,
@@ -40,6 +40,7 @@ export function registerLaunchRoutes(
     Body: {
       printerId?: unknown;
       confirmations?: unknown;
+      override?: { codes?: unknown; reason?: unknown };
       idempotencyKey?: unknown;
       operator?: unknown;
     };
@@ -51,11 +52,18 @@ export function registerLaunchRoutes(
       throw new ValidationError("Поле «confirmations» должно быть массивом строк");
     }
 
+    // An explicit, audited acceptance of overridable warnings — the `review`
+    // verdict's way out. Shape is validated here; WHICH codes may be waived is
+    // the dispatch gate's decision, and a hard blocker is refused there whatever
+    // this asks for.
+    const override = readOverride(body.override);
+
     const outcome = await services.launch.launch(request.params.taskId, {
       ...(str(body.printerId) ? { printerId: str(body.printerId) as string } : {}),
       ...(confirmations
         ? { confirmations: confirmations.filter((c): c is string => typeof c === "string") }
         : {}),
+      ...(override ? { override } : {}),
       // The client supplies the idempotency key, which is what makes a double
       // click or a refresh-and-retry return the first run instead of starting a
       // second print. Absent, the dispatch still guards physically (one active
@@ -70,4 +78,28 @@ export function registerLaunchRoutes(
 
 function str(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/**
+ * Validates an override's *shape*. Both fields are mandatory: an override with
+ * no codes accepts nothing, and one with no reason is not a decision anybody can
+ * be held to later.
+ */
+function readOverride(raw: unknown): { codes: string[]; reason: string } | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ValidationError("Поле «override» должно быть объектом { codes, reason }");
+  }
+  const record = raw as { codes?: unknown; reason?: unknown };
+  const codes = Array.isArray(record.codes)
+    ? record.codes.filter((c): c is string => typeof c === "string" && c.trim().length > 0)
+    : [];
+  const reason = typeof record.reason === "string" ? record.reason.trim() : "";
+  if (codes.length === 0) {
+    throw new ValidationError("«override.codes» должен перечислять принимаемые предупреждения");
+  }
+  if (!reason) {
+    throw new ValidationError("«override.reason» обязателен — подтверждение без причины не подтверждение");
+  }
+  return { codes, reason };
 }

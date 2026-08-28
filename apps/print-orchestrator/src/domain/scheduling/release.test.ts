@@ -239,3 +239,69 @@ test("an operation waits for its own window even when the operator is available"
   });
   assert.equal(out.get("p1")?.releaseAtMs, noon + 2 * H + 5 * MIN);
 });
+
+// ── An intervention that was attempted and failed ───────────────────────────
+//
+// A `FAILED` operation stays blocking on purpose — a nozzle that is still
+// clogged holds the machine exactly as it did before. What it loses is a
+// meaningful duration: `estimatedMinutes` describes a routine attempt, and the
+// failure is evidence that this machine did not behave routinely. Projecting a
+// release from it promises the queue a repair nobody has made.
+
+test("a failed operation has no projectable end — the release is unknown, not «25 minutes»", () => {
+  const out = projectFarmRelease({
+    nowMs: NOW,
+    machines: [machine("p1")],
+    operations: [
+      operation("op1", "p1", { type: "NOZZLE_CHANGE", label: "замена сопла", minutes: 25, failed: true })
+    ],
+    nextOperatorSlot: nineToFive
+  });
+  const p1 = out.get("p1");
+  assert.equal(p1?.releaseAtMs, null, "the estimate no longer describes what has to happen");
+  assert.equal(p1?.code, "RELEASE_BLOCKED_FAILED_OPERATION");
+  assert.match(p1?.reason ?? "", /не выполнена/);
+});
+
+test("the same operation, not yet attempted, still projects normally", () => {
+  const out = projectFarmRelease({
+    nowMs: NOW,
+    machines: [machine("p1")],
+    operations: [
+      operation("op1", "p1", { type: "NOZZLE_CHANGE", label: "замена сопла", minutes: 25 })
+    ],
+    nextOperatorSlot: nineToFive
+  });
+  // 08:00 (the operator's first window) + 25 min.
+  const day = Math.floor(NOW / (24 * H)) * 24 * H;
+  assert.equal(out.get("p1")?.releaseAtMs, day + 8 * H + 25 * MIN);
+});
+
+test("a failed operation poisons the printer: a later computable one cannot repair it", () => {
+  const out = projectFarmRelease({
+    nowMs: NOW,
+    machines: [machine("p1")],
+    operations: [
+      operation("op1", "p1", { label: "замена сопла", minutes: 25, failed: true, createdAtMs: NOW }),
+      operation("op2", "p1", { label: "снятие модели", minutes: 5, createdAtMs: NOW + 1000 })
+    ],
+    nextOperatorSlot: nineToFive
+  });
+  assert.equal(out.get("p1")?.releaseAtMs, null);
+});
+
+test("a failed operation on one printer does not silently free another", () => {
+  const out = projectFarmRelease({
+    nowMs: NOW,
+    machines: [machine("p1"), machine("p2")],
+    operations: [
+      operation("op1", "p1", { minutes: 25, failed: true }),
+      operation("op2", "p2", { minutes: 5, createdAtMs: NOW + 1000 })
+    ],
+    nextOperatorSlot: nineToFive
+  });
+  assert.equal(out.get("p1")?.releaseAtMs, null);
+  // One operator, and the hands that failed on p1 are of unknown availability
+  // afterwards — the existing fail-closed chaining rule, not a new one.
+  assert.equal(out.get("p2")?.releaseAtMs, null);
+});

@@ -7,10 +7,12 @@ import { assertTransition, DEVICE_ARTIFACT_TRANSITIONS } from "../../domain/prin
 import type {
   Artifact,
   Assignment,
+  AssignmentState,
   DeviceArtifact,
   DeviceArtifactState,
   DeviceTransferMode,
-  Metadata
+  Metadata,
+  PrintRun
 } from "../../domain/print/types";
 import type { SliceVariant } from "../../domain/slicing/types";
 import { capabilitiesOf, type PrinterCapabilities } from "../../infra/printers/capabilities";
@@ -20,6 +22,7 @@ import {
   buildBambuPlatePackage,
   MAX_DEVICE_UPLOAD_BYTES,
   normalizeStartablePath,
+  sameJobFile,
   type PrinterFilesListing
 } from "../../infra/printers/files";
 import { deriveBambuModelCode } from "../../domain/printers/modelSpecs";
@@ -113,9 +116,33 @@ export interface DeviceArtifactDeps {
   ): Promise<{ remotePath: string; sizeBytes: number }>;
   /** Capability lookup; defaults to the declared table (overridable in tests). */
   capabilities?(printer: PrinterConfig): PrinterCapabilities;
+  /**
+   * Removes a file from a device; only called when the adapter declares
+   * `supportsFileDelete`. Optional so a runtime without it simply keeps its
+   * files (and says so) rather than failing.
+   */
+  deleteFile?(printer: PrinterConfig, remotePath: string): Promise<void>;
   now?: () => Date;
   logger?: StoreLogger;
 }
+
+/**
+ * States whose files are candidates for reclamation. A `NOT_PRESENT` row has
+ * nothing on the device; an `UPLOADING` one is being written to right now.
+ */
+const RECLAIMABLE_STATES: readonly DeviceArtifactState[] = [
+  "PRESENT_UNVERIFIED",
+  "VERIFIED",
+  "INVALID",
+  "FAILED",
+  "STALE"
+];
+
+/** Assignment states after which nothing can start from the delivery any more. */
+const TERMINAL_ASSIGNMENT_STATES: ReadonlySet<AssignmentState> = new Set<AssignmentState>([
+  "RELEASED",
+  "CANCELLED"
+]);
 
 /** Everything `prepare` resolved before touching the device. */
 interface PreparationTarget {
@@ -166,6 +193,130 @@ export class DeviceArtifactService {
     const path = assignment.binding.expectedRemotePath;
     if (!path) return null;
     return this.deps.store.repositories.deviceArtifacts.findBySlot(assignment.printerId, path);
+  }
+
+  /**
+   * **Frees the printer's storage** of files no job can still need.
+   *
+   * `deleteBambuFile` existed and was called from nowhere, so nothing had ever
+   * removed a file from a printer: every `<stem>-<sha8>.gcode.3mf` this farm has
+   * prepared is still on the A1's MicroSD card, and a K2's G-code root grows the
+   * same way. The card fills, and the failure it produces is an upload error
+   * during a launch — as far from its cause as a failure can be.
+   *
+   * **What makes a file reclaimable is deliberately narrow.** Deleting a file a
+   * job still needs is worse than keeping one it does not: the print fails at
+   * start, or — if it is deleted mid-print from the card the printer is
+   * streaming — during. So all of these must hold:
+   *
+   *  - the row is `STALE` or `INVALID` (superseded or unusable), **or** its
+   *    assignment has reached a terminal state;
+   *  - **no active run** on that printer names that file. A run that is PENDING,
+   *    RUNNING, PAUSED or UNKNOWN may still be printing it, or may still need it
+   *    for a retry after the operator resolves it;
+   *  - the printer is not currently printing that file, whatever the rows say —
+   *    the device's own report is the last word before a delete;
+   *  - the adapter can actually delete.
+   *
+   * Idempotent and safe to repeat: both adapters treat "already gone" as
+   * success, and a failure leaves the row alone to be retried by the next sweep.
+   * Never throws.
+   */
+  async reclaim(options: { printerId?: string; actor?: string } = {}): Promise<{
+    deleted: number;
+    kept: number;
+    failed: number;
+  }> {
+    const repos = this.deps.store.repositories;
+    const actor = options.actor ?? "system";
+    let deleted = 0;
+    let kept = 0;
+    let failed = 0;
+
+    const printerIds = options.printerId
+      ? [options.printerId]
+      : [...new Set(repos.deviceArtifacts.listByStates(RECLAIMABLE_STATES).map((r) => r.printerId))];
+
+    for (const printerId of printerIds) {
+      const printer = this.deps.resolvePrinter(printerId);
+      if (!printer) continue;
+      if (!this.capabilitiesOf(printer).supportsFileDelete || !this.deps.deleteFile) {
+        kept += repos.deviceArtifacts.listByPrinter(printerId).length;
+        continue;
+      }
+
+      // One live read of what this printer is holding, for the whole printer.
+      const activeRun = repos.printRuns.findActiveByPrinter(printerId);
+
+      for (const record of repos.deviceArtifacts.listByPrinter(printerId)) {
+        const why = this.whyKeep(record, activeRun);
+        if (why !== null) {
+          kept += 1;
+          continue;
+        }
+        // Serialised on the slot, so a concurrent `prepare` for the same path
+        // cannot be uploading while this deletes.
+        const ok = await this.slots.run(slotKey(printerId, record.remotePath), async () => {
+          try {
+            await this.deps.deleteFile!(printer, record.remotePath);
+            return true;
+          } catch (error) {
+            this.logger.warn?.(
+              { err: error, printer: printerId, file: record.remotePath },
+              "could not remove a superseded file from the printer — will retry"
+            );
+            return false;
+          }
+        });
+        if (!ok) {
+          failed += 1;
+          continue;
+        }
+        this.transition(
+          record,
+          "NOT_PRESENT",
+          { verification: null, lastError: null },
+          actor,
+          "reclaimed"
+        );
+        deleted += 1;
+      }
+    }
+
+    if (deleted > 0 || failed > 0) {
+      this.logger.info?.({ deleted, kept, failed }, "reclaimed device storage");
+    }
+    return { deleted, kept, failed };
+  }
+
+  /**
+   * Why this file must stay on the device, or null when it may go.
+   *
+   * Returns a *reason* rather than a boolean so the decision is legible in a log
+   * and in a test failure — "kept" with no explanation is exactly the shape of
+   * answer that hides a bug.
+   */
+  private whyKeep(record: DeviceArtifact, activeRun: PrintRun | null): string | null {
+    if (record.state === "UPLOADING") return "перенос ещё идёт";
+    if (record.state === "NOT_PRESENT") return "файла и так нет на устройстве";
+
+    if (activeRun && sameJobFile(activeRun.file, record.remotePath)) {
+      return `принтер занят печатью «${activeRun.file}» из этого файла`;
+    }
+
+    // A superseded or unusable delivery is reclaimable whatever its assignment
+    // is doing: by definition nothing may start from it.
+    if (record.state === "STALE" || record.state === "INVALID" || record.state === "FAILED") return null;
+
+    if (!record.assignmentId) {
+      return "файл не привязан к назначению — судить о нём нельзя";
+    }
+    const assignment = this.deps.store.repositories.assignments.getById(record.assignmentId);
+    if (!assignment) return null; // the assignment is gone; nothing can start from it
+    if (!TERMINAL_ASSIGNMENT_STATES.has(assignment.state)) {
+      return `назначение ${assignment.id} ещё в состоянии ${assignment.state}`;
+    }
+    return null;
   }
 
   /**
@@ -472,7 +623,7 @@ export class DeviceArtifactService {
     // live telemetry: the package must describe the slice, not the machine's
     // current state.
     const binding = target.assignment.binding;
-    const pkg = buildBambuPlatePackage({
+    const pkg = await buildBambuPlatePackage({
       gcode,
       printerModelId: modelId,
       nozzleDiameterMm: binding.nozzleMm ?? printer.nozzleDiameterMm ?? 0.4,

@@ -140,3 +140,52 @@ function isStale(confirmation: ModelScaleConfirmation, artifact: Artifact): bool
 export function scaleMmPerUnit(confirmation: ModelScaleConfirmation): number {
   return (mmPerUnit(confirmation.units) ?? 1) * confirmation.scaleFactor;
 }
+
+/**
+ * **The one factor the slicer must apply**, and the only place that question is
+ * answered.
+ *
+ * Before this, two layers disagreed about the same model and neither knew it.
+ * The scheduler sized an STL as `sizeRaw × mmPerUnit` — honouring the operator's
+ * confirmation that "these numbers are inches" — while the slicer was handed the
+ * file untouched. A 2-inch cube was therefore *checked* as 50.8 mm (against the
+ * bed, the build volume, the plan) and *printed* as 2 mm. Neither layer was
+ * wrong on its own terms, nothing compared them, and the only way to discover it
+ * was to look at the finished part.
+ *
+ * The rule is one sentence: **apply the confirmation, and only the confirmation.**
+ *
+ *  - **The file declares its own unit** (`scaleKnown` — a 3MF with a convertible
+ *    `unit` attribute). The slicer reads exactly the same declaration, so its
+ *    geometry is already millimetres and a factor would double-apply it. → `1`.
+ *  - **A valid confirmation exists for unit-less numbers** — the STL case. The
+ *    slicer has nothing to read, so the confirmation is the only thing that makes
+ *    those numbers millimetres, and it must reach the slicer too. → `mmPerUnit`.
+ *  - **Nothing is confirmed, or the confirmation is stale** against the current
+ *    bytes. → `1`, deliberately: this is not a divergence but an honest unknown,
+ *    and both layers hold the *same* raw numbers. The size stays unproven, which
+ *    is what the dispatch gate already refuses to start on
+ *    (`MODEL_SCALE_UNKNOWN`). Refusing to *slice* as well would take away a
+ *    useful "prepare it and look at it" step without preventing anything the
+ *    start gate does not already prevent.
+ *
+ * The factor is therefore always a number, and the interesting output is
+ * `reason`: it is what the audit trail records and what the output verification
+ * compares against.
+ */
+export interface SliceScale {
+  /** Multiplier for the model's own numbers. Always usable; never a guess above 1. */
+  factor: number;
+  reason: "declared_by_file" | "confirmed_by_operator" | "unconfirmed" | "stale_confirmation";
+}
+
+export function resolveSliceScale(
+  /** `geometry.scaleKnown` from the source analysis: did the file declare its unit? */
+  fileDeclaresUnit: boolean,
+  scale: ResolvedModelScale | null
+): SliceScale {
+  if (fileDeclaresUnit) return { factor: 1, reason: "declared_by_file" };
+  if (!scale) return { factor: 1, reason: "unconfirmed" };
+  if (scale.stale) return { factor: 1, reason: "stale_confirmation" };
+  return { factor: scale.mmPerUnit, reason: "confirmed_by_operator" };
+}

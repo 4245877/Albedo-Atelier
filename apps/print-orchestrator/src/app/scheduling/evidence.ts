@@ -15,6 +15,8 @@ import {
   type CompatibilityTaskInput,
   type Dimensions
 } from "../../domain/scheduling/compatibility";
+import { OPERATION_LABELS } from "../../domain/operations/states";
+import { OPEN_OPERATION_STATES } from "../../domain/operations/types";
 import { readModelScale, type ResolvedModelScale } from "../../domain/print/modelScale";
 import { resolveUnits } from "../../domain/shared/units";
 import { readFilament, readMachine } from "../../domain/slicing/orcaProfile";
@@ -144,6 +146,7 @@ export class EvidenceResolver {
     const material =
       task.material ?? filamentFields?.filamentType ?? analysis?.material ?? null;
     const gcodeFlavor = machineFields?.gcodeFlavor ?? null;
+    const toolCount = readToolCount(analysis);
 
     // Build volume, in priority order: the explicit config field, then the ready
     // slice's own machine bed, then the approved machine profile bound to this
@@ -168,14 +171,20 @@ export class EvidenceResolver {
       // No dimensions at all is already reported as `dimensions_unknown`; the
       // scale flag only matters when there ARE numbers, so it defaults to true.
       dimensionsScaleKnown: readDimensions?.scaleKnown ?? true,
+      placement: readPlacement(analysis),
       requiredNozzleMm,
       gcodeFlavor,
-      // No AMS/multi-material requirement is recorded anywhere in the model yet
-      // (neither the task nor the analyzers detect it), so this stays an honest
-      // `null` = unknown rather than a fabricated boolean. The compatibility AMS
-      // branch only fires on `true`, so it is dormant — not wrong — until a real
-      // source (a task field or a multi-filament analysis signal) feeds it.
-      amsRequired: null,
+      // The analyzer HAS been counting tool selects all along — `toolCount`, with
+      // Bambu's pseudo-tools (T255 park, T1000 AMS unload) already filtered out.
+      // It simply had no consumer: `amsRequired` was hard-coded `null`, so the
+      // whole AMS branch of compatibility was dormant and a three-colour model
+      // passed every check on a machine that would print it in one filament.
+      //
+      // A count is only evidence when there is one: no analysis, or an analysis
+      // that did not report a count, stays `null` = unknown rather than becoming
+      // a fabricated `false`.
+      toolCount,
+      amsRequired: toolCount === null ? null : toolCount > 1,
       needsSlicing
     };
 
@@ -188,7 +197,13 @@ export class EvidenceResolver {
       heldByUnstartedRun: this.heldByUnstartedRun(printer.id),
       buildVolumeConflict,
       telemetryAgeMs: printer.telemetryAgeMs,
-      maintenanceBlockers: [],
+      maintenanceBlockers: this.maintenanceBlockersFor(printer),
+      // Nothing in this system decides a filament→tool slot mapping yet, so the
+      // honest answer is "none decided" and the compatibility gate refuses the
+      // automatic multi-material start. This is the field a future mapping
+      // resolver fills — the refusal is not a placeholder for it, it is the
+      // correct answer until one exists.
+      amsSlotMapping: null,
       sliceEtaS: variant?.orcaEtaS ?? null,
       gcodeEtaS: analysis?.estimatedDurationS ?? null
     };
@@ -204,6 +219,41 @@ export class EvidenceResolver {
       variant,
       bedCycle: bed
     };
+  }
+
+  /**
+   * The interventions that put this printer **out of service** — as opposed to
+   * merely busy for a known stretch.
+   *
+   * `maintenanceBlockers` was hard-coded `[]`, so the maintenance branch of
+   * compatibility was unreachable. The obvious repair — feed it every open
+   * blocking operation — is wrong, and the planner's own tests say why: a
+   * 20-minute nozzle change is not a reason to declare the machine incompatible
+   * with the job, it is a reason to start the job twenty minutes later, and the
+   * release projection already models exactly that (operator cursor, windows,
+   * segments). Blocking every such printer at the *capability* layer would throw
+   * that away and leave the work unplaced.
+   *
+   * What the release projection genuinely cannot model is an operation that has
+   * already been **attempted and failed**. It stays blocking on purpose — "nozzle
+   * still clogged" — but its estimated duration no longer means anything: there
+   * is no basis for saying the next attempt ends at a known time, and computing
+   * one produces a plan built on a repair nobody has made. That is the sustained
+   * out-of-service state, it has a real source, and it is what this reports.
+   *
+   * Deliberately NOT sourced from an inventory "disabled" flag: disabling a
+   * printer means "do not use this machine at all" and also hides its telemetry
+   * and camera, which is a different statement about a different situation.
+   */
+  private maintenanceBlockersFor(printer: SchedulerPrinterRef): string[] {
+    return this.ctx.store.repositories.manualOperations
+      .listByPrinter(printer.id, OPEN_OPERATION_STATES)
+      .filter((op) => op.blocking && op.state === "FAILED")
+      .map(
+        (op) =>
+          `${OPERATION_LABELS[op.type]} не выполнена${op.note ? `: ${op.note}` : ""} — ` +
+          "повторите операцию и подтвердите её"
+      );
   }
 
   /**
@@ -528,4 +578,54 @@ function positive(d: Dimensions): Dimensions | null {
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+/**
+ * How many physical tools the analysed file uses, or null when the analysis
+ * cannot say.
+ *
+ * Only a *completed* analysis counts. A pending, running or failed one has no
+ * opinion, and reading its absent count as "one tool" would turn "we have not
+ * looked" into "this is a single-material job" — exactly the direction the
+ * fail-closed rule forbids.
+ */
+function readToolCount(analysis: ArtifactAnalysis | null): number | null {
+  if (!analysis || analysis.state !== "ready") return null;
+  const raw = analysis.data.toolCount;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 1) return null;
+  return Math.floor(raw);
+}
+
+/**
+ * Where a sliced file places the printed body on the bed, in millimetres — or
+ * null when the file does not answer that question.
+ *
+ * Three conditions, all necessary:
+ *
+ *  - **The file must be G-code.** A model carries no bed position; the slicer
+ *    chooses one. Reading a model's own coordinates as a bed placement would
+ *    refuse every STL that happens to be modelled away from the origin.
+ *  - **The analyzer must have measured the OBJECT.** `bboxBasis` says what the
+ *    box is: `object` means the slicer's own "this is the model" markers, which
+ *    is a statement about the part. `extrusion` and `toolpath` include the
+ *    machine's purge and parking moves, which Bambu deliberately draws off the
+ *    front edge — blocking on those would refuse correct files for doing the
+ *    right thing.
+ *  - **The numbers must be proven millimetres**, which for G-code they are: it
+ *    is machine coordinates by definition.
+ *
+ * Anything else is null, and the placement rule simply does not fire. The size
+ * check, the declared-target check and the review verdict all still apply.
+ */
+function readPlacement(
+  analysis: ArtifactAnalysis | null
+): { min: Dimensions; max: Dimensions } | null {
+  if (!analysis || analysis.state !== "ready" || analysis.detectedFormat !== "gcode") return null;
+  if (analysis.data.bboxBasis !== "object") return null;
+  const bbox = analysis.data.bbox;
+  if (!bbox || typeof bbox !== "object" || Array.isArray(bbox)) return null;
+  const record = bbox as Record<string, unknown>;
+  const min = tripleOf(record.min);
+  const max = tripleOf(record.max);
+  return min && max ? { min, max } : null;
 }

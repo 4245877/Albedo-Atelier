@@ -17,7 +17,7 @@ import {
   type PrinterConfig,
   type PrinterConfigSource
 } from "../infra/printers/config";
-import { fetchPrinterFiles, uploadPrinterFile } from "../infra/printers/files";
+import { deletePrinterFile, fetchPrinterFiles, uploadPrinterFile } from "../infra/printers/files";
 import type {
   DeviceFileIdentity,
   DispatchEligibility
@@ -288,7 +288,8 @@ export class FarmRuntime implements PrintServices {
             metadata: { ...run.metadata, [AMS_BASELINE_KEY]: amsStart },
             updatedAt: new Date().toISOString()
           });
-        }
+        },
+        estimatedGramsFor: (printerId) => this.slicerFilamentGrams(printerId)
       },
       // Hardware discovery on the poll cadence. Like the run observer, it only
       // acts once the store is open — the poll loop must never force a lazy
@@ -601,6 +602,39 @@ export class FarmRuntime implements PrintServices {
     return this.profileServiceRef;
   }
 
+  /**
+   * What the slicer expected the print now on `printerId` to consume, in grams.
+   *
+   * Best evidence first: the confirmed slice variant's own `filamentG` (produced
+   * for this exact printer and profile set), then the source analysis's
+   * `estimatedFilamentG` (what the file declares about itself). Null when
+   * neither exists.
+   *
+   * This number NEVER becomes a deduction — it is attached to an unreconciled
+   * debt so the operator writing one off by hand has a starting figure. The
+   * warehouse is only ever moved by something a device observed.
+   */
+  private slicerFilamentGrams(printerId: string): number | null {
+    const store = this.printQueueStoreRef;
+    if (!store) return null;
+    const run = this.activeRunForPrinter(printerId);
+    if (!run) return null;
+    const repos = store.repositories;
+    const task = repos.tasks.getById(run.taskId);
+    if (!task) return null;
+
+    const variant = task.sliceVariantId ? repos.sliceVariants.getById(task.sliceVariantId) : null;
+    const fromSlice = variant?.filamentG ?? null;
+    if (typeof fromSlice === "number" && Number.isFinite(fromSlice) && fromSlice > 0) return fromSlice;
+
+    const artifactId = task.artifactId ?? task.sourceArtifactId;
+    const analysis = artifactId ? repos.artifactAnalyses.latestForArtifact(artifactId) : null;
+    const fromAnalysis = analysis?.state === "ready" ? analysis.estimatedFilamentG : null;
+    return typeof fromAnalysis === "number" && Number.isFinite(fromAnalysis) && fromAnalysis > 0
+      ? fromAnalysis
+      : null;
+  }
+
   /** The active canonical run holding a printer, if any (identity for commands). */
   activeRunForPrinter(printerId: string): PrintRun | null {
     if (!this.printQueueStoreRef) return null;
@@ -675,7 +709,14 @@ export class FarmRuntime implements PrintServices {
     });
     this.runLifecycleRef = new RunLifecycleService(store, {
       logger,
-      operations: this.manualOperationServiceRef
+      operations: this.manualOperationServiceRef,
+      // Housekeeping, never a dependency of closing the run: a printer that is
+      // unreachable simply keeps its file until the next sweep.
+      reclaimStorage: (printerId) => {
+        void this.deviceArtifactServiceRef
+          ?.reclaim({ printerId })
+          .catch((error) => logger.warn?.({ err: error, printer: printerId }, "storage reclaim failed"));
+      }
     });
     this.dispatchServiceRef = new DispatchService({
       store,
@@ -706,6 +747,7 @@ export class FarmRuntime implements PrintServices {
       resolvePrinter: (id) => this.enabledConfigs().find((p) => p.id === id),
       listFiles: fetchPrinterFiles,
       uploadFile: uploadPrinterFile,
+      deleteFile: deletePrinterFile,
       logger
     });
     // Resolve deliveries a previous process was in the middle of: an UPLOADING

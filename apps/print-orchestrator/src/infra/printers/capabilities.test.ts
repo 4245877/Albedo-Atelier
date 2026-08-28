@@ -31,14 +31,17 @@ function printer(protocol: string, over: Record<string, unknown> = {}) {
   return config;
 }
 
-test("Moonraker declares upload + listing + remote start, and name_and_size verification", () => {
+test("Moonraker declares upload + listing + start + delete, and name_and_size verification", () => {
   const caps = capabilitiesOf(printer("moonraker"));
   assert.deepEqual(caps, {
     supportsUpload: true,
     supportsFileListing: true,
     supportsRemoteStart: true,
-    // Not implemented here, so declared false rather than assumed from the API docs.
-    supportsFileDelete: false,
+    // `DELETE /server/files/gcodes/<path>`. This was `false` while only the
+    // upload half was implemented — an honest statement about the code that was
+    // easy to misread as one about Klipper, and it is why a K2's G-code root
+    // grew without bound: nothing could ever remove a delivered file.
+    supportsFileDelete: true,
     // The ceiling of what the API can prove — never presented as a content hash.
     fileVerification: "name_and_size",
     startableExtensions: [".gcode", ".gco", ".g"],
@@ -125,8 +128,10 @@ test("requireCapability passes silently for a declared ability", () => {
   assert.doesNotThrow(() => requireCapability(printer("moonraker"), "supportsUpload"));
   assert.doesNotThrow(() => requireCapability(printer("moonraker"), "supportsFileListing"));
   assert.doesNotThrow(() => requireCapability(printer("moonraker"), "supportsRemoteStart"));
-  // …but not for one nobody implemented.
-  assert.throws(() => requireCapability(printer("moonraker"), "supportsFileDelete"));
+  assert.doesNotThrow(() => requireCapability(printer("moonraker"), "supportsFileDelete"));
+  // …but not for one nobody implemented: Creality WS has no file API at all.
+  assert.throws(() => requireCapability(printer("creality"), "supportsFileDelete"));
+  assert.throws(() => requireCapability(printer("creality"), "supportsUpload"));
 });
 
 // ── Readiness: what THIS printer still needs, as opposed to what the adapter can do ──

@@ -1,3 +1,5 @@
+import { mapPreflightCode } from "../../domain/dispatch/eligibility";
+import { NON_OVERRIDABLE } from "../../domain/dispatch/reasons";
 import type { CompatibilityReason } from "../../domain/scheduling/compatibility";
 import type { LaunchCandidate } from "../../domain/launch/selection";
 
@@ -33,6 +35,16 @@ export interface LaunchProblem {
   action: string;
   /** The original engine message, for the expandable diagnostics view. */
   technical: string;
+  /**
+   * Whether a named operator may accept this one and proceed.
+   *
+   * Read from the dispatch layer's own `NON_OVERRIDABLE` set rather than
+   * re-decided here, so the UI can never offer a checkbox for something the
+   * gate will refuse anyway — and never hide one for something a human could
+   * legitimately vouch for. A `blocker` kind is never overridable whatever the
+   * code says; the distinction is only meaningful for the `confirmable` ones.
+   */
+  overridable: boolean;
 }
 
 interface Translation {
@@ -113,6 +125,12 @@ const TRANSLATIONS: Record<string, Translation> = {
     title: "Диаметр сопла неизвестен",
     action: "Укажите диаметр сопла в настройках принтера."
   },
+  model_off_bed: {
+    title: "Модель стоит за пределами стола",
+    action:
+      "Файл размещает деталь вне рабочей области этого принтера — скорее всего он нарезан " +
+      "для машины с бо́льшим столом. Нарежьте модель заново для этого принтера."
+  },
   too_large: {
     title: "Модель не помещается",
     action: "Габариты детали больше рабочей области принтера. Выберите принтер побольше."
@@ -157,6 +175,38 @@ const TRANSLATIONS: Record<string, Translation> = {
     title: "Нужен AMS",
     action: "Заданию нужна многоматериальная подача, которой у принтера нет."
   },
+  ams_unknown: {
+    title: "Поддержка AMS неизвестна",
+    action: "Не записано, есть ли у принтера многоматериальная подача. Укажите это в настройках принтера."
+  },
+  ams_mapping_ambiguous: {
+    title: "Не определено, какой филамент в какой слот",
+    action:
+      "Задание печатается несколькими инструментами, но раскладка по слотам не задана — " +
+      "печать пошла бы одним материалом. Нарежьте под один материал или подтвердите запуск вручную."
+  },
+  profileset_unknown: {
+    title: "Профиль печати неизвестен",
+    action: "У нарезки нет привязанного набора профилей. Пересоберите нарезку."
+  },
+  task_nozzle_unknown: {
+    title: "Сопло задания неизвестно",
+    action: "Не удалось определить, под какое сопло нарезана модель. Пересоберите нарезку или укажите сопло."
+  },
+  build_volume_conflict: {
+    title: "Размеры стола расходятся",
+    action: "Настройки принтера и его профиль печати называют разные размеры стола. Сверьте их."
+  },
+  dimensions_unknown: {
+    title: "Габариты модели неизвестны",
+    action: "Анализ не определил размеры детали — проверить, поместится ли она, нельзя. Перезапустите анализ."
+  },
+  model_scale_unknown: {
+    title: "Масштаб модели не подтверждён",
+    action:
+      "STL не содержит единиц измерения, поэтому размеры недоказуемы. " +
+      "Подтвердите масштаб модели (мм или дюймы) перед запуском."
+  },
   PRINTER_NOT_CONFIGURED: {
     title: "Принтер не настроен",
     action: "Не хватает данных для связи с принтером — заполните их в настройках принтера."
@@ -179,12 +229,27 @@ const TRANSLATIONS: Record<string, Translation> = {
   }
 };
 
-/** The operator-facing form of one refusal reason. */
-export function explainReason(reason: CompatibilityReason, kind: ProblemKind): LaunchProblem {
+/** The codes this layer has operator language for — iterated by the exhaustive test. */
+export const TRANSLATED_CODES: ReadonlySet<string> = new Set(Object.keys(TRANSLATIONS));
+
+/**
+ * The operator-facing form of one refusal reason.
+ *
+ * Takes a bare `{code, message}` rather than a {@link CompatibilityReason}: this
+ * layer also translates codes the launch flow raises itself (`UPLOAD_FAILED`,
+ * `START_REJECTED`, `device_file_unverified`), which are not part of the
+ * preflight vocabulary. It must stay total for any code — an unmapped one falls
+ * through with its own message rather than a generic apology.
+ */
+export function explainReason(reason: { code: string; message: string }, kind: ProblemKind): LaunchProblem {
   const t = TRANSLATIONS[reason.code];
   return {
     code: reason.code,
     kind,
+    // Only a review may be waived, and only when the dispatch vocabulary says the
+    // code is waivable. A preflight code is translated into that vocabulary first,
+    // exactly as the gate translates it.
+    overridable: kind === "confirmable" && !NON_OVERRIDABLE.has(mapPreflightCode(reason.code)),
     title: t?.title ?? reason.message,
     // An empty translated action means "the message itself is the instruction" —
     // used by codes whose message is generated per-device (a fault carries the

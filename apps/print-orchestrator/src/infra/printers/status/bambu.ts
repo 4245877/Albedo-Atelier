@@ -8,6 +8,7 @@ import {
   firstFiniteNumber,
   firstText,
   makeOfflineStatus,
+  resolveRemainingMinutes,
   roundOrNull,
   toStatusState
 } from "./mapper";
@@ -200,7 +201,15 @@ export function buildBambuStatus(printer: PrinterConfig, payload: unknown): Prin
     status: isError ? "error" : baseStatus,
     currentFile: currentFile || null,
     progressPct: roundOrNull(progressPct),
-    remainingMinutes: roundOrNull(remainingMinutes),
+    // The device's own countdown — the first branch of the shared precedence.
+    // Routed through it rather than assigned directly so there is one statement
+    // of "how much longer?" in the codebase, not one per adapter.
+    remainingMinutes: resolveRemainingMinutes({
+      reportedRemainingSec: remainingMinutes === null ? null : remainingMinutes * 60,
+      slicerTotalSec: null,
+      elapsedSec: null,
+      progressPct: null
+    }),
     // Bambu MQTT does not expose grams/length consumed (it lives in slicer
     // metadata). Filament is instead attributed per AMS tray at completion from
     // the drop in each tray's `remain` estimate — see bambuUsage.ts.

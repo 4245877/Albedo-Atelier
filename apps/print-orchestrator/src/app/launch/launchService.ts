@@ -119,6 +119,23 @@ export interface LaunchRequest {
   printerId?: string;
   /** Confirmation codes the operator ticked. */
   confirmations?: string[];
+  /**
+   * An explicit, audited decision to proceed despite **overridable** warnings —
+   * the `review` verdict's way out.
+   *
+   * The dispatch layer has always had this mechanism, with its own validation
+   * (a reason and an operator are mandatory) and its own audit entry. The launch
+   * path simply never passed it, so a task the gate marked `review` had no
+   * confirmation path in the only UI that starts prints: the operator saw a
+   * refusal listing things a human could vouch for, and no way to vouch for
+   * them.
+   *
+   * It can never clear a hard blocker. `NON_OVERRIDABLE` — an occupied bed, a
+   * file that is not the one verified, a part off the plate, a device fault, an
+   * unconfirmed previous launch — is enforced inside the dispatch gate, which
+   * this only forwards to.
+   */
+  override?: { codes: string[]; reason: string };
   /** Retry-safe key: the same key never starts a second print. */
   idempotencyKey?: string;
   actor?: string;
@@ -234,9 +251,17 @@ export class LaunchService {
     }
     const candidate = preview.candidates.find((c) => c.printerId === chosenId);
     if (!candidate) throw new NotFoundError(`Принтер «${chosenId}»`);
-    if (!candidate.eligible) {
-      // A safety blocker is not confirmable and not overridable from here: the
-      // operator may choose *among* startable printers, never past a refusal.
+    if (!candidate.eligible && !request.override) {
+      // Without an override this is where a refusal stops: the operator may choose
+      // *among* startable printers, never past a refusal.
+      //
+      // WITH one, the refusal is carried to the dispatch gate instead of being
+      // pre-empted here. That is not a weakening — this method has no authority
+      // to admit anything, and the gate re-reads every row inside its own
+      // transaction, enforces `NON_OVERRIDABLE`, requires a reason and an
+      // operator, and audits the decision. Deciding here would be the second
+      // implementation of an admission rule, which is exactly what this service
+      // is documented not to have.
       throw new JobError(candidate.reason, {
         blockers: candidate.blockers.map((b) => ({ code: b.code, message: b.message }))
       });
@@ -302,8 +327,15 @@ export class LaunchService {
     const run = await dispatch.startAssignment(assignment.id, {
       mode: "manual",
       actor,
+      // Forwarded, never interpreted: which codes may be waived, and whether a
+      // reason and an operator were given, is the dispatch gate's decision, and
+      // it records the whole thing in the audit trail under this actor's name.
+      ...(request.override
+        ? { override: { ...request.override, operator: actor } }
+        : {}),
       ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {})
     });
+    if (request.override) steps.push("override_accepted");
     steps.push(run.deduplicated ? "already_started" : "started");
 
     return { run, printerId: printer.id, printerName: printer.name, steps };

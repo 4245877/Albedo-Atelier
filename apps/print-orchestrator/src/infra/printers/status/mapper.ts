@@ -91,11 +91,86 @@ export function makeOfflineStatus(printer: PrinterConfig, error: string): Printe
   };
 }
 
-export function estimateRemainingMinutes(
+/**
+ * Below this, progress is too small a sample to extrapolate from: at 1 % a
+ * two-second timing wobble scales into hours. Reported as unknown instead.
+ */
+const MIN_EXTRAPOLATION_PCT = 2;
+
+/**
+ * **How much longer?** — one precedence, for every adapter.
+ *
+ * The sources are not equally good, and the order below is the whole rule:
+ *
+ *  1. **The device's own countdown** (`mc_remaining_time` on Bambu, `leftSec` on
+ *     Creality). The firmware is running the job and knows what is left.
+ *  2. **The slicer's estimate for this exact file**, minus time already spent.
+ *     Moonraker/Klipper has no countdown of its own, but the sliced file carries
+ *     `estimated_time`, computed from the real toolpath with acceleration —
+ *     a far better statement about a non-uniform model than anything derivable
+ *     from progress.
+ *  3. **Linear extrapolation from progress**, and only as a last resort.
+ *
+ * Why (3) was wrong as Moonraker's primary source: its `progress` is
+ * `virtual_sdcard` **file position**, not time. A model that is a wide base
+ * under a tall thin spire spends most of its bytes on the base and most of its
+ * hours on the spire, so the extrapolation reports "80 % done, 20 minutes left"
+ * for another two hours — and that number is what the night-window fit, the
+ * operator's plan and the release projection are built on.
+ *
+ * Every source is bounded at zero and returns null rather than guessing.
+ */
+export function resolveRemainingMinutes(input: {
+  /** A remaining time the device itself reports, in seconds. */
+  reportedRemainingSec: number | null;
+  /** The slicer's total estimate for the loaded file, in seconds. */
+  slicerTotalSec: number | null;
+  /** Seconds spent printing so far. */
+  elapsedSec: number | null;
+  /** Completion 0–100, however the adapter measures it. */
+  progressPct: number | null;
+}): number | null {
+  const { reportedRemainingSec, slicerTotalSec, elapsedSec, progressPct } = input;
+
+  if (
+    reportedRemainingSec !== null &&
+    Number.isFinite(reportedRemainingSec) &&
+    reportedRemainingSec >= 0
+  ) {
+    return Math.round(reportedRemainingSec / 60);
+  }
+
+  if (
+    slicerTotalSec !== null &&
+    Number.isFinite(slicerTotalSec) &&
+    slicerTotalSec > 0 &&
+    elapsedSec !== null &&
+    Number.isFinite(elapsedSec) &&
+    elapsedSec >= 0 &&
+    // An estimate the print has already outlived says nothing about the rest of
+    // it. Reporting the 0 it arithmetically gives would claim the job ends now,
+    // so the extrapolation below is used instead.
+    slicerTotalSec > elapsedSec
+  ) {
+    return Math.round((slicerTotalSec - elapsedSec) / 60);
+  }
+
+  return extrapolateRemainingMinutes(progressPct, elapsedSec);
+}
+
+/**
+ * The last-resort estimate: assumes the remaining file takes as long per unit of
+ * progress as the part already done. Null below {@link MIN_EXTRAPOLATION_PCT},
+ * where the sample is too small to mean anything.
+ */
+export function extrapolateRemainingMinutes(
   progressPct: number | null,
   elapsedSec: number | null
 ): number | null {
-  if (!progressPct || progressPct <= 0 || !elapsedSec) return null;
+  if (progressPct === null || !Number.isFinite(progressPct) || progressPct < MIN_EXTRAPOLATION_PCT) {
+    return null;
+  }
+  if (elapsedSec === null || !Number.isFinite(elapsedSec) || elapsedSec <= 0) return null;
   const totalSec = elapsedSec / (progressPct / 100);
   return Math.round(Math.max(0, totalSec - elapsedSec) / 60);
 }

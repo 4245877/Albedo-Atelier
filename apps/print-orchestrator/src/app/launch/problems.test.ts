@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { PreflightReasonCode } from "../../domain/scheduling/compatibility";
 import { explainLaunchFailure, explainReason, primaryProblem } from "./problems";
 
 /**
@@ -14,7 +15,7 @@ import { explainLaunchFailure, explainReason, primaryProblem } from "./problems"
  * the list more complete; it makes the cause unfindable.
  */
 
-const reason = (code: string, message = code) => ({ code, message });
+const reason = (code: PreflightReasonCode, message: string = code) => ({ code, message });
 
 test("a device-reported fault outranks every state it caused", () => {
   const problems = explainLaunchFailure({
@@ -92,7 +93,9 @@ test("a per-device fault keeps its own message as the instruction", () => {
 });
 
 test("an unmapped code falls through honestly rather than apologising", () => {
-  const problem = explainReason(reason("brand_new_code", "нечто новое"), "blocker");
+  // Deliberately outside the preflight vocabulary: this layer also translates
+  // codes the launch flow raises itself, so it must stay total for any string.
+  const problem = explainReason({ code: "brand_new_code", message: "нечто новое" }, "blocker");
   assert.equal(problem.title, "нечто новое");
   assert.equal(problem.action, "нечто новое");
 });

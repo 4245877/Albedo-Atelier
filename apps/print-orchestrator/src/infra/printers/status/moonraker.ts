@@ -2,7 +2,7 @@ import { fetchWithTimeout } from "../../../shared/fetchWithTimeout";
 import { isObject } from "../../../shared/isObject";
 import type { PrinterConfig } from "../config";
 import {
-  estimateRemainingMinutes,
+  resolveRemainingMinutes,
   firstText,
   firstFiniteNumber,
   makeOfflineStatus,
@@ -117,24 +117,43 @@ export function parseMoonrakerJobFilament(metadata: Record<string, unknown>): Ac
 }
 
 /**
+ * The slicer's own total estimate for the loaded file, in seconds.
+ *
+ * Klipper has no remaining-time countdown, so this is the best statement about
+ * a non-uniform print available anywhere in the Moonraker API — and it costs
+ * nothing extra, because the metadata request is already being made for the
+ * active filament. Rejects a zero/negative/absent value rather than treating it
+ * as "instant".
+ */
+export function parseMoonrakerEstimatedTimeSec(metadata: Record<string, unknown>): number | null {
+  const seconds = firstFiniteNumber(metadata.estimated_time);
+  return seconds !== null && seconds > 0 ? seconds : null;
+}
+
+/**
  * Best-effort fetch of the current job's sliced filament from Moonraker's file
  * metadata. Never throws — filament is a nice-to-have that must not break (or
  * slow past its own timeout) the core status poll, so any failure returns null.
  */
-async function fetchMoonrakerJobFilament(
+async function fetchMoonrakerJobMetadata(
   printer: PrinterConfig,
   filename: string
-): Promise<ActiveFilament | null> {
+): Promise<{ filament: ActiveFilament | null; estimatedTimeSec: number | null }> {
+  const none = { filament: null, estimatedTimeSec: null };
   try {
     const res = await fetchWithTimeout(
       `${moonrakerBaseUrl(printer)}/server/files/metadata?filename=${encodeURIComponent(filename)}`,
       { timeoutMs: MOONRAKER_TIMEOUT_MS, headers: moonrakerHeaders(printer) }
     );
-    if (!res.ok) return null;
+    if (!res.ok) return none;
     const json = (await res.json()) as { result?: unknown };
-    return isObject(json?.result) ? parseMoonrakerJobFilament(json.result) : null;
+    if (!isObject(json?.result)) return none;
+    return {
+      filament: parseMoonrakerJobFilament(json.result),
+      estimatedTimeSec: parseMoonrakerEstimatedTimeSec(json.result)
+    };
   } catch {
-    return null;
+    return none;
   }
 }
 
@@ -213,10 +232,13 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
     // usable material and no active slot). Only meaningful while a print is
     // loaded, so skip the extra request otherwise.
     const currentFile = firstText(printStats.filename) || null;
-    const activeFilament =
+    // One request serves both the active filament and the slicer's own time
+    // estimate; neither is meaningful unless a sliced file is actually loaded.
+    const jobMetadata =
       currentFile && (mappedStatus === "printing" || mappedStatus === "paused")
-        ? await fetchMoonrakerJobFilament(printer, currentFile)
-        : null;
+        ? await fetchMoonrakerJobMetadata(printer, currentFile)
+        : { filament: null, estimatedTimeSec: null };
+    const activeFilament = jobMetadata.filament;
 
     return {
       id: printer.id,
@@ -224,7 +246,15 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
       status: mappedStatus,
       currentFile,
       progressPct,
-      remainingMinutes: estimateRemainingMinutes(progressPct, elapsedSec),
+      // Klipper reports no countdown of its own, so the slicer's `estimated_time`
+      // leads and progress-extrapolation is the fallback — `progress` here is
+      // file POSITION, which is not time on any model that is not uniform.
+      remainingMinutes: resolveRemainingMinutes({
+        reportedRemainingSec: null,
+        slicerTotalSec: jobMetadata.estimatedTimeSec,
+        elapsedSec,
+        progressPct
+      }),
       filamentUsedMm,
       // Moonraker/Klipper has no AMS concept here; filament is one loaded reel.
       amsTrays: null,

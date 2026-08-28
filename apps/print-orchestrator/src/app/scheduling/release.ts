@@ -132,6 +132,7 @@ function toReleaseInput(op: ManualOperation, nowMs: number): ReleaseOperationInp
     label: OPERATION_LABELS[op.type] ?? op.type,
     printerId: op.printerId,
     inProgress: op.state === "IN_PROGRESS",
+    failed: op.state === "FAILED",
     blocking: op.blocking,
     // `operationMinutes` deliberately does NOT fall back to the type default: a
     // null here is a row created with the duration explicitly unknown.

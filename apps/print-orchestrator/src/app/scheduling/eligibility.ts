@@ -123,9 +123,13 @@ export class EligibilityQueries {
       currentAnalyzerVersion: ANALYZER_VERSION,
       deviceFileIdentity: request.deviceFileIdentity ?? "unchecked",
 
-      printerLabels: [printer.name, printer.model ?? "", printer.printerClass ?? ""].filter(
-        (l) => l.trim().length > 0
-      ),
+      // Three different things, kept apart: the model establishes the hardware,
+      // the class establishes interchangeability, and the name is what the
+      // operator calls it. Only the first two may confirm a file's declared
+      // target — a free-text name never establishes what machine this is.
+      printerModel: printer.model ?? null,
+      printerClass: printer.printerClass ?? null,
+      printerName: printer.name ?? null,
       printerProtocol: printer.protocol,
       remoteStartSupported: printer.remoteStartSupported,
       liveStatus: { online: printer.online, status: printer.status },

@@ -61,8 +61,8 @@ function readZip(bytes: Uint8Array): Map<string, Buffer> {
   return out;
 }
 
-test("package carries every part the firmware opens, and the G-code verbatim", () => {
-  const pkg = buildBambuPlatePackage(INPUT);
+test("package carries every part the firmware opens, and the G-code verbatim", async () => {
+  const pkg = await buildBambuPlatePackage(INPUT);
   const parts = readZip(pkg.bytes);
 
   for (const required of [
@@ -83,8 +83,8 @@ test("package carries every part the firmware opens, and the G-code verbatim", (
   assert.deepEqual(parts.get(BAMBU_PLATE_GCODE_PATH), Buffer.from(GCODE));
 });
 
-test("the embedded md5 is the md5 of the embedded G-code, upper-case", () => {
-  const pkg = buildBambuPlatePackage(INPUT);
+test("the embedded md5 is the md5 of the embedded G-code, upper-case", async () => {
+  const pkg = await buildBambuPlatePackage(INPUT);
   const parts = readZip(pkg.bytes);
   const embedded = parts.get(`${BAMBU_PLATE_GCODE_PATH}.md5`)!.toString("utf8").trim();
 
@@ -93,10 +93,10 @@ test("the embedded md5 is the md5 of the embedded G-code, upper-case", () => {
   assert.match(embedded, /^[0-9A-F]{32}$/);
 });
 
-test("relationships point only at parts that exist", () => {
+test("relationships point only at parts that exist", async () => {
   // A relationship to an absent thumbnail is exactly the kind of malformed
   // package a firmware may reject, so the writer must not emit one.
-  const parts = readZip(buildBambuPlatePackage(INPUT).bytes);
+  const parts = readZip((await buildBambuPlatePackage(INPUT)).bytes);
   const rels = parts.get("_rels/.rels")!.toString("utf8");
 
   for (const target of [...rels.matchAll(/Target="\/([^"]+)"/g)].map((m) => m[1])) {
@@ -105,8 +105,8 @@ test("relationships point only at parts that exist", () => {
   assert.ok(!rels.includes(".png"), "no thumbnail relationships when no thumbnails are written");
 });
 
-test("slice metadata reports the target model, nozzle and filament", () => {
-  const parts = readZip(buildBambuPlatePackage(INPUT).bytes);
+test("slice metadata reports the target model, nozzle and filament", async () => {
+  const parts = readZip((await buildBambuPlatePackage(INPUT)).bytes);
   const info = parts.get("Metadata/slice_info.config")!.toString("utf8");
 
   assert.match(info, /printer_model_id" value="N2S"/);
@@ -118,29 +118,29 @@ test("slice metadata reports the target model, nozzle and filament", () => {
   assert.equal(plate.nozzle_diameter, 0.4);
 });
 
-test("packaging is deterministic — the same slice always yields the same bytes", () => {
+test("packaging is deterministic — the same slice always yields the same bytes", async () => {
   // This is what keeps `prepare` idempotent: a re-prepare must not produce a
   // different file for the same job, or every retry would look like new content.
-  const a = buildBambuPlatePackage(INPUT);
-  const b = buildBambuPlatePackage({ ...INPUT });
+  const a = await buildBambuPlatePackage(INPUT);
+  const b = await buildBambuPlatePackage({ ...INPUT });
   assert.deepEqual(Buffer.from(a.bytes), Buffer.from(b.bytes));
 });
 
-test("a different slice yields different bytes", () => {
-  const a = buildBambuPlatePackage(INPUT);
-  const b = buildBambuPlatePackage({ ...INPUT, gcode: Buffer.from(`${GCODE.toString()}G1 X1\n`) });
+test("a different slice yields different bytes", async () => {
+  const a = await buildBambuPlatePackage(INPUT);
+  const b = await buildBambuPlatePackage({ ...INPUT, gcode: Buffer.from(`${GCODE.toString()}G1 X1\n`) });
   assert.notDeepEqual(Buffer.from(a.bytes), Buffer.from(b.bytes));
 });
 
-test("no ZIP64 records for a normal plate — strict readers must cope", () => {
-  const buf = Buffer.from(buildBambuPlatePackage(INPUT).bytes);
+test("no ZIP64 records for a normal plate — strict readers must cope", async () => {
+  const buf = Buffer.from((await buildBambuPlatePackage(INPUT)).bytes);
   assert.equal(buf.indexOf(Buffer.from([0x50, 0x4b, 0x06, 0x06])), -1, "no ZIP64 EOCD");
   assert.equal(buf.indexOf(Buffer.from([0x50, 0x4b, 0x06, 0x07])), -1, "no ZIP64 locator");
 });
 
-test("XML is escaped, so a hostile material name cannot break the package", () => {
+test("XML is escaped, so a hostile material name cannot break the package", async () => {
   const parts = readZip(
-    buildBambuPlatePackage({ ...INPUT, material: 'PETG"><inject/>' }).bytes
+    (await buildBambuPlatePackage({ ...INPUT, material: 'PETG"><inject/>' })).bytes
   );
   const info = parts.get("Metadata/slice_info.config")!.toString("utf8");
   assert.ok(!info.includes("<inject/>"), "injected markup must be escaped");
@@ -155,4 +155,56 @@ test("Bambu model ids map from catalogue codes, and refuse to guess", () => {
   // package that claims to be for the wrong machine.
   assert.equal(bambuModelIdFor("creality-k2-plus"), null);
   assert.equal(bambuModelIdFor(null), null);
+});
+
+// ── Cost of building a package ──────────────────────────────────────────────
+//
+// The compression used to be `deflateRawSync`, which blocks the WHOLE event
+// loop: 154 ms for a 10 MB slice, 837 ms for a 50 MB one, measured on this
+// farm's hardware. Nothing else runs in that window — no printer poll, no HTTP
+// response, no monitoring-lease renewal — and it happens in the middle of a
+// launch, which is exactly when the dashboard is watching.
+
+test("building a package does not block the event loop", async (t) => {
+  // A realistic sliced body: large and highly repetitive, as G-code is.
+  const line = "G1 X120.456 Y98.765 E.03338\n";
+  const gcode = Buffer.from(line.repeat(Math.ceil((10 * 1024 * 1024) / line.length)), "utf8");
+
+  // A 10 ms interval stands in for the poll loop; the worst gap it experiences
+  // while the package is built is the stall a printer would have seen.
+  let worstGapMs = 0;
+  let last = process.hrtime.bigint();
+  const probe = setInterval(() => {
+    const now = process.hrtime.bigint();
+    worstGapMs = Math.max(worstGapMs, Number(now - last) / 1e6 - 10);
+    last = now;
+  }, 10);
+
+  let pkg;
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    last = process.hrtime.bigint();
+    pkg = await buildBambuPlatePackage({ ...INPUT, gcode });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  } finally {
+    clearInterval(probe);
+  }
+
+  t.diagnostic(`10 MB package: worst event-loop gap ${worstGapMs.toFixed(0)} ms`);
+  assert.ok(pkg.bytes.byteLength > 0);
+  // The synchronous form measured ~154 ms here. The bound is loose because CI
+  // hardware varies; what it catches is a return to blocking the loop outright.
+  assert.ok(
+    worstGapMs < 80,
+    `the event loop stalled ${worstGapMs.toFixed(0)} ms while packaging — compression is back on the main thread`
+  );
+});
+
+test("moving compression off the loop did not change a single byte", async () => {
+  // Determinism is what makes `prepare` idempotent: a re-prepared delivery must
+  // produce the same bytes, or every size comparison reads as a bad transfer.
+  const a = await buildBambuPlatePackage(INPUT);
+  const b = await buildBambuPlatePackage({ ...INPUT });
+  assert.equal(Buffer.compare(Buffer.from(a.bytes), Buffer.from(b.bytes)), 0);
+  assert.equal(a.gcodeMd5, b.gcodeMd5);
 });

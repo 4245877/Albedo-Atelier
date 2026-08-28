@@ -188,6 +188,98 @@ test("a different file under a live run flags identity lost (UNKNOWN), never gue
   assert.equal(run.metadata.identityLost, "other.gcode");
 });
 
+/*
+ * The Bambu container form. A dispatch writes `<stem>-<sha8>.gcode.3mf` to the
+ * card; the device names the running job in `subtask_name`, which carries no
+ * container extension. Comparing those two verbatim declared the identity lost
+ * on the first poll after a perfectly healthy start, and everything downstream
+ * (completion, bed clearance, filament accounting) then had nothing to key on.
+ */
+async function bambuRun(): Promise<{
+  store: PrintQueueStore;
+  lifecycle: RunLifecycleService;
+  runId: string;
+  taskId: string;
+}> {
+  const store = openPrintQueueStore(":memory:");
+  const queue = new PrintQueueService(store);
+  const file = "cube-a1b2c3d4.gcode.3mf";
+  const taskId = queue.createTask({ title: "Cube", printer: "a1", material: "PLA", file }).task.id;
+  const A1 = { ...K2, id: "a1", name: "A1", model: "A1", protocol: "bambu" } as PrinterConfig;
+  const deps: DispatchDeps = {
+    store,
+    resolvePrinter: () => A1,
+    getStatus: () => status({ id: "a1" }),
+    startPhysical: async () => {},
+    classifyError: () => "unknown",
+    listFiles: async () => ({
+      path: "",
+      entries: [{ name: file, path: file, type: "file", size: 5, printable: true }]
+    }),
+    evaluateEligibility: () => ({
+      status: "eligible" as const,
+      reasons: [],
+      preflight: {
+        taskId: "",
+        printerId: "",
+        verdict: "compatible" as const,
+        blockers: [],
+        reviews: [],
+        warnings: [],
+        eta: { seconds: null, source: "unknown" as const, preliminary: true }
+      },
+      nightWindowFit: null
+    })
+  };
+  const result = await new DispatchService(deps).dispatch({ taskId, mode: "manual" });
+  return { store, lifecycle: new RunLifecycleService(store), runId: result.runId, taskId };
+}
+
+const bambuStatus = (over: Partial<PrinterLiveStatus>) => status({ id: "a1", ...over });
+
+test("Bambu: subtask_name without the container extension IS the dispatched job", async () => {
+  const { store, lifecycle, runId } = await bambuRun();
+  // Exactly what an A1 reports for `cube-a1b2c3d4.gcode.3mf`.
+  lifecycle.observe(
+    "a1",
+    undefined,
+    bambuStatus({ status: "printing", currentFile: "cube-a1b2c3d4", progressPct: 4 })
+  );
+  const run = store.repositories.printRuns.getById(runId)!;
+  assert.equal(run.state, "RUNNING", "the run attaches instead of losing its identity");
+  assert.equal(run.metadata.identityLost, undefined);
+});
+
+test("Bambu: the whole lifecycle closes through the container-form identity", async () => {
+  const { store, lifecycle, runId, taskId } = await bambuRun();
+  const printingA1 = bambuStatus({ status: "printing", currentFile: "cube-a1b2c3d4" });
+
+  lifecycle.observe("a1", undefined, printingA1);
+  assert.equal(store.repositories.printRuns.getById(runId)?.state, "RUNNING");
+
+  lifecycle.observe("a1", printingA1, bambuStatus({ status: "idle", stateText: "FINISH" }));
+  const run = store.repositories.printRuns.getById(runId)!;
+  assert.equal(run.state, "SUCCEEDED", "the observed ending closes the run");
+  assert.equal(store.repositories.tasks.getById(taskId)?.state, "COMPLETED");
+  assert.equal(
+    store.repositories.bedCycles.getById(run.bedCycleId!)?.state,
+    "AWAITING_CLEARANCE",
+    "the bed asks for the part to be removed"
+  );
+});
+
+test("Bambu: a genuinely different job under the run still loses identity", async () => {
+  const { store, lifecycle, runId } = await bambuRun();
+  lifecycle.observe(
+    "a1",
+    undefined,
+    bambuStatus({ status: "printing", currentFile: "chalice-99887766" })
+  );
+  const run = store.repositories.printRuns.getById(runId)!;
+  assert.equal(run.state, "UNKNOWN", "loosening the match must not blind the identity check");
+  assert.equal(run.metadata.identityLost, "chalice-99887766");
+});
+
 test("completion after reconnect is recorded once the ending is actually observed", async () => {
   const { store, lifecycle, runId } = await runningRun();
 

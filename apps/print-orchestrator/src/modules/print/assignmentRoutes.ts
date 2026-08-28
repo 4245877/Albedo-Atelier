@@ -25,6 +25,7 @@ import type { Assignment, DeviceArtifact, PrintRun } from "../../domain/print/ty
  *   POST /assignments/:id/confirm-file   operator confirms a manual transfer  body: { operator }
  *   POST /assignments/:id/start          run THIS assignment                  body: { idempotencyKey?, expectedTaskVersion?, override? }
  *   POST /assignments/:id/invalidate     withdraw a placement                 body: { reason }
+ *   POST /assignments/device-files/reclaim  free printer storage              body: { printerId? }
  */
 export function registerAssignmentRoutes(
   app: FastifyInstance,
@@ -57,6 +58,31 @@ export function registerAssignmentRoutes(
     ok: true,
     ...(await services.deviceArtifacts.prepare(request.params.id))
   }));
+
+  /**
+   * Frees printer storage of files no job can still need — the manual handle on
+   * the sweep a finished run also invites.
+   *
+   * It exists because the automatic path only fires when a run *closes*, and the
+   * files that accumulate fastest are the ones from runs that never got that far:
+   * superseded deliveries, failed transfers, packages left by a re-slice. An
+   * operator who finds the A1's card full needs to be able to act without
+   * waiting for the next print to finish.
+   *
+   * Safe by construction: it re-checks every condition (no active run naming the
+   * file, assignment terminal, adapter can delete) against fresh rows, so it can
+   * be called at any time, repeatedly, with no argument.
+   */
+  app.post<{ Body: { printerId?: unknown } }>(
+    "/assignments/device-files/reclaim",
+    async (request) => {
+      const printerId = optionalString(request.body?.printerId);
+      return {
+        ok: true,
+        ...(await services.deviceArtifacts.reclaim({ printerId: printerId ?? undefined }))
+      };
+    }
+  );
 
   app.post<{ Params: { id: string }; Body: { operator?: unknown } }>(
     "/assignments/:id/confirm-file",

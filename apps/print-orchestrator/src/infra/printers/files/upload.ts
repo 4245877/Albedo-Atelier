@@ -1,10 +1,11 @@
 import { PayloadTooLargeError } from "../../../core/errors";
 import { fetchWithTimeout } from "../../../shared/fetchWithTimeout";
-import { capabilitiesOfProtocol, requireCapability } from "../capabilities";
+import { capabilitiesOfProtocol, requireCapability, requireReady } from "../capabilities";
 import type { PrinterConfig } from "../config";
 import { moonrakerBaseUrl, moonrakerHeaders } from "../status/moonraker";
 import { PrinterCommandError } from "../status/types";
-import { uploadBambuFile } from "./bambu";
+import { deleteBambuFile, uploadBambuFile } from "./bambu";
+import { deleteMoonrakerFile } from "./moonraker";
 import { normalizeStartablePath } from "./path";
 
 /**
@@ -18,7 +19,7 @@ import { normalizeStartablePath } from "./path";
  * (`DEVICE_TRANSFER_NOT_CONFIRMED`).
  */
 
-const MOONRAKER_UPLOAD_TIMEOUT_MS = 120_000;
+export const MOONRAKER_UPLOAD_TIMEOUT_MS = 120_000;
 
 /**
  * Hard ceiling on what may be pushed to a printer in one go. A sliced G-code for
@@ -84,8 +85,13 @@ export async function uploadPrinterFile(
   const name = slash === -1 ? target : target.slice(slash + 1);
 
   const form = new FormData();
-  // Copy into a fresh buffer so the Blob never aliases a pooled Node buffer.
-  form.append("file", new Blob([new Uint8Array(bytes)]), name);
+  // A Blob must not alias a POOLED Node buffer — a small `Buffer.from` shares a
+  // slab with unrelated allocations, and the Blob would read whatever lands
+  // there next. But copying unconditionally doubled peak memory for every
+  // upload: a 50 MB package became 100 MB of live buffers at the exact moment
+  // the package build had just allocated its own. A buffer that owns its whole
+  // ArrayBuffer cannot alias anything, so only the pooled case is copied.
+  form.append("file", new Blob([ownsItsBuffer(bytes) ? bytes : new Uint8Array(bytes)]), name);
   form.append("root", "gcodes");
   if (dir) form.append("path", dir);
   // Explicitly do NOT ask Moonraker to start the print: delivery and dispatch are
@@ -105,4 +111,32 @@ export async function uploadPrinterFile(
   }
 
   return { remotePath: target, sizeBytes: bytes.byteLength };
+}
+
+/**
+ * Removes one file from a printer, whichever adapter it speaks.
+ *
+ * Both implemented adapters can do it — Bambu over FTPS `DELE`, Moonraker over
+ * `DELETE /server/files/gcodes/<path>` — and both treat "already gone" as
+ * success, so the whole retention sweep is idempotent and safe to retry after a
+ * partial failure. An adapter that cannot delete raises the structured
+ * {@link PrinterCapabilityError} rather than pretending the file is gone.
+ */
+export async function deletePrinterFile(printer: PrinterConfig, remotePath: string): Promise<void> {
+  requireCapability(printer, "supportsFileDelete", "удалите файл на самом принтере");
+  requireReady(printer);
+  if (printer.protocol === "bambu") {
+    return deleteBambuFile(printer, normalizeStartablePath(remotePath, printer));
+  }
+  return deleteMoonrakerFile(printer, normalizeStartablePath(remotePath, printer));
+}
+
+/**
+ * Whether `bytes` spans its entire backing ArrayBuffer — i.e. it is not a view
+ * into Node's shared allocation pool and cannot alias another allocation.
+ * Everything the delivery path produces (a `readFile` result, a built package)
+ * satisfies this; the small `Buffer.from(...)` of a test fixture may not.
+ */
+function ownsItsBuffer(bytes: Uint8Array): boolean {
+  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength;
 }

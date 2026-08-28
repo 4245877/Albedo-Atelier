@@ -120,3 +120,35 @@ export async function listMoonrakerFiles(
   const json = (await res.json()) as { result?: unknown };
   return { path: relative, entries: parseMoonrakerDirectory(relative, json?.result) };
 }
+
+/**
+ * Deletes one file from Moonraker's G-code root.
+ *
+ * `DELETE /server/files/gcodes/<path>` — the counterpart of the upload this
+ * module already performs. It existed in the API all along and was simply not
+ * implemented here, which is why the capability table declared
+ * `supportsFileDelete: false`: an accurate statement about this codebase that
+ * was easy to misread as a statement about Klipper.
+ *
+ * A 404 is treated as success: the caller's goal is "this file is not on the
+ * printer", and a file that is already gone satisfies it. That makes the whole
+ * retention sweep idempotent and safe to retry.
+ */
+export async function deleteMoonrakerFile(printer: PrinterConfig, remotePath: string): Promise<void> {
+  const target = normalizePrinterPath(remotePath);
+  const res = await fetchWithTimeout(
+    `${moonrakerBaseUrl(printer)}/server/files/gcodes/${encodeURI(target)}`,
+    {
+      method: "DELETE",
+      timeoutMs: MOONRAKER_FILES_TIMEOUT_MS,
+      headers: moonrakerHeaders(printer)
+    }
+  );
+  if (res.ok || res.status === 404) return;
+  throw new PrinterCommandError(
+    `Не удалось удалить «${target}» с принтера: Moonraker HTTP ${res.status}`,
+    // A 4xx other than 404 is the device refusing definitively (bad path, locked
+    // by a running print); a 5xx or a timeout leaves the outcome unknown.
+    res.status >= 400 && res.status < 500
+  );
+}

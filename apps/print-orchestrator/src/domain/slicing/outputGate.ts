@@ -26,6 +26,23 @@ export function evaluateSliceOutput(analysis: ArtifactAnalysis): SliceOutputGate
     };
   }
   const blockers = [...analysis.blockers];
+
+  // The delivery layer treats a slice as plain G-code it may WRAP for the target
+  // (a Bambu `.gcode.3mf` plate package is built at the transport boundary, from
+  // the slice's bytes). A slice that is itself a container would therefore be
+  // wrapped a second time, and every rule that reads the G-code — the ETA, the
+  // command policy, the bounding box — would have been reading a ZIP header.
+  // The format is checked from the analysed CONTENT, not from the file name.
+  if (analysis.detectedFormat !== null && analysis.detectedFormat !== "gcode") {
+    blockers.push(
+      finding(
+        "output_not_gcode",
+        `Слайсер вернул файл формата «${analysis.detectedFormat}», а нужен G-code — ` +
+          "проверьте профиль машины (контейнер .3mf собирается при передаче на принтер, не слайсером)"
+      )
+    );
+  }
+
   if (analysis.verdict !== "schedulable") {
     blockers.push(
       finding(

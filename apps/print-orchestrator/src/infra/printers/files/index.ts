@@ -17,8 +17,14 @@ import type { PrinterFilesListing } from "./types";
 
 export type { PrinterFileEntry, PrinterFilesListing } from "./types";
 export type { UploadResult } from "./upload";
-export { MAX_DEVICE_UPLOAD_BYTES, supportsPrinterUpload, uploadPrinterFile } from "./upload";
+export {
+  deletePrinterFile,
+  MAX_DEVICE_UPLOAD_BYTES,
+  supportsPrinterUpload,
+  uploadPrinterFile
+} from "./upload";
 export { buildDeviceFileName, isGeneratedDeviceFileName } from "./name";
+export { anyNamesJob, jobIdentityKey, jobNameStem, sameJobFile } from "./jobIdentity";
 export type { DeviceFileNameInput } from "./name";
 export { bambuModelIdFor, buildBambuPlatePackage, BAMBU_PLATE_GCODE_PATH } from "./bambuPackage";
 export type { BambuPackage, BambuPackageInput } from "./bambuPackage";

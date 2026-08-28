@@ -39,10 +39,10 @@ export const BAMBU_FTPS_PORT = 990;
 /** The only username Bambu's LAN services accept; the password is the access code. */
 export const BAMBU_FTPS_USER = "bblp";
 
-const CONNECT_TIMEOUT_MS = 8_000;
-const COMMAND_TIMEOUT_MS = 15_000;
+export const CONNECT_TIMEOUT_MS = 8_000;
+export const COMMAND_TIMEOUT_MS = 15_000;
 /** A full plate G-code is single-digit MB; this bounds a stalled transfer, not a big one. */
-const TRANSFER_TIMEOUT_MS = 180_000;
+export const TRANSFER_TIMEOUT_MS = 180_000;
 
 export interface BambuFtpsTarget {
   host: string;

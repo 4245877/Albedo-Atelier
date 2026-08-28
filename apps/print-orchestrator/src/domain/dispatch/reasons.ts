@@ -35,6 +35,30 @@ export const REASON = {
   PRINTER_BUSY: "PRINTER_BUSY",
   PRINTER_NOT_IDLE: "PRINTER_NOT_IDLE",
   PRINTER_ERROR: "PRINTER_ERROR",
+  /**
+   * The device is displaying a fault its adapter has *decoded* and knows
+   * prevents a start (`blocksStart`) — the printer's own screen, not our
+   * inference from a symptom.
+   */
+  PRINTER_FAULT: "PRINTER_FAULT",
+  /** The printer cannot read the storage the print file is started from. */
+  PRINTER_MEDIA_MISSING: "PRINTER_MEDIA_MISSING",
+  /**
+   * A previous start command left without a verdict and nobody has said what
+   * happened. The printer may be printing right now: this is the guard against a
+   * second dispatch of the same model, and it is resolved by the operator
+   * reporting what they see, never by waving it through.
+   */
+  LAUNCH_UNCONFIRMED: "LAUNCH_UNCONFIRMED",
+  /**
+   * A preflight reason arrived that this layer has no translation for.
+   *
+   * Only reachable if a code escapes the compile-time exhaustive
+   * `PREFLIGHT_CODE_MAP`. It is non-overridable on purpose: an unrecognised
+   * refusal is an unknown critical, and the fail-closed rule applies to reasons
+   * we do not understand exactly as it does to facts we cannot read.
+   */
+  PREFLIGHT_REASON_UNMAPPED: "PREFLIGHT_REASON_UNMAPPED",
   TELEMETRY_STALE: "TELEMETRY_STALE",
   TELEMETRY_MISSING: "TELEMETRY_MISSING",
   REMOTE_START_UNSUPPORTED: "REMOTE_START_UNSUPPORTED",
@@ -44,6 +68,12 @@ export const REASON = {
 
   // ── Geometry / hardware fit ───────────────────────────────────────────────
   BUILD_VOLUME_EXCEEDED: "BUILD_VOLUME_EXCEEDED",
+  /**
+   * The printed body sits outside the bed at the coordinates the FILE places it
+   * at — a different fact from "too large". A part that fits by size can still
+   * be off the plate if it was sliced for a bigger machine.
+   */
+  MODEL_OFF_BED: "MODEL_OFF_BED",
   BUILD_VOLUME_UNKNOWN: "BUILD_VOLUME_UNKNOWN",
   DIMENSIONS_UNKNOWN: "DIMENSIONS_UNKNOWN",
   MODEL_SCALE_UNKNOWN: "MODEL_SCALE_UNKNOWN",
@@ -53,6 +83,12 @@ export const REASON = {
   MATERIAL_UNKNOWN: "MATERIAL_UNKNOWN",
   AMS_UNSUPPORTED: "AMS_UNSUPPORTED",
   AMS_UNKNOWN: "AMS_UNKNOWN",
+  /**
+   * The job uses more than one tool and nothing has decided which filament feeds
+   * which. Overridable — an operator may knowingly accept that the whole model
+   * prints from one tray — but never automatically.
+   */
+  AMS_MAPPING_AMBIGUOUS: "AMS_MAPPING_AMBIGUOUS",
 
   // ── File / artifact identity ──────────────────────────────────────────────
   TARGET_PRINTER_MISMATCH: "TARGET_PRINTER_MISMATCH",
@@ -149,6 +185,8 @@ export const NON_OVERRIDABLE: ReadonlySet<ReasonCode> = new Set<ReasonCode>([
   // about it: no operator tick makes the part come off the plate by itself.
   REASON.MANUAL_OPERATION_REQUIRED,
   REASON.BUILD_VOLUME_EXCEEDED,
+  // Printing off the plate is a crash into the frame, not a judgement call.
+  REASON.MODEL_OFF_BED,
   REASON.GCODE_FLAVOR_MISMATCH,
   REASON.TARGET_PRINTER_MISMATCH,
   REASON.NOZZLE_MISMATCH,
@@ -167,7 +205,18 @@ export const NON_OVERRIDABLE: ReadonlySet<ReasonCode> = new Set<ReasonCode>([
   REASON.PRINTER_BUSY,
   REASON.NO_FILE,
   REASON.BAD_FILE_PATH,
-  REASON.FORMAT_MISMATCH
+  REASON.FORMAT_MISMATCH,
+  // The device saying it cannot start. An operator tick does not put the MicroSD
+  // card back in, and does not clear the fault code on the screen: the start
+  // would simply be refused by the adapter's own pre-flight a second later.
+  REASON.PRINTER_FAULT,
+  REASON.PRINTER_MEDIA_MISSING,
+  // The double-print guard. Overriding it is exactly the action it exists to
+  // prevent; the way out is to resolve the unconfirmed run, which is a separate
+  // audited statement about what the operator actually saw.
+  REASON.LAUNCH_UNCONFIRMED,
+  // A refusal nobody has taught this layer to read. Fail-closed by construction.
+  REASON.PREFLIGHT_REASON_UNMAPPED
 ]);
 
 export function reason(

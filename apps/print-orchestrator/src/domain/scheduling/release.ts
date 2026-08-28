@@ -41,7 +41,9 @@ export type ReleaseCode =
   /** The operator schedule could not be resolved, so no release time exists. */
   | "RELEASE_UNKNOWN_SCHEDULE"
   /** A blocking operation has no estimated duration. */
-  | "RELEASE_UNKNOWN_DURATION";
+  | "RELEASE_UNKNOWN_DURATION"
+  /** A blocking operation was attempted and failed — no end time can be projected. */
+  | "RELEASE_BLOCKED_FAILED_OPERATION";
 
 /** One stretch of a printer's near future, for the operator timeline. */
 export interface ReleaseSegment {
@@ -76,6 +78,16 @@ export interface ReleaseOperationInput {
   printerId: string;
   /** True while a human already has their hands on it (starts now, not later). */
   inProgress: boolean;
+  /**
+   * True when this intervention has already been **attempted and failed**.
+   *
+   * It stays blocking on purpose — a nozzle that is still clogged after one go
+   * holds the machine exactly as it did before. What it no longer has is a
+   * meaningful duration: `estimatedMinutes` describes a routine attempt, and
+   * projecting a release from it promises the queue a repair nobody has made.
+   * Treated as an unknown, like a missing duration.
+   */
+  failed?: boolean;
   /** Only blocking operations hold a printer; the rest are shown, not gating. */
   blocking: boolean;
   /** Hands-on minutes; `null` = nobody estimated it → the release is unknown. */
@@ -227,6 +239,15 @@ export function projectFarmRelease(input: FarmReleaseInput): Map<string, Printer
       operatorCursor = null;
       continue;
     }
+    if (op.failed === true) {
+      // Same rule as a missing duration, for the same reason: the number we hold
+      // does not describe what has to happen next. A failed attempt says the
+      // routine estimate was wrong about this machine, so reusing it to promise
+      // a release time is the one thing the evidence rules out.
+      markUnknown(printer, op, readyAt, "failed", nowMs, poisoned);
+      operatorCursor = null;
+      continue;
+    }
 
     // The forced idle: the machine was free at `notBefore` but nobody was there
     // until `readyAt`. This is the 03:00–08:00 stretch, shown as its own segment
@@ -274,13 +295,16 @@ type UnknownCause =
   /** The machine is busy with no reported remaining time. */
   | "machine"
   /** An earlier operation's end is unknown, so this one's start is too. */
-  | "chain";
+  | "chain"
+  /** The operation was attempted and failed; a second attempt has no known end. */
+  | "failed";
 
 const UNKNOWN_CODE: Record<UnknownCause, ReleaseCode> = {
   schedule: "RELEASE_UNKNOWN_SCHEDULE",
   duration: "RELEASE_UNKNOWN_DURATION",
   machine: "MACHINE_BUSY_UNKNOWN",
-  chain: "RELEASE_UNKNOWN_SCHEDULE"
+  chain: "RELEASE_UNKNOWN_SCHEDULE",
+  failed: "RELEASE_BLOCKED_FAILED_OPERATION"
 };
 
 /**
@@ -300,7 +324,9 @@ function markUnknown(
   printer.releaseAtMs = null;
   printer.code = UNKNOWN_CODE[cause];
   printer.reason =
-    cause === "schedule"
+    cause === "failed"
+      ? `операция «${op.label}» не выполнена — принтер вне работы, пока её не повторят`
+      : cause === "schedule"
       ? `срок освобождения неизвестен: нет расписания оператора для операции «${op.label}»`
       : cause === "duration"
         ? `срок освобождения неизвестен: не задана длительность операции «${op.label}»`

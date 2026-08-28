@@ -1,3 +1,4 @@
+import { analysisBudgetMs } from "./analysisBudget";
 import { BoundedWorkerPool } from "../../shared/boundedWorkerPool";
 import { errorMessage, type ArtifactContext } from "./context";
 import { NotFoundError } from "../../core/errors";
@@ -110,7 +111,10 @@ export class AnalysisRunner {
           { path, sizeBytes: artifact.sizeBytes ?? 0, fileName: artifact.name },
           this.ctx.options.limits
         ),
-        this.ctx.options.timeoutMs + 3000
+        // The same size-aware budget the worker host enforces, plus grace: this
+        // outer bound must never fire FIRST, or a healthy large file would be
+        // failed here with a message that has none of the worker's detail.
+        analysisBudgetMs(artifact.sizeBytes, this.ctx.options.timeoutMs) + 3000
       );
       this.applyResult(analysisId, result);
     } catch (error) {
