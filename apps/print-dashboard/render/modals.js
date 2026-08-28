@@ -70,6 +70,12 @@ function ensureRoot() {
     if (!current || current.kind !== "launch") return;
     launchController().handleChange(e);
   });
+  // Причина override набирается посимвольно: `change` придёт только по потере
+  // фокуса, а кнопка «Запустить» должна оживать по мере набора.
+  root.addEventListener("input", (e) => {
+    if (!current || current.kind !== "launch") return;
+    launchController().handleInput(e);
+  });
 
   // Навигация файлового браузера — делегированно, разметка перерисовывается.
   root.addEventListener("click", (e) => {

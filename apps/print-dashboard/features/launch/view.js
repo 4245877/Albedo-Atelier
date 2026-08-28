@@ -70,25 +70,36 @@ function candidateCard(c, selectedId) {
   if (c.printerNozzleMm != null) facts.push(`сопло ${c.printerNozzleMm} мм`);
   if (c.loadedMaterial) facts.push(c.loadedMaterial);
 
+  // Принтер, которому не хватает только человеческого подтверждения, — это не
+  // отпавший вариант. Раньше радиокнопка была `disabled` для всего, что не
+  // `eligible`, поэтому такого кандидата нельзя было даже ВЫБРАТЬ, а значит и
+  // подтвердить: единственный путь к override был закрыт в самом начале списка.
+  const reviewable = overridableProblems(c).length > 0;
+  const selectable = c.eligible || reviewable;
+
   // У непригодного принтера показываем ПРИЧИНУ, а не пустую карточку: оператор
   // должен понимать, почему вариант отпал, иначе выбор выглядит произволом.
   const why = c.eligible
     ? `<div class="launch-cand-why">${esc(c.reason)}</div>`
-    : `<div class="launch-cand-why is-blocked">${c.problems
-        .filter((p) => p.kind === "blocker")
+    : `<div class="launch-cand-why is-blocked">${(c.problems || [])
+        .filter((p) => p.kind === (reviewable ? "confirmable" : "blocker"))
         .map((p) => `<span>${esc(p.title)}</span>`)
         .join("")}</div>`;
 
+  const badge = c.eligible
+    ? { cls: "badge-idle", text: "совместим" }
+    : reviewable
+      ? { cls: "badge-paused", text: "нужно подтверждение" }
+      : { cls: "badge-error", text: "несовместим" };
+
   return `
-    <label class="launch-cand ${selected ? "is-selected" : ""} ${c.eligible ? "" : "is-blocked"}">
+    <label class="launch-cand ${selected ? "is-selected" : ""} ${selectable ? "" : "is-blocked"}">
       <input type="radio" name="launch-printer" value="${esc(c.printerId)}"
-        ${selected ? "checked" : ""} ${c.eligible ? "" : "disabled"} data-launch-pick />
+        ${selected ? "checked" : ""} ${selectable ? "" : "disabled"} data-launch-pick />
       <span class="launch-cand-body">
         <span class="launch-cand-head">
           <span class="launch-cand-name">${esc(c.printerName)}</span>
-          <span class="badge ${c.eligible ? "badge-idle" : "badge-error"}">
-            ${c.eligible ? "совместим" : "несовместим"}
-          </span>
+          <span class="badge ${badge.cls}">${esc(badge.text)}</span>
         </span>
         <span class="launch-cand-facts">${esc(facts.join(" · "))}</span>
         ${why}
@@ -129,6 +140,75 @@ function problemsBlock(candidate) {
     <ul class="launch-notes">
       ${infos.map((p) => `<li>${esc(p.title)}</li>`).join("")}
     </ul>`;
+}
+
+/* ── Принятие ответственности за «review» ───────────────────────
+
+   Отказ бывает двух совершенно разных видов, и раньше окно показывало их
+   одинаково. Есть жёсткий отказ — стол занят, сопло не то, принтер в ошибке, —
+   и его не снимает никто. А есть `review`: проверка, которую машина провести не
+   может, но человек, стоящий у принтера, может. Раньше оператор видел список
+   вроде «неизвестно, какой материал заряжен», кнопка «Запустить» была
+   выключена, и НИКАКОГО пути дальше не существовало — при том, что сервер
+   умеет принимать такое решение с самого начала (DispatchService, override).
+
+   Что решает оператор здесь, а что — сервер: здесь только собирается намерение
+   (какие коды принимаются и почему). Допускать или нет — по-прежнему решает
+   dispatch gate, внутри своей транзакции, по своему списку NON_OVERRIDABLE, и
+   он же пишет запись в журнал. Поэтому блок появляется, только когда КАЖДАЯ
+   непройденная проверка помечена сервером как overridable: предлагать снятие
+   того, что сервер всё равно не снимет, — это отправить оператора в отказ. */
+
+export function overridableProblems(candidate) {
+  if (!candidate || candidate.eligible) return [];
+  const problems = candidate.problems || [];
+  // Хоть один жёсткий блокер — и обсуждать нечего.
+  if (problems.some((p) => p.kind === "blocker")) return [];
+  const confirmable = problems.filter((p) => p.kind === "confirmable");
+  if (!confirmable.length) return [];
+  // Либо снимается всё, либо ничего: одна неснимаемая проверка отклонит запуск
+  // целиком, и предложение её принять было бы ложным обещанием.
+  return confirmable.every((p) => p.overridable) ? confirmable : [];
+}
+
+/** Готов ли собранный оператором override к отправке. */
+export function overrideReady(candidate, ui) {
+  return (
+    overridableProblems(candidate).length > 0 &&
+    Boolean(ui.overrideAccepted) &&
+    String(ui.overrideReason || "").trim().length > 0
+  );
+}
+
+function overrideBlock(candidate, ui) {
+  const problems = overridableProblems(candidate);
+  if (!problems.length) return "";
+  return `
+    <div class="launch-override">
+      <div class="launch-reason-title">Запустить под ответственность оператора</div>
+      <p class="launch-override-lead">
+        Эти проверки система провести не может — их может подтвердить только человек
+        у принтера. Решение и его причина попадут в журнал вместе с вашим именем.
+      </p>
+      <ul class="launch-override-list">
+        ${problems
+          .map(
+            (p) => `<li><span class="launch-override-what">${esc(p.title)}</span>
+                    <span class="launch-override-hint">${esc(p.action)}</span></li>`
+          )
+          .join("")}
+      </ul>
+      <label class="launch-confirm">
+        <input type="checkbox" ${ui.overrideAccepted ? "checked" : ""} data-launch-override-accept />
+        <span><span class="launch-confirm-lbl">Я проверил принтер и беру перечисленное на себя</span></span>
+      </label>
+      <label class="launch-override-why">
+        <span class="launch-confirm-hint">Причина — обязательно</span>
+        <textarea rows="2" data-launch-override-reason
+          placeholder="Например: катушка PETG заряжена вручную, проверено визуально"
+          >${esc(ui.overrideReason || "")}</textarea>
+      </label>
+    </div>`;
 }
 
 /* Ровно ОДНА причина отказа, и её выбирает backend (preview.primaryProblem).
@@ -254,11 +334,15 @@ export function launchModalHtml(preview, ui) {
   // рядом с вопросом «а что вообще произошло?» значит предлагать оператору шаг,
   // который заведомо кончится отказом. Сначала ответ, потом запуск.
   const unresolved = Boolean(preview.unresolvedRunId);
-  const canLaunch = !unresolved && Boolean(candidate?.eligible) && allConfirmed && !ui.busy;
+  // Пригоден сам по себе — или оператор явно принял на себя то, что помешало.
+  const admitted = Boolean(candidate?.eligible) || overrideReady(candidate, ui);
+  const canLaunch = !unresolved && admitted && allConfirmed && !ui.busy;
 
-  const cta = candidate
-    ? `Запустить на «${candidate.printerName}»`
-    : "Запустить печать";
+  const cta = !candidate
+    ? "Запустить печать"
+    : overridableProblems(candidate).length > 0
+      ? `Запустить на «${candidate.printerName}» под ответственность`
+      : `Запустить на «${candidate.printerName}»`;
 
   return `
     <div class="modal-head"><h2 id="modal-title">Запуск печати</h2></div>
@@ -281,6 +365,7 @@ export function launchModalHtml(preview, ui) {
 
     ${unresolved ? unresolvedBlock(preview, ui) : blockedBlock(preview, candidate)}
 
+    ${unresolved ? "" : overrideBlock(candidate, ui)}
     ${unresolved ? "" : confirmationsBlock(confirmations, ui.confirmed)}
     ${unresolved ? "" : problemsBlock(candidate)}
 

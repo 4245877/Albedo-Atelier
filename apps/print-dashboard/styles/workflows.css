@@ -1609,6 +1609,52 @@
 .launch-confirm-lbl { font-size: 13.5px; font-weight: 700; color: var(--ink); }
 .launch-confirm-hint { margin-top: 2px; font-size: 12px; color: var(--ink-soft); }
 
+/* ── Принятие ответственности за «review» ────────────────────
+   Не danger (это не отказ) и не обычное подтверждение (это не факт, который
+   оператор просто отмечает) — отдельный блок с собственной рамкой, чтобы
+   решение под ответственность нельзя было принять по инерции. */
+
+.launch-override {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--blocked-line);
+  border-radius: var(--radius-sm);
+  background: var(--blocked-soft);
+  color: var(--ink);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.launch-override-lead { margin: 4px 0 0; font-size: 12.5px; color: var(--ink-soft); }
+
+.launch-override-list {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.launch-override-what { font-weight: 600; color: var(--ink); }
+.launch-override-hint { display: block; color: var(--ink-soft); }
+
+.launch-override .launch-confirm { margin-top: 10px; background: transparent; }
+
+.launch-override-why { display: block; margin-top: 10px; }
+
+.launch-override-why textarea {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 7px 9px;
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius-sm);
+  background: var(--card-inner);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+
 .launch-notes {
   margin: 12px 0 0;
   padding-left: 18px;

@@ -424,3 +424,183 @@ test("без неподтверждённого запуска кнопок ра
   const html = launchModalHtml(preview(), ui());
   assert.doesNotMatch(html, /data-launch-resolve/);
 });
+
+/* ── Принятие ответственности за «review» ─────────────────────
+
+   Дефект был не в отказе, а в его безвыходности. Кандидат со статусом `review`
+   — «система не может проверить, а человек может» — выглядел так же, как
+   жёстко несовместимый: кнопка выключена, радиокнопка в ручном списке
+   заблокирована, и никакого способа сказать «я посмотрел, всё в порядке» из
+   единственного окна, откуда вообще запускают печать. Сервер такое решение
+   принимает с самого начала (override с причиной и оператором, с записью в
+   журнал) — до него просто нечему было дойти. */
+
+/** Кандидат, которому не хватает только человеческого подтверждения. */
+const reviewCandidate = (over = {}) =>
+  candidate({
+    eligible: false,
+    reason: "Bambu Lab A1 Combo: нужно подтверждение оператора",
+    problems: [
+      {
+        code: "material_mismatch",
+        kind: "confirmable",
+        title: "Материал не совпадает",
+        action: "Проверьте, что заряжен PETG.",
+        technical: "material_mismatch: заряжен PLA, требуется PETG",
+        overridable: true
+      }
+    ],
+    ...over
+  });
+
+const reviewPreview = (over = {}) =>
+  preview({
+    state: "needs_confirmation",
+    recommendedPrinterId: "bambu-a1",
+    candidates: [reviewCandidate()],
+    primaryProblem: reviewCandidate().problems[0],
+    ...over
+  });
+
+test("review предлагает путь дальше, а не только отказ", () => {
+  const html = launchModalHtml(reviewPreview(), ui());
+  assert.match(html, /launch-override/, "блок принятия ответственности должен быть показан");
+  assert.match(html, /Материал не совпадает/, "оператор должен видеть, ЧТО именно принимает");
+  assert.match(html, /data-launch-override-accept/);
+  assert.match(html, /data-launch-override-reason/);
+  // Но пока ничего не принято — кнопка по-прежнему выключена.
+  assert.equal(ctaEnabled(html), false, "сам по себе показ блока ничего не разрешает");
+});
+
+test("нужны и галочка, и причина — по отдельности они не запускают", () => {
+  const onlyTicked = launchModalHtml(reviewPreview(), ui({ overrideAccepted: true, overrideReason: "" }));
+  assert.equal(ctaEnabled(onlyTicked), false, "подтверждение без причины — не подтверждение");
+
+  const onlyText = launchModalHtml(
+    reviewPreview(),
+    ui({ overrideAccepted: false, overrideReason: "проверил катушку" })
+  );
+  assert.equal(ctaEnabled(onlyText), false, "причина без явного принятия ответственности ничего не решает");
+
+  const both = launchModalHtml(
+    reviewPreview(),
+    ui({ overrideAccepted: true, overrideReason: "проверил катушку — PETG" })
+  );
+  assert.equal(ctaEnabled(both), true);
+  assert.match(both, /под ответственность/, "кнопка должна называть, что именно делает");
+});
+
+test("пробелы вместо причины не считаются причиной", () => {
+  const html = launchModalHtml(reviewPreview(), ui({ overrideAccepted: true, overrideReason: "   \n  " }));
+  assert.equal(ctaEnabled(html), false);
+});
+
+test("жёсткий блокер не превращается в предложение его принять", () => {
+  // Занятый стол не подтверждается словами: сервер такой код не снимет, и
+  // предлагать это оператору значит обещать то, чего не будет.
+  const hard = reviewPreview({
+    candidates: [
+      reviewCandidate({
+        problems: [
+          {
+            code: "bed_not_clear",
+            kind: "blocker",
+            title: "Стол занят",
+            action: "Снимите предыдущую модель.",
+            technical: "bed_not_clear: на столе прошлая печать",
+            overridable: false
+          }
+        ]
+      })
+    ],
+    primaryProblem: null
+  });
+  const html = launchModalHtml(hard, ui({ overrideAccepted: true, overrideReason: "всё нормально" }));
+  assert.doesNotMatch(html, /launch-override\b/);
+  assert.equal(ctaEnabled(html), false);
+});
+
+test("одна неснимаемая проверка отменяет предложение целиком", () => {
+  // «Либо всё, либо ничего»: смешанный список привёл бы к отказу сервера уже
+  // после того, как оператор взял ответственность на себя.
+  const mixed = reviewPreview({
+    candidates: [
+      reviewCandidate({
+        problems: [
+          {
+            code: "material_mismatch",
+            kind: "confirmable",
+            title: "Материал не совпадает",
+            action: "Проверьте катушку.",
+            technical: "material_mismatch: …",
+            overridable: true
+          },
+          {
+            code: "launch_unconfirmed",
+            kind: "confirmable",
+            title: "Прошлый запуск не подтверждён",
+            action: "Разберитесь с предыдущей попыткой.",
+            technical: "launch_unconfirmed: …",
+            overridable: false
+          }
+        ]
+      })
+    ],
+    primaryProblem: null
+  });
+  const html = launchModalHtml(mixed, ui({ overrideAccepted: true, overrideReason: "проверил" }));
+  assert.doesNotMatch(html, /launch-override\b/);
+  assert.equal(ctaEnabled(html), false);
+});
+
+test("в ручном списке review-принтер можно ВЫБРАТЬ, а несовместимый — нет", () => {
+  const both = reviewPreview({
+    candidates: [
+      reviewCandidate(),
+      candidate({
+        printerId: "k2",
+        printerName: "Creality K2",
+        eligible: false,
+        problems: [
+          {
+            code: "nozzle_mismatch",
+            kind: "blocker",
+            title: "Сопло не то",
+            action: "Смените сопло.",
+            technical: "nozzle_mismatch: 0.6 вместо 0.4",
+            overridable: false
+          }
+        ]
+      })
+    ]
+  });
+  const html = launchModalHtml(both, ui({ mode: "manual" }));
+  const cards = html.split("launch-cand ").slice(1);
+  assert.equal(cards.length, 2);
+  assert.doesNotMatch(cards[0], /disabled/, "review-кандидат обязан быть выбираемым");
+  assert.match(cards[0], /нужно подтверждение/);
+  assert.match(cards[1], /disabled/, "жёстко несовместимый — нет");
+  assert.match(cards[1], /несовместим/);
+});
+
+test("совместимый принтер не спрашивают об ответственности", () => {
+  const html = launchModalHtml(preview(), ui());
+  assert.doesNotMatch(html, /launch-override\b/);
+  assert.equal(ctaEnabled(html), true);
+});
+
+test("физические подтверждения не подменяются принятием ответственности", () => {
+  // Стол и катушка — вопросы к человеку у машины, а не к его готовности
+  // отвечать за последствия. Одно не заменяет другое.
+  const html = launchModalHtml(
+    reviewPreview({ confirmations: [BED_CONFIRM] }),
+    ui({ overrideAccepted: true, overrideReason: "проверил катушку" })
+  );
+  assert.equal(ctaEnabled(html), false, "необходимая галочка всё ещё необходима");
+
+  const done = launchModalHtml(
+    reviewPreview({ confirmations: [BED_CONFIRM] }),
+    ui({ overrideAccepted: true, overrideReason: "проверил катушку", confirmed: new Set(["bed_clear"]) })
+  );
+  assert.equal(ctaEnabled(done), true);
+});

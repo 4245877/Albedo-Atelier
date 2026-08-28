@@ -208,3 +208,86 @@ test("moving compression off the loop did not change a single byte", async () =>
   assert.equal(Buffer.compare(Buffer.from(a.bytes), Buffer.from(b.bytes)), 0);
   assert.equal(a.gcodeMd5, b.gcodeMd5);
 });
+
+/**
+ * Measures the worst uninterrupted stretch the loop spends unable to run a timer
+ * while `build` executes. A 2 ms probe stands in for the poll loop.
+ */
+async function worstLoopGapMs(build: () => Promise<unknown>): Promise<number> {
+  let worst = 0;
+  let last = process.hrtime.bigint();
+  const probe = setInterval(() => {
+    const now = process.hrtime.bigint();
+    worst = Math.max(worst, Number(now - last) / 1e6 - 2);
+    last = now;
+  }, 2);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    last = process.hrtime.bigint();
+    await build();
+  } finally {
+    clearInterval(probe);
+  }
+  return worst;
+}
+
+test("the stall does not grow with the file — every whole-buffer pass is chunked", async (t) => {
+  // Moving the *deflate* off the loop was only part of it. Three synchronous
+  // whole-buffer passes stayed behind and, at 50 MB, cost more together than the
+  // deflate ever had: CRC-32 (256 ms — a byte-at-a-time JS loop), MD5 (159 ms:
+  // native is not the same as concurrent) and a `Buffer.from` copy of the G-code
+  // that served no purpose at all (147 ms).
+  //
+  // The invariant that catches all three, and any future fourth, is that the
+  // worst stall must NOT scale with the file. A pass left unchunked shows up as
+  // a gap that grows with the input; a chunked one stays flat.
+  const line = "G1 X120.456 Y98.765 E.03338\n";
+  const gcodeOf = (bytes: number) => Buffer.from(line.repeat(Math.ceil(bytes / line.length)), "utf8");
+  // Built up front: allocating a 40 MB string blocks the loop all by itself, and
+  // measuring the fixture instead of the subject is how a timing test lies.
+  const smallGcode = gcodeOf(4 * 1024 * 1024);
+  const largeGcode = gcodeOf(40 * 1024 * 1024);
+
+  const small = await worstLoopGapMs(() => buildBambuPlatePackage({ ...INPUT, gcode: smallGcode }));
+  const large = await worstLoopGapMs(() => buildBambuPlatePackage({ ...INPUT, gcode: largeGcode }));
+  t.diagnostic(`worst event-loop gap: 4 MB → ${small.toFixed(0)} ms, 40 MB → ${large.toFixed(0)} ms`);
+
+  // Ten times the bytes must not mean ten times the stall. The bound is a
+  // wall-clock one and deliberately loose — CI hardware varies and a collection
+  // can land inside any chunk — but the unchunked code produced a >200 ms gap
+  // at this size on hardware where the chunked code produces ~30 ms, so there is
+  // room for a slow machine without room for a regression.
+  assert.ok(
+    large < 120,
+    `40 MB stalled the loop ${large.toFixed(0)} ms — a whole-buffer pass is back on the main thread`
+  );
+});
+
+test("chunking the digests did not change them — the printer checks this md5", async () => {
+  // `plate_1.gcode.md5` is verified by the firmware, and the CRC-32 by any ZIP
+  // reader. Both are computed a chunk at a time now, so the thing worth pinning
+  // is that a chunked digest is the same digest.
+  const line = "G1 X120.456 Y98.765 E.03338\n";
+  for (const bytes of [0, 1, 255 * 1024, 256 * 1024, 256 * 1024 + 1, 3 * 1024 * 1024 + 7]) {
+    const gcode = Buffer.from(line.repeat(Math.ceil(bytes / line.length))).subarray(0, bytes);
+    const pkg = await buildBambuPlatePackage({ ...INPUT, gcode });
+    assert.equal(
+      pkg.gcodeMd5,
+      createHash("md5").update(gcode).digest("hex").toUpperCase(),
+      `md5 of a ${bytes}-byte slice must not depend on how it was fed in`
+    );
+    // And the archive still reads back, which is the CRC-32 being right.
+    assert.equal(Buffer.compare(readZip(pkg.bytes).get(BAMBU_PLATE_GCODE_PATH)!, gcode), 0);
+  }
+});
+
+test("a G-code that does not compress is stored, not grown", async () => {
+  // The `stored` fallback is the one branch that puts the raw buffer into the
+  // archive rather than the deflated one. Incompressible bytes take it, and the
+  // entry must still come back verbatim.
+  const gcode = Buffer.alloc(64 * 1024);
+  for (let i = 0; i < gcode.length; i += 1) gcode[i] = (i * 2654435761) % 251;
+  const pkg = await buildBambuPlatePackage({ ...INPUT, gcode });
+  assert.equal(Buffer.compare(readZip(pkg.bytes).get(BAMBU_PLATE_GCODE_PATH)!, gcode), 0);
+  assert.equal(pkg.gcodeMd5, createHash("md5").update(gcode).digest("hex").toUpperCase());
+});

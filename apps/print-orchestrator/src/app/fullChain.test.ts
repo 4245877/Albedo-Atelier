@@ -103,6 +103,13 @@ interface Harness {
   deletes: { printerId: string; remotePath: string }[];
   startCalls: { printerId: string; file: string }[];
   consumed: Record<string, unknown>[];
+  /**
+   * Awaits the housekeeping the lifecycle starts and deliberately does not wait
+   * for. Closing a run must not block on a printer's filesystem, so the reclaim
+   * is fire-and-forget in production; a test still has to join it, or it asserts
+   * against a race and leaks work past the store it runs on.
+   */
+  settle: () => Promise<void>;
 }
 
 let TMP: string;
@@ -113,7 +120,8 @@ beforeEach(async () => {
   h = await makeHarness(TMP);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await h.settle();
   h.slices.close();
   h.artifacts.close();
   h.store.close();
@@ -240,9 +248,10 @@ async function makeHarness(tmp: string): Promise<Harness> {
   };
 
   const operations = new ManualOperationService(store, new OperatorScheduleService(store));
+  const housekeeping: Promise<unknown>[] = [];
   const lifecycle = new RunLifecycleService(store, {
     operations,
-    reclaimStorage: (printerId) => void devices.reclaim({ printerId })
+    reclaimStorage: (printerId) => void housekeeping.push(devices.reclaim({ printerId }))
   });
   const filament = new FilamentConsumption(
     {
@@ -268,7 +277,10 @@ async function makeHarness(tmp: string): Promise<Harness> {
     onDevice,
     deletes,
     startCalls,
-    consumed
+    consumed,
+    settle: async () => {
+      while (housekeeping.length) await housekeeping.shift();
+    }
   };
 }
 
@@ -451,6 +463,7 @@ test("STL → analysis → slice → prepare → start → print → completion 
     printing,
     status({ status: "idle", stateText: "complete", progressPct: 100, filamentUsedMm: 4200 })
   );
+  await h.settle();
   const finished = h.store.repositories.printRuns.getById(runId)!;
   assert.equal(finished.state, "SUCCEEDED");
   assert.equal(h.store.repositories.tasks.getById(detail.task.id)?.state, "COMPLETED");
@@ -479,11 +492,16 @@ test("STL → analysis → slice → prepare → start → print → completion 
   assert.equal(h.consumed[0].lengthMm, 4200);
   assert.equal(h.filament.listUnreconciled().length, 0, "and nothing is left owing");
 
-  // 10 ── The device file is reclaimable now that the run is closed.
-  const reclaimed = await h.devices.reclaim({ printerId: "k2" });
-  assert.equal(reclaimed.deleted, 1);
+  // 10 ── Closing the run invited the printer's storage to be freed, and it was —
+  //       the delete is housekeeping the lifecycle starts but never waits for.
   assert.deepEqual(h.deletes, [{ printerId: "k2", remotePath }]);
   assert.deepEqual(h.onDevice.get("k2"), [], "the printer's storage is freed");
+  // Repeating it is a no-op rather than a second delete or an error: sweeps run
+  // on a timer, and the row is already NOT_PRESENT.
+  const again = await h.devices.reclaim({ printerId: "k2" });
+  assert.equal(again.deleted, 0);
+  assert.equal(again.failed, 0);
+  assert.equal(h.deletes.length, 1, "a repeated sweep does not re-delete");
 
   // 11 ── And the clearance still closes the bed only on a named confirmation.
   h.operations.complete(clearance[0].id, { actor: "miha" });
@@ -535,7 +553,12 @@ test("the chain refuses to complete when the ending is ambiguous, and leaves eve
 
   // The operator resolves it, and only then does the chain continue.
   h.lifecycle.resolveRun(started.runId, "SUCCEEDED", { status: status({ status: "idle" }), actor: "miha" });
+  await h.settle();
   assert.equal(h.store.repositories.printRuns.getById(started.runId)?.state, "SUCCEEDED");
   assert.equal(h.store.repositories.tasks.getById(detail.task.id)?.state, "COMPLETED");
   assert.equal(h.operations.openClearanceOperations("k2").length, 1);
+  // And everything the open question was holding back now proceeds — the same
+  // housekeeping that a witnessed ending would have triggered, no earlier.
+  assert.deepEqual(h.deletes, [{ printerId: "k2", remotePath }]);
+  assert.deepEqual(h.onDevice.get("k2"), []);
 });

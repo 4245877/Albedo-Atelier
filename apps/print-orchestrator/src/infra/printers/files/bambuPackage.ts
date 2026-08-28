@@ -100,18 +100,43 @@ export interface BambuPackage {
  * for a 50 MB one, on this farm's own hardware. Nothing else happens in that
  * window — no printer poll, no HTTP response, no monitoring-lease renewal — and
  * it happens in the middle of a launch, which is exactly when the dashboard is
- * watching. The async form moves the same work off the loop: the stall drops to
- * 2 ms, and the output is **byte-identical** at the same level, so the package
- * stays deterministic and `prepare` stays idempotent.
+ * watching. The async form moves that work off the loop entirely, and the output
+ * is **byte-identical** at the same level, so the package stays deterministic and
+ * `prepare` stays idempotent.
  *
  * The level stays 9 for the same reason it is not worth changing: G-code
  * compresses to ~0.6 % at both 6 and 9, so a lower level buys no measurable time
  * and would alter the package bytes that deliveries are compared by.
+ *
+ * Moving *only* the deflate was not enough, and it is worth recording why. Three
+ * whole-buffer passes stayed on the main thread and, measured on the same
+ * hardware for a 50 MB slice, cost more together than the deflate ever did:
+ * CRC-32 (256 ms, a byte-at-a-time JS loop), MD5 (159 ms — native, but native
+ * still means synchronous), and a `Buffer.from` copy of the G-code that had no
+ * reason to exist (147 ms). 561 ms of stall, in the same launch window the
+ * deflate was moved out of. See {@link crc32} / {@link md5Hex}.
  */
 const deflate = promisify(deflateRaw);
 
+/**
+ * How much of a buffer one uninterrupted pass may cover before yielding.
+ *
+ * The slowest of these passes (CRC-32) runs at ~5 ms/MB, so 256 KB puts the
+ * typical uninterrupted turn near a millisecond and the observed worst turn
+ * — a chunk unlucky enough to coincide with a collection — in the tens. That
+ * bound holds at any size, which is the property that matters: the upload limit
+ * allows 200 MB, and a stall must not grow with the file.
+ *
+ * Yielding costs one `setImmediate` per chunk (microseconds), so a smaller chunk
+ * buys a tighter bound for nothing measurable.
+ */
+const YIELD_CHUNK_BYTES = 256 * 1024;
+
+/** Hands the loop back, so a long pass is many short ones. */
+const yieldToLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
 export async function buildBambuPlatePackage(input: BambuPackageInput): Promise<BambuPackage> {
-  const gcodeMd5 = createHash("md5").update(input.gcode).digest("hex").toUpperCase();
+  const gcodeMd5 = await md5Hex(input.gcode);
   const bedType = input.bedType ?? "textured_plate";
   const nozzle = formatNumber(input.nozzleDiameterMm);
   const material = (input.material ?? "").trim() || "PLA";
@@ -272,14 +297,17 @@ async function buildZip(entries: ZipEntry[]): Promise<Uint8Array> {
 
   for (const entry of entries) {
     const nameBytes = Buffer.from(entry.name, "utf8");
-    const raw = Buffer.from(entry.data);
+    // No copy: `deflate` and `crc32` both read a `Uint8Array`, and the only
+    // consumer that needs a `Buffer` is the `stored` fallback below. Copying the
+    // G-code here duplicated the largest buffer in the process for nothing.
+    const raw = entry.data;
     const compressed = await deflate(raw, { level: 9 });
     // Never let "compression" grow a part: fall back to stored, exactly as any
     // conforming writer does.
     const useDeflate = compressed.length < raw.length;
-    const payload = useDeflate ? compressed : raw;
+    const payload = useDeflate ? compressed : Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength);
     const method = useDeflate ? 8 : 0;
-    const crc = crc32(raw);
+    const crc = await crc32(raw);
 
     const local = Buffer.alloc(30 + nameBytes.length);
     local.writeUInt32LE(0x04034b50, 0);
@@ -347,10 +375,40 @@ const CRC_TABLE = (() => {
   return table;
 })();
 
-function crc32(data: Uint8Array): number {
+/**
+ * CRC-32 of the whole buffer, computed a megabyte at a time.
+ *
+ * The table lookup is a byte-at-a-time JS loop — the single most expensive
+ * synchronous pass in a package build (256 ms for a 50 MB slice). CRC-32 is a
+ * running register, so splitting the loop changes nothing about the result and
+ * everything about who else gets to run while it happens.
+ */
+async function crc32(data: Uint8Array): Promise<number> {
   let crc = 0xffffffff;
-  for (let i = 0; i < data.length; i += 1) {
-    crc = CRC_TABLE[(crc ^ data[i]) & 0xff] ^ (crc >>> 8);
+  for (let start = 0; start < data.length; start += YIELD_CHUNK_BYTES) {
+    const end = Math.min(start + YIELD_CHUNK_BYTES, data.length);
+    for (let i = start; i < end; i += 1) {
+      crc = CRC_TABLE[(crc ^ data[i]) & 0xff] ^ (crc >>> 8);
+    }
+    if (end < data.length) await yieldToLoop();
   }
   return (crc ^ 0xffffffff) >>> 0;
+}
+
+/**
+ * Upper-case MD5 hex of the whole buffer, fed in a megabyte at a time.
+ *
+ * `createHash` is native, which makes it fast but not concurrent: a single
+ * `update()` of a 50 MB slice holds the loop for 159 ms. The digest is defined
+ * over the byte stream, so feeding it in chunks yields the same hash — the one
+ * the printer checks `plate_1.gcode.md5` against.
+ */
+async function md5Hex(data: Uint8Array): Promise<string> {
+  const hash = createHash("md5");
+  for (let start = 0; start < data.length; start += YIELD_CHUNK_BYTES) {
+    const end = Math.min(start + YIELD_CHUNK_BYTES, data.length);
+    hash.update(data.subarray(start, end));
+    if (end < data.length) await yieldToLoop();
+  }
+  return hash.digest("hex").toUpperCase();
 }

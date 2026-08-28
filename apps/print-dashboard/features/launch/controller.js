@@ -11,7 +11,7 @@
 
 import { apiGet, apiPost } from "../../api.js";
 import { esc, toast } from "../../util.js";
-import { launchModalHtml } from "./view.js";
+import { launchModalHtml, overridableProblems, overrideReady } from "./view.js";
 
 /* Ключ идемпотентности живёт столько же, сколько попытка запуска ОДНОЙ задачи.
    Он создаётся при открытии окна, а не при клике: повторный клик, двойной клик и
@@ -62,6 +62,10 @@ export function createLaunchController({ getContent, refresh, close }) {
         mode: "auto",
         selectedPrinterId: null,
         confirmed: new Set(),
+        // Принятие ответственности за `review`: галочка и причина. Живут ровно
+        // столько же, сколько выбор принтера, — и сбрасываются вместе с ним.
+        overrideAccepted: false,
+        overrideReason: "",
         busy: false,
         error: null,
         done: null
@@ -92,6 +96,10 @@ export function createLaunchController({ getContent, refresh, close }) {
     // вопроса про стол, а у старого — быть. Ранее поставленные галочки не
     // переносим, иначе оператор подтвердит одно, а запустит на другом.
     session.ui.confirmed = new Set();
+    // По той же причине снимается и принятая ответственность: она бралась за
+    // конкретный список проверок конкретной машины.
+    session.ui.overrideAccepted = false;
+    session.ui.overrideReason = "";
     render();
     try {
       const preview = await load(session.taskId, printerId);
@@ -116,11 +124,20 @@ export function createLaunchController({ getContent, refresh, close }) {
     render();
 
     try {
+      // Принтер называется ЯВНО и всегда — выбор принтера сам по себе ничего не
+      // снимает, а override относится к конкретной машине и её проверкам.
+      const override = overrideReady(candidate, ui)
+        ? {
+            codes: overridableProblems(candidate).map((p) => p.code),
+            reason: ui.overrideReason.trim()
+          }
+        : null;
       const res = await apiPost(
         `/api/print/launch/${encodeURIComponent(session.taskId)}`,
         {
           printerId: candidate.printerId,
           confirmations: [...ui.confirmed],
+          ...(override ? { override } : {}),
           idempotencyKey: session.idempotencyKey
         },
         { timeoutMs: LAUNCH_TIMEOUT_MS }
@@ -233,12 +250,39 @@ export function createLaunchController({ getContent, refresh, close }) {
       return true;
     }
 
+    const accept = e.target.closest("[data-launch-override-accept]");
+    if (accept) {
+      session.ui.overrideAccepted = accept.checked;
+      render();
+      return true;
+    }
+
     return false;
+  }
+
+  /* Текст причины набирается посимвольно, и перерисовывать окно на каждый
+     символ нельзя — курсор прыгал бы в начало поля. Поэтому значение только
+     запоминается, а состояние кнопки обновляется здесь же, точечно. */
+  function handleInput(e) {
+    if (!session) return false;
+    const why = e.target.closest("[data-launch-override-reason]");
+    if (!why) return false;
+    session.ui.overrideReason = why.value;
+    const go = getContent().querySelector("[data-launch-go]");
+    if (go) {
+      const { preview, ui } = session;
+      const candidate = preview?.candidates.find((c) => c.printerId === ui.selectedPrinterId) || null;
+      const confirmations = preview?.confirmations || [];
+      const allConfirmed = confirmations.filter((c) => c.required).every((c) => ui.confirmed.has(c.code));
+      const admitted = Boolean(candidate?.eligible) || overrideReady(candidate, ui);
+      go.disabled = !(admitted && allConfirmed && !ui.busy && !preview?.unresolvedRunId);
+    }
+    return true;
   }
 
   function reset() {
     session = null;
   }
 
-  return { open, handleClick, handleChange, reset, isOpen: () => session !== null, close };
+  return { open, handleClick, handleChange, handleInput, reset, isOpen: () => session !== null, close };
 }

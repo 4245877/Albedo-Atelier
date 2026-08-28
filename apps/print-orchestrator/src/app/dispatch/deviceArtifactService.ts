@@ -659,6 +659,23 @@ export class DeviceArtifactService {
    * corrupt or hand-edited, can make this read `/etc/passwd`, a path outside the
    * store, or a URL. The size is checked against the registered size before the
    * read, which is what stops a half-written blob being pushed as a whole file.
+   *
+   * **The whole file is read into memory, deliberately and boundedly.** The cost
+   * was measured rather than assumed: one delivery holds the artifact once and
+   * nothing else of consequence — building the Bambu container adds ~1 MB of live
+   * buffers on top of a 50 MB slice (the deflated payload is ~0.65 % of the
+   * G-code), and the Moonraker path uploads the same buffer it read. Both the
+   * package builder and the multipart upload avoid re-copying it (see
+   * `bambuPackage`'s chunked passes and `ownsItsBuffer` in `upload.ts`), so peak
+   * ≈ 1× the file.
+   *
+   * Two ceilings bound it: `MAX_UPLOAD_FILE_BYTES` (200 MB) caps what can enter
+   * the store, and {@link MAX_DEVICE_UPLOAD_BYTES} (512 MB) caps what may leave
+   * for a device. Preparation is serialised per device slot, not globally, so the
+   * true worst case is one artifact per printer being prepared at once — and a
+   * real sliced plate is single-digit MB. Streaming would trade that bounded cost
+   * for a transfer that could no longer be hashed and size-checked before the
+   * first byte leaves the host, which is the check `prepare` is built around.
    */
   private async readArtifactBytes(artifact: Artifact): Promise<Uint8Array> {
     if (!artifact.source) {
