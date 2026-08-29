@@ -87,6 +87,7 @@ function statusFor(printer: PrinterConfig): PrinterLiveStatus {
     progressPct: null,
     remainingMinutes: null,
     filamentUsedMm: null,
+    slicerFilamentG: null,
     amsTrays: null,
     nozzleDiameterMm: null,
     nozzleType: null,

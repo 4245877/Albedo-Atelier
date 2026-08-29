@@ -217,8 +217,25 @@ function normalizeUnreconciled(raw: unknown): UnreconciledConsume | null {
     estimatedGrams:
       typeof raw.estimatedGrams === "number" && Number.isFinite(raw.estimatedGrams)
         ? raw.estimatedGrams
-        : null
+        : null,
+    // Both absent on rows written before a rejected deduction could become a
+    // debt; a debt with neither is still actionable (the operator writes it off
+    // by hand), it just cannot be settled by re-posting.
+    measured: normalizeMeasured(raw.measured),
+    payload: normalizeConsumePayload(raw.payload)
   };
+}
+
+/** A stored measured quantity; anything not a positive number is dropped. */
+function normalizeMeasured(raw: unknown): { grams?: number; lengthMm?: number } | null {
+  if (!isObject(raw)) return null;
+  const grams = toPositiveFinite(raw.grams);
+  const lengthMm = toPositiveFinite(raw.lengthMm);
+  if (grams === undefined && lengthMm === undefined) return null;
+  const out: { grams?: number; lengthMm?: number } = {};
+  if (grams !== undefined) out.grams = grams;
+  if (lengthMm !== undefined) out.lengthMm = lengthMm;
+  return out;
 }
 
 function toPositiveFinite(value: unknown): number | undefined {
@@ -234,9 +251,16 @@ function toOptionalStr(value: unknown): string | undefined {
  * redelivery needs (printer, idempotency key, a positive quantity) is dropped —
  * redelivering it could never succeed or, worse, could deduct unpredictably.
  */
-function normalizePendingConsume(raw: unknown): PendingConsume | null {
-  if (!isObject(raw) || !isObject(raw.input)) return null;
-  const source = raw.input;
+/**
+ * Coerces one stored consume payload. Shared by the retry queue and by the
+ * unreconciled ledger (whose entries keep the payload so a debt can be settled
+ * by re-posting the ORIGINAL request, idempotency key included). A payload
+ * without a printer, a key or a positive quantity could never be delivered
+ * meaningfully, so it is dropped rather than half-restored.
+ */
+function normalizeConsumePayload(raw: unknown): ConsumePayload | null {
+  if (!isObject(raw)) return null;
+  const source = raw;
 
   const printerId = toStr(source.printerId);
   const idempotencyKey = toStr(source.idempotencyKey);
@@ -267,6 +291,15 @@ function normalizePendingConsume(raw: unknown): PendingConsume | null {
   if (color !== undefined) input.color = color;
   const note = toOptionalStr(source.note);
   if (note !== undefined) input.note = note;
+
+  return input;
+}
+
+function normalizePendingConsume(raw: unknown): PendingConsume | null {
+  if (!isObject(raw)) return null;
+  const input = normalizeConsumePayload(raw.input);
+  if (!input) return null;
+  const printerId = input.printerId;
 
   return {
     input,

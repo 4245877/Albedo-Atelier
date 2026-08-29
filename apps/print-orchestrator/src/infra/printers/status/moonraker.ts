@@ -117,6 +117,48 @@ export function parseMoonrakerJobFilament(metadata: Record<string, unknown>): Ac
 }
 
 /**
+ * The slicer's own weight estimate for the loaded file, in grams
+ * (`filament_weight_total`). A prediction, not a measurement — it never becomes
+ * a deduction; it is what an unmeasurable print leaves on an operator's debt so
+ * there is a number to write off by hand. Rejects zero/negative/absent.
+ */
+export function parseMoonrakerFilamentWeightG(metadata: Record<string, unknown>): number | null {
+  const grams = firstFiniteNumber(metadata.filament_weight_total);
+  return grams !== null && grams > 0 ? grams : null;
+}
+
+/**
+ * The sliced metadata Creality's Klipper fork embeds in `virtual_sdcard` for the
+ * job it is currently running (`cur_print_data.metadata`).
+ *
+ * This exists because on the farm's K2 the standard Moonraker route is empty:
+ * `GET /server/files/metadata` answers `{"slicer": "Unknown"}` with no
+ * `filament_type`, no `filament_colors` and no `estimated_time` for EVERY file
+ * on the device — Moonraker's own scanner does not understand the vendor's
+ * G-code flavour. The vendor's `cur_print_data` block carries the real values
+ * (`slicer: "OrcaSlicer"`, `filament_type: "PETG;…"`, `filament_total`,
+ * `filament_weight_total`, `estimated_time`, `nozzle_diameter`), and it arrives
+ * inside the status query that is already being made.
+ *
+ * Consequences of not reading it, all observed in production: the loaded-reel
+ * sync never fired for the K2 (its binding sat unchanged for six weeks while
+ * deductions kept draining whatever position an operator had bound by hand),
+ * the remaining-time fell back to file-position extrapolation, and a metadata
+ * request was issued every poll only to be discarded.
+ *
+ * Returns null when the block is absent or carries no metadata object — a
+ * stock Klipper simply has no `cur_print_data`, and the HTTP route stays the
+ * fallback for it.
+ */
+export function parseMoonrakerCurPrintMetadata(
+  virtualSd: Record<string, unknown>
+): Record<string, unknown> | null {
+  const current = isObject(virtualSd.cur_print_data) ? virtualSd.cur_print_data : null;
+  if (!current) return null;
+  return isObject(current.metadata) ? current.metadata : null;
+}
+
+/**
  * The slicer's own total estimate for the loaded file, in seconds.
  *
  * Klipper has no remaining-time countdown, so this is the best statement about
@@ -130,30 +172,62 @@ export function parseMoonrakerEstimatedTimeSec(metadata: Record<string, unknown>
   return seconds !== null && seconds > 0 ? seconds : null;
 }
 
+/** What one sliced-metadata blob tells us about the job now loaded. */
+export type MoonrakerJobMetadata = {
+  filament: ActiveFilament | null;
+  estimatedTimeSec: number | null;
+  slicerFilamentG: number | null;
+};
+
+const NO_JOB_METADATA: MoonrakerJobMetadata = {
+  filament: null,
+  estimatedTimeSec: null,
+  slicerFilamentG: null
+};
+
+/** Projects one sliced-metadata record into the three things telemetry wants. */
+export function readMoonrakerJobMetadata(metadata: Record<string, unknown>): MoonrakerJobMetadata {
+  return {
+    filament: parseMoonrakerJobFilament(metadata),
+    estimatedTimeSec: parseMoonrakerEstimatedTimeSec(metadata),
+    slicerFilamentG: parseMoonrakerFilamentWeightG(metadata)
+  };
+}
+
+/** Whether a metadata read produced anything at all worth keeping. */
+function hasJobMetadata(metadata: MoonrakerJobMetadata): boolean {
+  return (
+    metadata.filament !== null ||
+    metadata.estimatedTimeSec !== null ||
+    metadata.slicerFilamentG !== null
+  );
+}
+
 /**
  * Best-effort fetch of the current job's sliced filament from Moonraker's file
  * metadata. Never throws — filament is a nice-to-have that must not break (or
  * slow past its own timeout) the core status poll, so any failure returns null.
+ *
+ * The FALLBACK path only: the device's own `virtual_sdcard.cur_print_data`
+ * (see {@link parseMoonrakerCurPrintMetadata}) is preferred because it arrives
+ * inside the status query that is already being made and, on a vendor Klipper
+ * whose files Moonraker cannot parse, it is the only copy that has the values.
  */
 async function fetchMoonrakerJobMetadata(
   printer: PrinterConfig,
   filename: string
-): Promise<{ filament: ActiveFilament | null; estimatedTimeSec: number | null }> {
-  const none = { filament: null, estimatedTimeSec: null };
+): Promise<MoonrakerJobMetadata> {
   try {
     const res = await fetchWithTimeout(
       `${moonrakerBaseUrl(printer)}/server/files/metadata?filename=${encodeURIComponent(filename)}`,
       { timeoutMs: MOONRAKER_TIMEOUT_MS, headers: moonrakerHeaders(printer) }
     );
-    if (!res.ok) return none;
+    if (!res.ok) return NO_JOB_METADATA;
     const json = (await res.json()) as { result?: unknown };
-    if (!isObject(json?.result)) return none;
-    return {
-      filament: parseMoonrakerJobFilament(json.result),
-      estimatedTimeSec: parseMoonrakerEstimatedTimeSec(json.result)
-    };
+    if (!isObject(json?.result)) return NO_JOB_METADATA;
+    return readMoonrakerJobMetadata(json.result);
   } catch {
-    return none;
+    return NO_JOB_METADATA;
   }
 }
 
@@ -230,14 +304,21 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
     // Active filament from the current job's sliced metadata — the only honest
     // live filament signal the K2 exposes (CFS `box`/`filament_rack` report no
     // usable material and no active slot). Only meaningful while a print is
-    // loaded, so skip the extra request otherwise.
+    // loaded, so it is not read otherwise.
     const currentFile = firstText(printStats.filename) || null;
-    // One request serves both the active filament and the slicer's own time
-    // estimate; neither is meaningful unless a sliced file is actually loaded.
+    const jobLoaded = Boolean(currentFile) && (mappedStatus === "printing" || mappedStatus === "paused");
+    // The device's own copy first: it rides along in the status response that was
+    // already fetched, so it costs no request, and on a vendor Klipper whose
+    // G-code Moonraker cannot parse it is the ONLY copy with real values. The
+    // HTTP metadata route stays the fallback for a stock Klipper, and is skipped
+    // entirely when the embedded block already answered — that request used to
+    // fire every poll on the K2 only to be discarded.
+    const embedded = jobLoaded ? parseMoonrakerCurPrintMetadata(virtualSd) : null;
+    const embeddedMetadata = embedded ? readMoonrakerJobMetadata(embedded) : NO_JOB_METADATA;
     const jobMetadata =
-      currentFile && (mappedStatus === "printing" || mappedStatus === "paused")
-        ? await fetchMoonrakerJobMetadata(printer, currentFile)
-        : { filament: null, estimatedTimeSec: null };
+      jobLoaded && !hasJobMetadata(embeddedMetadata)
+        ? await fetchMoonrakerJobMetadata(printer, currentFile as string)
+        : embeddedMetadata;
     const activeFilament = jobMetadata.filament;
 
     return {
@@ -256,6 +337,7 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
         progressPct
       }),
       filamentUsedMm,
+      slicerFilamentG: jobMetadata.slicerFilamentG,
       // Moonraker/Klipper has no AMS concept here; filament is one loaded reel.
       amsTrays: null,
       nozzleDiameterMm,

@@ -92,6 +92,24 @@ export type UnreconciledConsume = {
    * field can never become a deduction without a human.
    */
   estimatedGrams: number | null;
+  /**
+   * The quantity a device DID measure for this print but the warehouse never
+   * applied — a rejected deduction (no loaded reel, not enough stock, archived
+   * position) or one dropped from the retry queue.
+   *
+   * Distinct from {@link estimatedGrams} on purpose, and the distinction is the
+   * whole point: this is an observation, so an operator settling the debt is
+   * confirming a real number rather than accepting a guess. Null for debts that
+   * arise because nothing was measured at all.
+   */
+  measured: { grams?: number; lengthMm?: number } | null;
+  /**
+   * The delivery that was owed, verbatim, when one was built. Kept so settling
+   * the debt re-posts the ORIGINAL payload — same `idempotencyKey` — which means
+   * a manual settlement can never double-deduct against a delivery that had in
+   * fact landed. Null for debts with no payload (nothing was measurable).
+   */
+  payload: ConsumePayload | null;
 };
 
 /**
@@ -296,23 +314,113 @@ export class FilamentConsumption {
     return [...this.unreconciled].reverse();
   }
 
-  /** Operator acknowledgement: the debt has been settled by hand. */
+  /** One debt by id, or null. */
+  findUnreconciled(id: string): UnreconciledConsume | null {
+    return this.unreconciled.find((entry) => entry.id === id) ?? null;
+  }
+
+  /**
+   * Operator acknowledgement: the debt has been settled by hand.
+   *
+   * Persists immediately. Without that the acknowledgement lived only in memory
+   * and a restart resurrected a debt the operator had already written off —
+   * which is the same class of bug as losing one.
+   */
   clearUnreconciled(id: string): boolean {
     const before = this.unreconciled.length;
     this.unreconciled = this.unreconciled.filter((entry) => entry.id !== id);
-    return this.unreconciled.length !== before;
+    const removed = this.unreconciled.length !== before;
+    if (removed) this.persist();
+    return removed;
+  }
+
+  /**
+   * Settle a debt by actually posting its deduction to the warehouse — the
+   * operator's decision, taken once the reason it failed has been fixed (a reel
+   * bound, stock refilled, a position restored).
+   *
+   * Only a debt that carries the ORIGINAL payload can be settled this way, and
+   * the payload is re-posted verbatim: the `idempotencyKey` is the one the
+   * failed delivery already used, so if that delivery had in fact landed,
+   * fulfillment answers `duplicate` and nothing is deducted twice. The debt is
+   * cleared only after fulfillment accepted it; a refusal leaves it standing
+   * with the new reason, because a debt that disappears on a failed settlement
+   * is exactly the drift this whole ledger exists to prevent.
+   */
+  async settleUnreconciled(
+    id: string,
+    /**
+     * Grams the OPERATOR states, for a debt with nothing measured — the A1's
+     * external spool reports no `tray_weight`, so its prints are unmeasurable by
+     * construction and no amount of retrying will produce a figure.
+     *
+     * This is the one door through which a non-measurement may move the
+     * warehouse, and it is deliberately narrow: a person has to name the number,
+     * having been shown the slicer's estimate next to it. Automatic deduction
+     * still never accepts an estimate — see {@link ConsumptionConfidence}.
+     */
+    grams?: number
+  ): Promise<{ settled: boolean; reason?: string }> {
+    const entry = this.findUnreconciled(id);
+    if (!entry) return { settled: false, reason: "долг не найден" };
+    if (!this.inventory?.enabled) {
+      return { settled: false, reason: "интеграция со складом не настроена" };
+    }
+
+    const manual = grams !== undefined;
+    if (manual && (!Number.isFinite(grams) || (grams as number) < MIN_CONSUME_GRAMS)) {
+      return { settled: false, reason: `укажите не менее ${MIN_CONSUME_GRAMS} г` };
+    }
+    const payload = manual ? this.manualPayload(entry, grams as number) : entry.payload;
+    if (!payload) {
+      return {
+        settled: false,
+        reason: "по этой печати нет измеренного расхода — укажите граммы для списания вручную"
+      };
+    }
+
+    try {
+      await this.inventory.consume(payload);
+      this.authNotified = false;
+      this.clearUnreconciled(id);
+      this.events.push(
+        "✔",
+        `<b>${entry.printerName}</b>: склад — ручное списание выполнено` +
+          `${entry.job ? ` (${entry.job})` : ""}`,
+        "ok"
+      );
+      return { settled: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      entry.reason = message;
+      this.persist();
+      this.logger.warn?.(
+        { printer: entry.printerId, debt: id },
+        "manual settlement of an unreconciled consume failed"
+      );
+      return { settled: false, reason: message };
+    }
   }
 
   /**
    * Record that a print finished without a recoverable deduction. Bounded, so a
    * persistent fault cannot grow the state file without limit — the OLDEST entry
    * is dropped, because the newest debt is the one most likely still actionable.
+   *
+   * Persists on its own rather than relying on a caller's later save: every call
+   * site happens to push a feed event straight after (and the feed persists),
+   * but a debt whose durability depends on an unrelated side effect is one
+   * refactor away from being lost.
    */
   private recordUnreconciled(
     printer: { id: string; name: string },
     job: string | null,
     reason: string,
-    estimatedGrams: number | null = null
+    options: {
+      estimatedGrams?: number | null;
+      measured?: { grams?: number; lengthMm?: number } | null;
+      payload?: ConsumePayload | null;
+    } = {}
   ): void {
     this.unreconciled.push({
       id: randomUUID(),
@@ -321,9 +429,44 @@ export class FilamentConsumption {
       job,
       observedAt: new Date().toISOString(),
       reason,
-      estimatedGrams
+      estimatedGrams: options.estimatedGrams ?? null,
+      measured: options.measured ?? null,
+      payload: options.payload ?? null
     });
     while (this.unreconciled.length > MAX_UNRECONCILED) this.unreconciled.shift();
+    this.persist();
+  }
+
+  /**
+   * The deduction for an operator-stated settlement of an unmeasured debt.
+   *
+   * The idempotency key is derived from the DEBT id (a UUID minted once, when
+   * the debt was recorded), so a double-submit — an impatient second click, a
+   * retried request — settles the same debt exactly once on the warehouse side.
+   * Whole grams: fulfillment tracks stock in whole grams and this figure came
+   * from a person, not from an accumulator that needs a sub-gram carry.
+   */
+  private manualPayload(entry: UnreconciledConsume, grams: number): ConsumePayload {
+    const rounded = Math.round(grams);
+    return {
+      printerId: entry.printerId,
+      grams: rounded,
+      printJobId: entry.payload?.printJobId ?? entry.id,
+      idempotencyKey: `manual:${entry.id}`,
+      note: entry.job ? `Ручное списание за печать «${entry.job}»` : "Ручное списание"
+    };
+  }
+
+  /** The measured quantity a payload carries, for an operator-facing debt row. */
+  private measuredOf(input: ConsumePayload): { grams?: number; lengthMm?: number } {
+    return input.grams !== undefined ? { grams: input.grams } : { lengthMm: input.lengthMm as number };
+  }
+
+  /** "12 г" / "1450 мм" — how a debt's owed quantity reads to an operator. */
+  private quantityLabel(input: ConsumePayload): string {
+    return input.grams !== undefined
+      ? `${input.grams} г`
+      : `${Math.round(input.lengthMm ?? 0)} мм`;
   }
 
   /** The sub-gram carry for persistence (only non-zero amounts are written). */
@@ -367,7 +510,15 @@ export class FilamentConsumption {
     prev: PrinterLiveStatus,
     next: PrinterLiveStatus,
     run: CompletedRun | undefined,
-    job: string | null
+    job: string | null,
+    /**
+     * The slicer's expected grams for this job when the caller knows one and
+     * the run does not carry it — an untracked run has no `CompletedRun` to
+     * hold it, and a device that publishes its own sliced metadata (Moonraker
+     * `filament_weight_total`) can supply one the queue never had. Orientation
+     * only: it is written onto a debt, never deducted.
+     */
+    estimatedGrams: number | null = null
   ): void {
     if (!this.inventory?.enabled) return;
 
@@ -385,10 +536,15 @@ export class FilamentConsumption {
     // happened to give us measurable data does not change the fact that a print
     // completed whose filament nobody deducted.
     if (!run) {
+      // The estimate is attached here too: an untracked run still has a job on
+      // the queue most of the time, and a debt with a starting number is the
+      // difference between an operator who can settle it and one who cannot.
+      const untrackedEstimate = estimatedGrams ?? null;
       this.recordUnreconciled(
         printer,
         job,
-        "печать не отслеживалась (перезапуск во время печати) — автосписание пропущено"
+        "печать не отслеживалась (перезапуск во время печати) — автосписание пропущено",
+        { estimatedGrams: untrackedEstimate }
       );
       this.events.push(
         "⚠",
@@ -412,14 +568,14 @@ export class FilamentConsumption {
       // the slicer's own figure attached as an ORIENTATION for whoever writes it
       // off — never posted as a deduction, because nothing observed it.
       if (!this.measuredSomething(printer, prev, next, run)) {
-        const estimate = run.estimatedGrams ?? null;
+        const estimate = run.estimatedGrams ?? estimatedGrams ?? null;
         const hint =
           estimate !== null ? ` по расчёту слайсера ≈ ${estimate.toFixed(1)} г (оценка, не замер)` : "";
         this.recordUnreconciled(
           printer,
           job,
           `принтер не сообщил расход филамента — автосписание невозможно${hint}`,
-          estimate
+          { estimatedGrams: estimate }
         );
         this.events.push(
           "⚠",
@@ -552,7 +708,7 @@ export class FilamentConsumption {
               idempotencyKey: `${printer.id}:${printJobId}:t${item.amsTray}`,
               note
             };
-      void this.deliver(input, printer.name);
+      void this.deliver(input, printer.name, job);
     }
   }
 
@@ -703,6 +859,17 @@ export class FilamentConsumption {
       },
       "pending consume dropped"
     );
+    // A queue entry leaving the queue for good is still an owed deduction: the
+    // quantity was measured and the warehouse never applied it. It becomes a
+    // durable debt for the same reason a rejected first delivery does — the
+    // counters behind /api/monitoring/filament-queue are in-memory and reset on
+    // restart, so they cannot be the only trace that grams went missing.
+    this.recordUnreconciled(
+      { id: entry.input.printerId, name: entry.printerName },
+      entry.input.note ?? null,
+      `отложенное списание ${this.quantityLabel(entry.input)} отброшено (${reason}): ${message}`,
+      { measured: this.measuredOf(entry.input), payload: entry.input }
+    );
     this.events.push("⚠", `<b>${entry.printerName}</b>: ${message}`, "err");
   }
 
@@ -718,10 +885,21 @@ export class FilamentConsumption {
   }
 
   /** First delivery of one deduction; failures route to the queue or the feed. */
-  private async deliver(input: ConsumePayload, printerName: string): Promise<void> {
+  private async deliver(input: ConsumePayload, printerName: string, job: string | null): Promise<void> {
     try {
-      await this.inventory!.consume(input);
+      const result = (await this.inventory!.consume(input)) as { duplicate?: boolean } | null;
       this.authNotified = false;
+      if (result?.duplicate === true) {
+        // The key was already spent, so THIS request moved nothing. Harmless for
+        // a genuine redelivery, but the key is the run id and a run adopted from
+        // the canonical record can outlive one physical print — in which case a
+        // real deduction has just silently applied 0 g. Never silent: the carry
+        // was already zeroed for it.
+        this.logger.warn?.(
+          { printer: input.printerId, idempotencyKey: input.idempotencyKey },
+          "fulfillment reported the deduction as a duplicate — nothing was applied by this request"
+        );
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn?.({ err: error, printer: input.printerId }, "filament consume failed");
@@ -737,7 +915,28 @@ export class FilamentConsumption {
         this.enqueue(input, printerName, message, { announce: true });
         return;
       }
-      this.events.push("⚠", `<b>${printerName}</b>: склад — ${message}`, "err");
+
+      // Rejected: fulfillment processed the call and refused (no loaded reel,
+      // not enough stock, an archived position). Auto-retrying is still wrong —
+      // it would re-fail identically, and a late retry after a manual correction
+      // could double-deduct — but DROPPING it was worse. The carry was already
+      // zeroed for this quantity, so a feed line alone meant the grams simply
+      // vanished; with stock at zero on the shelf, every subsequent print on
+      // that printer vanished the same way. The debt is now durable, carries the
+      // measured quantity, and can be settled with one action once the reason is
+      // fixed — see settleUnreconciled.
+      this.recordUnreconciled(
+        { id: input.printerId, name: printerName },
+        job,
+        `склад отклонил списание ${this.quantityLabel(input)}: ${message}`,
+        { measured: this.measuredOf(input), payload: input }
+      );
+      this.events.push(
+        "⚠",
+        `<b>${printerName}</b>: склад — ${message}; списание ${this.quantityLabel(input)} ` +
+          `сохранено как долг — исправьте причину и подтвердите списание`,
+        "err"
+      );
     }
   }
 

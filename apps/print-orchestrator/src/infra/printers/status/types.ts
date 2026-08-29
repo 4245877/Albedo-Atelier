@@ -72,6 +72,14 @@ export interface PrinterLiveStatus {
    */
   filamentUsedMm: number | null;
   /**
+   * What the SLICER expected this job to consume, in grams, when the device
+   * carries the sliced metadata (Moonraker `filament_weight_total`). A
+   * prediction, never a measurement: it must never be deducted automatically —
+   * it exists so a print the device could not measure leaves the operator a
+   * starting figure on a durable debt. `null` when unknown.
+   */
+  slicerFilamentG: number | null;
+  /**
    * AMS/AMS-Lite tray state (Bambu), or `null` when the device/adapter has no
    * AMS (Moonraker, Creality, offline). Snapshotted at print start and compared
    * at completion to attribute filament per slot.

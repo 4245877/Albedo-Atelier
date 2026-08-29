@@ -214,6 +214,7 @@ export function buildBambuStatus(printer: PrinterConfig, payload: unknown): Prin
     // metadata). Filament is instead attributed per AMS tray at completion from
     // the drop in each tray's `remain` estimate — see bambuUsage.ts.
     filamentUsedMm: null,
+    slicerFilamentG: null,
     amsTrays,
     nozzleDiameterMm,
     nozzleType,

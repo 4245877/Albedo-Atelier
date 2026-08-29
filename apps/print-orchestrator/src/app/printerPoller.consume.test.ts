@@ -43,6 +43,7 @@ function baseStatus(over: Partial<PrinterLiveStatus>): PrinterLiveStatus {
     progressPct: null,
     remainingMinutes: null,
     filamentUsedMm: null,
+    slicerFilamentG: null,
     amsTrays: null,
     nozzleDiameterMm: null,
     nozzleType: null,
@@ -540,4 +541,128 @@ test("the poller syncs the loaded reel to fulfillment while a print runs", async
   // And the completion deduction still fires as before.
   assert.equal(inventory.calls.length, 1);
   assert.equal(inventory.calls[0].lengthMm, 1234);
+});
+
+/*
+ * The Creality WebSocket path (the Ender 3 V3 KE).
+ *
+ * Before the adapter read the heartbeat's extrusion odometer, this printer could
+ * not be accounted for at all: `filamentUsedMm` was hardcoded null, so every
+ * finished print deducted nothing and left an invisible debt while the shelf
+ * balance drifted. These drive the whole poll loop with a Creality-protocol
+ * config to prove the end-to-end path now closes.
+ */
+
+test("Creality WS: a completed print deducts the reported extruded length", async () => {
+  const inventory = recordingInventory();
+  const ender: PrinterConfig = { ...bambuConfig(), id: "ender3-v3-ke", protocol: "creality" };
+  const sequence = [
+    baseStatus({ id: "ender3-v3-ke", status: "idle" }),
+    baseStatus({ id: "ender3-v3-ke", status: "printing", stateText: "printing" }),
+    baseStatus({
+      id: "ender3-v3-ke",
+      status: "idle",
+      stateText: "complete",
+      progressPct: 100,
+      filamentUsedMm: 4200
+    })
+  ];
+  const { poller } = makePoller(ender, sequence, inventory.client);
+
+  await pollTimes(poller, 3);
+
+  assert.equal(inventory.calls.length, 1, "the Ender must deduct like any single-reel machine");
+  assert.equal(inventory.calls[0].lengthMm, 4200);
+  assert.equal(inventory.calls[0].amsTray, undefined, "no AMS on this machine");
+  assert.equal(poller.filament.listUnreconciled().length, 0, "a measured print owes nothing");
+});
+
+test("Creality WS: a firmware that sends no odometer leaves a debt, never a silent zero", async () => {
+  const inventory = recordingInventory();
+  const ender: PrinterConfig = { ...bambuConfig(), id: "ender3-v3-ke", protocol: "creality" };
+  const sequence = [
+    baseStatus({ id: "ender3-v3-ke", status: "idle" }),
+    baseStatus({ id: "ender3-v3-ke", status: "printing", stateText: "printing" }),
+    baseStatus({
+      id: "ender3-v3-ke",
+      status: "idle",
+      stateText: "complete",
+      progressPct: 100,
+      filamentUsedMm: null
+    })
+  ];
+  const { poller, events } = makePoller(ender, sequence, inventory.client);
+
+  await pollTimes(poller, 3);
+
+  assert.equal(inventory.calls.length, 0, "nothing is invented when nothing was measured");
+  const owed = poller.filament.listUnreconciled();
+  assert.equal(owed.length, 1, "the obligation is recorded durably, not only in the feed");
+  assert.equal(owed[0].printerId, "ender3-v3-ke");
+  assert.match(feedText(events), /нет данных о расходе филамента/);
+});
+
+test("Creality WS: the named material binds the reel so a deduction has a target", async () => {
+  const inventory = recordingInventory();
+  const syncCalls: SyncPayload[] = [];
+  const syncClient: InventorySyncClient = {
+    enabled: true,
+    syncLoadedFilament: async (input) => {
+      syncCalls.push(input);
+      return { resolved: true };
+    }
+  };
+  const ender: PrinterConfig = { ...bambuConfig(), id: "ender3-v3-ke", protocol: "creality" };
+  const active = { material: "PLA", color: null, tray: null, remainPct: null };
+  const sequence = [
+    baseStatus({ id: "ender3-v3-ke", status: "idle" }),
+    baseStatus({
+      id: "ender3-v3-ke",
+      status: "printing",
+      stateText: "printing",
+      activeFilament: active
+    }),
+    baseStatus({
+      id: "ender3-v3-ke",
+      status: "idle",
+      stateText: "complete",
+      progressPct: 100,
+      filamentUsedMm: 4200
+    })
+  ];
+  const { poller } = makePoller(ender, sequence, inventory.client, new FilamentSync(syncClient));
+
+  await pollTimes(poller, 3);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(syncCalls, [
+    { printerId: "ender3-v3-ke", amsTray: undefined, material: "PLA", color: undefined }
+  ]);
+});
+
+test("a debt carries the device's own slicer estimate when the queue has none", async () => {
+  // The A1 Combo's external spool reports no tray_weight, so its prints are
+  // genuinely unmeasurable. What the operator needs is a number to write off —
+  // and a Moonraker-class device publishes one in its sliced metadata.
+  const inventory = recordingInventory();
+  const printer: PrinterConfig = { ...bambuConfig(), id: "k2", protocol: "moonraker" };
+  const sequence = [
+    baseStatus({ id: "k2", status: "idle" }),
+    baseStatus({ id: "k2", status: "printing", stateText: "printing", slicerFilamentG: 39.45 }),
+    baseStatus({
+      id: "k2",
+      status: "idle",
+      stateText: "complete",
+      progressPct: 100,
+      filamentUsedMm: null
+    })
+  ];
+  const { poller, events } = makePoller(printer, sequence, inventory.client);
+
+  await pollTimes(poller, 3);
+
+  const owed = poller.filament.listUnreconciled();
+  assert.equal(owed.length, 1);
+  assert.equal(owed[0].estimatedGrams, 39.45, "the slicer figure rides along as an orientation");
+  assert.match(feedText(events), /по расчёту слайсера ≈ 39\.5 г \(оценка, не замер\)/);
 });

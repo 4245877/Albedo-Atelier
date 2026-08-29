@@ -446,18 +446,23 @@ say:
 
 ## Filament auto-consume
 
-When a print **completes** (never on cancel or error), the poller deducts the
-used filament from the fulfillment warehouse via
-`POST /api/inventory/filament/consume`. All stock logic stays in fulfillment —
+When a print **ends** — completed, cancelled, or failed — the poller deducts the
+filament the device MEASURED from the fulfillment warehouse via
+`POST /api/inventory/filament/consume`. A cancelled or failed print consumed
+real material and the device's own figure (AMS remain-drop / extruded length)
+measures exactly how much, so it is deducted the same way; what is never
+deducted is a job's *planned* total. All stock logic stays in fulfillment —
 the orchestrator only reports what a printer consumed. Disabled (a no-op) until
 `FULFILLMENT_API_URL` is set, so the farm still runs standalone. Warehouse
 errors are **soft** — never fatal to the poll loop — and split by whether
 delivery is worth repeating:
 
 - **Rejected** (fulfillment processed the call and refused: no loaded reel, not
-  enough stock, material mismatch): one feed warning, no auto-retry. Retrying
-  would re-fail identically — and once the operator corrects the stock by hand,
-  a late auto-retry could double-deduct.
+  enough stock, material mismatch): no auto-retry — retrying would re-fail
+  identically, and once the operator corrects the stock by hand a late
+  auto-retry could double-deduct. The measured quantity is **not** discarded:
+  it becomes a durable debt (see below) carrying the original payload, so one
+  action settles it after the cause is fixed.
 - **Unreachable** (network error, timeout, 5xx — delivery unknown): the
   deduction is queued and redelivered with exponential backoff (1 min doubling
   up to 30 min, given up loudly after 7 days). The queue is persisted in
@@ -466,6 +471,34 @@ delivery is worth repeating:
 Each deduction carries a stable `idempotencyKey` (minted per print run, and per
 AMS tray), so a re-observed completion or any redelivery cannot double-deduct —
 fulfillment answers `duplicate: true` instead of writing a second movement.
+
+### Unreconciled debts (filament the warehouse never applied)
+
+A print whose consumption did not reach the shelf is recorded as a durable debt
+rather than a feed line — the feed is capped and unacknowledged, so an
+obligation left only there scrolls away and the warehouse drifts a spool at a
+time. Debts are persisted with the farm state and exposed for an operator to
+act on:
+
+    GET  /api/monitoring/filament-debts                 the outstanding list
+    POST /api/monitoring/filament-debts/:id/settle      post the deduction now
+    POST /api/monitoring/filament-debts/:id/acknowledge settled outside the system
+
+Three ways a debt appears: a print nobody tracked (a restart mid-print), a print
+nothing could measure (an external spool with no `tray_weight`), and a
+**measured** deduction the warehouse refused or that was finally dropped from
+the retry queue.
+
+`settle` re-posts the debt's ORIGINAL payload, `idempotencyKey` included, so a
+delivery that had in fact landed answers `duplicate` and nothing moves twice. A
+refusal leaves the debt standing with the new reason — a debt that vanishes on a
+failed settlement is the drift this ledger exists to prevent.
+
+For a debt with nothing measured, `settle` accepts an operator-stated
+`{ "grams": N }`. That is the one door through which a non-measurement may move
+the warehouse, and it is deliberately narrow: a person names the number, having
+been shown the slicer's estimate beside it. Automatic deduction still never
+accepts an estimate.
 
 ### Automatic loaded-reel binding (no manual entry)
 
@@ -565,8 +598,9 @@ and nothing missing from it is guessed:
 | Nozzle diameter | ✓ `print.nozzle_diameter` | ✓ `configfile.settings.extruder.nozzle_diameter` | — |
 | Nozzle type | ✓ `print.nozzle_type` | ✗ no Klipper field → manual | — |
 | AMS / AMS Lite / CFS | ✓ `print.ams` (kind from the catalogue) | presence of the `box` object only | — |
-| Loaded materials | ✓ `print.ams` / `vt_tray` | job metadata (see below) | — |
+| Loaded materials | ✓ `print.ams` / `vt_tray` | job metadata (see below) | heartbeat `materialType`, if present |
 | Extruders, chamber, filament sensor | chamber *sensor* only | ✓ `/printer/objects/list` | — |
+| Filament consumed | ✗ per-AMS-tray `remain` drop only | ✓ `print_stats.filament_used` (mm) | heartbeat `usedMaterialLength` (mm), if present |
 | Faults (codes) | ✓ `print.print_error` + `print.hms` | ✗ a state + message, no code register | error string only |
 | Removable print medium | ✓ `print.sdcard` | ✗ prints from streamed G-code | — |
 

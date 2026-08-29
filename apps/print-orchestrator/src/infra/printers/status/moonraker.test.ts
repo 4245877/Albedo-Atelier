@@ -3,9 +3,12 @@ import { test } from "node:test";
 
 import { normalizePrinterConfig } from "../config";
 import {
+  parseMoonrakerCurPrintMetadata,
+  parseMoonrakerFilamentWeightG,
   parseMoonrakerJobFilament,
   parseMoonrakerNozzleDiameter,
-  readMoonrakerLightState
+  readMoonrakerLightState,
+  readMoonrakerJobMetadata
 } from "./moonraker";
 
 /*
@@ -142,4 +145,78 @@ test("an unreadable pin stays null regardless of invert (never invents a state)"
     }),
     null
   );
+});
+
+/*
+ * The sliced metadata Creality's Klipper fork embeds in `virtual_sdcard`.
+ *
+ * Captured verbatim from the farm's K2 mid-print. The fixture matters because
+ * the STANDARD Moonraker route on this device answers `{"slicer": "Unknown"}`
+ * with no filament fields for every file it holds — so reading only that route
+ * left `activeFilament` permanently null, which meant the loaded-reel sync never
+ * fired and deductions kept draining whatever position an operator had bound by
+ * hand weeks earlier.
+ */
+const K2_VIRTUAL_SDCARD = {
+  file_path: "/mnt/UDISK/printer_data/gcodes/AQARA_M2_PETG_1h15m.gcode",
+  progress: 0.5848963241532185,
+  is_active: true,
+  cur_print_data: {
+    filament_used: 2185.253090001999,
+    filename: "AQARA_M2_PETG_1h15m.gcode",
+    metadata: {
+      slicer: "OrcaSlicer",
+      slicer_version: "2.4.2",
+      layer_count: 298,
+      estimated_time: 4497,
+      nozzle_diameter: 0.4,
+      filament_name: 'PETG @K2 FAST1";"PETG @K2 FAST1',
+      filament_type: "PETG;PETG;PETG;PETG",
+      filament_total: 13122.56,
+      filament_weight_total: 39.45
+    }
+  }
+};
+
+test("reads the embedded sliced metadata a vendor Klipper publishes in virtual_sdcard", () => {
+  const metadata = parseMoonrakerCurPrintMetadata(K2_VIRTUAL_SDCARD);
+  assert.ok(metadata, "cur_print_data.metadata is where the real values live on this device");
+  assert.equal(metadata.slicer, "OrcaSlicer");
+});
+
+test("a stock Klipper without cur_print_data yields null (the HTTP route stays the fallback)", () => {
+  assert.equal(parseMoonrakerCurPrintMetadata({ progress: 0.5, is_active: true }), null);
+  assert.equal(parseMoonrakerCurPrintMetadata({ cur_print_data: { filename: "a.gcode" } }), null);
+  assert.equal(parseMoonrakerCurPrintMetadata({ cur_print_data: "nonsense" }), null);
+});
+
+test("the embedded metadata yields the K2's material, ETA and slicer weight", () => {
+  const metadata = parseMoonrakerCurPrintMetadata(K2_VIRTUAL_SDCARD) as Record<string, unknown>;
+  const job = readMoonrakerJobMetadata(metadata);
+
+  // A multi-extruder list collapses to the primary material — the reel binding
+  // names one material, and guessing which slot feeds would be invention.
+  assert.deepEqual(job.filament, { material: "PETG", color: null, tray: null, remainPct: null });
+  assert.equal(job.estimatedTimeSec, 4497);
+  assert.equal(job.slicerFilamentG, 39.45);
+});
+
+test("the slicer weight is an estimate: absent/zero/negative reads as unknown, never as zero grams", () => {
+  assert.equal(parseMoonrakerFilamentWeightG({ filament_weight_total: 39.45 }), 39.45);
+  assert.equal(parseMoonrakerFilamentWeightG({}), null);
+  assert.equal(parseMoonrakerFilamentWeightG({ filament_weight_total: 0 }), null);
+  assert.equal(parseMoonrakerFilamentWeightG({ filament_weight_total: -5 }), null);
+  assert.equal(parseMoonrakerFilamentWeightG({ filament_weight_total: "nope" }), null);
+});
+
+test("the empty answer Moonraker's own route gives on this device carries nothing", () => {
+  // Verbatim shape of GET /server/files/metadata on the farm's K2.
+  const job = readMoonrakerJobMetadata({
+    size: 3744797,
+    slicer: "Unknown",
+    gcode_start_byte: 17840,
+    filename: "AQARA_M2_PETG_1h15m.gcode"
+  });
+
+  assert.deepEqual(job, { filament: null, estimatedTimeSec: null, slicerFilamentG: null });
 });

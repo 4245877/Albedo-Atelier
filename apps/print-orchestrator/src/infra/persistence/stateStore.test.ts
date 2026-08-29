@@ -94,7 +94,40 @@ function sampleState(): PersistedState {
         firstFailedAtMs: 1_720_000_000_000
       }
     ],
-    unreconciledConsumes: [],
+    unreconciledConsumes: [
+      {
+        id: "debt-1",
+        printerId: "creality-k2",
+        printerName: "Creality K2",
+        job: "vase.gcode",
+        observedAt: "2026-08-29T10:06:40.000Z",
+        reason: "склад отклонил списание 1450 мм: нет загруженного филамента",
+        estimatedGrams: null,
+        // A rejected deduction keeps what was MEASURED plus the payload it owed,
+        // so the debt can be settled later by re-posting the original request.
+        measured: { lengthMm: 1450 },
+        payload: {
+          printerId: "creality-k2",
+          lengthMm: 1450,
+          printJobId: "run-7",
+          idempotencyKey: "creality-k2:run-7",
+          note: "Печать «vase.gcode»"
+        }
+      },
+      {
+        id: "debt-2",
+        printerId: "bambu-a1-combo",
+        printerName: "Bambu Lab A1 Combo",
+        job: "clip.3mf",
+        observedAt: "2026-08-29T11:00:00.000Z",
+        reason: "принтер не сообщил расход филамента — автосписание невозможно",
+        estimatedGrams: 39.45,
+        // Nothing was measured, so there is nothing to re-post: this debt is
+        // written off by hand and only acknowledged here.
+        measured: null,
+        payload: null
+      }
+    ],
     filamentCarry: {
       "creality-k2:main": { lengthMm: 120.5 },
       "bambu-a1-combo:t0": { grams: 0.6 }
@@ -310,4 +343,58 @@ test("save is a no-op until a snapshot provider is bound", async () => {
   store.save();
   await store.flush();
   assert.equal(fs.existsSync(file), false, "nothing is written without a provider");
+});
+
+test("a debt written before the settle fields existed still restores (measured/payload null)", () => {
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      version: 1,
+      unreconciledConsumes: [
+        {
+          id: "legacy",
+          printerId: "creality-k2",
+          printerName: "Creality K2",
+          job: "old.gcode",
+          observedAt: "2026-08-01T00:00:00.000Z",
+          reason: "печать не отслеживалась"
+        }
+      ]
+    })
+  );
+
+  const [debt] = new StateStore(file).load().unreconciledConsumes;
+
+  assert.equal(debt.id, "legacy");
+  assert.equal(debt.measured, null);
+  assert.equal(debt.payload, null);
+  assert.equal(debt.estimatedGrams, null);
+});
+
+test("a debt payload that could never be delivered is dropped, not half-restored", () => {
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      version: 1,
+      unreconciledConsumes: [
+        {
+          id: "broken",
+          printerId: "creality-k2",
+          printerName: "Creality K2",
+          job: null,
+          observedAt: "2026-08-01T00:00:00.000Z",
+          reason: "склад отклонил списание",
+          // No idempotency key and no quantity: re-posting this could only fail,
+          // or worse, deduct unpredictably.
+          payload: { printerId: "creality-k2" },
+          measured: { lengthMm: 0 }
+        }
+      ]
+    })
+  );
+
+  const [debt] = new StateStore(file).load().unreconciledConsumes;
+
+  assert.equal(debt.payload, null, "an undeliverable payload must not survive the round trip");
+  assert.equal(debt.measured, null, "a non-positive quantity is not a measurement");
 });

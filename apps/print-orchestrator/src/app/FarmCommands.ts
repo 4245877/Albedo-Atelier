@@ -19,6 +19,7 @@ import {
 import type { DispatchService } from "./dispatch/dispatchService";
 import type { BedClearanceConfirmation, RunLifecycleService } from "./dispatch/runLifecycle";
 import { runDriverOperation } from "./driverErrors";
+import type { UnreconciledConsume } from "./filamentConsumption";
 import type { NightPlanEntry } from "./nightPlanner";
 import { toLegacyQueueJob } from "./printQueue/projection";
 
@@ -187,6 +188,37 @@ export class FarmCommands {
     dropped: Record<"overflow" | "expired" | "rejected", number>;
   } {
     return this.runtime.filament.metrics();
+  }
+
+  /**
+   * Every outstanding filament debt — a print whose consumption the warehouse
+   * never applied — newest first.
+   *
+   * This read is the reason the ledger exists. Recording debts durably while
+   * exposing them nowhere left them exactly as invisible as the capped event
+   * feed they were meant to replace, which is how a farm drifts from the
+   * warehouse a spool at a time without anyone being able to name a print.
+   */
+  listFilamentDebts(): UnreconciledConsume[] {
+    return this.runtime.filament.listUnreconciled();
+  }
+
+  /** Operator acknowledgement: the debt was settled outside the system. */
+  acknowledgeFilamentDebt(id: string): { cleared: boolean } {
+    return { cleared: this.runtime.filament.clearUnreconciled(id) };
+  }
+
+  /**
+   * Post a debt's ORIGINAL measured deduction to the warehouse now that the
+   * reason it failed has been fixed. Idempotent by construction — it re-sends
+   * the payload's own key — so it can never double-deduct.
+   */
+  settleFilamentDebt(
+    id: string,
+    /** Operator-stated grams, for a debt whose print nothing could measure. */
+    grams?: number
+  ): Promise<{ settled: boolean; reason?: string }> {
+    return this.runtime.filament.settleUnreconciled(id, grams);
   }
 
   // ── Queue operations (→ PrintQueueService / DispatchService) ───────────────

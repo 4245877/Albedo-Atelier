@@ -65,6 +65,7 @@ function liveStatus(overrides: Partial<PrinterLiveStatus> = {}): PrinterLiveStat
     progressPct: 42.5,
     remainingMinutes: 87,
     filamentUsedMm: 1234.5,
+    slicerFilamentG: null,
     amsTrays: null,
     nozzleDiameterMm: 0.4,
     nozzleType: "hardened_steel",

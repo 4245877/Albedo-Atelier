@@ -59,6 +59,7 @@ function makeStatus(over: Partial<PrinterLiveStatus> = {}): PrinterLiveStatus {
     progressPct: 10,
     remainingMinutes: 30,
     filamentUsedMm: null,
+    slicerFilamentG: null,
     amsTrays: null,
     nozzleDiameterMm: null,
     nozzleType: null,

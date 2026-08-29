@@ -424,7 +424,7 @@ export class PrinterPoller {
       // negative one.
       startedAtMs: canonical.startedAtMs ?? Date.now(),
       amsStart: canonical.amsStart ?? null,
-      estimatedGrams: this.readEstimatedGrams(printer.id)
+      estimatedGrams: this.readEstimatedGrams(printer.id) ?? status.slicerFilamentG
     });
     this.logger.info?.(
       {
@@ -467,7 +467,25 @@ export class PrinterPoller {
    * one deduction, while a throw would cost the whole poll cycle.
    */
   /**
-   * The slicer's expected grams for the job on this printer. Never throws — an
+   * The best slicer estimate available for the print that just ended on this
+   * printer: the queue's figure when the job came through the orchestrator,
+   * else whatever the device published about the file it was running.
+   *
+   * Only ever attached to a debt as an orientation for a human — never
+   * deducted. It exists because a debt that says "we owe something" and a debt
+   * that says "we owe about 39 g for this file" are different objects to the
+   * operator who has to settle it.
+   */
+  private estimateFor(
+    printer: PrinterConfig,
+    next: PrinterLiveStatus,
+    prev: PrinterLiveStatus
+  ): number | null {
+    return this.readEstimatedGrams(printer.id) ?? next.slicerFilamentG ?? prev.slicerFilamentG;
+  }
+
+  /**
+   * The QUEUE's expected grams for the job on this printer. Never throws — an
    * orientation number is a nice-to-have that must not break the poll loop.
    */
   private readEstimatedGrams(printerId: string): number | null {
@@ -547,7 +565,7 @@ export class PrinterPoller {
       if (wasActive) {
         // consumeForPrint deducts only what the telemetry measured; with no
         // measurable AMS data it deducts nothing and logs a clear skip reason.
-        this.filament.consumeForPrint(printer, prev, next, run, job);
+        this.filament.consumeForPrint(printer, prev, next, run, job, this.estimateFor(printer, next, prev));
       }
       return;
     }
@@ -570,7 +588,10 @@ export class PrinterPoller {
         file: job,
         startedAtMs: Date.now(),
         amsStart,
-        estimatedGrams: this.readEstimatedGrams(printer.id)
+        // The queue's figure first (it is for this exact printer + profile set),
+        // then the device's own sliced metadata — which is the only source for a
+        // print an operator started at the machine.
+        estimatedGrams: this.readEstimatedGrams(printer.id) ?? next.slicerFilamentG
       });
       // Mirror the baseline into durable storage immediately. Everything in the
       // map above is lost on restart; this is what lets it be rebuilt.
@@ -602,7 +623,7 @@ export class PrinterPoller {
         // A cancelled print still consumed real filament, and the device data
         // (AMS remain drop / extruded length) measures exactly what was used,
         // so the deduction is posted the same as for a completion.
-        this.filament.consumeForPrint(printer, prev, next, run, job);
+        this.filament.consumeForPrint(printer, prev, next, run, job, this.estimateFor(printer, next, prev));
         this.events.push("✕", `Печать${job ? ` «${job}»` : ""} на ${name} отменена`, "info");
         return;
       }
@@ -613,7 +634,7 @@ export class PrinterPoller {
         // the printer was occupied".
         this.today.recordCompleted(run ? Date.now() - run.startedAtMs : null);
         this.persist();
-        this.filament.consumeForPrint(printer, prev, next, run, job);
+        this.filament.consumeForPrint(printer, prev, next, run, job, this.estimateFor(printer, next, prev));
         this.events.push("✔", `${name} завершил печать${job ? ` «${job}»` : ""}`, "ok");
         return;
       }
