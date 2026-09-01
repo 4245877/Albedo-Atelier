@@ -89,7 +89,11 @@ clear_staging() {
     docker exec "$ORCHESTRATOR_CONTAINER" rm -rf "${DATA_DIR_IN_CONTAINER}/.backup-staging" 2>/dev/null || true
   fi
 }
-trap cleanup_incomplete INT TERM ERR
+# EXIT as well as ERR: die() ends the script with a plain `exit 1`, which does
+# NOT raise ERR, so without it every die() between here and the publish below
+# left an orphaned <stamp>.incomplete on disk — and those match the `20*` glob
+# retention counts by, so each one silently cost a real set.
+trap cleanup_incomplete INT TERM ERR EXIT
 
 rm -rf "$INCOMPLETE"; mkdir -p "$INCOMPLETE"; chmod 0700 "$INCOMPLETE"
 
@@ -187,7 +191,7 @@ if ! "${BACKUP_DIR}/verify.sh" "$INCOMPLETE"; then
   die "verification failed — the set was NOT published"
 fi
 
-trap - INT TERM ERR
+trap - INT TERM ERR EXIT
 mv "$INCOMPLETE" "$SET_DIR"
 ln -sfn "$SET_DIR" "${ROOT}/latest-${TIER}"
 if [ "$MODE" = "full" ]; then ln -sfn "$SET_DIR" "${ROOT}/latest-full"; fi
