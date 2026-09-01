@@ -87,7 +87,10 @@ else
   docker volume inspect "$TO_VOLUME" >/dev/null 2>&1 || docker volume create "$TO_VOLUME" >/dev/null
   STAGE="$(mktemp -d)"
   restore_payload "$STAGE"
-  restore_image="$(docker inspect -f '{{.Config.Image}}' "$ORCHESTRATOR_CONTAINER" 2>/dev/null || echo "${COMPOSE_PROJECT}-print-orchestrator:latest")"
+  # docker inspect on a MISSING container prints an empty line to stdout and exits
+  # 1, so a bare `|| echo` fallback would be *appended* to that newline and yield an
+  # image reference docker rejects ("invalid reference format"). grep drops it.
+  restore_image="$(docker inspect -f '{{.Config.Image}}' "$ORCHESTRATOR_CONTAINER" 2>/dev/null | grep . || echo "${COMPOSE_PROJECT}-print-orchestrator:latest")"
   docker run --rm --network none --user "$(id -u):$(id -g)" \
     -v "${TO_VOLUME}:/dest" -v "${STAGE}:/src:ro" \
     --entrypoint sh "$restore_image" -c 'rm -rf /dest/queue.db /dest/queue.db-wal /dest/queue.db-shm /dest/state.json /dest/artifacts /dest/snapshots; cp -a /src/. /dest/'
