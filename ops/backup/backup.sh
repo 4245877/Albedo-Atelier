@@ -166,8 +166,26 @@ for f in go2rtc.yaml config/printers.json; do
 done
 
 # ── 4. manifest ─────────────────────────────────────────────────────────────
-GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
-GIT_DIRTY="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+# Metadata is best-effort: a missing container, a repo with no commits, or a
+# REPO_ROOT that is not a git checkout at all must degrade to a placeholder —
+# never abort the run, never corrupt the JSON. Two traps make that subtle here:
+#   * a FAILING `docker inspect` still prints an empty line, and `git rev-parse
+#     HEAD` in a commit-less repo prints the literal "HEAD", so a bare
+#     `|| echo unknown` APPENDS its fallback to that output ("\nunknown",
+#     "HEAD\nunknown"). The embedded newline makes manifest.json unparseable
+#     ("Bad control character in string literal"), so verify.sh below rejects a
+#     set that is otherwise perfectly good and the whole run is thrown away.
+#   * `git status --porcelain | wc -l` fails the PIPELINE under pipefail while
+#     `wc` still prints "0", so the tempting `|| echo 0` yields "0\n0" — and
+#     with no fallback at all the failing substitution kills the script outright
+#     (rc=128), before the manifest is ever written.
+# So: capture, discard the exit status, then validate the SHAPE of the result.
+GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+case "$GIT_COMMIT" in *[!0-9a-f]* | "") GIT_COMMIT="unknown" ;; esac
+GIT_DIRTY="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ' || true)"
+case "$GIT_DIRTY" in *[!0-9]* | "") GIT_DIRTY=0 ;; esac
+ORCHESTRATOR_IMAGE="$(docker inspect -f '{{.Image}}' "$ORCHESTRATOR_CONTAINER" 2>/dev/null || true)"
+[ -n "$ORCHESTRATOR_IMAGE" ] || ORCHESTRATOR_IMAGE="unknown"
 SET_BYTES="$(du -sb "$INCOMPLETE" | cut -f1)"
 {
   printf '{\n'
@@ -176,7 +194,7 @@ SET_BYTES="$(du -sb "$INCOMPLETE" | cut -f1)"
   printf '  "hostname": "%s",\n' "$(hostname)"
   printf '  "backupTier": "%s",\n' "$BACKUP_TIER"
   printf '  "gitCommit": "%s",\n  "gitDirtyFiles": %s,\n' "$GIT_COMMIT" "${GIT_DIRTY:-0}"
-  printf '  "orchestratorImage": "%s",\n' "$(docker inspect -f '{{.Image}}' "$ORCHESTRATOR_CONTAINER" 2>/dev/null || echo unknown)"
+  printf '  "orchestratorImage": "%s",\n' "$ORCHESTRATOR_IMAGE"
   printf '  "sizeBytes": %s,\n' "$SET_BYTES"
   printf '  "contents": [%s],\n' "$(cd "$INCOMPLETE" && find . -maxdepth 1 -mindepth 1 -printf '"%f",' | sed 's/,$//')"
   printf '  "secretsIncluded": %s,\n' "$([ -f "${INCOMPLETE}/secrets/atelier.env" ] && echo true || echo false)"
