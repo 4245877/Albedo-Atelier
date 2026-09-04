@@ -85,8 +85,10 @@ BUILD_LOG="${STATE_DIR}/build.log"
 # "cancelled to protect the disk" from "the code did not compile".
 WATCHDOG_FLAG="${STATE_DIR}/watchdog.tripped"
 DB_SNAPSHOT_DIR="${STATE_DIR}/db-snapshots"
-# Distinct exit codes: 1 generic, 3 watchdog, 130 SIGINT, 143 SIGTERM.
+# Distinct exit codes: 1 generic failure, 3 watchdog, 4 DEFERRED (built but
+# deliberately not swapped — nothing is broken), 130 SIGINT, 143 SIGTERM.
 EXIT_WATCHDOG=3
+EXIT_DEFERRED=4
 
 # ── Output ──────────────────────────────────────────────────────────────────
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -96,8 +98,11 @@ else
   C_RESET=""; C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""
 fi
 
-TOTAL_STAGES=6
+TOTAL_STAGES=7
 STAGE_NO=0
+# Build identity, filled in by build_images. Declared here so every later
+# reporting path can read them under `set -u` even if the build never ran.
+GIT_COMMIT=""; BUILD_TIME=""; GIT_DIRTY=0
 CURRENT_STAGE="startup"
 WARNINGS=0
 
@@ -108,7 +113,11 @@ detail() { printf '      %s%s%s\n' "$C_DIM" "$*" "$C_RESET"; }
 ok()     { printf '      %s✓%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
 warn()   { WARNINGS=$((WARNINGS + 1)); printf '      %s!%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 err()    { printf '      %s✗%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
-die()    { printf '\n%s✗ Deployment failed: %s%s\n' "$C_RED$C_BOLD" "$*" "$C_RESET" >&2; exit 1; }
+# What a hard failure is CALLED depends on what was being attempted. A refused
+# rollback printing "Deployment failed" sends the operator looking for a deploy
+# that never ran. Set once by the dispatch, before anything can fail.
+FAILURE_LABEL="DEPLOY FAILED"
+die()    { printf '\n%s✗ %s: %s%s\n' "$C_RED$C_BOLD" "$FAILURE_LABEL" "$*" "$C_RESET" >&2; exit 1; }
 
 # ── Process lifecycle: temp files, the background build, and signals ────────
 # Three traps share one teardown path, and it must run exactly once. ERR fires
@@ -181,7 +190,11 @@ cleanup() {
   remove_temps
   rm -f "${STATE_FILE}.tmp"
   if [ -n "$signal" ]; then
-    printf '%s  Nothing was swapped; the running stack is untouched: docker compose ps%s\n' "$C_RED" "$C_RESET" >&2
+    if [ "${SWAP_ATTEMPTED:-0}" -eq 0 ]; then
+      printf '%s  Nothing was swapped; the running stack is untouched: docker compose ps%s\n' "$C_RED" "$C_RESET" >&2
+    else
+      printf '%s  Interrupted DURING the swap — check: docker compose ps%s\n' "$C_RED" "$C_RESET" >&2
+    fi
   fi
   return "$exit_code"
 }
@@ -190,9 +203,14 @@ on_err() {
   local exit_code=$? line=$1
   [ "$BASHPID" = "$MAIN_SHELL_PID" ] || return "$exit_code"
   if [ "$CLEANUP_DONE" -eq 0 ]; then
-    printf '\n%s✗ Deployment failed during: %s%s (line %s, exit %s)\n' \
-      "$C_RED$C_BOLD" "$CURRENT_STAGE" "$C_RESET$C_RED" "$line" "$exit_code" >&2
-    printf '%s  The previous stack was left as-is; inspect it with: docker compose ps%s\n' "$C_RED" "$C_RESET" >&2
+    printf '\n%s✗ %s during: %s%s (line %s, exit %s)\n' \
+      "$C_RED$C_BOLD" "$FAILURE_LABEL" "$CURRENT_STAGE" "$C_RESET$C_RED" "$line" "$exit_code" >&2
+    if [ "${SWAP_ATTEMPTED:-0}" -eq 0 ]; then
+      printf '%s  Nothing was stopped — the previous stack is still serving: docker compose ps%s\n' "$C_RED" "$C_RESET" >&2
+    else
+      printf '%s  The swap had already started — containers MAY have been replaced. Check: docker compose ps%s\n' "$C_RED" "$C_RESET" >&2
+      printf '%s  To return to the last verified images: ./scripts/deploy.sh rollback%s\n' "$C_RED" "$C_RESET" >&2
+    fi
   fi
   cleanup "$exit_code" || true
   exit "$exit_code"
@@ -219,9 +237,12 @@ Flags (deploy):
   --cleanup               reclaim build cache + dangling images after a successful deploy
   --min-free-mb N         override the pre-build free-space requirement
   --health-timeout N      seconds to wait for containers to become healthy (default 180)
-  --allow-active-prints   proceed even though printers are mid-print (the orchestrator
-                          restart loses in-memory run identity: no filament auto-deduction
-                          and no duration metric for those runs)
+  --allow-active-prints   recreate the orchestrator even though printers are mid-print.
+                          The printers are never touched. Canonical runs are re-adopted
+                          from SQLite on restart, so identity, duration and filament
+                          accounting survive; what does not is an UNTRACKED print (started
+                          on the printer, not via the queue) and any completion that lands
+                          inside the restart window.
   --rollback-on-failure   if the new stack fails verification, re-point compose at the
                           previous images and restart them (see the migration caveat below)
   --no-disk-watchdog      do not cancel the build when free space hits the floor
@@ -232,6 +253,16 @@ Flags (reclaim):
   --cache                 also drop the build cache — the NEXT BUILD BECOMES COLD
   -y, --yes               non-interactive: same as --allow-active-prints
   -h, --help              this help
+
+Terminal states (read the LAST line of the log; the exit code matches):
+  0   DEPLOY SUCCESS    built, swapped, healthy, HTTP-verified, identity proven
+  0   ROLLBACK SUCCESS  last-known-good images restored AND verified
+  4   DEPLOY DEFERRED   images built and cached, deliberately NOT swapped
+                        (a print is in flight and the orchestrator would be
+                        recreated). Nothing is broken; re-run when convenient.
+  3   build cancelled by the disk watchdog — free space, then rebuild
+  1   DEPLOY FAILED / ROLLBACK FAILED — needs a decision before re-running
+  130/143  interrupted (SIGINT/SIGTERM); nothing was swapped
 USAGE
 }
 
@@ -246,20 +277,38 @@ free_mb()     { df -P -k "$1" | awk 'NR==2 {print int($4/1024)}'; }
 free_inodes() { df -P -i "$1" | awk 'NR==2 {print $4}'; }
 used_pct()    { df -P -k "$1" | awk 'NR==2 {gsub(/%/,"",$5); print $5}'; }
 
+# These three ask compose to describe itself, and every one of them is reached
+# by `status`, `rollback` and `reclaim` — commands that never run preflight and
+# so have never proved the daemon is up or the config resolves. A bare
+# `dc config | jq` there turns "the Docker daemon is down" into an abort at a
+# line number under `set -e` + `pipefail`. Each now falls back instead.
 compose_project() {
   if [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then printf '%s' "$COMPOSE_PROJECT_NAME"; return; fi
-  if have jq; then dc config --format json 2>/dev/null | jq -r '.name'; return; fi
-  basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-'
+  local name=""
+  if have jq; then
+    name="$(dc config --format json 2>/dev/null | jq -r '.name // empty' 2>/dev/null || true)"
+  fi
+  if [ -n "$name" ] && [ "$name" != "null" ]; then printf '%s' "$name"; return; fi
+  # compose's own default: the directory name, lowercased and sanitised.
+  # `tr -c` treats the trailing newline as "not in the set" too, so the naive
+  # form returned "atelier-" instead of "atelier" — a project name that matches
+  # no running container and no existing volume.
+  local dir; dir="$(basename "$REPO_ROOT")"
+  printf '%s' "$dir" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-'
 }
 
 # Services compose will build (as opposed to pull). Only these can be rolled back
 # to a locally tagged predecessor.
 buildable_services() {
+  local out=""
   if have jq; then
-    dc config --format json | jq -r '.services | to_entries[] | select(.value.build) | .key'
-  else
-    dc config | awk '/^  [a-z]/ {svc=$1} /^    build:/ {print svc}' | tr -d ':'
+    out="$(dc config --format json 2>/dev/null | jq -r '.services | to_entries[] | select(.value.build) | .key' 2>/dev/null || true)"
   fi
+  if [ -z "$out" ]; then
+    out="$(dc config 2>/dev/null | awk '/^  [a-z]/ {svc=$1} /^    build:/ {print svc}' | tr -d ':' || true)"
+  fi
+  [ -n "$out" ] && printf '%s\n' "$out"
+  return 0
 }
 
 # The image tag compose builds into: an explicit `image:` if the service declares
@@ -267,8 +316,9 @@ buildable_services() {
 service_image_name() {
   local svc="$1" img=""
   if have jq; then
-    img="$(dc config --format json | jq -r --arg s "$svc" '.services[$s].image // empty')"
+    img="$(dc config --format json 2>/dev/null | jq -r --arg s "$svc" '.services[$s].image // empty' 2>/dev/null || true)"
   fi
+  [ "$img" = "null" ] && img=""
   if [ -n "$img" ]; then printf '%s' "$img"; return; fi
   printf '%s-%s' "$(compose_project)" "$svc"
 }
@@ -276,9 +326,37 @@ service_image_name() {
 container_id() { dc ps -q "$1" 2>/dev/null || true; }
 
 image_id()  { docker image inspect "$1" --format '{{.Id}}' 2>/dev/null || true; }
+
+# The image a service's CONTAINER is actually running, read from the container.
+# This — not the `:latest` tag — is the only honest answer to "what is serving
+# right now", and it is exactly what `docker compose up` compares against when
+# it decides whether to recreate. The two diverge whenever a deploy built images
+# but did not swap them in (a deferred deploy, an interrupted one, a manual
+# `docker compose build`), and reading the tag in that state makes the script
+# compare the new image against itself and conclude "nothing changed" while
+# compose goes ahead and recreates the container anyway.
+running_image_id() {
+  local cid; cid="$(container_id "$1")"
+  [ -n "$cid" ] || return 0
+  docker inspect "$cid" --format '{{.Image}}' 2>/dev/null || true
+}
+
+# The commit an image was built from, straight off its OCI label.
+image_revision() {
+  local rev
+  rev="$(docker image inspect "$1" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
+  case "$rev" in ''|'<no value>') return 0 ;; *) printf '%s' "$rev" ;; esac
+}
 # The image's actual content: the ordered rootfs layer digests. Unlike the image
-# id this is stable across rebuilds that changed nothing. Takes an image
-# REFERENCE (name:tag) — a container's .Image digest is not resolvable here.
+# id this is stable across rebuilds that changed nothing (a moved OCI label
+# changes the id, never a layer).
+#
+# Takes any reference `docker image inspect` accepts — a name:tag, or the bare
+# image id a container reports as `.Image`, which IS resolvable (verified on
+# Docker 29.7 with the containerd image store; an older note here claimed
+# otherwise and cost this script its ability to compare against what is
+# actually running). Callers must still treat an EMPTY answer as "unknown" and
+# fail safe, since an id can stop resolving at any time.
 rootfs_of() {
   if [ -z "$1" ]; then return 0; fi
   docker image inspect "$1" --format '{{.RootFS.Layers}}' 2>/dev/null || true
@@ -477,20 +555,37 @@ EOF
   # -- source revision -------------------------------------------------------
   if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     local commit dirty
-    commit="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
-    dirty="$(git -C "$REPO_ROOT" status --porcelain | wc -l | tr -d ' ')"
-    if [ "$dirty" -gt 0 ]; then
+    # `rev-parse --git-dir` succeeds in a repository whose HEAD is UNBORN (git
+    # init, nothing committed yet). `rev-parse HEAD` then exits 128 — and under
+    # `set -e` a failing command substitution in an assignment aborts the whole
+    # script, so this used to end a deploy with a bare "exit 128" at a line
+    # number instead of the honest "there is no commit to build from".
+    commit="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+    dirty="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    if [ -z "$commit" ]; then
+      warn "git repository has no commits yet — the image will be labelled with an unknown revision"
+    elif [ "$dirty" -gt 0 ]; then
       warn "building from ${commit} with ${dirty} uncommitted change(s) — the deployed image will not match any commit"
     else
       ok "building from commit ${commit} (clean tree)"
     fi
+  else
+    warn "${REPO_ROOT} is not a git repository — the image will be labelled with an unknown revision"
   fi
 
   # -- security posture (README / SECURITY.md invariants) --------------------
   local bind token
   bind="$(dc config 2>/dev/null | awk '/published:/ {print $2}' | tr -d '"' | tr '\n' ' ')"
   detail "published ports: ${bind}"
-  token="$(dc config --format json 2>/dev/null | { have jq && jq -r '.services["print-dashboard"].environment.ORCHESTRATOR_API_TOKEN // ""' || echo "?"; })"
+  # Guarded on BOTH sides of the pipe. `pipefail` makes the whole substitution
+  # fail if `dc config` dies OR jq does — and a failing `$(...)` in an assignment
+  # ends the script under `set -e`, which is a violent way to react to not being
+  # able to read one optional field.
+  if have jq; then
+    token="$(dc config --format json 2>/dev/null | jq -r '.services["print-dashboard"].environment.ORCHESTRATOR_API_TOKEN // ""' 2>/dev/null || true)"
+  else
+    token="?"   # unknown, not "empty" — do not warn about what was not read
+  fi
   if [ -z "$token" ]; then
     warn "ORCHESTRATOR_API_TOKEN is empty — state-changing API calls are refused (503) unless ALLOW_UNAUTHENTICATED_MUTATIONS=1; see SECURITY.md"
   fi
@@ -562,7 +657,9 @@ count_active_prints_live() {
   # Fallback: the published dashboard proxy. Parsed with a real JSON reader when
   # jq is available rather than by counting substring occurrences.
   local port url body code n
-  port="$(dc port "$HTTP_SERVICE" "$HTTP_CONTAINER_PORT" 2>/dev/null | awk -F: 'NF{print $NF}')" || true
+  # `head -1`: a dual-stack publish prints one line per address family, and
+  # without it `port` becomes "8090\n8090" and every URL built from it is junk.
+  port="$(dc port "$HTTP_SERVICE" "$HTTP_CONTAINER_PORT" 2>/dev/null | awk -F: 'NF{print $NF}' | head -1)" || true
   [ -n "${port:-}" ] || { echo unknown; return; }
   url="http://127.0.0.1:${port}/api/print-orchestrator/api/printers"
   body="$(new_temp)"
@@ -571,7 +668,12 @@ count_active_prints_live() {
   if have jq; then
     n="$(jq -r '[(if type=="array" then .[] else .printers[] end) | select(.status=="printing" or .status=="paused")] | length' <"$body" 2>/dev/null || echo unknown)"
   else
-    n="$(grep -o '"status":"\(printing\|paused\)"' "$body" | wc -l | tr -d ' ')"
+    # `|| true` is load-bearing: grep exits 1 when it matches NOTHING, and with
+    # `set -o pipefail` that becomes the whole substitution's status, which under
+    # `set -e` aborts the deploy. The no-match case is "no printers are busy" —
+    # the single most common, most correct answer this branch can produce, and
+    # it used to be the one that killed the script (on a host without jq).
+    n="$( { grep -o '"status":"\(printing\|paused\)"' "$body" || true; } | wc -l | tr -d ' ')"
   fi
   rm -f "$body"
   case "$n" in
@@ -600,8 +702,38 @@ count_active_runs_db() {
   esac
 }
 
+# Which printers are busy, by name, so the operator can see WHY a deploy is
+# being held instead of having to go and look. Best-effort: never allowed to
+# fail the gate it is only annotating.
+describe_active_prints() {
+  local cid out
+  cid="$(container_id print-orchestrator)"
+  [ -n "$cid" ] || return 0
+  out="$(docker exec -i "$cid" node -e '
+    fetch("http://127.0.0.1:3100/api/printers")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))))
+      .then((d) => {
+        const list = Array.isArray(d) ? d : d.printers;
+        if (!Array.isArray(list)) throw new Error("unexpected payload shape");
+        for (const p of list.filter((x) => x && (x.status === "printing" || x.status === "paused"))) {
+          const pct = typeof p.progress === "number" ? p.progress + "%" : "?";
+          process.stdout.write(`${p.name || p.id}: ${p.status} ${pct} — ${p.currentJob || p.job || "unnamed job"}\n`);
+        }
+      })
+      .catch(() => {});
+  ' 2>/dev/null || true)"
+  [ -n "$out" ] || return 0
+  printf '%s\n' "$out" | sed 's/^/        · /'
+}
+
 # The gate itself, so deploy and rollback enforce IDENTICAL rules.
 # $1 = what is about to happen, for the message.
+#
+# Returns 0 to proceed, 1 when prints are in flight, 2 when the state could not
+# be determined. It NEVER exits: "a printer is busy" is an expected, correct
+# outcome of a healthy farm, and the caller is the only thing that knows whether
+# that means DEFERRED (a deploy that can simply be re-run) or a refusal (a
+# rollback the operator asked for explicitly).
 enforce_active_print_gate() {
   local what="$1" active
   active="$(count_active_prints)"
@@ -610,41 +742,96 @@ enforce_active_print_gate() {
       warn "could not determine whether prints are in flight — proceeding on --allow-active-prints"
       return 0
     fi
+    # "Unknown" fails CLOSED, with one carve-out that is not a loophole but the
+    # whole point of the gate stated precisely.
+    #
+    # This gate protects the orchestrator's observation of a running print. An
+    # orchestrator that is itself down or unhealthy is observing nothing — it has
+    # already lost whatever the gate exists to preserve, and recreating it cannot
+    # make that worse. Without this carve-out the rule became a deadlock in the
+    # one situation that needs a rollback most: a new image that cannot start
+    # takes the API and the DB reader down with it, so the state is unknowABLE,
+    # so the automatic rollback refuses, so the farm stays down. Observed
+    # exactly that way during testing.
+    local o_state o_status o_health
+    o_state="$(container_state "$(container_id print-orchestrator)")"
+    o_status="$(awk '{print $1}' <<<"$o_state")"
+    o_health="$(awk '{print $2}' <<<"$o_state")"
+    if [ "$o_status" != "running" ] || { [ "$o_health" != "none" ] && [ "$o_health" != "healthy" ]; }; then
+      warn "active-print state is unknown because the orchestrator is ${o_status}/${o_health} — it is tracking nothing, so this gate has nothing left to protect"
+      return 0
+    fi
     err "could not determine whether any prints are in flight"
     cat >&2 <<'EOF'
 
-      The orchestrator did not answer on either the direct API or the dashboard
-      proxy, so this is NOT the same as "no prints are running". Recreating the
-      orchestrator mid-print loses run identity: filament auto-deduction and the
-      duration metric are skipped for those runs.
+      The orchestrator is up and healthy but answered neither the direct API nor
+      the dashboard proxy, so this is NOT the same as "no prints are running".
 
       Check the farm, then re-run. To override deliberately:
         ./scripts/deploy.sh --allow-active-prints
 EOF
-    die "active-print state unknown (use --allow-active-prints to override)"
+    return 2
   fi
   if [ "$active" -gt 0 ] && [ "$ALLOW_ACTIVE_PRINTS" -eq 0 ]; then
     err "${active} print(s) in flight and ${what}"
+    describe_active_prints >&2
     cat >&2 <<'EOF'
 
-      Recreating the orchestrator keeps the queue, event feed and today's
-      counters (they live on the orchestrator-data volume), but in-memory print
-      RUN IDENTITY is lost: prints that finish after the swap skip filament
-      auto-deduction in the fulfillment warehouse and the average-duration
-      metric. The prints themselves keep printing — the printers are not touched.
+      The printers are NOT touched by a deploy — they keep printing either way.
+      What a recreate costs is orchestrator-side observation of those runs.
 
-      The images are already built, so re-running later costs nothing:
-        ./scripts/deploy.sh                        # once the prints have finished
-        ./scripts/deploy.sh --allow-active-prints  # accept the loss and swap now
+      Durable state is safe: the queue, the event feed, today's counters, the
+      canonical PrintRun rows and their AMS baselines all live on the
+      orchestrator-data volume. On restart the poller re-adopts the canonical
+      run for any printer it finds mid-print (hydrateRunFromCanonical), so run
+      id, start time and filament baseline survive — filament auto-deduction and
+      the duration metric still happen.
+
+      What is genuinely at risk is narrower, and it is why this gate still
+      exists:
+        · a print with NO canonical PrintRun row (started on the printer itself,
+          not dispatched through the queue) has no identity to re-adopt;
+        · a completion that lands inside the restart window is observed by
+          neither the old process nor the new one;
+        · a Bambu run adopted without a persisted AMS baseline deducts nothing
+          until the next full AMS report.
 EOF
-    die "prints in flight (use --allow-active-prints to override)"
+    return 1
   fi
   if [ "$active" -eq 0 ]; then
     ok "no prints in flight"
   else
     warn "${active} print(s) in flight — proceeding on --allow-active-prints"
+    describe_active_prints >&2
   fi
   return 0
+}
+
+# A deploy that built everything and then deliberately did not swap is NOT a
+# failure — it is a decision the script made on the operator's behalf, and it
+# needs its own terminal state and its own exit code. Reporting it as
+# "Deployment failed" trains operators to ignore real failures.
+deploy_deferred() {
+  local reason="$1" svc
+  printf '\n%s◐ DEPLOY DEFERRED — nothing was swapped%s\n' "$C_YELLOW$C_BOLD" "$C_RESET" >&2
+  printf '%s  reason: %s%s\n\n' "$C_YELLOW" "$reason" "$C_RESET" >&2
+  printf '      BUILT    : %s\n' "${GIT_COMMIT:0:12} — images are tagged :latest and ready" >&2
+  printf '      APPLIED  : nothing — every running container is untouched\n' >&2
+  printf '      RUNNING  :\n' >&2
+  while read -r svc; do
+    [ -n "$svc" ] || continue
+    printf '                 %-20s %s · %s\n' "$svc" "$(container_state "$(container_id "$svc")")" "$(running_revision "$svc")" >&2
+  done < <(dc config --services)
+  cat >&2 <<EOF
+
+      The build is done and cached, so re-running costs seconds, not minutes:
+        ./scripts/deploy.sh                        # once the prints have finished
+        ./scripts/deploy.sh --allow-active-prints  # accept the caveats and swap now
+
+      Exit code ${EXIT_DEFERRED} means DEFERRED (built, not applied) as opposed to
+      1 = failed. Nothing needs repairing before the next attempt.
+EOF
+  exit "$EXIT_DEFERRED"
 }
 
 # ── Stage 2: record the running images + pre-deploy DB snapshot ─────────────
@@ -672,33 +859,64 @@ snapshot_images() {
   while read -r svc; do
     [ -n "$svc" ] || continue
     img_name="$(service_image_name "$svc")"
-    img_id="$(image_id "${img_name}:latest")"
+    # Read the CONTAINER, not the tag. The old code took `${img_name}:latest`
+    # and called it "currently running", which is only true when the previous
+    # deploy completed. After a deferred or interrupted one the tag holds an
+    # image that was built but never swapped in, and re-tagging :previous from
+    # it destroyed the only pointer back to what is actually serving — while
+    # making the stage-4 comparison compare the new image against itself.
+    img_id="$(running_image_id "$svc")"
     if [ -z "$img_id" ]; then
-      detail "${svc}: no ${img_name}:latest yet — first deploy"
+      detail "${svc}: no container running — first deploy"
       continue
     fi
     RUNNING_IMAGE_ID["$svc"]="$img_id"
-    # :previous == "what was running before this deploy". Kept for continuity,
-    # but it is NOT what rollback uses.
-    docker tag "${img_name}:latest" "${img_name}:previous"
-    detail "${svc}: running ${img_id:7:12} (tagged ${img_name}:previous)"
+    # :previous == "the image the container is on right now". Kept for
+    # continuity, but it is NOT what rollback uses.
+    docker tag "$img_id" "${img_name}:previous"
+    detail "${svc}: running ${img_id:7:12} (rev $(image_revision "$img_id" | cut -c1-12), tagged ${img_name}:previous)"
     recorded=$((recorded + 1))
   done < <(buildable_services)
 
   [ "$recorded" -gt 0 ] || warn "nothing was running — this is a first deploy"
 
-  # Bootstrap: a host that has never completed a verified deploy under the new
-  # scheme has no :last-known-good. The stack that is running and healthy right
-  # now is the best evidence available, so adopt it once, explicitly.
-  if [ "$recorded" -gt 0 ] && [ -z "$(lkg_image_id print-orchestrator)" ]; then
+  # Bootstrap / repair. A host that has never completed a verified deploy under
+  # this scheme has no :last-known-good — but so does a host whose recorded
+  # target was pruned out from under it, and THAT case used to be invisible:
+  # the old check only asked whether the state file held a value, so a state
+  # file naming images that no longer exist left rollback permanently broken and
+  # nothing said so until someone actually needed it.
+  if [ "$recorded" -gt 0 ] && ! lkg_is_usable; then
     if stack_is_healthy; then
-      adopt_last_known_good "the currently running, healthy stack"
+      # Adopt the RUNNING containers, not :latest — at this point :latest may be
+      # an unverified image left behind by a deferred deploy, and blessing that
+      # as the rollback target would be exactly backwards.
+      adopt_last_known_good "the currently running, healthy stack" running
     else
-      warn "no last-known-good recorded and the running stack is not healthy — rollback will be unavailable until a deploy verifies"
+      warn "no usable last-known-good and the running stack is not healthy — rollback is unavailable until a deploy verifies"
     fi
   fi
 
   snapshot_database
+}
+
+# Does the recorded last-known-good still exist and still resolve to the id it
+# was recorded as? A tag that was re-pointed, or an image that a prune removed,
+# is not a rollback target — it is a promise the script cannot keep.
+lkg_is_usable() {
+  [ -f "$STATE_FILE" ] || return 1
+  local svc img recorded actual any=0
+  while read -r svc; do
+    [ -n "$svc" ] || continue
+    img="$(awk -F= -v k="LKG_IMAGE_$(printf '%s' "$svc" | tr '-' '_')" '$1==k{print $2}' "$STATE_FILE")"
+    recorded="$(lkg_image_id "$svc")"
+    [ -n "$img" ] && [ -n "$recorded" ] || return 1
+    actual="$(image_id "$img")"
+    [ -n "$actual" ] || return 1
+    [ "$actual" = "$recorded" ] || return 1
+    any=1
+  done < <(buildable_services)
+  [ "$any" -eq 1 ]
 }
 
 # Is every service that has a healthcheck currently healthy?
@@ -719,29 +937,60 @@ lkg_image_id() {
   awk -F= -v k="LKG_IMAGE_ID_$(printf '%s' "$1" | tr '-' '_')" '$1==k{print $2}' "$STATE_FILE"
 }
 
-# Move last-known-good to whatever :latest currently resolves to. Called ONLY
-# after full verification (or once at bootstrap for an already-healthy stack).
+# Bless a set of images as the thing a rollback returns to. Called ONLY after
+# full verification, or once at bootstrap/repair for an already-healthy stack.
+#
+# $1 = why, for the state file and the log.
+# $2 = source: "latest" (default — the build this deploy just verified) or
+#      "running" (the images the containers are actually on). The distinction
+#      matters: at bootstrap time :latest can be an unverified image a deferred
+#      deploy left behind, and blessing that would make "last known good" mean
+#      "never known to work at all".
 adopt_last_known_good() {
-  local why="$1" svc img_name img_id tmp
+  local why="$1" source="${2:-latest}" svc img_name img_id tmp blessed_rev=""
   tmp="${STATE_FILE}.tmp"
+
+  # Resolve every id BEFORE writing anything, so a half-written state file can
+  # never replace a good one.
+  local -A blessed=()
+  while read -r svc; do
+    [ -n "$svc" ] || continue
+    img_name="$(service_image_name "$svc")"
+    if [ "$source" = "running" ]; then
+      img_id="$(running_image_id "$svc")"
+    else
+      img_id="$(image_id "${img_name}:latest")"
+    fi
+    [ -n "$img_id" ] || continue
+    blessed["$svc"]="$img_id"
+    [ "$svc" = "print-orchestrator" ] && blessed_rev="$(image_revision "$img_id")"
+  done < <(buildable_services)
+
+  if [ "${#blessed[@]}" -eq 0 ]; then
+    warn "nothing to record as last-known-good (${why})"
+    return 0
+  fi
+
   {
     printf '# written by scripts/deploy.sh — the LAST KNOWN GOOD state a rollback returns to\n'
     printf 'LKG_AT=%s\n' "$(date -Iseconds)"
     printf 'LKG_REASON=%s\n' "$why"
-    if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-      # The commit of the image being blessed — NOT, as the old
-      # SNAPSHOT_GIT_COMMIT did, the commit being deployed over it.
-      printf 'LKG_GIT_COMMIT=%s\n' "$(git -C "$REPO_ROOT" rev-parse HEAD)"
-      printf 'DEPLOYED_GIT_COMMIT=%s\n' "$(git -C "$REPO_ROOT" rev-parse HEAD)"
+    # The commit of the image being BLESSED, read from its own OCI label — not
+    # `git rev-parse HEAD`, which answers "what is checked out", a different
+    # question that is simply wrong whenever the tree is ahead of what runs.
+    if [ -n "$blessed_rev" ]; then
+      printf 'LKG_GIT_COMMIT=%s\n' "$blessed_rev"
+      printf 'DEPLOYED_GIT_COMMIT=%s\n' "$blessed_rev"
+    elif [ -n "$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)" ]; then
+      printf 'LKG_GIT_COMMIT=%s\n' "$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+      printf 'DEPLOYED_GIT_COMMIT=%s\n' "$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
     fi
   } >"$tmp"
 
-  while read -r svc; do
-    [ -n "$svc" ] || continue
+  for svc in "${!blessed[@]}"; do
     img_name="$(service_image_name "$svc")"
-    img_id="$(image_id "${img_name}:latest")"
-    [ -n "$img_id" ] || continue
-    docker tag "${img_name}:latest" "${img_name}:last-known-good"
+    img_id="${blessed[$svc]}"
+    docker tag "$img_id" "${img_name}:last-known-good"
     {
       printf 'LKG_IMAGE_%s=%s\n'    "$(printf '%s' "$svc" | tr '-' '_')" "${img_name}:last-known-good"
       printf 'LKG_IMAGE_ID_%s=%s\n' "$(printf '%s' "$svc" | tr '-' '_')" "$img_id"
@@ -749,7 +998,7 @@ adopt_last_known_good() {
       printf 'PREV_IMAGE_ID_%s=%s\n' "$(printf '%s' "$svc" | tr '-' '_')" "$img_id"
     } >>"$tmp"
     ok "${svc}: last-known-good ← ${img_id:7:12}"
-  done < <(buildable_services)
+  done
 
   mv "$tmp" "$STATE_FILE"
   detail "last-known-good updated (${why})"
@@ -810,9 +1059,18 @@ build_images() {
   # and defeat the no-op deploy path that keeps the orchestrator from being
   # recreated mid-print. Per-commit values keep an unchanged rebuild identical.
   if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-    GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-    BUILD_TIME="$(git -C "$REPO_ROOT" show -s --format=%cI HEAD)"
-    if [ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]; then GIT_DIRTY=1; else GIT_DIRTY=0; fi
+    # `|| true` on every one: an unborn HEAD makes these exit 128, which under
+    # `set -e` would abort the deploy at the point where it was merely trying to
+    # LABEL the image. A missing label is a cosmetic loss; an aborted deploy is
+    # not. Note that `rev-parse HEAD` also PRINTS the literal string "HEAD" on
+    # failure, so the emptiness check has to come after, not instead.
+    GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+    BUILD_TIME="$(git -C "$REPO_ROOT" show -s --format=%cI HEAD 2>/dev/null || true)"
+    case "$GIT_COMMIT" in
+      [0-9a-f][0-9a-f]*) ;;
+      *) GIT_COMMIT=""; BUILD_TIME="" ;;
+    esac
+    if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)" ]; then GIT_DIRTY=1; else GIT_DIRTY=0; fi
   else
     GIT_COMMIT=""; BUILD_TIME=""; GIT_DIRTY=0
   fi
@@ -935,68 +1193,113 @@ EOF
 
 # ── Stage 4: swap ───────────────────────────────────────────────────────────
 IMAGES_CHANGED=0
+# Flips to 1 the moment `docker compose up` is invoked. Before that, "nothing was
+# stopped" is a guarantee this script can make; after it, it is a guess.
+SWAP_ATTEMPTED=0
 declare -A BASELINE_RESTARTS=()
 
 start_services() {
   stage "Starting updated services"
 
-  # Which services actually got a new image? Only those force a recreate, and
-  # only an orchestrator recreate can disturb an in-flight print.
+  # Which services will compose ACTUALLY recreate, and is the change real?
   #
-  # Compared by ROOTFS LAYERS, not by image id: BuildKit's provenance
-  # attestation (disabled in compose.yml, but a `docker compose build` run by
-  # hand elsewhere may re-enable it) changes the manifest digest on every build
-  # while every layer stays byte-identical. Comparing ids there would report
-  # "new image" for a no-op rebuild and gate a deploy that changes nothing.
+  # Two separate questions, and the old code answered neither cleanly. It
+  # compared the tag as it stood before the build against the tag after it —
+  # "did this build produce something different" — which is not the same as
+  # "does the running container need replacing". They diverge after any deploy
+  # that built without swapping: the tag already holds the new image, so the
+  # comparison sees no change, skips the active-print gate, and then `up -d`
+  # recreates the orchestrator anyway because the CONTAINER is still on the old
+  # image. The gate silently disarmed itself in exactly the situation it was
+  # written for.
   #
-  # The comparison is between the tag as it stood BEFORE this build (stage 2
-  # pinned it as :previous) and the tag as it stands AFTER — i.e. "did this
-  # build change anything", which is what decides whether compose swaps the
-  # container. The running container's own digest cannot be used here: the
-  # containerd image store does not expose it as a resolvable image reference.
-  local svc img_name new_id old_id new_fs old_fs orchestrator_changed=0
+  # So: compare against the running container.
+  #   * recreate? -> new image id != the id the container is on. This is
+  #     literally compose's own rule, so the script cannot disagree with it.
+  #   * real change? -> rootfs layers differ. Identical layers with a different
+  #     id is build metadata only (an OCI label moving with the commit), and
+  #     recreating for that is pure cost.
+  local svc img_name new_id new_fs run_id run_fs orchestrator_changed=0
   while read -r svc; do
     [ -n "$svc" ] || continue
     img_name="$(service_image_name "$svc")"
     new_id="$(image_id "${img_name}:latest")"
-    if [ -z "$new_id" ]; then new_id="$(image_id "$img_name")"; fi
-    old_id="$(image_id "${img_name}:previous")"
-    new_fs="$(rootfs_of "${img_name}:latest")"; old_fs="$(rootfs_of "${img_name}:previous")"
-    if [ -n "$new_id" ] && [ "$new_fs" != "$old_fs" ]; then
+    [ -n "$new_id" ] || new_id="$(image_id "$img_name")"
+    run_id="${RUNNING_IMAGE_ID[$svc]:-}"
+
+    if [ -z "$new_id" ]; then
+      warn "${svc}: no image resolved after the build — leaving the decision to compose"
+      continue
+    fi
+    if [ -z "$run_id" ]; then
+      # Nothing is running for this service, so nothing can be disturbed by
+      # starting it. Deliberately does NOT arm the gate: with no orchestrator up
+      # there is no API and no DB to ask, `count_active_prints` correctly answers
+      # "unknown", and a first deploy (or a deploy after a manual `compose down`)
+      # would be blocked by a check that has nothing to protect.
       IMAGES_CHANGED=$((IMAGES_CHANGED + 1))
-      ok "${svc}: new image ${new_id:7:12} (was ${old_id:7:12}) — filesystem changed"
-      if [ "$svc" = "print-orchestrator" ]; then orchestrator_changed=1; fi
-    elif [ -n "$new_id" ] && [ "$new_id" != "$old_id" ]; then
+      ok "${svc}: not running — will be started from ${new_id:7:12}"
+      continue
+    fi
+    if [ "$new_id" = "$run_id" ]; then
+      detail "${svc}: already running ${run_id:7:12} — compose recreates it only if its config changed"
+      continue
+    fi
+
+    new_fs="$(rootfs_of "${img_name}:latest")"
+    run_fs="$(rootfs_of "$run_id")"
+    if [ -n "$run_fs" ] && [ "$new_fs" = "$run_fs" ]; then
       # AT-004: THE decision must be made once, not twice by different rules.
       # This script compares rootfs layers; `docker compose up` compares image
-      # IDs. They agree only while --provenance=false keeps the id stable. When
-      # they disagree, the script concludes "unchanged" and skips the gate while
-      # compose still recreates the container — silently killing run identity
-      # mid-print, which is the exact thing the gate exists to prevent.
+      # IDs. When they disagree the script would conclude "unchanged" and skip
+      # the gate while compose still recreated the container — killing run
+      # identity mid-print, the exact thing the gate exists to prevent.
       #
-      # Rather than trusting the flag, make the two views identical: move the
-      # tag back onto the byte-identical image compose is already running. After
-      # this, compose sees literally the same image ID and cannot recreate the
-      # container, whatever provenance settings are in play.
+      # Rather than hoping they agree, make the two views identical: move the
+      # tag back onto the byte-identical image compose is already running.
+      # After this compose sees literally the same image id and cannot recreate
+      # the container, whatever provenance settings are in play.
       warn "${svc}: image id changed but the filesystem is identical (build metadata only)"
-      if [ -n "${RUNNING_IMAGE_ID[$svc]:-}" ]; then
-        docker tag "${RUNNING_IMAGE_ID[$svc]}" "${img_name}:latest"
-        detail "${svc}: ${img_name}:latest re-pointed at the running image ${RUNNING_IMAGE_ID[$svc]:7:12} so compose sees no change"
-      fi
-    else
-      detail "${svc}: image unchanged — compose recreates it only if its config changed"
+      docker tag "$run_id" "${img_name}:latest"
+      detail "${svc}: ${img_name}:latest re-pointed at the running image ${run_id:7:12} so compose sees no change"
+      continue
     fi
+
+    IMAGES_CHANGED=$((IMAGES_CHANGED + 1))
+    ok "${svc}: new image ${new_id:7:12} (running ${run_id:7:12}) — filesystem changed"
+    [ "$svc" = "print-orchestrator" ] && orchestrator_changed=1
   done < <(buildable_services)
 
   # The active-print gate fires HERE, with FRESHLY READ data, not in preflight:
   # a production-orca build takes minutes, and a night-scheduled print can start
   # inside that window. Re-reading turns a build-length race into a seconds-long
   # one. An idempotent re-run with unchanged images never reaches this point.
+  #
+  # It is armed ONLY for an orchestrator recreate. A dashboard-only or
+  # go2rtc-only change cannot disturb a print — nothing in this stack observes a
+  # printer except the orchestrator — so a busy farm must not block it, and
+  # does not.
+  if [ "$orchestrator_changed" -eq 1 ] && [ -z "${RUNNING_IMAGE_ID[print-orchestrator]:-}" ]; then
+    # Belt and braces: the loop above already declines to arm the gate for a
+    # service that is not up, but keep the invariant stated where it is read.
+    orchestrator_changed=0
+    detail "orchestrator is not running — nothing to disturb, no active-print gate"
+  fi
   if [ "$orchestrator_changed" -eq 1 ]; then
     info "re-checking prints in flight immediately before the swap"
-    enforce_active_print_gate "the orchestrator image changed"
+    local gate_rc=0
+    enforce_active_print_gate "the orchestrator image changed" || gate_rc=$?
+    case "$gate_rc" in
+      0) ;;
+      1) deploy_deferred "${IMAGES_CHANGED} image(s) built, but a print is in flight and the orchestrator would be recreated" ;;
+      *) deploy_deferred "${IMAGES_CHANGED} image(s) built, but the active-print state could not be determined" ;;
+    esac
   else
-    detail "orchestrator image unchanged — no restart, so no active-print gate needed"
+    detail "the orchestrator will not be recreated — no active-print gate needed"
+  fi
+
+  if [ "$IMAGES_CHANGED" -eq 0 ]; then
+    detail "no service image changed — 'up -d' will reconcile configuration only"
   fi
 
   # Baseline restart counters so a crash loop after the swap is distinguishable
@@ -1008,7 +1311,28 @@ start_services() {
 
   # --no-build: the images are already built and verified above; an implicit
   # rebuild here would be an unguarded second build.
-  dc up -d --no-build
+  #
+  # From this line on, containers may have been REPLACED. Everything downstream
+  # (including the ERR trap's wording) has to stop claiming the old stack is
+  # still serving.
+  SWAP_ATTEMPTED=1
+  local up_rc=0
+  dc up -d --no-build || up_rc=$?
+  if [ "$up_rc" -ne 0 ]; then
+    # `up` does not only fail before touching anything. print-dashboard declares
+    # `depends_on: print-orchestrator: condition: service_healthy`, so when a new
+    # orchestrator image cannot become healthy compose recreates it, waits, and
+    # THEN exits non-zero with "dependency failed to start". The old container is
+    # already gone at that point.
+    #
+    # This used to reach the ERR trap, which printed "the previous stack was left
+    # as-is" — false — and exited without ever consulting --rollback-on-failure.
+    # The single loudest "this image does not work" was the one failure mode that
+    # could not trigger an automatic rollback.
+    err "docker compose up -d failed (exit ${up_rc}) — containers may already have been replaced"
+    dump_failure print-orchestrator
+    handle_verification_failure "docker compose up -d failed (exit ${up_rc})"
+  fi
   ok "docker compose up -d completed"
 }
 
@@ -1040,11 +1364,19 @@ wait_for_health() {
       case "$status" in
         exited|dead)
           err "${svc} exited (${status})"
-          dump_failure "$svc"; die "${svc} exited during startup" ;;
+          dump_failure "$svc"
+          # Route through handle_verification_failure, NOT die. These two are
+          # the LOUDEST possible "the new image does not work", and they used to
+          # be the only post-swap failures that ignored --rollback-on-failure
+          # outright: an operator who asked for an automatic rollback got one
+          # for a slow healthcheck but not for a container that could not start
+          # at all — precisely backwards.
+          handle_verification_failure "${svc} exited during startup (${status})" ;;
       esac
       if [ "$restarts" -gt $(( ${BASELINE_RESTARTS[$svc]:-0} + 2 )) ]; then
         err "${svc} is crash-looping (restart count ${restarts})"
-        dump_failure "$svc"; die "${svc} is restarting repeatedly"
+        dump_failure "$svc"
+        handle_verification_failure "${svc} is restarting repeatedly (restart count ${restarts})"
       fi
 
       # A service without a healthcheck (go2rtc, until compose.yml gained one)
@@ -1109,7 +1441,7 @@ verify_http() {
     warn "${HTTP_SERVICE} publishes no host port for ${HTTP_CONTAINER_PORT} — skipping HTTP verification"
     return 0
   fi
-  port="$(awk -F: 'NF{print $NF}' <<<"$mapping")"
+  port="$(awk -F: 'NF{print $NF}' <<<"$mapping" | head -1)"
   # Always dial loopback: the published bind may be 0.0.0.0 (LAN) or 127.0.0.1,
   # and loopback works for both without assuming the host's LAN address.
   base="http://127.0.0.1:${port}"
@@ -1144,6 +1476,83 @@ probe() {
     fi
     sleep 2
   done
+}
+
+# ── Stage 7: deployed identity ──────────────────────────────────────────────
+# `docker compose up` exiting 0 and a green healthcheck prove the stack STARTED.
+# They do not prove it started the thing this deploy built. A tag that failed to
+# move, a container compose declined to recreate, a service still on yesterday's
+# image behind a perfectly healthy nginx — all of those pass stages 5 and 6.
+#
+# So close the loop explicitly: git commit -> built image -> running container.
+verify_deployed_identity() {
+  stage "Verifying deployed identity (commit → image → container)"
+  local svc img_name expected actual rev failures=0
+
+  for svc in $(buildable_services); do
+    img_name="$(service_image_name "$svc")"
+    expected="$(image_id "${img_name}:latest")"
+    actual="$(running_image_id "$svc")"
+    rev="$(image_revision "$actual")"
+
+    if [ -z "$actual" ]; then
+      err "${svc}: no container running"; failures=$((failures + 1)); continue
+    fi
+    if [ -n "$expected" ] && [ "$expected" != "$actual" ]; then
+      err "${svc}: container runs ${actual:7:12} but ${img_name}:latest is ${expected:7:12}"
+      failures=$((failures + 1)); continue
+    fi
+    if [ -n "$GIT_COMMIT" ] && [ -n "$rev" ] && [ "$rev" != "$GIT_COMMIT" ]; then
+      # Not fatal on its own: an unchanged service legitimately keeps serving an
+      # older image when this commit did not touch it. Say which, and why.
+      warn "${svc}: running revision ${rev:0:12}, built from ${GIT_COMMIT:0:12} (image unchanged by this commit)"
+      ok "${svc}: ${actual:7:12} — matches ${img_name}:latest"
+      continue
+    fi
+    if [ "${GIT_DIRTY:-0}" = "1" ]; then
+      ok "${svc}: ${actual:7:12} · rev ${rev:0:12} (built from a DIRTY tree)"
+    else
+      ok "${svc}: ${actual:7:12} · rev ${rev:0:12}"
+    fi
+  done
+
+  # Persistent state must still be attached, and queue.db must still be
+  # readable through the new binary. A deploy that came up healthy on an EMPTY
+  # volume (a mount typo recreating it) also answers /health with 200.
+  local cid vol_ok=0
+  cid="$(container_id print-orchestrator)"
+  if [ -n "$cid" ]; then
+    if docker inspect "$cid" --format '{{range .Mounts}}{{.Name}} {{end}}' 2>/dev/null \
+         | grep -q "$(compose_project)_orchestrator-data"; then
+      ok "persistent volume $(compose_project)_orchestrator-data is mounted"
+      vol_ok=1
+    else
+      err "persistent volume $(compose_project)_orchestrator-data is NOT mounted"
+      failures=$((failures + 1))
+    fi
+  fi
+  if [ "$vol_ok" -eq 1 ]; then
+    local counts
+    counts="$(docker exec -i "$cid" node --experimental-sqlite -e '
+      try {
+        const { DatabaseSync } = require("node:sqlite");
+        const db = new DatabaseSync("/app/data/queue.db", { readOnly: true });
+        const q = db.prepare("SELECT COUNT(*) n FROM queue_entries").get().n;
+        const r = db.prepare("SELECT COUNT(*) n FROM print_runs").get().n;
+        const p = db.prepare("SELECT COUNT(*) n FROM printers").get().n;
+        process.stdout.write(`OK queue=${q} runs=${r} printers=${p}`);
+      } catch (e) { process.stdout.write("ERROR=" + e.message); }
+    ' 2>/dev/null || true)"
+    case "$counts" in
+      OK*) ok "queue.db readable through the new image (${counts#OK })" ;;
+      *)   err "queue.db is not readable through the new image (${counts:-no answer})"
+           failures=$((failures + 1)) ;;
+    esac
+  fi
+
+  if [ "$failures" -gt 0 ]; then
+    handle_verification_failure "${failures} deployed-identity check(s) failed — the running stack is not what this deploy built"
+  fi
 }
 
 # ── Failure handling after the swap ─────────────────────────────────────────
@@ -1215,10 +1624,56 @@ do_rollback() {
   [ -f "$STATE_FILE" ] || die "no ${STATE_FILE} — this host has no recorded last-known-good to roll back to"
   local restored=0 svc var_tag var_id img recorded_id actual_id
 
+  # Prove the target exists BEFORE touching anything — including before asking
+  # about prints. Discovering that the rollback is impossible only after the
+  # per-service loop has already re-tagged some of them is how a rollback turns
+  # a bad deploy into a mixed stack.
+  if ! lkg_is_usable; then
+    err "the recorded last-known-good is not usable"
+    while read -r svc; do
+      [ -n "$svc" ] || continue
+      img="$(awk -F= -v k="LKG_IMAGE_$(printf '%s' "$svc" | tr '-' '_')" '$1==k{print $2}' "$STATE_FILE")"
+      recorded_id="$(lkg_image_id "$svc")"
+      actual_id="$(image_id "${img:-/nonexistent}")"
+      if [ -z "$img" ] || [ -z "$recorded_id" ]; then
+        detail "${svc}: nothing recorded"
+      elif [ -z "$actual_id" ]; then
+        detail "${svc}: ${img} (${recorded_id:7:12}) no longer exists — pruned?"
+      elif [ "$actual_id" != "$recorded_id" ]; then
+        detail "${svc}: ${img} now resolves to ${actual_id:7:12}, recorded ${recorded_id:7:12} — re-tagged behind our back"
+      fi
+    done < <(buildable_services)
+    cat >&2 <<EOF
+
+      Nothing was changed. Recover deliberately instead:
+
+        ./scripts/deploy.sh status                          # what is running now
+        docker images atelier-print-orchestrator            # what images remain
+        ls -t ${DB_SNAPSHOT_DIR}/                           # pre-deploy snapshots
+        ./ops/backup/restore.sh --set <set> --to-production --i-mean-it
+
+      A successful ./scripts/deploy.sh records a fresh last-known-good, and so
+      does any run that finds the stack healthy with no usable target recorded.
+EOF
+    printf '\n%s✗ ROLLBACK FAILED: no usable last-known-good images%s\n' "$C_RED$C_BOLD" "$C_RESET" >&2
+    exit 1
+  fi
+
   # AT-005(b): rollback recreates containers exactly like a deploy does, so it
-  # needs the same protection. It previously had none at all.
+  # needs the same protection. It previously had none at all. Unlike a deploy
+  # this is not deferrable — the operator asked for it explicitly — so a busy
+  # farm is a refusal, not a DEFERRED state.
   info "checking prints in flight before rolling back"
-  enforce_active_print_gate "a rollback would recreate the orchestrator"
+  local gate_rc=0
+  enforce_active_print_gate "a rollback would recreate the orchestrator" || gate_rc=$?
+  if [ "$gate_rc" -ne 0 ]; then
+    # A refusal is not a failure: nothing was attempted, nothing is broken.
+    FAILURE_LABEL="ROLLBACK REFUSED"
+    if [ "$gate_rc" -eq 2 ]; then
+      die "active-print state unknown — nothing was changed (override with --allow-active-prints)"
+    fi
+    die "prints in flight — nothing was changed (override with --allow-active-prints)"
+  fi
 
   while read -r svc; do
     [ -n "$svc" ] || continue
@@ -1255,7 +1710,8 @@ do_rollback() {
   # would report success while the farm was down.
   ROLLBACK_IN_PROGRESS=1
   if ! rollback_verify; then
-    err "ROLLBACK FAILED — the last-known-good images did not come up healthy"
+    printf '\n%s✗ ROLLBACK FAILED%s — the last-known-good images did not come up healthy\n' \
+      "$C_RED$C_BOLD" "$C_RESET" >&2
     dump_failure print-orchestrator
     cat >&2 <<EOF
 
@@ -1270,7 +1726,8 @@ EOF
     exit 1
   fi
 
-  ok "ROLLBACK VERIFIED — last-known-good images are running and answering"
+  printf '\n%s✓ ROLLBACK SUCCESS%s — last-known-good images are running, healthy and answering\n' \
+    "$C_GREEN$C_BOLD" "$C_RESET"
   info "note: the working tree is still at the NEW code — rollback restores the running"
   info "      containers, not the checkout. Re-deploy once the failure is fixed."
   dc ps --format 'table {{.Service}}\t{{.Status}}' | sed 's/^/        /'
@@ -1281,9 +1738,16 @@ EOF
 ROLLBACK_IN_PROGRESS=0
 rollback_verify() {
   local saved_stage_no="$STAGE_NO" saved_total="$TOTAL_STAGES"
-  TOTAL_STAGES=$((STAGE_NO + 2))
-  ( wait_for_health ) || return 1
-  ( verify_http )     || return 1
+  TOTAL_STAGES=$((STAGE_NO + 3))
+  # Each runs in a subshell so its `die` cannot kill the rollback report — which
+  # also means each gets its OWN copy of STAGE_NO and any increment is lost. Step
+  # the parent's counter between them, or all three print the same "[5/7]".
+  ( wait_for_health )            || return 1; STAGE_NO=$((STAGE_NO + 1))
+  ( verify_http )                || return 1; STAGE_NO=$((STAGE_NO + 1))
+  # Prove the containers are actually on the restored images. "Healthy" alone
+  # would also be true if compose had declined to recreate anything and the
+  # broken build were still serving.
+  ( verify_deployed_identity )   || return 1
   STAGE_NO="$saved_stage_no"; TOTAL_STAGES="$saved_total"
   return 0
 }
@@ -1360,6 +1824,19 @@ do_status() {
   if [ -f "$STATE_FILE" ]; then
     printf '\n  rollback target (%s):\n' "$STATE_FILE"
     sed 's/^/    /' "$STATE_FILE"
+    # The state file is a record, not a guarantee. An image it names can be
+    # pruned or re-tagged at any time, and printing the record alone told the
+    # operator a rollback was available when it was not.
+    if lkg_is_usable; then
+      printf '\n  %s✓ rollback target verified — every recorded image still resolves to its recorded id%s\n' \
+        "$C_GREEN" "$C_RESET"
+    else
+      printf '\n  %s✗ ROLLBACK UNAVAILABLE — the recorded images no longer resolve (pruned or re-tagged)%s\n' \
+        "$C_RED$C_BOLD" "$C_RESET"
+      printf '    the next ./scripts/deploy.sh re-adopts the running stack if it is healthy\n'
+    fi
+  else
+    printf '\n  %sno rollback target recorded yet (%s absent)%s\n' "$C_YELLOW" "$STATE_FILE" "$C_RESET"
   fi
 }
 
@@ -1422,14 +1899,17 @@ case "$COMMAND" in
     ;;
   reclaim)
     CURRENT_STAGE="reclaim"
+    FAILURE_LABEL="RECLAIM FAILED"
     DOCKER_FS="$(docker_root)"
     do_reclaim "$RECLAIM_MODE"
     ;;
   rollback)
     CURRENT_STAGE="rollback"
+    FAILURE_LABEL="ROLLBACK FAILED"
     do_rollback
     ;;
   preflight)
+    FAILURE_LABEL="PREFLIGHT FAILED"
     TOTAL_STAGES=1
     preflight
     printf '\n%s✓ Preflight passed%s — %s warning(s). Nothing was built or changed.\n' \
@@ -1437,12 +1917,14 @@ case "$COMMAND" in
     ;;
   deploy)
     START_TS=$SECONDS
+    svc=""
     preflight
     snapshot_images
     build_images
     start_services
     wait_for_health
     verify_http
+    verify_deployed_identity
 
     # Everything above passed: health checks AND real HTTP responses. Only now
     # is this build entitled to be the thing a rollback returns to. Doing it
@@ -1451,7 +1933,7 @@ case "$COMMAND" in
     # was tagged last time" — a failed deploy never touches the target, and a
     # second failed deploy cannot promote the first failure.
     if [ "$IMAGES_CHANGED" -gt 0 ]; then
-      adopt_last_known_good "verified deploy at $(date -Iseconds)"
+      adopt_last_known_good "verified deploy at $(date -Iseconds)" latest
     else
       detail "no image changed — last-known-good left as it was"
     fi
@@ -1464,11 +1946,17 @@ case "$COMMAND" in
     fi
 
     PORT_MAP="$(dc port "$HTTP_SERVICE" "$HTTP_CONTAINER_PORT" 2>/dev/null || echo 'not published')"
-    printf '\n%s✓ Atelier deployed successfully%s in %ss (%s warning(s))\n' \
+    printf '\n%s✓ DEPLOY SUCCESS%s in %ss (%s warning(s))\n' \
       "$C_GREEN$C_BOLD" "$C_RESET" "$((SECONDS - START_TS))" "$WARNINGS"
-    printf '  dashboard: %s\n' "$PORT_MAP"
-    printf '  images swapped: %s\n' "$IMAGES_CHANGED"
-    printf '  roll back with: ./scripts/deploy.sh rollback\n'
+    printf '  BUILT     : %s\n' "${GIT_COMMIT:0:12}${GIT_DIRTY:+ (dirty tree)}"
+    printf '  APPLIED   : %s service image(s) swapped\n' "$IMAGES_CHANGED"
+    printf '  RUNNING   :\n'
+    while read -r svc; do
+      [ -n "$svc" ] || continue
+      printf '              %-20s %s · %s\n' "$svc" "$(container_state "$(container_id "$svc")")" "$(running_revision "$svc")"
+    done < <(dc config --services)
+    printf '  dashboard : %s\n' "$PORT_MAP"
+    printf '  roll back : ./scripts/deploy.sh rollback\n'
     if [ "$CLEANUP" -eq 0 ]; then
       printf '  %sfree build cache when disk gets tight: ./scripts/deploy.sh reclaim%s\n' "$C_DIM" "$C_RESET"
     fi

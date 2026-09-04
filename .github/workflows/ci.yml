@@ -6,6 +6,27 @@ on:
   pull_request:
 
 jobs:
+  # Committed key material. Added after an ED25519 keypair reached this repo's
+  # root under a bare numeric name (`42477`, `42477.pub`) and was pushed — a
+  # name no .gitignore pattern would ever have predicted. .gitignore now blocks
+  # the shapes (*.pem, *.key, *.pub, id_*), but the private half of a bare-name
+  # pair has no shape at all, so it has to be caught by CONTENT.
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse committed private keys
+        run: |
+          if git grep -lI -E -e '-----BEGIN (OPENSSH|RSA|DSA|EC|PGP)? ?PRIVATE KEY' \
+               -e '-----BEGIN ENCRYPTED PRIVATE KEY' -- . ':!.github/workflows/ci.yml' > /tmp/hits; then
+            echo "::error::private key material is committed to this repository:"
+            cat /tmp/hits
+            echo "Treat every listed key as COMPROMISED: rotate it, then purge it from history."
+            exit 1
+          fi
+          echo "no private key material found in the working tree"
+
   # The Node service: typecheck (tests included), the full unit + integration
   # suite, build. The suite now includes the P0 regressions AND the
   # canonical-dispatch safety net: SQLite migration tests (008 fail-closed),

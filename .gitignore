@@ -20,3 +20,26 @@ apps/print-orchestrator/config/printers.json
 
 # Host-specific backup configuration (paths and retention, never secrets).
 ops/backup/backup.conf
+
+# SSH key material must never enter this repository. Added after an ED25519
+# keypair was committed to the repo ROOT under a bare numeric name (`42477`,
+# `42477.pub`) and pushed — a name no pattern would have caught, which is why
+# the rules below match by SHAPE (extension, PEM body, conventional prefixes)
+# rather than by filename.
+*.pem
+*.key
+*.p12
+*.pfx
+*.ppk
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+id_*.pub
+*_rsa
+*_ed25519
+*.pub
+# The private half of a bare-name pair (`42477`) has no shape to match on, so
+# .gitignore cannot catch it. That half is caught by CONTENT instead, by the
+# `secret-scan` job in .github/workflows/ci.yml, which fails the build on any
+# committed PEM private-key header.

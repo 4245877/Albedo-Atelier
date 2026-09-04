@@ -14,16 +14,22 @@ COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN pnpm run build
 
-# The production stage runs on Debian (glibc), NOT Alpine (musl), so a mounted
+# The runtime stages run on Debian (glibc), NOT Alpine (musl), so a mounted
 # OrcaSlicer AppImage (a glibc binary) CAN run in the `production-orca` variant
 # below. The build stage stays on Alpine: it only emits portable JS (dist/),
 # copied in below. Pinned by digest like the build base; refresh with:
 #   docker inspect --format '{{index .RepoDigests 0}}' node:22-bookworm-slim
 #
-# This is the LEAN default image: no GTK/WebKit/GL. The heavy OrcaSlicer system
-# libraries live only in the `production-orca` stage, selected by
-# compose.orca.yml — they must never creep into the base image.
-FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS production
+# `runtime-base` is the complete, runnable image MINUS the build-identity
+# labels — everything both shipping targets share. It is LEAN: no GTK/WebKit/GL.
+# The heavy OrcaSlicer system libraries live only in `orca-runtime` and reach
+# production only through `production-orca` (selected by compose.orca.yml) —
+# they must never creep into this base.
+#
+# The two shipping targets are `production` (lean) and `production-orca`. Both
+# are `runtime-base` + the identity block; neither adds a filesystem layer after
+# it. `runtime-base` and `orca-runtime` are internal and are never deployed.
+FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS runtime-base
 
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
@@ -34,7 +40,8 @@ WORKDIR /app
 RUN corepack enable
 # gosu drops the entrypoint from root to the unprivileged node user after fixing
 # the data-volume ownership (Debian's equivalent of Alpine's su-exec).
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN DEBIAN_FRONTEND=noninteractive apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       gosu \
     && rm -rf /var/lib/apt/lists/*
 
@@ -60,42 +67,19 @@ ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "--experimental-sqlite", "--disable-warning=ExperimentalWarning", "dist/src/server.js"]
 
 # ── OrcaSlicer host-runtime variant ─────────────────────────────────────────
-# The base image plus the system libraries OrcaSlicer's Linux AppImage links
+# `runtime-base` plus the system libraries OrcaSlicer's Linux AppImage links
 # against (it does not bundle the GTK/WebKit/GL stack, so the read-only mounted
 # binary needs them present just to load — the boot-time version probe loads it
 # too). Selected ONLY by compose.orca.yml (`target: production-orca`) together
 # with the ORCA_HOST_DIR mount; the default deployment ships the lean image.
 # Kept lean with --no-install-recommends; apt lists removed to shrink the layer.
-# ── Build identity ──────────────────────────────────────────────────────────
-# Surfaced three ways, because each answers a different question:
-#   * OCI labels -> `docker image inspect`, "what is in this image"
-#   * ENV        -> `GET /version`, "what is actually running"
-#   * deploy.sh  -> reads the label of the image a container was started from
 #
-# DECLARED LAST, and this position is load-bearing. An `ARG` invalidates the
-# build cache for every instruction that FOLLOWS it, so declaring these near the
-# top would rebuild `pnpm install --prod` and the apt layer on every commit —
-# turning a metadata change into a new rootfs. deploy.sh decides "did anything
-# really change?" by comparing rootfs layers and uses that answer to avoid
-# recreating the orchestrator mid-print, so a churning rootfs would silently
-# disable that protection (and make every deploy a slow one).
-#
-# Down here, only image CONFIG changes: the image id moves, the layers do not.
-# Verified: two builds of the same tree with different GIT_COMMIT produce
-# identical `RootFS.Layers` and a correctly-updated revision label.
-ARG GIT_COMMIT=""
-ARG BUILD_TIME=""
-ARG GIT_DIRTY="0"
-LABEL org.opencontainers.image.revision="$GIT_COMMIT"
-LABEL org.opencontainers.image.created="$BUILD_TIME"
-LABEL org.opencontainers.image.title="atelier-print-orchestrator"
-ENV GIT_COMMIT=$GIT_COMMIT
-ENV BUILD_TIME=$BUILD_TIME
-ENV GIT_DIRTY=$GIT_DIRTY
+# It builds on `runtime-base`, NOT on `production`, and that is load-bearing —
+# see the build-identity note below.
+FROM runtime-base AS orca-runtime
 
-FROM production AS production-orca
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN DEBIAN_FRONTEND=noninteractive apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       libgtk-3-0 \
       libwebkit2gtk-4.0-37 \
       libgl1 \
@@ -119,3 +103,61 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libsm6 \
       libice6 \
     && rm -rf /var/lib/apt/lists/*
+
+# ── Build identity ──────────────────────────────────────────────────────────
+# Surfaced three ways, because each answers a different question:
+#   * OCI labels -> `docker image inspect`, "what is in this image"
+#   * ENV        -> `GET /version`, "what is actually running"
+#   * deploy.sh  -> reads the label of the image a container was started from
+#
+# Declared LAST **in every leaf stage**, and repeated rather than inherited.
+# Both halves of that rule are load-bearing.
+#
+# "Last" — an `ARG` invalidates the build cache for every instruction that
+# FOLLOWS it, so declaring these near the top would rebuild `pnpm install --prod`
+# and the apt layers on every commit, turning a metadata change into a new
+# rootfs. Down here only image CONFIG changes: the image id moves, the layers do
+# not.
+#
+# "Repeated, not inherited" — this is the part that used to be wrong, and it
+# cost a deploy. The identity block lived in `production`, and `production-orca`
+# was `FROM production`. ARG values in scope and inherited ENV both feed the
+# cache key of any RUN that follows them, so the 564 MB OrcaSlicer apt layer was
+# re-executed on EVERY commit and produced a fresh rootfs digest every time.
+# `docker history` showed it plainly:
+#
+#   RUN |3 GIT_COMMIT=<sha> BUILD_TIME=<t> GIT_DIRTY=0 /bin/sh -c apt-get …
+#
+# deploy.sh decides "did anything really change?" by comparing rootfs layers and
+# uses that answer to decide whether recreating the orchestrator mid-print is
+# necessary. A churning rootfs made every dashboard-only commit look like an
+# orchestrator change, which armed the active-print gate and blocked deploys
+# that had no business touching the orchestrator at all.
+#
+# Splitting the heavy layer into `orca-runtime` (no identity in scope) and
+# applying the identity block afterwards in each leaf keeps both targets
+# byte-identical across commits while still labelling them correctly.
+# Verified: two builds of the same tree with different GIT_COMMIT produce
+# identical `RootFS.Layers` for BOTH `production` and `production-orca`.
+
+FROM runtime-base AS production
+ARG GIT_COMMIT=""
+ARG BUILD_TIME=""
+ARG GIT_DIRTY="0"
+LABEL org.opencontainers.image.revision="$GIT_COMMIT"
+LABEL org.opencontainers.image.created="$BUILD_TIME"
+LABEL org.opencontainers.image.title="atelier-print-orchestrator"
+ENV GIT_COMMIT=$GIT_COMMIT
+ENV BUILD_TIME=$BUILD_TIME
+ENV GIT_DIRTY=$GIT_DIRTY
+
+FROM orca-runtime AS production-orca
+ARG GIT_COMMIT=""
+ARG BUILD_TIME=""
+ARG GIT_DIRTY="0"
+LABEL org.opencontainers.image.revision="$GIT_COMMIT"
+LABEL org.opencontainers.image.created="$BUILD_TIME"
+LABEL org.opencontainers.image.title="atelier-print-orchestrator"
+ENV GIT_COMMIT=$GIT_COMMIT
+ENV BUILD_TIME=$BUILD_TIME
+ENV GIT_DIRTY=$GIT_DIRTY
