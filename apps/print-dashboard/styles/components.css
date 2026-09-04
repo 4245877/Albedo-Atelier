@@ -360,11 +360,22 @@
 
 .menu-host { position: relative; display: inline-flex; }
 
+/* Панель открытого меню на время показа живёт в <body> и стоит по координатам,
+   посчитанным от кнопки (shared/menu.js → placeMenu). `position: absolute`
+   внутри карточки не годится: `.printer-card` объявлена `overflow: hidden`
+   (кадр камеры не должен вылезать из скруглённого угла) и обрезала меню по
+   своей нижней границе, а `transform` при наведении запирал его z-index в
+   стековом контексте карточки.
+
+   Слой 210 — над скрымом модального окна (200), под окном подтверждения (250)
+   и стопкой уведомлений (300): меню открывают в том числе из окна принтера.
+   left/top/max-height проставляет JS; здесь — только исходные значения, чтобы
+   панель не мелькнула в углу экрана, если скрипт почему-либо не отработал. */
 .menu {
-  position: absolute;
-  top: calc(100% + 6px);
+  position: fixed;
+  top: 0;
   left: 0;
-  z-index: 60;
+  z-index: 210;
   min-width: 232px;
   max-width: min(320px, 86vw);
   padding: 5px;
@@ -373,13 +384,22 @@
   background: linear-gradient(180deg, var(--card-top), var(--card-bot));
   box-shadow: var(--shadow-pop);
   animation: menu-in var(--dur-ui) var(--ease-out);
+  /* Список длиннее свободной высоты прокручивается сам, а не уходит за край
+     экрана; цепная прокрутка страницы под ним при этом не запускается. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .menu[hidden] { display: none; }
-.menu.to-left { left: auto; right: 0; }
-.menu.to-top { top: auto; bottom: calc(100% + 6px); }
+/* Меню, раскрытое вверх, и выезжает снизу — иначе движение спорит с местом. */
+.menu[data-side="up"] { animation-name: menu-in-up; }
 
 @keyframes menu-in {
   from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes menu-in-up {
+  from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: none; }
 }
 

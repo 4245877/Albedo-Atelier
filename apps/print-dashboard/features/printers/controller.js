@@ -21,7 +21,7 @@
 import { apiDelete, apiGet, apiPatch, apiPost } from "../../api.js";
 import { confirmAction } from "../../shared/dialog.js";
 import { createInflightGuard } from "../../shared/inflight.js";
-import { isMenuOpen } from "../../shared/menu.js";
+import { isMenuOpen, menuOwner } from "../../shared/menu.js";
 import { createPoller } from "../../shared/polling.js";
 import { $, esc, toast } from "../../util.js";
 import { buildPrinterPayload } from "./formModel.js";
@@ -154,7 +154,10 @@ function wireDelegates() {
 
   document.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-prn-action]");
-    if (!btn || btn.disabled || !$("#hardware-body")?.contains(btn)) return;
+    // Пункт открытого меню «⋯» физически лежит в <body> (портал, см.
+    // shared/menu.js) — проверяем принадлежность разделу по владельцу меню,
+    // иначе «Удалить принтер» молча не срабатывал бы.
+    if (!btn || btn.disabled || !$("#hardware-body")?.contains(menuOwner(btn))) return;
     e.preventDefault();
     const id = btn.dataset.id;
     if (btn.dataset.prnAction === "test") void testConnection(id);

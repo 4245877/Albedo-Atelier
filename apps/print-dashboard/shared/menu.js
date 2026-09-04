@@ -5,6 +5,22 @@
    Меню полностью доступно с клавиатуры (роль menu/menuitem, стрелки, Home/End,
    Escape с возвратом фокуса на кнопку) и закрывается по клику вне себя.
 
+   ПОЧЕМУ ПАНЕЛЬ НА ВРЕМЯ ПОКАЗА ЖИВЁТ В <body>. Пока она была
+   `position: absolute` внутри карточки, её резала сама карточка:
+   `.printer-card` объявлена `overflow: hidden` (иначе кадр камеры вылезал бы
+   из скруглённого угла), а кнопка «⋯» стоит в самом низу карточки — меню
+   раскрывалось ровно за её нижнюю границу и обрезалось по ней. Вторая
+   половина той же беды: при наведении карточка получает `transform`, то есть
+   собственный стековый контекст, и `z-index` панели переставал что-либо
+   значить относительно соседних карточек. Ни то, ни другое не лечится
+   правкой z-index: обрезает ПРЕДОК, а не порядок слоёв.
+
+   Поэтому открытая панель переезжает в <body>, встаёт `position: fixed` и
+   позиционируется от прямоугольника кнопки: выбираем сторону раскрытия,
+   прижимаемся к краям экрана и, если места не хватает нигде, отдаём панели
+   собственную прокрутку вместо ухода за край. Геометрия вынесена в чистую
+   placeMenu() — она проверяется тестами без браузера.
+
    Важное следствие для доски: пока меню открыто, перерисовывать карточки
    нельзя — очередной тик опроса (раз в 6 с) снёс бы открытое меню прямо
    из-под курсора. Поэтому модуль отдаёт `isMenuOpen()`, и renderAll() его
@@ -14,11 +30,32 @@ import { API_BASE } from "../api.js";
 import { esc } from "../util.js";
 import { icon } from "./icons.js";
 
-let openHost = null;
+/** Зазор между кнопкой и панелью. */
+const GAP = 6;
+/** Неприкосновенная кромка экрана: к самому краю меню не прижимается. */
+const EDGE = 8;
+
+let openHost = null;   // .menu-host открытого меню (кнопка остаётся в нём)
+let openPanel = null;  // его панель — на время показа она в <body>
+let openSize = null;   // естественный размер панели, измеренный при открытии
 
 /** Открыто ли сейчас хоть одно меню (доска на это время не пересобирается). */
 export function isMenuOpen() {
-  return Boolean(openHost && openHost.isConnected);
+  // Хост мог исчезнуть с перерисовкой раздела. Тогда меню не «открыто», а
+  // портал обязан быть убран: иначе панель осталась бы висеть в <body>
+  // сиротой — без кнопки, но поверх страницы.
+  if (openHost && !openHost.isConnected) close(openHost);
+  return Boolean(openHost);
+}
+
+/**
+ * Элемент, по которому следует проверять принадлежность разделу. Пункты
+ * открытого меню физически лежат в <body>, поэтому `section.contains(item)`
+ * их не находит; для них отвечаем кнопкой-владельцем, оставшейся в разметке
+ * раздела (см. features/printers/controller.js).
+ */
+export function menuOwner(el) {
+  return openPanel && el && openPanel.contains(el) ? openHost : el;
 }
 
 /**
@@ -56,18 +93,105 @@ export function menuHtml(items, { id, label = "Ещё действия", dataId 
     </div>`;
 }
 
+/* ── Геометрия раскрытия ───────────────────────────────────────
+   Чистая функция: никакого DOM, только числа. Здесь же лежат все крайние
+   случаи (карточка у края экрана, узкий вьюпорт, длинный список пунктов),
+   поэтому они проверяются тестами, а не глазами в браузере. */
+
+/**
+ * Куда поставить панель меню.
+ * @param {{left:number,right:number,top:number,bottom:number}} anchor кнопка «⋯», координаты вьюпорта
+ * @param {{width:number,height:number}} panel естественный размер панели
+ * @param {{width:number,height:number}} view видимая область без полос прокрутки
+ * @returns {{left:number, top:number, maxHeight:number, side:"down"|"up"}}
+ *   `maxHeight` — предел, за которым панель прокручивается сама.
+ */
+export function placeMenu(anchor, panel, view, { gap = GAP, edge = EDGE } = {}) {
+  const below = Math.max(0, view.height - edge - (anchor.bottom + gap));
+  const above = Math.max(0, anchor.top - gap - edge);
+  // Вниз — пока панель туда помещается целиком; не помещается — вверх; не
+  // помещается нигде (низкий вьюпорт, длинный список) — сторона с бОльшим
+  // запасом, и панель получает предел высоты со своей прокруткой.
+  const side = panel.height <= below || (panel.height > above && below >= above) ? "down" : "up";
+  // Запас никогда не больше самого экрана: кнопку могло увезти прокруткой за
+  // его край, и «свободная высота» вышла бы фиктивной.
+  const room = Math.max(0, Math.min(side === "down" ? below : above, view.height - 2 * edge));
+  const height = Math.min(panel.height, room);
+  let top = side === "down" ? anchor.bottom + gap : anchor.top - gap - height;
+  top = Math.min(Math.max(top, edge), Math.max(edge, view.height - edge - height));
+
+  // Кнопка «⋯» стоит последней в своём ряду, поэтому панель прижата к её
+  // правому краю. У левой кромки экрана (узкий вьюпорт, карточка у края)
+  // разворачиваем в другую сторону — от левого края кнопки.
+  let left = anchor.right - panel.width;
+  if (left < edge) left = anchor.left;
+  // И в любом случае панель остаётся внутри экрана: она шире свободного
+  // места — прижимаем к левой кромке, но за правую не выпускаем.
+  left = Math.min(Math.max(left, edge), Math.max(edge, view.width - edge - panel.width));
+
+  return { left, top, maxHeight: room, side };
+}
+
+/* ── Показ и скрытие ───────────────────────────────────────── */
+
+/** Панель меню, к которому относится элемент (учитывая портал в <body>). */
+function panelOf(host) {
+  return host === openHost && openPanel ? openPanel : host.querySelector(".menu");
+}
+
+/** Хост меню по любому его элементу — в том числе по пункту, живущему в <body>. */
+function hostOf(el) {
+  if (openPanel && openPanel.contains(el)) return openHost;
+  return el.closest("[data-menu-host]");
+}
+
 function items(host) {
-  return [...host.querySelectorAll('.menu-item:not([disabled])')];
+  const panel = panelOf(host);
+  return panel ? [...panel.querySelectorAll(".menu-item:not([disabled])")] : [];
+}
+
+/** Пересчёт позиции открытой панели по текущему положению кнопки. */
+function reposition() {
+  if (!openHost || !openPanel || !openSize) return;
+  if (!openHost.isConnected) { close(openHost); return; }
+  const toggle = openHost.querySelector("[data-menu-toggle]");
+  if (!toggle) { close(openHost); return; }
+
+  const a = toggle.getBoundingClientRect();
+  const view = {
+    width: document.documentElement.clientWidth,
+    height: document.documentElement.clientHeight
+  };
+  // Кнопку увезло прокруткой за пределы экрана — держать меню больше не за
+  // что: панель висела бы посреди страницы сама по себе.
+  if (a.bottom <= 0 || a.top >= view.height || a.right <= 0 || a.left >= view.width) {
+    close(openHost);
+    return;
+  }
+
+  const p = placeMenu(a, openSize, view);
+  openPanel.style.left = `${p.left}px`;
+  openPanel.style.top = `${p.top}px`;
+  openPanel.style.maxHeight = `${p.maxHeight}px`;
+  openPanel.dataset.side = p.side;
 }
 
 function close(host, { focusToggle = false } = {}) {
   if (!host) return;
-  const panel = host.querySelector(".menu");
+  const panel = panelOf(host);
   const toggle = host.querySelector("[data-menu-toggle]");
-  if (panel) panel.hidden = true;
+  if (panel) {
+    panel.hidden = true;
+    panel.style.cssText = "";
+    delete panel.dataset.side;
+    // Панель возвращается в свою карточку: разметка снова целая, и следующая
+    // перерисовка уносит её вместе с хостом, не оставляя сироты в <body>.
+    if (host.isConnected) host.appendChild(panel);
+    else panel.remove();
+  }
   if (toggle) toggle.setAttribute("aria-expanded", "false");
   host.removeAttribute("data-open");
-  if (openHost === host) openHost = null;
+  if (openHost === host) { openHost = null; openPanel = null; openSize = null; }
   if (focusToggle && toggle) toggle.focus();
 }
 
@@ -76,17 +200,31 @@ function open(host) {
   const panel = host.querySelector(".menu");
   const toggle = host.querySelector("[data-menu-toggle]");
   if (!panel) return;
+
+  document.body.appendChild(panel);
   panel.hidden = false;
   host.setAttribute("data-open", "1");
   if (toggle) toggle.setAttribute("aria-expanded", "true");
   openHost = host;
+  openPanel = panel;
 
-  // Меню, упирающееся в правый край окна, раскрывается влево; упирающееся
-  // в низ — вверх. Считаем после показа, по фактическим размерам.
-  panel.classList.remove("to-left", "to-top");
-  const r = panel.getBoundingClientRect();
-  if (r.right > window.innerWidth - 8) panel.classList.add("to-left");
-  if (r.bottom > window.innerHeight - 8 && r.height < window.innerHeight - 24) panel.classList.add("to-top");
+  // Естественный размер меряем ОДИН раз, при открытии: дальше панель только
+  // переставляется. Повторный замер требовал бы снимать max-height, а это
+  // сбрасывало бы собственную прокрутку панели прямо под пальцем.
+  panel.style.left = "0px";
+  panel.style.top = "0px";
+  panel.style.maxHeight = "";
+  const box = panel.getBoundingClientRect();
+  openSize = { width: box.width, height: box.height };
+  reposition();
+
+  // Появившаяся полоса прокрутки могла расширить панель — уточняем ширину,
+  // иначе прижатая к правому краю панель вылезла бы за него на её толщину.
+  const shown = panel.getBoundingClientRect();
+  if (shown.width > openSize.width + 0.5) {
+    openSize.width = shown.width;
+    reposition();
+  }
 }
 
 /** Один делегированный обработчик на весь документ — меню живут в перерисовываемой разметке. */
@@ -104,24 +242,26 @@ export function installMenus() {
     const item = e.target.closest(".menu-item");
     if (item) {
       // Действие исполняет общий обработчик data-act; меню просто закрывается.
-      close(item.closest("[data-menu-host]"));
+      close(hostOf(item));
       return;
     }
+    // Клик по самой панели (её полоса прокрутки, отступы между пунктами) меню
+    // не закрывает: иначе перетаскивание ползунка захлопывало бы список.
+    if (openPanel && openPanel.contains(e.target)) return;
     if (openHost) close(openHost);
   });
 
   document.addEventListener("keydown", (e) => {
     if (!openHost) {
-      // Стрелка вниз на самой кнопке открывает меню и встаёт на первый пункт.
+      // Стрелка вниз на самой кнопке открывает меню и встаёт на первый пункт;
+      // стрелка вверх — на последний. Enter и пробел жмут кнопку сами.
       const toggle = e.target.closest?.("[data-menu-toggle]");
-      if (toggle && (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ")) {
-        if (e.key === "ArrowDown") {
-          e.preventDefault();
-          const host = toggle.closest("[data-menu-host]");
-          open(host);
-          items(host)[0]?.focus();
-        }
-      }
+      if (!toggle || (e.key !== "ArrowDown" && e.key !== "ArrowUp")) return;
+      e.preventDefault();
+      const host = toggle.closest("[data-menu-host]");
+      open(host);
+      const list = items(host);
+      (e.key === "ArrowDown" ? list[0] : list[list.length - 1])?.focus();
       return;
     }
     const list = items(openHost);
@@ -142,10 +282,24 @@ export function installMenus() {
       e.preventDefault();
       list[list.length - 1]?.focus();
     } else if (e.key === "Tab") {
+      // Закрываем ДО того, как браузер выберет следующий элемент: панель
+      // возвращается в разметку, и Tab уходит по обычному порядку страницы,
+      // а не из конца <body>.
       close(openHost);
     }
   });
 
-  // Прокрутка страницы уводит меню от своей кнопки — закрываем.
-  window.addEventListener("scroll", () => { if (openHost) close(openHost); }, { passive: true, capture: true });
+  // Прокрутка и смена размера окна не отрывают меню от кнопки — панель
+  // переставляется (а если кнопку увезло с экрана, меню закрывается). Раньше
+  // ЛЮБАЯ прокрутка в документе просто закрывала меню, включая прокрутку
+  // самого списка.
+  // Пересчитываем синхронно, а не через requestAnimationFrame: браузер и так
+  // отдаёт scroll не чаще кадра, а лишний кадр задержки — это видимое
+  // «отставание» панели от собственной кнопки.
+  const track = () => { if (openHost) reposition(); };
+  window.addEventListener("scroll", track, { passive: true, capture: true });
+  window.addEventListener("resize", track, { passive: true });
+  // Мобильный вьюпорт живёт своей жизнью: адресная строка, клавиатура, зум.
+  window.visualViewport?.addEventListener("resize", track, { passive: true });
+  window.visualViewport?.addEventListener("scroll", track, { passive: true });
 }
