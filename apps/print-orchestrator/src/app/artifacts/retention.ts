@@ -1,4 +1,4 @@
-import { NotFoundError, ValidationError } from "../../core/errors";
+import { JobError, NotFoundError } from "../../core/errors";
 import type { Repositories } from "../../domain/print/repositories";
 import type { PrintTaskState } from "../../domain/print/types";
 import type { SliceVariant } from "../../domain/slicing/types";
@@ -160,7 +160,11 @@ export class ArtifactRetention {
       if (!artifact) throw new NotFoundError(`Артефакт «${artifactId}»`);
       const blocker = deletionBlocker(repos, artifactId);
       if (blocker) {
-        throw new ValidationError(`Файл «${artifact.name}» нельзя удалить: ${blocker}`, {
+        // 409, not 400: the request is perfectly well formed — the FILE is in a
+        // state that forbids the action, exactly like every other "your view was
+        // stale, refresh and look again" refusal in this taxonomy. A 400 would
+        // tell the dashboard the call itself was wrong and must not be retried.
+        throw new JobError(`Файл «${artifact.name}» нельзя удалить: ${blocker}`, {
           artifactId,
           blocker
         });

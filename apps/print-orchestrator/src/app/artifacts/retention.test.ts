@@ -5,7 +5,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, test } from "node:test";
 
-import { ValidationError } from "../../core/errors";
+import { JobError } from "../../core/errors";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import { openPrintQueueStore } from "../../infra/db/store";
 import { ArtifactStorage, keyFor } from "../../infra/storage/artifactStorage";
@@ -88,7 +88,7 @@ test("an artifact used by an active (queued) task is protected", async () => {
 
   await assert.rejects(
     service.deleteArtifact(artifact.id),
-    (e: unknown) => e instanceof ValidationError && /использует файл/.test((e as Error).message)
+    (e: unknown) => e instanceof JobError && /использует файл/.test((e as Error).message)
   );
   assert.ok(store.repositories.artifacts.getById(artifact.id), "still present");
 });
@@ -180,6 +180,6 @@ test("concurrent dispatch-vs-cleanup: an artifact that became live mid-decision 
   // …but the task is queued before the delete transaction runs (simulating the
   // race) — the in-transaction re-check must refuse.
   queue.addTask({ title: "Raced", artifactId: artifact.id });
-  await assert.rejects(service.deleteArtifact(artifact.id), ValidationError);
+  await assert.rejects(service.deleteArtifact(artifact.id), JobError);
   assert.equal(await storage.exists(keyFor((artifact.sha256 as string) ?? "")), true, "blob intact");
 });

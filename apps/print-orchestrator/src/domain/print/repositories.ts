@@ -85,8 +85,6 @@ export interface PrintTaskRepository extends WritableRepository<PrintTask> {
   findByLegacyRef(legacyRef: string): PrintTask | null;
   /** The (single) task created for an uploaded artifact; oldest first if several. */
   findByArtifactId(artifactId: string): PrintTask | null;
-  /** EVERY task referencing an artifact — the retention safety check needs all of them. */
-  listByArtifactId(artifactId: string): PrintTask[];
   /**
    * Every task naming the artifact in EITHER binding column — `artifact_id` (the
    * executable) or `source_artifact_id` (the model it was sliced from). A

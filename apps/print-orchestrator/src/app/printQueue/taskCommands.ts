@@ -211,10 +211,29 @@ export class TaskCommands {
     });
   }
 
-  /** Returns a parked/failed task to the runnable queue: → `QUEUED`, entry → `WAITING`. */
+  /**
+   * Returns a parked/failed task to the runnable queue: → `QUEUED`, entry → `WAITING`.
+   *
+   * Refuses a task whose uploaded file has since been deleted. `FAILED → QUEUED`
+   * is a legal move (a failed print may be retried), but artifact retention
+   * counts `FAILED` as history and lets the operator delete its file — and the
+   * foreign key then nulls `artifact_id` while `source_artifact_id` (no key)
+   * keeps naming the row that is gone. That pair — no executable, but a source
+   * binding — happens ONLY that way: every other origin (a manual task, a
+   * file-less scheduler entry, the legacy import) leaves `source_artifact_id`
+   * null. Reviving such a task put a `QUEUED` row in the queue with nothing to
+   * print, and every downstream identity check read "nothing is expected" rather
+   * than "this is wrong". Re-upload the file and queue it afresh.
+   */
   releaseTask(id: string, actor?: string): PrintTask {
     return this.store.transaction(() => {
       const task = this.queries.getTask(id);
+      if (task.artifactId === null && task.sourceArtifactId !== null) {
+        throw new JobError(
+          `Задание «${task.title}» нельзя вернуть в очередь: его файл удалён — загрузите файл заново`,
+          { taskId: task.id, taskState: task.state }
+        );
+      }
       const updated = this.ctx.transitionTask(task, "QUEUED", { reason: null }, "released", actor);
       const entry = this.store.repositories.queue.findByTaskId(id);
       if (entry && entry.state === "HELD") {

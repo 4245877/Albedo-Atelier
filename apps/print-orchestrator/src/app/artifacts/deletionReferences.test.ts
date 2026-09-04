@@ -5,7 +5,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, test } from "node:test";
 
-import { ValidationError } from "../../core/errors";
+import { JobError } from "../../core/errors";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import {
@@ -23,6 +23,7 @@ import type {
   SliceVariant,
   SliceVariantState
 } from "../../domain/slicing/types";
+import { PrintQueueService } from "../printQueue/printQueueService";
 import { openPrintQueueStore } from "../../infra/db/store";
 import { ArtifactStorage } from "../../infra/storage/artifactStorage";
 import { ArtifactService } from "./artifactService";
@@ -268,7 +269,7 @@ test("a source model a live task was promoted from is protected — the task no 
 
   const blocker = service.deletionBlocker(model.artifact.id);
   assert.match(blocker ?? "", /QUEUED/);
-  await assert.rejects(service.deleteArtifact(model.artifact.id), ValidationError);
+  await assert.rejects(service.deleteArtifact(model.artifact.id), JobError);
   assert.ok(store.repositories.artifacts.getById(model.artifact.id), "the model survives");
   assert.ok(store.repositories.sliceVariants.getById(variant.id), "so does its slice");
 });
@@ -283,7 +284,7 @@ test("the G-code a live task executes is protected too", async () => {
   });
   promote(model.task.id, variant, "QUEUED");
 
-  await assert.rejects(service.deleteArtifact(output.artifact.id), ValidationError);
+  await assert.rejects(service.deleteArtifact(output.artifact.id), JobError);
   assert.ok(store.repositories.artifacts.getById(output.artifact.id));
 });
 
@@ -331,8 +332,8 @@ test("a live assignment protects both the file it names and the model behind its
 
   assert.match(service.deletionBlocker(output.artifact.id) ?? "", new RegExp(live.id));
   assert.match(service.deletionBlocker(model.artifact.id) ?? "", new RegExp(variant.id));
-  await assert.rejects(service.deleteArtifact(output.artifact.id), ValidationError);
-  await assert.rejects(service.deleteArtifact(model.artifact.id), ValidationError);
+  await assert.rejects(service.deleteArtifact(output.artifact.id), JobError);
+  await assert.rejects(service.deleteArtifact(model.artifact.id), JobError);
 
   // Released placement → both are free again, and the variant goes with the model.
   const released = store.repositories.assignments.getById(live.id)!;
@@ -348,7 +349,7 @@ test("a file being streamed to a printer is protected; one already delivered is 
 
   const record = deviceArtifact(gcode.artifact.id, "UPLOADING");
   assert.match(service.deletionBlocker(gcode.artifact.id) ?? "", /загружается на принтер/);
-  await assert.rejects(service.deleteArtifact(gcode.artifact.id), ValidationError);
+  await assert.rejects(service.deleteArtifact(gcode.artifact.id), JobError);
 
   // VERIFIED means the bytes are on the printer and no longer need ours; a live
   // placement around them is caught by the assignment rule, not by this one.
@@ -367,7 +368,7 @@ test("an unfinished slice still holds its source model", async () => {
     state: "running"
   });
   assert.match(service.deletionBlocker(model.artifact.id) ?? "", new RegExp(variant.id));
-  await assert.rejects(service.deleteArtifact(model.artifact.id), ValidationError);
+  await assert.rejects(service.deleteArtifact(model.artifact.id), JobError);
 });
 
 test("an upload deduplicating onto bytes a delete is unlinking keeps its blob", async () => {
@@ -409,4 +410,113 @@ test("an upload deduplicating onto bytes a delete is unlinking keeps its blob", 
   assert.equal(uploaded.artifact.source, key, "the new artifact addresses the same content");
   assert.equal(await storage.exists(key), true, "and its bytes are on disk");
   assert.ok(store.repositories.artifacts.getById(uploaded.artifact.id));
+});
+
+/*
+ * The far end of "FAILED is history".
+ *
+ * Retention counts FAILED among the terminal states, so a failed print's file may
+ * be deleted — but the task state machine says `FAILED → QUEUED` (a failed print
+ * may be retried). Deleting the file nulls `artifact_id` through the foreign key
+ * and leaves `source_artifact_id` (which has no key) naming a row that is gone.
+ * Re-queuing such a task used to succeed and put a QUEUED row in the queue with
+ * nothing to print — and because every downstream identity check reads a missing
+ * artifact as "no expectation" rather than "wrong", nothing downstream said so.
+ */
+test("a failed task whose file was deleted cannot be re-queued — it says why instead", async () => {
+  const model = await upload("retry.gcode", "G28 ; retry-me");
+  const repos = store.repositories;
+  const queue = new PrintQueueService(store, { now: () => new Date(ISO) });
+
+  // The print failed; the task is history as far as retention is concerned.
+  repos.tasks.update({ ...repos.tasks.getById(model.task.id)!, state: "FAILED", updatedAt: ISO });
+  assert.equal(service.deletionBlocker(model.artifact.id), null, "a failed task does not pin its file");
+
+  await service.deleteArtifact(model.artifact.id);
+
+  const orphaned = repos.tasks.getById(model.task.id)!;
+  assert.equal(orphaned.artifactId, null, "the foreign key nulled the executable");
+  assert.equal(orphaned.sourceArtifactId, model.artifact.id, "the keyless source column still names it");
+
+  assert.throws(
+    () => queue.releaseTask(orphaned.id),
+    (e: unknown) => e instanceof JobError && /файл удалён/.test((e as Error).message)
+  );
+  assert.equal(repos.tasks.getById(orphaned.id)!.state, "FAILED", "the refusal changes nothing");
+});
+
+/* A task that legitimately never had an uploaded file is untouched by that rule. */
+test("a file-less task still parks and returns to the queue as it always did", () => {
+  const queue = new PrintQueueService(store, { now: () => new Date(ISO) });
+  const created = queue.createTask({ title: "Ручная работа" }); // no printer, no file
+  assert.equal(created.task.state, "NEEDS_REVIEW");
+  assert.equal(created.task.artifactId, null);
+  assert.equal(created.task.sourceArtifactId, null);
+
+  assert.equal(queue.releaseTask(created.task.id).state, "QUEUED");
+});
+
+/*
+ * A corrupt row must not become a filesystem primitive.
+ *
+ * `Artifact.source` is written only by the ingest path, which derives it from a
+ * content hash — but deletion READS it back and hands it to the filesystem, so
+ * the interesting question is what a row that says something else can make the
+ * service unlink. A hand-edited database, a bad restore, a future bug upstream:
+ * the answer has to be "nothing", from the storage layer's own key check, not
+ * from trusting whoever wrote the row.
+ */
+test("a corrupt storage key deletes the row and touches nothing on disk", async () => {
+  const outside = path.join(dir, "precious.txt");
+  fs.writeFileSync(outside, "not yours");
+  const repos = store.repositories;
+
+  const evil = {
+    id: newId(ID_PREFIX.artifact),
+    kind: "gcode" as const,
+    name: "evil.gcode",
+    // Escapes the store root, and is not a well-formed `sha256/<2>/<64>` key.
+    source: `../../${path.basename(dir)}/precious.txt`,
+    sizeBytes: 9,
+    sha256: "0".repeat(64),
+    createdAt: ISO,
+    updatedAt: ISO,
+    version: 1,
+    legacyRef: null,
+    metadata: {}
+  };
+  repos.artifacts.insert(evil);
+
+  // The row goes (the database is what the operator asked to clean up), the
+  // unlink is refused by the key check, and the deletion says the blob stayed
+  // rather than claiming a removal that never happened.
+  const outcome = await service.deleteArtifact(evil.id);
+  assert.equal(outcome.blobRemoved, false, "no unlink may be reported for a key that was refused");
+  assert.equal(repos.artifacts.getById(evil.id), null, "the row is gone");
+  assert.equal(fs.existsSync(outside), true, "the file outside the store is untouched");
+});
+
+test("an absolute path in `source` is refused the same way", async () => {
+  const outside = path.join(dir, "absolute.txt");
+  fs.writeFileSync(outside, "still not yours");
+  const repos = store.repositories;
+
+  const evil = {
+    id: newId(ID_PREFIX.artifact),
+    kind: "gcode" as const,
+    name: "abs.gcode",
+    source: outside,
+    sizeBytes: 15,
+    sha256: "1".repeat(64),
+    createdAt: ISO,
+    updatedAt: ISO,
+    version: 1,
+    legacyRef: null,
+    metadata: {}
+  };
+  repos.artifacts.insert(evil);
+
+  const outcome = await service.deleteArtifact(evil.id);
+  assert.equal(outcome.blobRemoved, false);
+  assert.equal(fs.existsSync(outside), true, "an absolute path is not a storage key");
 });

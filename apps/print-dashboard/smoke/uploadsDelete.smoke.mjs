@@ -174,3 +174,93 @@ test("удаление файла: подтверждение, запрос на
     await mock.close();
   }
 });
+
+/*
+ * Состояние, которое сервер видит, а вкладка — ещё нет.
+ *
+ * Список файлов (и вместе с ним причина отказа) читается один раз при открытии
+ * страницы: поллер работает только пока идёт анализ. Без сверки освободившийся
+ * файл навсегда оставался бы с погашенной кнопкой, а файл, удалённый в соседней
+ * вкладке, — в списке до перезагрузки. Оба случая проверяются здесь на живой
+ * странице: возврат вкладки на передний план обязан сверить список с сервером,
+ * а DELETE, отвечающий 404, — убрать карточку, а не показать ошибку.
+ */
+test("вкладка вернулась: список сверяется с сервером, а 404 при удалении — не ошибка", { skip: version ? false : `no CDP browser at ${CDP_URL}` }, async () => {
+  // Начинаем с занятого файла и файла, которого на сервере уже нет к моменту
+  // подтверждения (его удалили «в другой вкладке»).
+  let artifacts = [row("art_a", "a.gcode", BLOCKER), row("art_b", "b.gcode", null)];
+  const mock = await startMockServer({
+    handle: (req, key) => {
+      if (key === "/api/print/artifacts" && req.method === "GET") {
+        return { status: 200, body: { artifacts } };
+      }
+      if (req.method === "DELETE" && key === "/api/print/artifacts/art_b") {
+        // Файл уже удалён другой вкладкой — ровно то, что вернёт настоящий backend.
+        return {
+          status: 404,
+          body: { error: { code: "NOT_FOUND", message: "Артефакт «art_b» not found", details: null } }
+        };
+      }
+      return null;
+    }
+  });
+
+  const target = await (await fetch(`${CDP_URL}/json/new?${encodeURIComponent(mock.url)}`, { method: "PUT" })).json();
+  const cdp = await connect(target.webSocketDebuggerUrl);
+
+  const evalValue = async (expression) => {
+    const { result } = await cdp.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+    return result.value;
+  };
+  const until = async (expression, what) => {
+    for (let i = 0; i < 80; i++) {
+      if (await evalValue(expression)) return;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    throw new Error(`timeout waiting for ${what}`);
+  };
+  const deleteBtn = (id) =>
+    `(() => {
+       const li = document.querySelector('[data-upload="${id}"]');
+       const btn = li && li.querySelector('.upload-head-side button');
+       return btn ? { disabled: btn.disabled, deletes: btn.hasAttribute('data-delete-artifact') } : null;
+     })()`;
+
+  try {
+    await cdp.send("Page.enable");
+    await cdp.send("Runtime.enable");
+    await cdp.send("Page.navigate", { url: mock.url });
+    await until('document.querySelectorAll("#worknav .work-tab").length > 0', "the app to boot");
+    await evalValue('document.querySelector(\'.mode-tab[data-mode="works"]\').click(), 1');
+    await until('document.getElementById("mode-works") && !document.getElementById("mode-works").hidden', "the works mode");
+    await until("document.querySelectorAll('#upload-list .upload-item').length === 2", "both file cards");
+
+    assert.deepEqual(await evalValue(deleteBtn("art_a")), { disabled: true, deletes: false }, "the busy file starts blocked");
+
+    // ── Задание отменили: сервер отдаёт файл свободным ──
+    artifacts = [row("art_a", "a.gcode", null), row("art_b", "b.gcode", null)];
+    await evalValue('document.dispatchEvent(new Event("visibilitychange")), 1');
+    await until(`(${deleteBtn("art_a")}).disabled === false`, "the freed file to regain its button");
+    assert.deepEqual(
+      await evalValue(deleteBtn("art_a")),
+      { disabled: false, deletes: true },
+      "a file the server now calls free must be deletable without a page reload"
+    );
+
+    // ── Файл удалён в другой вкладке: DELETE отвечает 404 ──
+    artifacts = artifacts.filter((r) => r.artifact.id !== "art_b");
+    await evalValue("document.querySelector('[data-delete-artifact=\"art_b\"]').click(), 1");
+    await until("Boolean(document.querySelector('.modal-confirm'))", "the confirmation dialog");
+    await evalValue("document.querySelector('[data-confirm-yes]').click(), 1");
+
+    await until('!document.querySelector(\'[data-upload="art_b"]\')', "the card to disappear on a 404");
+    const errorShown = await evalValue("Boolean(document.querySelector('.modal-confirm'))");
+    assert.equal(errorShown, false, "a file that is already gone is not an error to show");
+
+    assert.deepEqual(cdp.exceptions, [], "there should be no uncaught page errors");
+  } finally {
+    cdp.close();
+    await fetch(`${CDP_URL}/json/close/${target.id}`).catch(() => {});
+    await mock.close();
+  }
+});

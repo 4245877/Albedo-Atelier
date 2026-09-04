@@ -51,7 +51,7 @@ export interface PrintRoutesOptions {
  *   GET  /artifacts/config       upload limits for the dashboard
  *   POST /artifacts              multipart upload of one file → Artifact + DRAFT task + pending analysis
  *   POST /artifacts/:id/analyze  re-run analysis (after a failed attempt)
- *   DELETE /artifacts/:id        delete one stored file (refused while it is in use)
+ *   DELETE /artifacts/:id        delete one stored file (409 while it is in use)
  */
 export async function registerPrintQueueRoutes(
   app: FastifyInstance,
@@ -226,10 +226,12 @@ function registerArtifactRoutes(
   }));
 
   // Safe manual deletion of one stored file (STL / 3MF / G-code alike — an
-  // artifact is an artifact). Refused with 400 and the reason while any live
-  // task, run, analysis, assignment, device upload or slice variant still uses
-  // it; deduplicated blobs are only unlinked when the LAST reference goes, and
-  // the row is removed before the bytes, never the other way round.
+  // artifact is an artifact). Refused with 409 and the reason (`details.blocker`)
+  // while any live task, run, analysis, assignment, device upload or slice
+  // variant still uses it — a state conflict the caller may retry after a
+  // refresh, not a malformed request; 404 when the id is unknown. Deduplicated
+  // blobs are only unlinked when the LAST reference goes, and the row is removed
+  // before the bytes, never the other way round.
   app.delete<{ Params: { id: string } }>("/artifacts/:id", async (request) => ({
     ok: true,
     ...(await services.artifacts.deleteArtifact(request.params.id))

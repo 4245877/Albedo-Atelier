@@ -179,6 +179,10 @@ export function confirmAction({
     function finish(value) {
       if (settled) return;
       settled = true;
+      // Скрым — единственный элемент окна, переживающий закрытие (его создают
+      // один раз на всю страницу). Слушатель на нём снимается здесь: иначе
+      // каждое подтверждение оставляло бы на нём ещё один обработчик навсегда.
+      root.removeEventListener("click", onBackdrop);
       root.hidden = true;
       root.innerHTML = "";
       document.documentElement.classList.remove("modal-open");
@@ -196,7 +200,10 @@ export function confirmAction({
     }
 
     no.addEventListener("click", () => finish(false));
-    root.addEventListener("click", (e) => { if (e.target === root) finish(false); });
+    function onBackdrop(e) {
+      if (e.target === root) finish(false);
+    }
+    root.addEventListener("click", onBackdrop);
 
     yes.addEventListener("click", async () => {
       if (yes.disabled) return;

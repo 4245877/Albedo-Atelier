@@ -110,7 +110,13 @@ export function setupUploads() {
   });
 
   // Показать уже загруженные ранее артефакты (переживают перезагрузку страницы).
-  void loadExisting();
+  void syncExisting();
+
+  // Вкладку вернули на передний план: за это время файл мог быть удалён или
+  // занят в другой вкладке. Сверяемся, вместо того чтобы показывать прошлое.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void syncExisting();
+  });
 }
 
 /* ── Загрузка новых файлов ──────────────────────────────────── */
@@ -296,20 +302,75 @@ function notifyAnalysisCompleted(item) {
   );
 }
 
-/* ── Существующие артефакты (при открытии страницы) ─────────── */
+/* ── Существующие артефакты: чтение и сверка со списком ─────── */
 
-async function loadExisting() {
+/* Порядковый номер чтения списка: применяется только ответ последнего запроса,
+   иначе медленный ранний ответ затирал бы свежий. */
+let listSeq = 0;
+
+/*
+ * Перечитывает список файлов и СВЕРЯЕТ его с тем, что показано.
+ *
+ * Не просто дозагрузка: `deletionBlocker` приходит именно отсюда, а поллер
+ * работает только пока идёт анализ — без сверки причина отказа застывала бы на
+ * момент открытия страницы. Файл, который освободился (задание отменили,
+ * назначение сняли), навсегда оставался бы с погашенной кнопкой до F5; файл,
+ * удалённый в соседней вкладке, — в списке.
+ *
+ * Карточки текущих загрузок (у них ещё нет артефакта) не трогаются: сервер о
+ * них ничего не знает, и их состоянием владеет очередь загрузки.
+ */
+async function syncExisting() {
+  const seq = ++listSeq;
+  // Что раздел знал ДО запроса. Убирать можно только эти карточки: файл,
+  // загрузившийся, пока ответ был в пути, в него не попал — и вычеркнуть его
+  // значило бы стереть только что успешную загрузку. Он дождётся следующей сверки.
+  const knownBefore = new Set(items.filter((it) => it.artifact).map((it) => it.artifact.id));
+
+  let artifacts;
   try {
-    const { artifacts } = await apiGet("/api/print/artifacts");
-    for (const row of artifacts || []) {
-      if (items.some((it) => it.artifact && it.artifact.id === row.artifact.id)) continue;
-      items.push(toItem(row));
-    }
-    render();
-    if (hasActiveAnalysis()) ensurePolling();
+    ({ artifacts } = await apiGet("/api/print/artifacts"));
   } catch {
-    /* backend недоступен — раздел просто пуст до восстановления связи */
+    return; /* backend недоступен — оставляем показанное как есть */
   }
+  if (seq !== listSeq) return; // ответ устарел, пришёл более свежий
+
+  const byId = new Map((artifacts || []).map((row) => [row.artifact.id, row]));
+  const kept = [];
+  for (const it of items) {
+    if (!it.artifact) {
+      kept.push(it); // локальная загрузка — сервер о ней ещё не знает
+      continue;
+    }
+    const row = byId.get(it.artifact.id);
+    if (!row) {
+      if (knownBefore.has(it.artifact.id)) {
+        forget(it); // файла на сервере больше нет
+        continue;
+      }
+      kept.push(it); // появился уже после запроса — ответ о нём ничего не говорит
+      continue;
+    }
+    byId.delete(it.artifact.id);
+    applyRow(it, row);
+    kept.push(it);
+  }
+  items = kept;
+  for (const row of byId.values()) items.push(toItem(row));
+
+  render();
+  if (hasActiveAnalysis()) ensurePolling();
+}
+
+/* Переносит серверную строку списка на уже показанную карточку, не теряя того,
+   что знает только раздел (ключ, имя файла, прогресс загрузки). */
+function applyRow(item, row) {
+  const fresh = toItem(row);
+  item.artifact = fresh.artifact;
+  item.analysis = fresh.analysis;
+  item.task = fresh.task;
+  item.deletionBlocker = fresh.deletionBlocker;
+  item.stage = fresh.stage;
 }
 
 function toItem(row) {
@@ -388,14 +449,19 @@ async function removeArtifact(artifactId) {
         );
         if (skipped) throw new Error("удаление этого файла уже выполняется");
       } catch (err) {
-        // Отказ «файл занят» несёт причину структурно. Запоминаем её на карточке:
-        // список раздела не опрашивается постоянно, и без этого кнопка осталась бы
-        // живой, предлагая ровно то, в чём сервер только что отказал.
-        if (err?.details?.blocker) {
-          item.deletionBlocker = String(err.details.blocker);
-          render();
+        // 404 — файла уже нет: его удалили в другой вкладке или очисткой. Оператор
+        // просил, чтобы файла не было; он его не видит. Показывать ошибку значило бы
+        // оставить карточку в списке ради разницы, которой для него не существует.
+        if (err?.status !== 404) {
+          // Отказ «файл занят» несёт причину структурно. Запоминаем её на карточке:
+          // без этого кнопка осталась бы живой, предлагая ровно то, в чём сервер
+          // только что отказал.
+          if (err?.details?.blocker) {
+            item.deletionBlocker = String(err.details.blocker);
+            render();
+          }
+          throw err; // текст отказа показывает само окно подтверждения
         }
-        throw err; // текст отказа показывает само окно подтверждения
       }
     }
   });
@@ -408,6 +474,9 @@ async function removeArtifact(artifactId) {
   // Слайсинг показывает те же файлы (модели и нарезанный G-code) — пусть узнает
   // сразу, а не через свой следующий фоновый опрос.
   document.dispatchEvent(new CustomEvent("artifact-deleted", { detail: { artifactId } }));
+  // Удаление меняет и СОСЕДЕЙ: у исходной модели уходит вариант слайсинга, и она
+  // может стать удаляемой. Перечитываем причины отказа, а не гадаем о них.
+  void syncExisting();
 }
 
 /* Что именно произойдёт — по состоянию конкретного файла, без общих слов. */
@@ -417,7 +486,11 @@ function deletionPoints(item) {
     points.push("Черновик задания, созданный при загрузке, будет отменён");
   }
   if (item.analysis && item.analysis.verdict === "needs_preparation") {
-    points.push("Нарезанные из этой модели G-code файлы останутся — удалите их отдельно");
+    // Две разные вещи, и обе стоит назвать: записи о нарезке этой модели сервер
+    // удаляет вместе с ней (иначе они ссылались бы в пустоту), а сами нарезанные
+    // файлы — отдельные файлы этого же списка и никуда не денутся.
+    points.push("Варианты слайсинга этой модели будут удалены вместе с ней");
+    points.push("Сами нарезанные G-code файлы останутся — удалите их отдельно");
   }
   points.push("Файл, который используется заданием или печатью, сервер удалить не даст");
   return points;

@@ -31,7 +31,7 @@ let app: FastifyInstance;
 let farmStore: typeof import("../../app/farmStore").farmStore;
 
 before(async () => {
-  const { AppError } = await import("../../core/errors");
+  const { AppError, toClientError } = await import("../../core/errors");
   const { registerSecurity } = await import("../../http/security");
   const { registerPrintQueueRoutes } = await import("./routes");
   ({ farmStore } = await import("../../app/farmStore"));
@@ -40,7 +40,9 @@ before(async () => {
   registerSecurity(app);
   app.setErrorHandler((error: FastifyError, _request, reply) => {
     if (error instanceof AppError) {
-      reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+      // The SAME client-safe projection app.ts uses, so what these tests read is
+      // what a real caller gets — `details` included.
+      reply.code(error.statusCode).send({ error: toClientError(error) });
       return;
     }
     const status = typeof error.statusCode === "number" ? error.statusCode : 500;
@@ -346,8 +348,14 @@ test("DELETE /artifacts/:id refuses a file a queued task uses, and says which", 
     url: `/api/print/artifacts/${artifactId}`,
     headers: { authorization: `Bearer ${TOKEN}` }
   });
-  assert.equal(res.statusCode, 400);
+  // 409, not 400: the call was well formed — the file's STATE forbids it, and the
+  // caller may retry once the task is done. The reason travels structurally too,
+  // so the dashboard can update the card instead of only printing a sentence.
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.json().error.code, "JOB_ERROR");
   assert.match(res.json().error.message, /Живое задание/);
+  assert.equal(res.json().error.details.artifactId, artifactId);
+  assert.match(res.json().error.details.blocker, /Живое задание/);
   const still = await app.inject({ method: "GET", url: `/api/print/artifacts/${artifactId}` });
   assert.equal(still.statusCode, 200, "a refused deletion changes nothing");
 });
