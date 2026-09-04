@@ -34,4 +34,11 @@ export interface SliceVariantRepository extends WritableRepository<SliceVariant>
   list(): SliceVariant[];
   /** Every variant referencing the artifact as source or output — retention safety check. */
   listReferencingArtifact(artifactId: string): SliceVariant[];
+  /**
+   * Removes one variant row. `slice_variants.source_artifact_id` is
+   * `ON DELETE CASCADE`, so deleting a source model would take its variants with
+   * it *invisibly*; retention calls this first instead, to audit every removal
+   * and to keep the decision in the application layer where the safety rules are.
+   */
+  delete(id: string): void;
 }

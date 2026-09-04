@@ -177,4 +177,18 @@ export class SqliteAssignmentRepository
       printerId
     );
   }
+
+  listReferencingArtifact(artifactId: string): Assignment[] {
+    return this.query(
+      "SELECT * FROM assignments WHERE artifact_id = ? ORDER BY created_at DESC, id DESC",
+      artifactId
+    );
+  }
+
+  listBySliceVariant(sliceVariantId: string): Assignment[] {
+    return this.query(
+      "SELECT * FROM assignments WHERE slice_variant_id = ? ORDER BY created_at DESC, id DESC",
+      sliceVariantId
+    );
+  }
 }

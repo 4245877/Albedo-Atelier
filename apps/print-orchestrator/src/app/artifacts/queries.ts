@@ -1,11 +1,20 @@
 import { NotFoundError } from "../../core/errors";
 import type { Artifact, ArtifactAnalysis, AuditEvent, PrintTask } from "../../domain/print/types";
 import type { ArtifactContext } from "./context";
+import { deletionBlocker } from "./retention";
 
 export interface ArtifactSummary {
   artifact: Artifact;
   task: PrintTask | null;
   analysis: ArtifactAnalysis | null;
+  /**
+   * Why this file cannot be deleted right now, or null when it can. Computed by
+   * the very rule the delete transaction enforces, so the dashboard can disable
+   * the button and name the reason instead of offering an action that is going
+   * to be refused. Advisory only — a file can become live between this read and
+   * the delete, and the transaction re-checks.
+   */
+  deletionBlocker: string | null;
 }
 
 export interface ArtifactDetail {
@@ -13,6 +22,8 @@ export interface ArtifactDetail {
   task: PrintTask | null;
   analyses: ArtifactAnalysis[];
   audit: AuditEvent[];
+  /** @see {@link ArtifactSummary.deletionBlocker} */
+  deletionBlocker: string | null;
 }
 
 /** Read side of the artifact store: listings and the per-artifact detail. */
@@ -26,7 +37,8 @@ export class ArtifactQueries {
       .map((artifact) => ({
         artifact,
         task: repos.tasks.findByArtifactId(artifact.id),
-        analysis: repos.artifactAnalyses.latestForArtifact(artifact.id)
+        analysis: repos.artifactAnalyses.latestForArtifact(artifact.id),
+        deletionBlocker: deletionBlocker(repos, artifact.id)
       }))
       .reverse(); // newest upload first
   }
@@ -44,7 +56,8 @@ export class ArtifactQueries {
       artifact,
       task,
       analyses: repos.artifactAnalyses.listByArtifact(id),
-      audit
+      audit,
+      deletionBlocker: deletionBlocker(repos, id)
     };
   }
 }

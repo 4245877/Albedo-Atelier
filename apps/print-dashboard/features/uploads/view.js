@@ -58,12 +58,46 @@ export function itemHtml(item, { detailsOpen = false } = {}) {
           <span class="upload-size">${esc(size)}</span>
           ${dedup}
         </div>
-        ${badge}
+        <div class="upload-head-side">
+          ${badge}
+          ${removeButtonHtml(item)}
+        </div>
       </div>
       ${progressBar}
       ${errorBlock}
       ${analysisBlock}
     </li>`;
+}
+
+/* Кнопка удаления файла — единственное необратимое действие карточки.
+ *
+ * Три облика, потому что за ними три разные вещи:
+ *   • у карточки без артефакта (загрузка не дошла до сервера) удалять на
+ *     сервере нечего — она просто убирается из списка;
+ *   • пока файл кем-то используется, backend откажет; кнопка погашена, а
+ *     причина — та же строка, которую вернул бы отказ, — стоит в подсказке,
+ *     чтобы не заставлять оператора выяснять это нажатием;
+ *   • свободный файл получает живую кнопку; подтверждение — в контроллере.
+ * Идёт последним в строке заголовка: рядом со статусом, но после него —
+ * сначала читают, что с файлом, и только потом решают его судьбу. */
+function removeButtonHtml(item) {
+  if (!item.artifact) {
+    if (item.stage !== "error") return "";
+    return `<button type="button" class="btn btn-sm btn-icon" data-upload-dismiss="${esc(item.key)}"
+      title="Убрать из списка" aria-label="Убрать «${esc(item.name)}» из списка">${icon("cross")}</button>`;
+  }
+  // Пока анализ идёт, файл читает worker — предлагать его удаление нечестно:
+  // сервер откажет. Это правило раздела, а не копия серверного: оно лишь не
+  // показывает действие, пока с файлом ещё идёт работа.
+  const analysing = item.analysis?.state === "pending" || item.analysis?.state === "running";
+  const blocker = analysing ? "файл ещё анализируется" : item.deletionBlocker;
+  if (blocker) {
+    return `<button type="button" class="btn btn-sm btn-icon" disabled
+      title="${esc(`Удалить нельзя: ${blocker}`)}"
+      aria-label="${esc(`Удалить «${item.name}» нельзя: ${blocker}`)}">${icon("trash")}</button>`;
+  }
+  return `<button type="button" class="btn btn-sm btn-icon btn-danger" data-delete-artifact="${esc(item.artifact.id)}"
+    title="Удалить файл" aria-label="Удалить файл «${esc(item.name)}»">${icon("trash")}</button>`;
 }
 
 function statusBadge(item) {

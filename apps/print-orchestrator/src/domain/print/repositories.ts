@@ -87,6 +87,14 @@ export interface PrintTaskRepository extends WritableRepository<PrintTask> {
   findByArtifactId(artifactId: string): PrintTask | null;
   /** EVERY task referencing an artifact — the retention safety check needs all of them. */
   listByArtifactId(artifactId: string): PrintTask[];
+  /**
+   * Every task naming the artifact in EITHER binding column — `artifact_id` (the
+   * executable) or `source_artifact_id` (the model it was sliced from). A
+   * promoted slice re-points `artifact_id` at the G-code, so a check that reads
+   * only `artifact_id` no longer sees the live task that still depends on the
+   * source model. Retention asks this, never the narrower one.
+   */
+  listReferencingArtifact(artifactId: string): PrintTask[];
   list(query?: TaskQuery): PrintTask[];
 }
 
@@ -108,6 +116,10 @@ export interface AssignmentRepository extends WritableRepository<Assignment> {
   listByPlan(planId: string): Assignment[];
   /** The current non-terminal assignment on a printer, if any. */
   findOpenByPrinter(printerId: string): Assignment | null;
+  /** Every assignment whose binding names this artifact (any state), newest first. */
+  listReferencingArtifact(artifactId: string): Assignment[];
+  /** Every assignment whose binding names this slice variant (any state), newest first. */
+  listBySliceVariant(sliceVariantId: string): Assignment[];
 }
 
 export interface BedCycleRepository extends WritableRepository<BedCycle> {
@@ -142,6 +154,8 @@ export interface DeviceArtifactRepository extends WritableRepository<DeviceArtif
   listByAssignment(assignmentId: string): DeviceArtifact[];
   /** Every tracked file on a printer, newest first. */
   listByPrinter(printerId: string): DeviceArtifact[];
+  /** Every tracked device file that carries this artifact's identity, newest first. */
+  listByArtifact(artifactId: string): DeviceArtifact[];
   /**
    * Every tracked file in one of `states`, oldest first — the crash-recovery
    * read (`UPLOADING` rows orphaned by a restart).

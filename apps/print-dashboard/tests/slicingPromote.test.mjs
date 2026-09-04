@@ -260,3 +260,25 @@ test("итоговое действие формы «Новый набор» о�
   assert.ok(note > -1 && actions > note, "пояснение идёт до ряда действий");
   assert.ok(submit > actions, "кнопка лежит внутри ряда действий, а не сразу за текстом");
 });
+
+/*
+ * Удалённый нарезанный файл. G-code — такой же файл в разделе загрузок, и его
+ * можно удалить; вариант при этом остаётся `ready`, но без выхода. Раньше он в
+ * этом состоянии молча терял и строку «Готовый G-code», и кнопку «в очередь» —
+ * «готово», за которым ничего нет.
+ */
+
+test("готовый вариант без выходного файла объясняет, что файл удалён, и даёт нарезать заново", () => {
+  const html = variantsHtml(
+    baseState({ variants: [{ ...READY_VARIANT, outputArtifactId: null }], outputs: [] })
+  );
+  assert.match(html, /Нарезанный файл удалён/);
+  assert.match(html, /data-slice-action="rerun"/);
+  assert.doesNotMatch(html, /Добавить в очередь/);
+});
+
+test("готовый вариант с файлом остаётся прежним — ни предупреждения, ни «Повторить»", () => {
+  const html = variantsHtml(baseState());
+  assert.doesNotMatch(html, /Нарезанный файл удалён/);
+  assert.doesNotMatch(html, /data-slice-action="rerun"/);
+});

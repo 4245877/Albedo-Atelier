@@ -159,6 +159,13 @@ export class SqliteDeviceArtifactRepository
     );
   }
 
+  listByArtifact(artifactId: string): DeviceArtifact[] {
+    return this.query(
+      "SELECT * FROM device_artifacts WHERE artifact_id = ? ORDER BY created_at DESC, id DESC",
+      artifactId
+    );
+  }
+
   listByStates(states: readonly DeviceArtifactState[]): DeviceArtifact[] {
     if (states.length === 0) return [];
     // The placeholder list is built from the array *length* only; every value is

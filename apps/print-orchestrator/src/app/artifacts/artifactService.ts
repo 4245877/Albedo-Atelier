@@ -6,12 +6,13 @@ import { ArtifactContext, type ArtifactServiceOptions } from "./context";
 import { ArtifactIngest, type IngestInput, type IngestResult } from "./ingest";
 import { ModelScaleService } from "./modelScale";
 import { ArtifactQueries, type ArtifactDetail, type ArtifactSummary } from "./queries";
-import { ArtifactRetention } from "./retention";
+import { ArtifactRetention, type ArtifactDeletion } from "./retention";
 
 export type { AnalyzeFn } from "./analysisRunner";
 export type { ArtifactServiceOptions } from "./context";
 export type { IngestInput, IngestResult } from "./ingest";
 export type { ArtifactDetail, ArtifactSummary } from "./queries";
+export type { ArtifactDeletion } from "./retention";
 
 /**
  * The application service for uploaded artifacts and their analysis. A facade
@@ -117,10 +118,7 @@ export class ArtifactService {
     return this.retention.deletionBlocker(artifactId);
   }
 
-  deleteArtifact(
-    artifactId: string,
-    options: { actor?: string } = {}
-  ): Promise<{ blobKey: string | null; blobRemoved: boolean }> {
+  deleteArtifact(artifactId: string, options: { actor?: string } = {}): Promise<ArtifactDeletion> {
     return this.retention.deleteArtifact(artifactId, options);
   }
 

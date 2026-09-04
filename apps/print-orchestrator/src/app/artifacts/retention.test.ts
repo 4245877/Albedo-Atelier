@@ -88,7 +88,7 @@ test("an artifact used by an active (queued) task is protected", async () => {
 
   await assert.rejects(
     service.deleteArtifact(artifact.id),
-    (e: unknown) => e instanceof ValidationError && /использует артефакт/.test((e as Error).message)
+    (e: unknown) => e instanceof ValidationError && /использует файл/.test((e as Error).message)
   );
   assert.ok(store.repositories.artifacts.getById(artifact.id), "still present");
 });

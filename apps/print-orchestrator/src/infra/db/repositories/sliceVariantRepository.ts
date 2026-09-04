@@ -177,4 +177,8 @@ export class SqliteSliceVariantRepository
   list(): SliceVariant[] {
     return this.query("SELECT * FROM slice_variants ORDER BY created_at DESC, id DESC");
   }
+
+  delete(id: string): void {
+    this.db.prepare("DELETE FROM slice_variants WHERE id = ?").run(id);
+  }
 }

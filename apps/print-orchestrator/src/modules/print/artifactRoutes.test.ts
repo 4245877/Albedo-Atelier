@@ -276,3 +276,87 @@ test("the scale endpoint is behind the same API token as every other mutation", 
   });
   assert.equal(res.statusCode, 401);
 });
+
+/*
+ * DELETE /artifacts/:id — the operator-facing "удалить файл".
+ *
+ * Same guard as every other mutation, refuses (400) while the file is in use,
+ * and when it does go through it removes the row AND the bytes — the two are
+ * never allowed to disagree.
+ */
+
+test("DELETE /artifacts/:id is behind the same API token as every other mutation", async () => {
+  const up = await uploadReq("guarded-delete.stl", binaryStl(13));
+  const res = await app.inject({ method: "DELETE", url: `/api/print/artifacts/${up.json().artifact.id}` });
+  assert.equal(res.statusCode, 401);
+  // Refused means untouched, not "probably fine".
+  const still = await app.inject({ method: "GET", url: `/api/print/artifacts/${up.json().artifact.id}` });
+  assert.equal(still.statusCode, 200);
+});
+
+test("DELETE /artifacts/:id removes the row, the bytes and the draft task together", async () => {
+  const up = await uploadReq("deleteme.stl", binaryStl(15));
+  const artifactId = up.json().artifact.id;
+  const taskId = up.json().task.id;
+  await farmStore.artifacts.whenIdle();
+
+  const res = await app.inject({
+    method: "DELETE",
+    url: `/api/print/artifacts/${artifactId}`,
+    headers: { authorization: `Bearer ${TOKEN}` }
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().ok, true);
+  assert.equal(res.json().blobRemoved, true, "the last reference went, so the blob went");
+
+  // Gone from the detail endpoint, gone from the listing, and its draft cancelled.
+  const detail = await app.inject({ method: "GET", url: `/api/print/artifacts/${artifactId}` });
+  assert.equal(detail.statusCode, 404);
+  const list = await app.inject({ method: "GET", url: "/api/print/artifacts" });
+  assert.ok(
+    !list.json().artifacts.some((row: { artifact: { id: string } }) => row.artifact.id === artifactId)
+  );
+  const tasks = await app.inject({ method: "GET", url: "/api/print/tasks" });
+  const draft = tasks.json().tasks.find((t: { id: string }) => t.id === taskId);
+  assert.equal(draft.state, "CANCELLED");
+});
+
+test("DELETE /artifacts/:id refuses a file a queued task uses, and says which", async () => {
+  const up = await uploadReq("in-use.stl", binaryStl(17));
+  const artifactId = up.json().artifact.id;
+  await farmStore.artifacts.whenIdle();
+
+  const queued = await app.inject({
+    method: "POST",
+    url: "/api/print/scheduler/queue",
+    payload: { title: "Живое задание", artifactId },
+    headers: { authorization: `Bearer ${TOKEN}` }
+  });
+  assert.equal(queued.statusCode, 200);
+
+  // The listing warns BEFORE the click: same rule, same wording.
+  const list = await app.inject({ method: "GET", url: "/api/print/artifacts" });
+  const row = list
+    .json()
+    .artifacts.find((r: { artifact: { id: string } }) => r.artifact.id === artifactId);
+  assert.match(row.deletionBlocker, /Живое задание/);
+
+  const res = await app.inject({
+    method: "DELETE",
+    url: `/api/print/artifacts/${artifactId}`,
+    headers: { authorization: `Bearer ${TOKEN}` }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match(res.json().error.message, /Живое задание/);
+  const still = await app.inject({ method: "GET", url: `/api/print/artifacts/${artifactId}` });
+  assert.equal(still.statusCode, 200, "a refused deletion changes nothing");
+});
+
+test("DELETE /artifacts/:id on an unknown id is a 404, not a silent success", async () => {
+  const res = await app.inject({
+    method: "DELETE",
+    url: "/api/print/artifacts/art_does_not_exist",
+    headers: { authorization: `Bearer ${TOKEN}` }
+  });
+  assert.equal(res.statusCode, 404);
+});

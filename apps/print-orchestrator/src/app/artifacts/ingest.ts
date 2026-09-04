@@ -79,93 +79,100 @@ export class ArtifactIngest {
       throw error;
     }
 
-    let committed: CommittedBlob;
-    try {
-      committed = await this.ctx.storage.commit(staged);
-    } catch (error) {
-      await this.ctx.storage.discard(staged.tempPath);
-      throw mapStorageError(error);
-    }
+    // Commit-and-reference under the blob lock: from the moment the bytes land in
+    // content-addressed storage until the row that references them is committed,
+    // no deletion may decide the key is unreferenced and unlink it.
+    const result = await this.ctx.withBlobLock(keyFor(staged.sha256), async () => {
+      let committed: CommittedBlob;
+      try {
+        committed = await this.ctx.storage.commit(staged);
+      } catch (error) {
+        await this.ctx.storage.discard(staged.tempPath);
+        throw mapStorageError(error);
+      }
 
-    try {
-      const result = this.ctx.store.transaction<Omit<IngestResult, "blobExisted">>(() => {
-        const repos = this.ctx.store.repositories;
-        const iso = this.ctx.nowIso();
+      try {
+        const rows = this.ctx.store.transaction<Omit<IngestResult, "blobExisted">>(() => {
+          const repos = this.ctx.store.repositories;
+          const iso = this.ctx.nowIso();
 
-        const artifact: Artifact = {
-          id: newId(ID_PREFIX.artifact),
-          kind: kindForName(fileName),
-          name: fileName,
-          source: committed.key,
-          sizeBytes: committed.sizeBytes,
-          sha256: committed.sha256,
-          createdAt: iso,
-          updatedAt: iso,
-          version: 1,
-          legacyRef: null,
-          metadata: {
-            originalName: input.fileName,
-            mimeType: input.mimeType ?? null,
-            blobExisted: committed.deduplicated
-          }
-        };
-        repos.artifacts.insert(artifact);
-        this.ctx.recordAudit({ entityType: "artifact", entityId: artifact.id, action: "uploaded", actor });
+          const artifact: Artifact = {
+            id: newId(ID_PREFIX.artifact),
+            kind: kindForName(fileName),
+            name: fileName,
+            source: committed.key,
+            sizeBytes: committed.sizeBytes,
+            sha256: committed.sha256,
+            createdAt: iso,
+            updatedAt: iso,
+            version: 1,
+            legacyRef: null,
+            metadata: {
+              originalName: input.fileName,
+              mimeType: input.mimeType ?? null,
+              blobExisted: committed.deduplicated
+            }
+          };
+          repos.artifacts.insert(artifact);
+          this.ctx.recordAudit({ entityType: "artifact", entityId: artifact.id, action: "uploaded", actor });
 
-        const task: PrintTask = {
-          id: newId(ID_PREFIX.printTask),
-          artifactId: artifact.id,
-          // The upload IS the source here; nothing has been sliced yet.
-          sliceVariantId: null,
-          sourceArtifactId: artifact.id,
-          onDeviceFile: null,
-          title: fileName,
-          material: null,
-          targetPrinter: null,
-          priority: 0,
-          // Uploaded work is a DRAFT — deliberately NOT enqueued (no QueueEntry).
-          state: "DRAFT",
-          reason: null,
-          night: false,
-          notBefore: null,
-          deadline: null,
-          dayNightPreference: "any",
-          pinnedPrinterId: null,
-          unattendedAllowed: false,
-          createdAt: iso,
-          updatedAt: iso,
-          version: 1,
-          legacyRef: null,
-          metadata: { source: "upload" }
-        };
-        repos.tasks.insert(task);
-        this.ctx.recordAudit({
-          entityType: "print_task",
-          entityId: task.id,
-          action: "created",
-          to: task.state,
-          actor
+          const task: PrintTask = {
+            id: newId(ID_PREFIX.printTask),
+            artifactId: artifact.id,
+            // The upload IS the source here; nothing has been sliced yet.
+            sliceVariantId: null,
+            sourceArtifactId: artifact.id,
+            onDeviceFile: null,
+            title: fileName,
+            material: null,
+            targetPrinter: null,
+            priority: 0,
+            // Uploaded work is a DRAFT — deliberately NOT enqueued (no QueueEntry).
+            state: "DRAFT",
+            reason: null,
+            night: false,
+            notBefore: null,
+            deadline: null,
+            dayNightPreference: "any",
+            pinnedPrinterId: null,
+            unattendedAllowed: false,
+            createdAt: iso,
+            updatedAt: iso,
+            version: 1,
+            legacyRef: null,
+            metadata: { source: "upload" }
+          };
+          repos.tasks.insert(task);
+          this.ctx.recordAudit({
+            entityType: "print_task",
+            entityId: task.id,
+            action: "created",
+            to: task.state,
+            actor
+          });
+
+          const analysis = this.ctx.newPendingAnalysis(artifact.id, iso);
+          repos.artifactAnalyses.insert(analysis);
+          this.ctx.recordAudit({
+            entityType: "artifact_analysis",
+            entityId: analysis.id,
+            action: "created",
+            to: analysis.state,
+            actor
+          });
+
+          return { artifact, task, analysis };
         });
 
-        const analysis = this.ctx.newPendingAnalysis(artifact.id, iso);
-        repos.artifactAnalyses.insert(analysis);
-        this.ctx.recordAudit({
-          entityType: "artifact_analysis",
-          entityId: analysis.id,
-          action: "created",
-          to: analysis.state,
-          actor
-        });
+        return { ...rows, blobExisted: committed.deduplicated };
+      } catch (dbError) {
+        await this.cleanupOrphanBlob(committed);
+        throw dbError;
+      }
+    });
 
-        return { artifact, task, analysis };
-      });
-
-      this.analysis.enqueue(result.analysis.id);
-      return { ...result, blobExisted: committed.deduplicated };
-    } catch (dbError) {
-      await this.cleanupOrphanBlob(committed);
-      throw dbError;
-    }
+    this.analysis.enqueue(result.analysis.id);
+    return result;
   }
 
   /**
@@ -189,51 +196,59 @@ export class ArtifactIngest {
     const staged = await this.ctx.storage.stage(fs.createReadStream(input.filePath), {
       maxBytes: this.ctx.options.maxFileBytes
     });
-    const committed = await this.ctx.storage.commit(staged);
 
-    try {
-      const created = this.ctx.store.transaction(() => {
-        const repos = this.ctx.store.repositories;
-        const iso = this.ctx.nowIso();
-        const artifact: Artifact = {
-          id: newId(ID_PREFIX.artifact),
-          kind: kindForName(fileName),
-          name: fileName,
-          source: committed.key,
-          sizeBytes: committed.sizeBytes,
-          sha256: committed.sha256,
-          createdAt: iso,
-          updatedAt: iso,
-          version: 1,
-          legacyRef: null,
-          metadata: { ...(input.metadata ?? {}), source: "slice", blobExisted: committed.deduplicated }
-        };
-        repos.artifacts.insert(artifact);
-        this.ctx.recordAudit({ entityType: "artifact", entityId: artifact.id, action: "sliced", actor });
+    // Same commit-and-reference lock as an upload (see `ingest`): the bytes and
+    // the row that owns them appear together, with no window in which a
+    // concurrent deletion could see the key as unreferenced.
+    const created = await this.ctx.withBlobLock(keyFor(staged.sha256), async () => {
+      const committed = await this.ctx.storage.commit(staged);
+      try {
+        return this.ctx.store.transaction(() => {
+          const repos = this.ctx.store.repositories;
+          const iso = this.ctx.nowIso();
+          const artifact: Artifact = {
+            id: newId(ID_PREFIX.artifact),
+            kind: kindForName(fileName),
+            name: fileName,
+            source: committed.key,
+            sizeBytes: committed.sizeBytes,
+            sha256: committed.sha256,
+            createdAt: iso,
+            updatedAt: iso,
+            version: 1,
+            legacyRef: null,
+            metadata: { ...(input.metadata ?? {}), source: "slice", blobExisted: committed.deduplicated }
+          };
+          repos.artifacts.insert(artifact);
+          this.ctx.recordAudit({ entityType: "artifact", entityId: artifact.id, action: "sliced", actor });
 
-        const analysis = this.ctx.newPendingAnalysis(artifact.id, iso);
-        repos.artifactAnalyses.insert(analysis);
-        this.ctx.recordAudit({
-          entityType: "artifact_analysis",
-          entityId: analysis.id,
-          action: "created",
-          to: analysis.state,
-          actor
+          const analysis = this.ctx.newPendingAnalysis(artifact.id, iso);
+          repos.artifactAnalyses.insert(analysis);
+          this.ctx.recordAudit({
+            entityType: "artifact_analysis",
+            entityId: analysis.id,
+            action: "created",
+            to: analysis.state,
+            actor
+          });
+          return { artifact, analysisId: analysis.id };
         });
-        return { artifact, analysisId: analysis.id };
-      });
+      } catch (error) {
+        await this.cleanupOrphanBlob(committed);
+        throw error;
+      }
+    });
 
-      await this.analysis.runAnalysis(created.analysisId);
-      const analysis =
-        this.ctx.store.repositories.artifactAnalyses.getById(created.analysisId) ??
-        (() => {
-          throw new NotFoundError(`Анализ «${created.analysisId}»`);
-        })();
-      return { artifact: created.artifact, analysis };
-    } catch (error) {
-      await this.cleanupOrphanBlob(committed);
-      throw error;
-    }
+    // Outside the lock: the analysis reads the blob and takes as long as the file
+    // is big, and the rows it belongs to are already committed — a failure here
+    // leaves a `failed` analysis, never an orphan blob.
+    await this.analysis.runAnalysis(created.analysisId);
+    const analysis =
+      this.ctx.store.repositories.artifactAnalyses.getById(created.analysisId) ??
+      (() => {
+        throw new NotFoundError(`Анализ «${created.analysisId}»`);
+      })();
+    return { artifact: created.artifact, analysis };
   }
 
   // ── Admission control ──────────────────────────────────────────────────────
@@ -280,7 +295,12 @@ export class ArtifactIngest {
     }
   }
 
-  /** Removes a blob a failed DB write orphaned — never a pre-existing/shared one. */
+  /**
+   * Removes a blob a failed DB write orphaned — never a pre-existing/shared one.
+   * Callers must already hold that key's blob lock (both do): the check and the
+   * unlink are the same critical section as the commit they are undoing, and the
+   * mutex is not reentrant.
+   */
   private async cleanupOrphanBlob(committed: CommittedBlob): Promise<void> {
     if (committed.deduplicated) return; // pre-existing content may be shared → keep
     const referenced = this.ctx.store.repositories.artifacts.findBySource(committed.key);

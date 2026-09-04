@@ -224,7 +224,17 @@ const API = {
   "/api/monitoring/lease": { ok: true }
 };
 
-export function startMockServer() {
+/**
+ * @param {object} [options]
+ * @param {Record<string, unknown>} [options.api]  ответы, замещающие таблицу API
+ *        (по точному пути) — для сценариев, которым нужно не пустое состояние.
+ * @param {(req, key) => ({ status: number, body: unknown } | null)} [options.handle]
+ *        перехватчик до таблицы: возвращает ответ или null, чтобы пропустить
+ *        запрос дальше. Через него сценарий отвечает на мутации (DELETE и т. п.)
+ *        и меняет своё состояние между запросами.
+ */
+export function startMockServer(options = {}) {
+  const api = { ...API, ...(options.api ?? {}) };
   const requests = [];
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, "http://x");
@@ -233,7 +243,13 @@ export function startMockServer() {
     if (p.startsWith("/api/print-orchestrator/")) {
       const key = p.slice("/api/print-orchestrator".length);
       requests.push({ method: req.method, path: key });
-      const body = API[key];
+      const handled = options.handle ? options.handle(req, key) : null;
+      if (handled) {
+        res.writeHead(handled.status, { "content-type": "application/json" });
+        res.end(JSON.stringify(handled.body ?? {}));
+        return;
+      }
+      const body = api[key];
       if (body !== undefined) {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(body));

@@ -290,6 +290,13 @@ function wireDelegates() {
   document.addEventListener("artifact-analysis-completed", () => {
     if (state.loaded) void loadAll();
   });
+
+  // Файл удалён в разделе загрузок. Он мог быть и моделью из «Запуска слайсинга»,
+  // и нарезанным выходом варианта — перечитываем, чтобы раздел не предлагал
+  // нарезать или поставить в очередь то, чего уже нет.
+  document.addEventListener("artifact-deleted", () => {
+    if (state.loaded) void loadAll({ full: true });
+  });
 }
 
 // Показывает выбранный список цели и прячет+выключает другой (disabled select не

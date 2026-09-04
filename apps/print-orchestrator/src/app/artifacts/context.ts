@@ -6,6 +6,7 @@ import {
 } from "../../domain/print/states";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
 import type { ArtifactAnalysis, Metadata, PrintTask } from "../../domain/print/types";
+import { KeyedMutex } from "../../shared/keyedMutex";
 import type { StoreLogger } from "../../shared/logger";
 import type { ArtifactStorage } from "../../infra/storage/artifactStorage";
 import { recordAuditEvent, type AuditInput } from "../audit";
@@ -42,6 +43,16 @@ export class ArtifactContext {
   readonly now: () => Date;
   readonly defaultActor: string;
   readonly logger: StoreLogger;
+  /**
+   * Serializes everything that touches ONE blob key: committing bytes into
+   * content-addressed storage together with the rows that reference them, and
+   * unlinking a blob after its last row is gone. Without it the two race — a
+   * delete reads "nothing references this key", an upload deduplicates onto the
+   * very same bytes and inserts its row, and then the delete unlinks the file
+   * out from under it, leaving a DB row pointing at nothing. Different keys
+   * never block each other, so parallel uploads are unaffected.
+   */
+  private readonly blobLocks = new KeyedMutex();
 
   constructor(
     readonly store: PrintQueueStore,
@@ -55,6 +66,11 @@ export class ArtifactContext {
 
   nowIso(): string {
     return this.now().toISOString();
+  }
+
+  /** Runs `task` with exclusive access to one storage key. @see {@link blobLocks} */
+  withBlobLock<T>(key: string, task: () => Promise<T>): Promise<T> {
+    return this.blobLocks.run(key, task);
   }
 
   recordAudit(input: AuditInput): void {

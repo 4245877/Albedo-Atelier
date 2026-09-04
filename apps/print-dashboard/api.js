@@ -12,6 +12,9 @@ async function apiError(res) {
   const err = new Error(message);
   err.code = body?.error?.code;
   err.status = res.status;
+  // Структурированные поля отказа (`{ artifactId, blocker }` и т. п.): вызывающий
+  // код может показать не только текст, но и обновить по ним своё состояние.
+  err.details = body?.error?.details ?? null;
   return err;
 }
 

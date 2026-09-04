@@ -134,6 +134,17 @@
   min-width: 0;
   flex-wrap: wrap;
 }
+/* Статус и удаление держатся вместе у правого края: между ними нет иерархии,
+   которую стоило бы показывать расстоянием, а порознь в `space-between` они
+   разъезжались по строке и «удалить» вставало посреди карточки. Кнопка не
+   сжимается — глиф остаётся квадратным при любом имени файла. */
+.upload-head-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.upload-head-side .btn-icon { flex: 0 0 auto; }
 .upload-name b {
   color: var(--ink);
   overflow: hidden;

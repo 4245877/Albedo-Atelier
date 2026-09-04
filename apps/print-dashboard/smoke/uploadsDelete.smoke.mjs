@@ -1,0 +1,176 @@
+/* ── Browser smoke: удаление файла в разделе «Загрузка и анализ» ──
+   Проверяет в НАСТОЯЩЕМ браузере цепочку, которую чистые функции не покрывают:
+   карточка файла → кнопка удаления → окно подтверждения → DELETE на backend →
+   карточка исчезает из списка немедленно, без перезагрузки страницы.
+
+   И обратную сторону: файл, который backend объявил занятым, кнопки не даёт
+   вовсе — причина отказа читается в подсказке, а запроса не происходит.
+
+   Как и остальные smoke-тесты, работает через CDP без Playwright/Puppeteer и
+   SKIP-ается, когда браузера нет (CHROME_CDP_URL, по умолчанию :9222). */
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { startMockServer } from "./mockServer.mjs";
+
+const CDP_URL = process.env.CHROME_CDP_URL || "http://127.0.0.1:9222";
+
+async function probeCdp() {
+  try {
+    const res = await fetch(`${CDP_URL}/json/version`, { signal: AbortSignal.timeout(1500) });
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function connect(wsUrl) {
+  const ws = new WebSocket(wsUrl);
+  const pending = new Map();
+  const exceptions = [];
+  let seq = 0;
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.id && pending.has(msg.id)) {
+      const { resolve, reject } = pending.get(msg.id);
+      pending.delete(msg.id);
+      msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result);
+    } else if (msg.method === "Runtime.exceptionThrown") {
+      const d = msg.params?.exceptionDetails;
+      exceptions.push(d?.exception?.description || d?.text || "uncaught exception");
+    }
+  };
+  await new Promise((resolve, reject) => {
+    ws.onopen = resolve;
+    ws.onerror = () => reject(new Error("CDP websocket failed"));
+  });
+  const send = (method, params = {}) => {
+    const id = ++seq;
+    ws.send(JSON.stringify({ id, method, params }));
+    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+  };
+  return { send, exceptions, close: () => ws.close() };
+}
+
+/** Один готовый артефакт в форме, которую отдаёт GET /api/print/artifacts. */
+const row = (id, name, deletionBlocker) => ({
+  artifact: { id, name, kind: "gcode", sizeBytes: 2048, sha256: `sha-${id}`, metadata: {} },
+  task: { id: `task-${id}`, title: name, state: "DRAFT", reason: null },
+  analysis: {
+    id: `an-${id}`,
+    state: "ready",
+    detectedFormat: "gcode",
+    verdict: "schedulable",
+    warnings: [],
+    blockers: [],
+    material: "PLA",
+    data: {}
+  },
+  deletionBlocker
+});
+
+const BLOCKER = "задание «Кронштейн» в состоянии QUEUED использует файл";
+
+const version = await probeCdp();
+
+test("удаление файла: подтверждение, запрос на backend, карточка исчезает", { skip: version ? false : `no CDP browser at ${CDP_URL}` }, async () => {
+  // Состояние живёт в моке: после успешного DELETE список отдаёт уже без файла,
+  // как настоящий backend — интерфейс не должен зависеть от повторного чтения,
+  // но и расходиться с сервером тоже не должен.
+  let artifacts = [row("art_free", "free.gcode", null), row("art_busy", "busy.gcode", BLOCKER)];
+  const mock = await startMockServer({
+    handle: (req, key) => {
+      if (key === "/api/print/artifacts" && req.method === "GET") {
+        return { status: 200, body: { artifacts } };
+      }
+      if (req.method === "DELETE" && key === "/api/print/artifacts/art_free") {
+        artifacts = artifacts.filter((r) => r.artifact.id !== "art_free");
+        return {
+          status: 200,
+          body: { ok: true, artifactId: "art_free", blobKey: "sha256/ab/cd", blobRemoved: true, removedSliceVariants: [] }
+        };
+      }
+      return null;
+    }
+  });
+
+  const target = await (await fetch(`${CDP_URL}/json/new?${encodeURIComponent(mock.url)}`, { method: "PUT" })).json();
+  const cdp = await connect(target.webSocketDebuggerUrl);
+
+  const evalValue = async (expression) => {
+    const { result } = await cdp.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+    return result.value;
+  };
+  const until = async (expression, what) => {
+    for (let i = 0; i < 80; i++) {
+      if (await evalValue(expression)) return;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    throw new Error(`timeout waiting for ${what}`);
+  };
+
+  try {
+    await cdp.send("Page.enable");
+    await cdp.send("Runtime.enable");
+    await cdp.send("Page.navigate", { url: mock.url });
+
+    // Раздел «Загрузка» поднимается лениво, при первом открытии «Работ». Ждём не
+    // появления кнопки в статической разметке, а того, что её обработчик уже
+    // висит: вкладки Работ рисует сам скрипт, так что их наличие и есть признак
+    // «приложение стартовало» — клик по кнопке из ещё не оживлённой страницы
+    // молча ничего бы не сделал.
+    await until('document.querySelectorAll("#worknav .work-tab").length > 0', "the app to boot");
+    await evalValue('document.querySelector(\'.mode-tab[data-mode="works"]\').click(), 1');
+    await until('document.getElementById("mode-works") && !document.getElementById("mode-works").hidden', "the works mode");
+    await until("document.querySelectorAll('#upload-list .upload-item').length === 2", "both file cards");
+
+    // ── Занятый файл кнопки не даёт, а причину показывает ──
+    const busyBtn = await evalValue(
+      `(() => {
+         const li = document.querySelector('[data-upload="art_busy"]');
+         const btn = li && li.querySelector('.upload-head-side button');
+         return btn ? { disabled: btn.disabled, title: btn.title, deletes: btn.hasAttribute('data-delete-artifact') } : null;
+       })()`
+    );
+    assert.ok(busyBtn, "the busy file should still render its (disabled) control");
+    assert.equal(busyBtn.disabled, true, "a file in use must not offer deletion");
+    assert.equal(busyBtn.deletes, false, "and must carry no delete handle at all");
+    assert.match(busyBtn.title, /Кронштейн/, "the refusal reason belongs in the tooltip");
+
+    // ── Свободный файл: клик открывает подтверждение, называющее файл ──
+    await evalValue("document.querySelector('[data-delete-artifact=\"art_free\"]').click(), 1");
+    await until("Boolean(document.querySelector('.modal-confirm'))", "the confirmation dialog");
+    const dialogText = await evalValue("document.querySelector('.modal-confirm').textContent");
+    assert.match(dialogText, /free\.gcode/, "the dialog must name the file being deleted");
+    assert.match(dialogText, /необратимо/i, "and say the action cannot be undone");
+
+    // Пока оператор не подтвердил — на backend не ушло ничего.
+    assert.equal(
+      mock.requests.filter((r) => r.method === "DELETE").length,
+      0,
+      "opening the dialog must not delete anything"
+    );
+
+    await evalValue("document.querySelector('[data-confirm-yes]').click(), 1");
+
+    // ── Карточка уходит из списка сразу после успешного ответа ──
+    await until('!document.querySelector(\'[data-upload="art_free"]\')', "the card to disappear");
+    const remaining = await evalValue("document.querySelectorAll('#upload-list .upload-item').length");
+    assert.equal(remaining, 1, "only the busy file is left");
+    const stillBusy = await evalValue('Boolean(document.querySelector(\'[data-upload="art_busy"]\'))');
+    assert.equal(stillBusy, true, "the other file is untouched");
+
+    const deletes = mock.requests.filter((r) => r.method === "DELETE");
+    assert.deepEqual(
+      deletes.map((r) => r.path),
+      ["/api/print/artifacts/art_free"],
+      "exactly one DELETE, for exactly the file the operator confirmed"
+    );
+
+    assert.deepEqual(cdp.exceptions, [], "there should be no uncaught page errors");
+  } finally {
+    cdp.close();
+    await fetch(`${CDP_URL}/json/close/${target.id}`).catch(() => {});
+    await mock.close();
+  }
+});

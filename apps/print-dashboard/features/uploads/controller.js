@@ -7,7 +7,8 @@
    (renderBoard его не трогает). Разметка элементов — view.js.
    ═══════════════════════════════════════════════════════════════ */
 
-import { apiGet, apiPost, uploadArtifact } from "../../api.js";
+import { apiDelete, apiGet, apiPost, uploadArtifact } from "../../api.js";
+import { confirmAction } from "../../shared/dialog.js";
 import { createInflightGuard } from "../../shared/inflight.js";
 import { createPoller } from "../../shared/polling.js";
 import { $, cssEscape, esc, toast } from "../../util.js";
@@ -32,6 +33,9 @@ const uploadQueue = [];
 const fileStore = new Map();
 /* Защита от двойного запуска повторного анализа (по artifactId). */
 const analyzeGuard = createInflightGuard();
+/* То же для удаления: окно подтверждения держит кнопку заблокированной, но
+   защита нужна и от второго окна, открытого до ответа сервера. */
+const deleteGuard = createInflightGuard();
 /* Явный выбор оператора «раскрыть/свернуть свойства» по ключу элемента. Живёт
    вне разметки: список перерисовывается на каждом тике опроса, и без этой карты
    раскрытые свойства схлопывались бы, как только у соседнего файла сменился
@@ -125,6 +129,9 @@ function addFiles(fileList) {
       artifact: null,
       analysis: null,
       task: null,
+      /* Почему файл нельзя удалить (строка с сервера) или null. Пока файл ещё
+         не сохранён, удалять на сервере нечего. */
+      deletionBlocker: null,
       blobExisted: false
     };
     fileStore.set(item.key, file);
@@ -235,6 +242,9 @@ async function fetchActive(signal) {
       } catch (err) {
         // Отмена (вытеснение/стоп) — наверх, поллер её проглотит.
         if (err?.name === "AbortError") throw err;
+        // Артефакта больше нет: его удалил другой оператор или очистка. Опрашивать
+        // его вечно бессмысленно — карточка уходит из списка на этом же тике.
+        if (err?.status === 404) return { it, gone: true };
         // Частичный сбой одного артефакта: сохраняем прежнее, повторим на след. тике.
         return { it, error: err };
       }
@@ -243,8 +253,14 @@ async function fetchActive(signal) {
 }
 
 function applyActive(results) {
+  const vanished = new Set();
   for (const r of results) {
-    if (r.detail) applyDetail(r.it, r.detail);
+    if (r.gone) vanished.add(r.it);
+    else if (r.detail) applyDetail(r.it, r.detail);
+  }
+  if (vanished.size > 0) {
+    for (const it of vanished) forget(it);
+    items = items.filter((it) => !vanished.has(it));
   }
   render();
   // Активных анализов не осталось — прекращаем опрос (таймер снят, запрос оборван).
@@ -258,6 +274,7 @@ function applyDetail(item, detail) {
   const latest = (detail.analyses || [])[detail.analyses.length - 1] || item.analysis;
   const wasDone = item.stage === "done";
   item.analysis = latest;
+  item.deletionBlocker = detail.deletionBlocker ?? null;
   if (latest) {
     if (latest.state === "ready") {
       item.stage = "done";
@@ -314,6 +331,7 @@ function toItem(row) {
     artifact: row.artifact,
     analysis,
     task: row.task,
+    deletionBlocker: row.deletionBlocker ?? null,
     blobExisted: false
   };
 }
@@ -339,6 +357,76 @@ async function reanalyze(artifactId) {
       render();
     }
   });
+}
+
+/* ── Удаление файла ─────────────────────────────────────────── */
+
+/* Удаление необратимо, поэтому спрашиваем — и спрашиваем предметно: имя файла,
+   что именно исчезнет и что при этом уцелеет. Сам запрос идёт из окна (`run`):
+   оно держится открытым, пока сервер отвечает, и показывает отказ прямо в себе,
+   вместо того чтобы закрыться и оставить оператора гадать, удалилось ли. Из
+   списка карточка уходит только после успешного ответа — интерфейс никогда не
+   показывает удалённым то, что на сервере осталось, и наоборот. */
+async function removeArtifact(artifactId) {
+  const item = items.find((it) => it.artifact && it.artifact.id === artifactId);
+  if (!item) return;
+
+  const ok = await confirmAction({
+    title: "Удалить файл",
+    object: item.name,
+    body: "Файл будет стёрт из хранилища, а его записи — из базы.",
+    points: deletionPoints(item),
+    cta: "Удалить файл",
+    tone: "danger",
+    irreversible: true,
+    run: async () => {
+      try {
+        // Пропущенный из-за guard'а вызов — не успех: иначе окно закрылось бы, а
+        // карточка исчезла бы из списка, ничего на сервере не удалив.
+        const { skipped } = await deleteGuard.run(`delete:${artifactId}`, () =>
+          apiDelete(`/api/print/artifacts/${encodeURIComponent(artifactId)}`)
+        );
+        if (skipped) throw new Error("удаление этого файла уже выполняется");
+      } catch (err) {
+        // Отказ «файл занят» несёт причину структурно. Запоминаем её на карточке:
+        // список раздела не опрашивается постоянно, и без этого кнопка осталась бы
+        // живой, предлагая ровно то, в чём сервер только что отказал.
+        if (err?.details?.blocker) {
+          item.deletionBlocker = String(err.details.blocker);
+          render();
+        }
+        throw err; // текст отказа показывает само окно подтверждения
+      }
+    }
+  });
+  if (!ok) return;
+
+  forget(item);
+  items = items.filter((it) => it !== item);
+  render();
+  toast(`Файл «${esc(item.name)}» удалён, Владыка`, "toast-ok");
+  // Слайсинг показывает те же файлы (модели и нарезанный G-code) — пусть узнает
+  // сразу, а не через свой следующий фоновый опрос.
+  document.dispatchEvent(new CustomEvent("artifact-deleted", { detail: { artifactId } }));
+}
+
+/* Что именно произойдёт — по состоянию конкретного файла, без общих слов. */
+function deletionPoints(item) {
+  const points = ["Содержимое файла будет удалено с диска сервера"];
+  if (item.task && item.task.state === "DRAFT") {
+    points.push("Черновик задания, созданный при загрузке, будет отменён");
+  }
+  if (item.analysis && item.analysis.verdict === "needs_preparation") {
+    points.push("Нарезанные из этой модели G-code файлы останутся — удалите их отдельно");
+  }
+  points.push("Файл, который используется заданием или печатью, сервер удалить не даст");
+  return points;
+}
+
+/* Забыть всё, что раздел помнил об элементе вне модели списка. */
+function forget(item) {
+  detailPrefs.delete(item.key);
+  fileStore.delete(item.key);
 }
 
 /* ── Отрисовка (разметка — view.js) ─────────────────────────── */
@@ -386,10 +474,28 @@ function renderItem(item) {
 /* ── Делегированные клики (повторный анализ) ────────────────── */
 
 document.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-reanalyze]");
-  if (btn) {
+  const analyze = e.target.closest("[data-reanalyze]");
+  if (analyze) {
     e.preventDefault();
-    void reanalyze(btn.dataset.reanalyze);
+    void reanalyze(analyze.dataset.reanalyze);
+    return;
+  }
+  const remove = e.target.closest("[data-delete-artifact]");
+  if (remove) {
+    e.preventDefault();
+    void removeArtifact(remove.dataset.deleteArtifact);
+    return;
+  }
+  // Карточка неудавшейся загрузки: на сервере ничего нет, убираем только строку.
+  const dismiss = e.target.closest("[data-upload-dismiss]");
+  if (dismiss) {
+    e.preventDefault();
+    const key = dismiss.dataset.uploadDismiss;
+    const item = items.find((it) => it.key === key && !it.artifact);
+    if (!item) return;
+    forget(item);
+    items = items.filter((it) => it !== item);
+    render();
   }
 });
 

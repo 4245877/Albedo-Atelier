@@ -143,3 +143,58 @@ test("сводка списка разделяет «в работе», «при
   ]);
   assert.deepEqual(s, { total: 5, working: 2, ready: 1, attention: 2 });
 });
+
+/*
+ * Удаление файла. Кнопка живёт в шапке карточки и обязана быть честной: пока
+ * файл кем-то используется, backend откажет — значит и предлагать действие
+ * нельзя, а причину отказа оператор должен прочитать, не нажимая.
+ */
+
+test("свободный файл получает живую кнопку удаления с именем в подписи", () => {
+  const html = itemHtml(item(ready()));
+  assert.match(html, /data-delete-artifact="art_1"/);
+  assert.match(html, /aria-label="Удалить файл «part\.3mf»"/);
+  assert.doesNotMatch(html, /data-delete-artifact="art_1"[^>]*disabled/);
+});
+
+test("занятый файл: кнопка погашена, причина отказа стоит в подсказке", () => {
+  const it = item(ready());
+  it.deletionBlocker = "задание «Куб» в состоянии QUEUED использует файл";
+  const html = itemHtml(it);
+  assert.match(html, /disabled/);
+  assert.match(html, /Удалить нельзя: задание «Куб» в состоянии QUEUED использует файл/);
+  assert.doesNotMatch(html, /data-delete-artifact/);
+});
+
+test("пока идёт анализ, удаление не предлагается — сервер всё равно откажет", () => {
+  const html = itemHtml(item({ state: "running", warnings: [], blockers: [], data: {} }));
+  assert.doesNotMatch(html, /data-delete-artifact/);
+  assert.match(html, /файл ещё анализируется/);
+});
+
+test("карточка неудавшейся загрузки убирается из списка, а не удаляется на сервере", () => {
+  const it = item(null);
+  it.artifact = null;
+  it.stage = "error";
+  it.error = "Сеть недоступна";
+  const html = itemHtml(it);
+  assert.match(html, /data-upload-dismiss="art_1"/);
+  assert.doesNotMatch(html, /data-delete-artifact/);
+});
+
+test("карточка ещё не сохранённого файла не предлагает ни удаления, ни снятия", () => {
+  const it = item(null);
+  it.artifact = null;
+  it.stage = "uploading";
+  const html = itemHtml(it);
+  assert.doesNotMatch(html, /data-upload-dismiss/);
+  assert.doesNotMatch(html, /data-delete-artifact/);
+});
+
+test("причина отказа экранируется — она приходит с сервера", () => {
+  const it = item(ready());
+  it.deletionBlocker = 'задание "<b>x</b>" использует файл';
+  const html = itemHtml(it);
+  assert.doesNotMatch(html, /<b>x<\/b>/);
+  assert.match(html, /&lt;b&gt;x&lt;\/b&gt;/);
+});

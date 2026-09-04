@@ -314,7 +314,12 @@ function variantRow(state, v) {
   const out =
     v.state === "ready" && v.outputArtifactId
       ? `<div class="slice-out">Готовый G-code: <code>${esc(v.outputArtifactId)}</code></div>`
-      : "";
+      : v.state === "ready"
+        ? // Нарезка была, а её файл удалён в разделе загрузок. Без этой строки
+          // вариант выглядел бы «готов», но молча не давал бы ни файла, ни
+          // кнопки «в очередь» — состояние без объяснения. Нарезать заново можно.
+          `<div class="slice-block">${icon("warn")}Нарезанный файл удалён — вариант больше ничего не даёт. Нарежьте заново.</div>`
+        : "";
 
   // Рендерим И предупреждения (cache-hit, неполный анализ), И блокеры — раньше
   // warnings терялись, и было не видно, что результат переиспользован из кэша.
@@ -327,10 +332,12 @@ function variantRow(state, v) {
   const when = fmtWhen(v.endedAt || v.updatedAt || v.createdAt);
   const timeRow = when ? `<div class="slice-when">Обновлено: ${esc(when)}</div>` : "";
 
-  const rerun =
-    v.state === "failed" || v.state === "blocked"
-      ? `<button type="button" class="btn btn-sm" data-slice-action="rerun" data-id="${esc(v.id)}">${icon("refresh")}<span>Повторить</span></button>`
-      : "";
+  // Повторить можно и готовый вариант, у которого не осталось файла: сервер
+  // сбрасывает результат прошлой попытки и ставит вариант в очередь заново.
+  const rerunnable = v.state === "failed" || v.state === "blocked" || (v.state === "ready" && !v.outputArtifactId);
+  const rerun = rerunnable
+    ? `<button type="button" class="btn btn-sm" data-slice-action="rerun" data-id="${esc(v.id)}">${icon("refresh")}<span>Повторить</span></button>`
+    : "";
   return `
     <li class="slice-item">
       <div class="slice-item-head">
