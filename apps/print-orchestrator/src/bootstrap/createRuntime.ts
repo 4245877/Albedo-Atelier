@@ -799,6 +799,14 @@ export class FarmRuntime implements PrintServices {
       maxArtifactCount: uploads.maxArtifactCount,
       minFreeDiskBytes: uploads.minFreeDiskBytes,
       analysisMaxQueue: uploads.analysisMaxQueue,
+      // Lets a cascading file delete cancel the scheduler tasks holding the file
+      // through the queue's OWN use case — releasing the entry, unwinding
+      // assignments and beds — instead of retention writing task rows itself.
+      // Constructed above, so the reference is live by the time an operator
+      // deletes anything.
+      cancelTask: (taskId, reason, actor) => {
+        this.printQueue.cancelTask(taskId, reason, actor);
+      },
       logger
     });
     // Re-queue analyses left `pending`/`running` by a previous crash/restart.

@@ -54,6 +54,7 @@ let dir: string;
 let store: PrintQueueStore;
 let storage: ArtifactStorage;
 let service: ArtifactService;
+let queue: PrintQueueService;
 
 function analyzerResult(): AnalyzerResult {
   return {
@@ -71,12 +72,16 @@ beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "atelier-deletion-"));
   store = openPrintQueueStore(":memory:");
   storage = new ArtifactStorage({ root: path.join(dir, "artifacts") });
+  queue = new PrintQueueService(store, { now: () => new Date(ISO) });
   service = new ArtifactService(store, storage, {
     limits: LIMITS,
     maxFileBytes: 1 << 20,
     timeoutMs: 2000,
     concurrency: 1,
-    analyze: async () => analyzerResult()
+    analyze: async () => analyzerResult(),
+    // Wired exactly as the runtime wires it: a cascading delete borrows the
+    // queue's own cancellation instead of writing task rows itself.
+    cancelTask: (taskId, reason, actor) => void queue.cancelTask(taskId, reason, actor)
   });
 });
 
@@ -519,4 +524,254 @@ test("an absolute path in `source` is refused the same way", async () => {
   const outcome = await service.deleteArtifact(evil.id);
   assert.equal(outcome.blobRemoved, false);
   assert.equal(fs.existsSync(outside), true, "an absolute path is not a storage key");
+});
+
+/*
+ * ── Каскадное удаление ───────────────────────────────────────────────────────
+ *
+ * Всё выше описывает файл, который трогать НЕЛЬЗЯ. Здесь — обратный случай, с
+ * которого начинается работа оператора: модель больше не нужна, и её надо убрать
+ * целиком, вместе со строкой планировщика. Без каскада это был тупик: «удалить
+ * файл» отвечало 409 «его использует задание QUEUED», а убрать само задание из
+ * раздела файлов было нечем — оператор оставался с файлом, который не удаляется,
+ * и заданием, которое печатать нечего.
+ *
+ * Граница каскада намеренно совпадает с той, что очередь уже проводит для
+ * «убрать строку»: планирование отменяется, физика — нет. Эти тесты закрепляют
+ * и то, что каскад делает, и — важнее — то, чего он не делает и в каком порядке
+ * отказывается.
+ */
+
+/** Задание планировщика поверх загруженного файла: QUEUED + строка очереди WAITING. */
+function scheduled(artifactId: string, title = "3U-default") {
+  return queue.addTask({ title, artifactId });
+}
+
+test("файл больше не нужен: каскад отменяет задание планировщика и удаляет файл", async () => {
+  const model = await upload("3U-default.3mf", "3mf ; no longer needed");
+  const planned = scheduled(model.artifact.id);
+  const repos = store.repositories;
+
+  // Ровно тот тупик, ради которого каскад и появился: обычное удаление отказывает…
+  const hold = service.deletionHold(model.artifact.id);
+  assert.match(hold.reason ?? "", /QUEUED/);
+  await assert.rejects(service.deleteArtifact(model.artifact.id), JobError);
+  // …но отказ теперь называет, что именно держит файл и что можно отменить.
+  assert.equal(hold.cascadable, true);
+  assert.deepEqual(
+    hold.tasks.map((t) => t.id),
+    [planned.task.id]
+  );
+
+  const outcome = await service.deleteArtifact(model.artifact.id, { cascade: true });
+
+  assert.deepEqual(outcome.cancelledTasks, [planned.task.id]);
+  assert.equal(outcome.blobRemoved, true);
+  assert.equal(repos.artifacts.getById(model.artifact.id), null, "файла больше нет");
+  assert.equal(repos.tasks.getById(planned.task.id)!.state, "CANCELLED", "и задания в очереди тоже");
+  // «Висячей» строки не остаётся: запись очереди освобождена, а не брошена
+  // указывать на задание, которому нечего печатать.
+  assert.equal(repos.queue.findByTaskId(planned.task.id)!.state, "RELEASED");
+  assert.equal(queue.listOpenQueue().length, 0, "планировщик пуст");
+
+  // Черновик загрузки отменяется как и прежде — каскад его не касается.
+  assert.equal(repos.tasks.getById(model.task.id)!.state, "CANCELLED");
+  assert.deepEqual(outcome.cancelledTasks, [planned.task.id], "черновик не считается отменённым каскадом");
+});
+
+test("удаление файла записано в аудит вместе с отменённым заданием", async () => {
+  const model = await upload("audited.3mf", "3mf ; audited");
+  const planned = scheduled(model.artifact.id, "Аудируемое");
+
+  await service.deleteArtifact(model.artifact.id, { cascade: true });
+
+  const deleted = store.repositories.audit
+    .listByEntity("artifact", model.artifact.id)
+    .find((e) => e.action === "deleted");
+  assert.ok(deleted, "удаление файла записано");
+  assert.deepEqual(deleted!.detail?.cancelledTasks, [planned.task.id]);
+  // Задание тоже рассказывает свою половину истории — через обычный cancelTask.
+  assert.ok(
+    store.repositories.audit
+      .listByEntity("print_task", planned.task.id)
+      .some((e) => e.action === "cancelled"),
+    "отмена задания записана очередью, а не в обход неё"
+  );
+});
+
+/*
+ * Печать — не строка в базе. DISPATCHING означает, что файл уже уехал на
+ * принтер, PRINTING — что по нему ведут соплом; отменяют такое на устройстве, а
+ * не удалением байтов из-под работающей печати. Каскад здесь обязан отказать
+ * ровно так же, как обычное удаление, и ничего не отменить по дороге.
+ */
+for (const state of ["DISPATCHING", "PRINTING"] as const) {
+  test(`каскад не отменяет печать: задание в ${state} отказывает и остаётся на месте`, async () => {
+    const gcode = await upload(`live-${state}.gcode`, `G28 ; live-${state}`);
+    const planned = scheduled(gcode.artifact.id, `Печатается ${state}`);
+    const repos = store.repositories;
+    repos.tasks.update({ ...repos.tasks.getById(planned.task.id)!, state, updatedAt: ISO });
+
+    const hold = service.deletionHold(gcode.artifact.id);
+    assert.match(hold.reason ?? "", new RegExp(state));
+    assert.equal(hold.cascadable, false, "такое не предлагают отменить");
+    assert.deepEqual(hold.tasks, [], "и не называют отменяемым");
+
+    await assert.rejects(service.deleteArtifact(gcode.artifact.id, { cascade: true }), JobError);
+    assert.ok(repos.artifacts.getById(gcode.artifact.id), "файл на месте");
+    assert.equal(repos.tasks.getById(planned.task.id)!.state, state, "задание не тронуто");
+    assert.equal(repos.queue.findByTaskId(planned.task.id)!.state, "WAITING", "и очередь тоже");
+  });
+}
+
+/*
+ * Самое дорогое свойство каскада — порядок отказа.
+ *
+ * Файл может держаться сразу за несколько краёв графа: отменяемое задание И
+ * загрузка байтов на принтер. Если сначала отменить то, что отменяется, и только
+ * потом обнаружить непреодолимое, оператор получит 409 — и очередь, из которой
+ * уже пропало задание, хотя файл остался. Отказ обязан случиться ДО первой
+ * отмены.
+ */
+test("жёсткая блокировка позади отменяемой: отказ до единой отмены", async () => {
+  const gcode = await upload("contended.gcode", "G28 ; contended");
+  const planned = scheduled(gcode.artifact.id, "Ждёт в очереди");
+  const repos = store.repositories;
+  // Байты уже текут на принтер — этого каскад отменить не может.
+  deviceArtifact(gcode.artifact.id, "UPLOADING");
+
+  const hold = service.deletionHold(gcode.artifact.id);
+  assert.match(hold.reason ?? "", /загружается на принтер/, "жёсткая причина вытесняет отменяемую");
+  assert.equal(hold.cascadable, false);
+
+  await assert.rejects(service.deleteArtifact(gcode.artifact.id, { cascade: true }), JobError);
+
+  assert.ok(repos.artifacts.getById(gcode.artifact.id), "файл на месте");
+  assert.equal(repos.tasks.getById(planned.task.id)!.state, "QUEUED", "задание НЕ отменено");
+  assert.equal(repos.queue.findByTaskId(planned.task.id)!.state, "WAITING");
+});
+
+/*
+ * Каскад не пишет строки состояний сам — он вызывает тот же `cancelTask`, что и
+ * «убрать из очереди». Здесь это проверяется по следам, которые оставляет только
+ * он: размотанное назначение и освобождённая строка очереди.
+ */
+test("каскад разматывает назначение через очередь, а не отменяет задание в обход", async () => {
+  const gcode = await upload("placed.gcode", "G28 ; placed");
+  const planned = scheduled(gcode.artifact.id, "Размещено");
+  const repos = store.repositories;
+  const placement = assignment({
+    taskId: planned.task.id,
+    state: "RESERVED",
+    artifactId: gcode.artifact.id
+  });
+
+  const hold = service.deletionHold(gcode.artifact.id);
+  assert.equal(hold.cascadable, true, "резерв снимается вместе с заданием");
+  assert.deepEqual(hold.tasks.map((t) => t.id), [planned.task.id], "и держит его одно задание");
+
+  const outcome = await service.deleteArtifact(gcode.artifact.id, { cascade: true });
+
+  assert.deepEqual(outcome.cancelledTasks, [planned.task.id]);
+  assert.equal(repos.assignments.getById(placement.id)!.state, "CANCELLED", "назначение размотано");
+  assert.equal(repos.queue.findByTaskId(planned.task.id)!.state, "RELEASED");
+  assert.equal(repos.artifacts.getById(gcode.artifact.id), null);
+});
+
+/*
+ * Назначение, чьё задание уже история, отменить нечем: у терминального состояния
+ * нет исходящих переходов. Такой файл держится намертво — и каскад обязан это
+ * признать, а не пытаться.
+ */
+test("живое назначение на завершённом задании каскаду не поддаётся", async () => {
+  const gcode = await upload("stuck.gcode", "G28 ; stuck");
+  const repos = store.repositories;
+  const planned = scheduled(gcode.artifact.id, "Уже завершено");
+  repos.tasks.update({ ...repos.tasks.getById(planned.task.id)!, state: "COMPLETED", updatedAt: ISO });
+  assignment({ taskId: planned.task.id, state: "RESERVED", artifactId: gcode.artifact.id });
+
+  assert.equal(service.deletionHold(gcode.artifact.id).cascadable, false);
+  await assert.rejects(service.deleteArtifact(gcode.artifact.id, { cascade: true }), JobError);
+  assert.ok(repos.artifacts.getById(gcode.artifact.id));
+});
+
+/*
+ * Модель, из которой уже нарезано и поставлено в очередь задание, держится через
+ * ДВА края сразу: собственную колонку `source_artifact_id` и slice-вариант, на
+ * котором стоит задание. Отменяется при этом одно задание — один раз.
+ */
+test("каскад по исходной модели отменяет задание один раз и уносит её вариант", async () => {
+  const model = await upload("source.stl", "solid cascade-source");
+  const output = await upload("source.gcode", "G28 ; cascade-source");
+  const variant = sliceVariant({
+    taskId: model.task.id,
+    sourceArtifactId: model.artifact.id,
+    outputArtifactId: output.artifact.id
+  });
+  promote(model.task.id, variant, "QUEUED");
+  const repos = store.repositories;
+
+  const hold = service.deletionHold(model.artifact.id);
+  assert.equal(hold.cascadable, true);
+  assert.deepEqual(hold.tasks.map((t) => t.id), [model.task.id], "две зацепки — одно задание");
+
+  const outcome = await service.deleteArtifact(model.artifact.id, { cascade: true });
+
+  assert.deepEqual(outcome.cancelledTasks, [model.task.id]);
+  assert.deepEqual(outcome.removedSliceVariants, [variant.id]);
+  assert.equal(repos.tasks.getById(model.task.id)!.state, "CANCELLED");
+  // Нарезанный G-code — отдельный файл и отдельное решение оператора.
+  assert.ok(repos.artifacts.getById(output.artifact.id), "G-code остаётся");
+});
+
+/*
+ * Каскад — осознанное действие оператора, а не новое поведение старого вызова.
+ * Тот же `deleteArtifact` вызывает и автоматическая уборка по retention; если бы
+ * каскад был поведением по умолчанию, ночная уборка отменяла бы задания очереди.
+ */
+test("без флага удаление отказывает как прежде, и уборка ничего не отменяет", async () => {
+  const gcode = await upload("swept.gcode", "G28 ; swept");
+  const planned = scheduled(gcode.artifact.id, "Стоит в очереди");
+  const repos = store.repositories;
+
+  await assert.rejects(service.deleteArtifact(gcode.artifact.id), JobError);
+  assert.ok(repos.artifacts.getById(gcode.artifact.id));
+
+  // Черновик загрузки уборка отсеивает раньше всех проверок («только ручное
+  // удаление»), а интересна здесь следующая за ним — та, что видит очередь.
+  queue.cancelTask(gcode.task.id, "черновик не нужен");
+
+  const swept = await service.retentionSweep({ olderThanDays: 0, dryRun: false });
+  assert.deepEqual(swept.deleted, [], "уборка ничего не удалила");
+  assert.equal(repos.tasks.getById(planned.task.id)!.state, "QUEUED", "и ничего не отменила");
+  assert.ok(
+    swept.skipped.some((s) => s.id === gcode.artifact.id && /QUEUED/.test(s.reason)),
+    "а честно назвала причину пропуска"
+  );
+});
+
+/*
+ * Каскад без подключённой очереди не может состояться. Молчаливое «ну и ладно»
+ * здесь — худший исход: файл был бы удалён, а задание осталось бы в очереди
+ * указывать на исчезнувшие байты, то есть ровно та висячая строка, против
+ * которой каскад и сделан.
+ */
+test("каскад без подключённой очереди отказывает, а не удаляет молча", async () => {
+  const unwired = new ArtifactService(store, storage, {
+    limits: LIMITS,
+    maxFileBytes: 1 << 20,
+    timeoutMs: 2000,
+    concurrency: 1,
+    analyze: async () => analyzerResult()
+  });
+  try {
+    const gcode = await upload("unwired.gcode", "G28 ; unwired");
+    const planned = scheduled(gcode.artifact.id, "Без очереди");
+
+    await assert.rejects(unwired.deleteArtifact(gcode.artifact.id, { cascade: true }), JobError);
+    assert.ok(store.repositories.artifacts.getById(gcode.artifact.id), "файл на месте");
+    assert.equal(store.repositories.tasks.getById(planned.task.id)!.state, "QUEUED");
+  } finally {
+    unwired.close();
+  }
 });

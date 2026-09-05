@@ -1,3 +1,4 @@
+import { JobError } from "../../core/errors";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import {
   ARTIFACT_ANALYSIS_TRANSITIONS,
@@ -30,6 +31,21 @@ export interface ArtifactServiceOptions {
   analysisMaxQueue?: number;
   /** Analyzer implementation; defaults to the built-in worker-thread analyzer. */
   analyze?: import("./analysisRunner").AnalyzeFn;
+  /**
+   * Cancels one scheduler task, for a cascading delete — normally
+   * `PrintQueueService.cancelTask`.
+   *
+   * Injected rather than imported because `app/artifacts` depends on the domain
+   * and infrastructure only, never on the queue service; and because cancelling
+   * a task is far more than a state write (queue entry released, assignments
+   * unwound, beds and interventions resolved), so retention must borrow that use
+   * case whole instead of re-deriving a second, quietly diverging copy of it.
+   *
+   * Runs inside the caller's transaction — the store joins nested calls — so a
+   * later refusal rolls the cancellations back. Absent, a cascading delete is
+   * refused outright; a plain delete never needs it.
+   */
+  cancelTask?: (taskId: string, reason: string, actor?: string) => void;
   logger?: StoreLogger;
 }
 
@@ -75,6 +91,23 @@ export class ArtifactContext {
 
   recordAudit(input: AuditInput): void {
     recordAuditEvent(this.store, () => this.nowIso(), this.defaultActor, input);
+  }
+
+  /**
+   * Cancels a scheduler task on behalf of a cascading delete.
+   * @see {@link ArtifactServiceOptions.cancelTask}
+   *
+   * Refuses loudly when nothing is wired: a cascade that silently did not
+   * cascade would report the file as deleted while its task stayed in the queue
+   * pointing at bytes that are gone — the exact dangling row the cascade exists
+   * to prevent.
+   */
+  cancelTask(taskId: string, reason: string, actor?: string): void {
+    const cancel = this.options.cancelTask;
+    if (!cancel) {
+      throw new JobError("Каскадное удаление недоступно: очередь печати не подключена", { taskId });
+    }
+    cancel(taskId, reason, actor);
   }
 
   transitionAnalysis(

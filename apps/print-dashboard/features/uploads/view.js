@@ -74,9 +74,13 @@ export function itemHtml(item, { detailsOpen = false } = {}) {
  * Три облика, потому что за ними три разные вещи:
  *   • у карточки без артефакта (загрузка не дошла до сервера) удалять на
  *     сервере нечего — она просто убирается из списка;
- *   • пока файл кем-то используется, backend откажет; кнопка погашена, а
- *     причина — та же строка, которую вернул бы отказ, — стоит в подсказке,
- *     чтобы не заставлять оператора выяснять это нажатием;
+ *   • пока файл держит что-то непреодолимое (идёт печать, байты уезжают на
+ *     принтер, работает слайсер), backend откажет; кнопка погашена, а причина —
+ *     та же строка, которую вернул бы отказ, — стоит в подсказке, чтобы не
+ *     заставлять оператора выяснять это нажатием;
+ *   • если файл держат только задания планировщика, сервер готов отменить их
+ *     вместе с ним и присылает их списком: кнопка живая, подсказка называет
+ *     задания, а не запрет;
  *   • свободный файл получает живую кнопку; подтверждение — в контроллере.
  * Идёт последним в строке заголовка: рядом со статусом, но после него —
  * сначала читают, что с файлом, и только потом решают его судьбу. */
@@ -91,10 +95,22 @@ function removeButtonHtml(item) {
   // показывает действие, пока с файлом ещё идёт работа.
   const analysing = item.analysis?.state === "pending" || item.analysis?.state === "running";
   const blocker = analysing ? "файл ещё анализируется" : item.deletionBlocker;
-  if (blocker) {
+  // Занятость, которую сервер готов снять сам, — не повод гасить кнопку: он уже
+  // назвал задания, которые отменит вместе с файлом (`deletionCascade`).
+  // Погашенная кнопка здесь оставляла оператора в тупике — причина отказа есть,
+  // а убрать её из этого раздела нечем. Кнопка остаётся живой, а в подсказке —
+  // не «нельзя», а что именно уйдёт; окно подтверждения перечислит поимённо.
+  const cascade = analysing ? [] : item.deletionCascade || [];
+  if (blocker && cascade.length === 0) {
     return `<button type="button" class="btn btn-sm btn-icon" disabled
       title="${esc(`Удалить нельзя: ${blocker}`)}"
       aria-label="${esc(`Удалить «${item.name}» нельзя: ${blocker}`)}">${icon("trash")}</button>`;
+  }
+  if (cascade.length > 0) {
+    const what = cascade.map((t) => `«${t.title}»`).join(", ");
+    const hint = `Удалить файл и отменить ${cascade.length === 1 ? "задание" : "задания"} ${what}`;
+    return `<button type="button" class="btn btn-sm btn-icon btn-danger" data-delete-artifact="${esc(item.artifact.id)}"
+      title="${esc(hint)}" aria-label="${esc(`${hint} («${item.name}»)`)}">${icon("trash")}</button>`;
   }
   return `<button type="button" class="btn btn-sm btn-icon btn-danger" data-delete-artifact="${esc(item.artifact.id)}"
     title="Удалить файл" aria-label="Удалить файл «${esc(item.name)}»">${icon("trash")}</button>`;

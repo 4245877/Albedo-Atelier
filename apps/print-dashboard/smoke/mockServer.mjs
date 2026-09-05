@@ -264,7 +264,10 @@ export function startMockServer(options = {}) {
 
     if (p.startsWith("/api/print-orchestrator/")) {
       const key = p.slice("/api/print-orchestrator".length);
-      requests.push({ method: req.method, path: key });
+      // Строка запроса записывается отдельно от пути: `handle` сопоставляет
+      // маршрут по чистому пути, а сценарию бывает нужен именно флаг — например
+      // `?cascade=true`, которым удаление файла уносит задание планировщика.
+      requests.push({ method: req.method, path: key, query: url.search.slice(1) });
       const handled = options.handle ? options.handle(req, key) : null;
       if (handled) {
         res.writeHead(handled.status, { "content-type": "application/json" });

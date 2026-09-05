@@ -140,6 +140,10 @@ function addFiles(fileList) {
       /* Почему файл нельзя удалить (строка с сервера) или null. Пока файл ещё
          не сохранён, удалять на сервере нечего. */
       deletionBlocker: null,
+      /* Задания планировщика, которые сервер готов отменить вместе с файлом,
+         или null, если отменять нечего (файл свободен) либо нельзя (идёт
+         печать). Решает сервер — раздел только показывает и спрашивает. */
+      deletionCascade: null,
       /* Решение сервера о следующем шаге (status.next), подтверждениях масштаба
          и проверки. Пока файл не сохранён — его нет. */
       status: null,
@@ -294,6 +298,7 @@ function applyDetail(item, detail) {
   const wasDone = item.stage === "done";
   item.analysis = latest;
   item.deletionBlocker = detail.deletionBlocker ?? null;
+  item.deletionCascade = detail.deletionCascade ?? null;
   if (latest) {
     if (latest.state === "ready") {
       item.stage = "done";
@@ -384,6 +389,7 @@ function applyRow(item, row) {
   item.task = fresh.task;
   item.status = fresh.status;
   item.deletionBlocker = fresh.deletionBlocker;
+  item.deletionCascade = fresh.deletionCascade;
   item.stage = fresh.stage;
 }
 
@@ -408,6 +414,7 @@ function toItem(row) {
     task: row.task,
     status: row.status ?? null,
     deletionBlocker: row.deletionBlocker ?? null,
+    deletionCascade: row.deletionCascade ?? null,
     blobExisted: false
   };
 }
@@ -442,17 +449,34 @@ async function reanalyze(artifactId) {
    оно держится открытым, пока сервер отвечает, и показывает отказ прямо в себе,
    вместо того чтобы закрыться и оставить оператора гадать, удалилось ли. Из
    списка карточка уходит только после успешного ответа — интерфейс никогда не
-   показывает удалённым то, что на сервере осталось, и наоборот. */
+   показывает удалённым то, что на сервере осталось, и наоборот.
+
+   Файл, за который держится задание планировщика, раньше был тупиком: сервер
+   отказывал, а убрать задание из этого раздела было нечем. Теперь сервер сам
+   сообщает (`deletionCascade`), какие задания он готов отменить вместе с
+   файлом, — и окно называет их поимённо, прежде чем спросить. Это по-прежнему
+   один вопрос и одно действие: каскад уходит на сервер флагом того же запроса,
+   а не отдельной отменой задания следом за удалением, которая могла бы пройти
+   наполовину. */
 async function removeArtifact(artifactId) {
   const item = items.find((it) => it.artifact && it.artifact.id === artifactId);
   if (!item) return;
 
+  const cascade = item.deletionCascade || [];
+  const query = cascade.length > 0 ? "?cascade=true" : "";
+  // «задание» / «задания» — согласование по числу, а не безличное «задание(я)»:
+  // оператор читает это перед необратимым действием.
+  const one = cascade.length === 1;
+
   const ok = await confirmAction({
-    title: "Удалить файл",
+    title: cascade.length > 0 ? `Удалить файл и ${one ? "задание" : "задания"}` : "Удалить файл",
     object: item.name,
-    body: "Файл будет стёрт из хранилища, а его записи — из базы.",
-    points: deletionPoints(item),
-    cta: "Удалить файл",
+    body:
+      cascade.length > 0
+        ? `Файл будет стёрт из хранилища, а ${one ? "задание, которое его ждёт" : "задания, которые его ждут"}, — отменено${one ? "" : "ы"}.`
+        : "Файл будет стёрт из хранилища, а его записи — из базы.",
+    points: deletionPoints(item, cascade),
+    cta: cascade.length > 0 ? `Удалить вместе с ${one ? "заданием" : "заданиями"}` : "Удалить файл",
     tone: "danger",
     irreversible: true,
     run: async () => {
@@ -460,7 +484,7 @@ async function removeArtifact(artifactId) {
         // Пропущенный из-за guard'а вызов — не успех: иначе окно закрылось бы, а
         // карточка исчезла бы из списка, ничего на сервере не удалив.
         const { skipped } = await deleteGuard.run(`delete:${artifactId}`, () =>
-          apiDelete(`/api/print/artifacts/${encodeURIComponent(artifactId)}`)
+          apiDelete(`/api/print/artifacts/${encodeURIComponent(artifactId)}${query}`)
         );
         if (skipped) throw new Error("удаление этого файла уже выполняется");
       } catch (err) {
@@ -473,6 +497,10 @@ async function removeArtifact(artifactId) {
           // только что отказал.
           if (err?.details?.blocker) {
             item.deletionBlocker = String(err.details.blocker);
+            // Каскад, которому только что отказали, предлагать снова нельзя: за
+            // файл взялось что-то, чего отменой задания не снять. Настоящую
+            // причину принесёт syncExisting ниже — до тех пор молчим.
+            item.deletionCascade = null;
             render();
           }
           throw err; // текст отказа показывает само окно подтверждения
@@ -485,18 +513,35 @@ async function removeArtifact(artifactId) {
   forget(item);
   items = items.filter((it) => it !== item);
   render();
-  toast(`Файл «${esc(item.name)}» удалён, Владыка`, "toast-ok");
+  toast(
+    cascade.length > 0
+      ? `Файл «${esc(item.name)}» удалён вместе с ${cascade.length === 1 ? "заданием" : "заданиями"}, Владыка`
+      : `Файл «${esc(item.name)}» удалён, Владыка`,
+    "toast-ok"
+  );
   // Слайсинг показывает те же файлы (модели и нарезанный G-code) — пусть узнает
   // сразу, а не через свой следующий фоновый опрос.
-  document.dispatchEvent(new CustomEvent("artifact-deleted", { detail: { artifactId } }));
+  document.dispatchEvent(
+    new CustomEvent("artifact-deleted", { detail: { artifactId, cancelledTasks: cascade } })
+  );
   // Удаление меняет и СОСЕДЕЙ: у исходной модели уходит вариант слайсинга, и она
   // может стать удаляемой. Перечитываем причины отказа, а не гадаем о них.
   void syncExisting();
 }
 
 /* Что именно произойдёт — по состоянию конкретного файла, без общих слов. */
-function deletionPoints(item) {
+function deletionPoints(item, cascade = []) {
   const points = ["Содержимое файла будет удалено с диска сервера"];
+  // Задания называем поимённо и первыми: это самое дорогое из того, что уйдёт,
+  // и единственное, чего оператор может не ожидать, нажимая «удалить файл».
+  for (const task of cascade) {
+    points.push(`Задание «${task.title}» (${task.state}) будет отменено и уйдёт из очереди`);
+  }
+  if (cascade.length > 0) {
+    // Отмена — не удаление: строка остаётся в истории заданий, и это стоит
+    // сказать до того, как оператор решит, что стёр её следы.
+    points.push("Отменённые задания останутся в истории — из очереди уйдут только они сами");
+  }
   if (item.task && item.task.state === "DRAFT") {
     points.push("Черновик задания, созданный при загрузке, будет отменён");
   }
@@ -507,7 +552,11 @@ function deletionPoints(item) {
     points.push("Варианты слайсинга этой модели будут удалены вместе с ней");
     points.push("Сами нарезанные G-code файлы останутся — удалите их отдельно");
   }
-  points.push("Файл, который используется заданием или печатью, сервер удалить не даст");
+  points.push(
+    cascade.length > 0
+      ? "Уже идущую печать это не остановит — такой файл сервер удалить не даст"
+      : "Файл, который используется заданием или печатью, сервер удалить не даст"
+  );
   return points;
 }
 

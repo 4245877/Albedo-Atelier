@@ -146,8 +146,14 @@ test("сводка списка разделяет «в работе», «при
 
 /*
  * Удаление файла. Кнопка живёт в шапке карточки и обязана быть честной: пока
- * файл кем-то используется, backend откажет — значит и предлагать действие
- * нельзя, а причину отказа оператор должен прочитать, не нажимая.
+ * файл держит что-то, чего сервер снять не может, backend откажет — значит и
+ * предлагать действие нельзя, а причину отказа оператор должен прочитать, не
+ * нажимая.
+ *
+ * Отдельный случай — файл, который держат только задания планировщика. Сервер
+ * готов отменить их вместе с ним и присылает списком (`deletionCascade`);
+ * гасить кнопку здесь означало бы тупик: причина показана, а убрать её из этого
+ * раздела нечем.
  */
 
 test("свободный файл получает живую кнопку удаления с именем в подписи", () => {
@@ -159,11 +165,51 @@ test("свободный файл получает живую кнопку уд�
 
 test("занятый файл: кнопка погашена, причина отказа стоит в подсказке", () => {
   const it = item(ready());
-  it.deletionBlocker = "задание «Куб» в состоянии QUEUED использует файл";
+  it.deletionBlocker = "активная печать run_1 (RUNNING) использует файл";
   const html = itemHtml(it);
   assert.match(html, /disabled/);
-  assert.match(html, /Удалить нельзя: задание «Куб» в состоянии QUEUED использует файл/);
+  assert.match(html, /Удалить нельзя: активная печать run_1 \(RUNNING\) использует файл/);
   assert.doesNotMatch(html, /data-delete-artifact/);
+});
+
+test("файл держит только задание очереди: кнопка жива и называет, что отменится", () => {
+  const it = item(ready());
+  it.deletionBlocker = "задание «Куб» в состоянии QUEUED использует файл";
+  it.deletionCascade = [{ id: "task_1", title: "Куб", state: "QUEUED" }];
+  const html = itemHtml(it);
+  assert.match(html, /data-delete-artifact="art_1"/);
+  assert.doesNotMatch(html, /data-delete-artifact="art_1"[^>]*disabled/);
+  // В подсказке — что произойдёт, а не запрет, которого больше нет.
+  assert.match(html, /Удалить файл и отменить задание «Куб»/);
+  assert.doesNotMatch(html, /Удалить нельзя/);
+});
+
+test("несколько заданий перечисляются во множественном числе", () => {
+  const it = item(ready());
+  it.deletionBlocker = "задание «Куб» в состоянии QUEUED использует файл";
+  it.deletionCascade = [
+    { id: "task_1", title: "Куб", state: "QUEUED" },
+    { id: "task_2", title: "Пирамида", state: "NEEDS_REVIEW" }
+  ];
+  const html = itemHtml(it);
+  assert.match(html, /отменить задания «Куб», «Пирамида»/);
+});
+
+test("название задания экранируется — оно приходит с сервера", () => {
+  const it = item(ready());
+  it.deletionBlocker = "задание использует файл";
+  it.deletionCascade = [{ id: "task_1", title: '<img src=x onerror="alert(1)">', state: "QUEUED" }];
+  const html = itemHtml(it);
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img src=x/);
+});
+
+test("пока идёт анализ, каскад не предлагается — файл читает worker", () => {
+  const it = item({ state: "running", warnings: [], blockers: [], data: {} });
+  it.deletionCascade = [{ id: "task_1", title: "Куб", state: "QUEUED" }];
+  const html = itemHtml(it);
+  assert.doesNotMatch(html, /data-delete-artifact/);
+  assert.match(html, /файл ещё анализируется/);
 });
 
 test("пока идёт анализ, удаление не предлагается — сервер всё равно откажет", () => {

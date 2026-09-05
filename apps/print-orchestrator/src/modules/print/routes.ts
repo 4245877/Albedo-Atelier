@@ -55,6 +55,8 @@ export interface PrintRoutesOptions {
  *   POST /artifacts/:id/scale    state what an STL's units are  body: { units, scaleFactor? }
  *   POST /artifacts/:id/review   accept a `review` verdict      body: { note?, operator? }
  *   DELETE /artifacts/:id        delete one stored file (409 while it is in use)
+ *                                `?cascade=true` also cancels the scheduler
+ *                                tasks holding it (never a running print)
  */
 export async function registerPrintQueueRoutes(
   app: FastifyInstance,
@@ -304,10 +306,23 @@ function registerArtifactRoutes(
   // refresh, not a malformed request; 404 when the id is unknown. Deduplicated
   // blobs are only unlinked when the LAST reference goes, and the row is removed
   // before the bytes, never the other way round.
-  app.delete<{ Params: { id: string } }>("/artifacts/:id", async (request) => ({
-    ok: true,
-    ...(await services.artifacts.deleteArtifact(request.params.id))
-  }));
+  //
+  // `?cascade=true` additionally cancels the scheduler tasks holding the file
+  // (reported back as `cancelledTasks`), so «файл больше не нужен» is one
+  // action rather than a refusal plus a hunt for the task that caused it. Only
+  // planning-state tasks are cancellable: a print that is dispatching or running
+  // refuses either way, and refuses before anything is cancelled. Opt-in in the
+  // query string on purpose — the plain DELETE keeps its old, fail-closed
+  // meaning for every existing caller, the retention sweep included.
+  app.delete<{ Params: { id: string }; Querystring: { cascade?: string } }>(
+    "/artifacts/:id",
+    async (request) => ({
+      ok: true,
+      ...(await services.artifacts.deleteArtifact(request.params.id, {
+        cascade: request.query.cascade === "true"
+      }))
+    })
+  );
 
   // Retention sweep (dry-run by default — pass {"dryRun": false} to act).
   app.post<{ Body: { olderThanDays?: unknown; dryRun?: unknown; maxDelete?: unknown } }>(

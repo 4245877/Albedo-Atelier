@@ -7,13 +7,13 @@ import { ArtifactContext, type ArtifactServiceOptions } from "./context";
 import { ArtifactIngest, type IngestInput, type IngestResult } from "./ingest";
 import { ModelScaleService } from "./modelScale";
 import { ArtifactQueries, type ArtifactDetail, type ArtifactSummary } from "./queries";
-import { ArtifactRetention, type ArtifactDeletion } from "./retention";
+import { ArtifactRetention, type ArtifactDeletion, type DeletionHold } from "./retention";
 
 export type { AnalyzeFn } from "./analysisRunner";
 export type { ArtifactServiceOptions } from "./context";
 export type { IngestInput, IngestResult } from "./ingest";
 export type { ArtifactDetail, ArtifactSummary } from "./queries";
-export type { ArtifactDeletion } from "./retention";
+export type { ArtifactDeletion, DeletionHold, HeldTask } from "./retention";
 
 /**
  * The application service for uploaded artifacts and their analysis. A facade
@@ -140,7 +140,20 @@ export class ArtifactService {
     return this.retention.deletionBlocker(artifactId);
   }
 
-  deleteArtifact(artifactId: string, options: { actor?: string } = {}): Promise<ArtifactDeletion> {
+  /** The structured form: the reason plus the tasks a cascade would cancel. */
+  deletionHold(artifactId: string): DeletionHold {
+    return this.retention.deletionHold(artifactId);
+  }
+
+  /**
+   * Deletes one stored file. With `cascade`, the scheduler tasks holding it are
+   * cancelled first — see {@link ArtifactRetention.deleteArtifact} for what that
+   * may and may not clear.
+   */
+  deleteArtifact(
+    artifactId: string,
+    options: { actor?: string; cascade?: boolean } = {}
+  ): Promise<ArtifactDeletion> {
     return this.retention.deleteArtifact(artifactId, options);
   }
 

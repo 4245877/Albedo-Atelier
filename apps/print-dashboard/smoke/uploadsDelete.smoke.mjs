@@ -53,7 +53,7 @@ async function connect(wsUrl) {
 }
 
 /** Один готовый артефакт в форме, которую отдаёт GET /api/print/artifacts. */
-const row = (id, name, deletionBlocker) => ({
+const row = (id, name, deletionBlocker, deletionCascade = null) => ({
   artifact: { id, name, kind: "gcode", sizeBytes: 2048, sha256: `sha-${id}`, metadata: {} },
   task: { id: `task-${id}`, title: name, state: "DRAFT", reason: null },
   analysis: {
@@ -66,10 +66,18 @@ const row = (id, name, deletionBlocker) => ({
     material: "PLA",
     data: {}
   },
-  deletionBlocker
+  deletionBlocker,
+  deletionCascade
 });
 
-const BLOCKER = "задание «Кронштейн» в состоянии QUEUED использует файл";
+/* Занятость, которую сервер снять не может: печать идёт прямо сейчас. Именно
+   такой отказ и оставляет кнопку погашенной — задание в очереди backend теперь
+   предлагает отменить вместе с файлом (см. третий тест). */
+const BLOCKER = "активная печать run_7 (RUNNING) использует файл";
+
+/* А это — занятость, которую снимает каскад: держит только строка планировщика. */
+const QUEUED_BLOCKER = "задание «Кронштейн» в состоянии QUEUED использует файл";
+const QUEUED_CASCADE = [{ id: "task-art_q", title: "Кронштейн", state: "QUEUED" }];
 
 const version = await probeCdp();
 
@@ -135,7 +143,7 @@ test("удаление файла: подтверждение, запрос на
     assert.ok(busyBtn, "the busy file should still render its (disabled) control");
     assert.equal(busyBtn.disabled, true, "a file in use must not offer deletion");
     assert.equal(busyBtn.deletes, false, "and must carry no delete handle at all");
-    assert.match(busyBtn.title, /Кронштейн/, "the refusal reason belongs in the tooltip");
+    assert.match(busyBtn.title, /run_7/, "the refusal reason belongs in the tooltip");
 
     // ── Свободный файл: клик открывает подтверждение, называющее файл ──
     await evalValue("document.querySelector('[data-delete-artifact=\"art_free\"]').click(), 1");
@@ -237,7 +245,7 @@ test("вкладка вернулась: список сверяется с се
 
     assert.deepEqual(await evalValue(deleteBtn("art_a")), { disabled: true, deletes: false }, "the busy file starts blocked");
 
-    // ── Задание отменили: сервер отдаёт файл свободным ──
+    // ── Печать закончилась: сервер отдаёт файл свободным ──
     artifacts = [row("art_a", "a.gcode", null), row("art_b", "b.gcode", null)];
     await evalValue('document.dispatchEvent(new Event("visibilitychange")), 1');
     await until(`(${deleteBtn("art_a")}).disabled === false`, "the freed file to regain its button");
@@ -256,6 +264,112 @@ test("вкладка вернулась: список сверяется с се
     await until('!document.querySelector(\'[data-upload="art_b"]\')', "the card to disappear on a 404");
     const errorShown = await evalValue("Boolean(document.querySelector('.modal-confirm'))");
     assert.equal(errorShown, false, "a file that is already gone is not an error to show");
+
+    assert.deepEqual(cdp.exceptions, [], "there should be no uncaught page errors");
+  } finally {
+    cdp.close();
+    await fetch(`${CDP_URL}/json/close/${target.id}`).catch(() => {});
+    await mock.close();
+  }
+});
+
+/*
+ * Каскад: файл, который держит только строка планировщика.
+ *
+ * Раньше это был тупик — backend отвечал 409 «его использует задание QUEUED», а
+ * убрать само задание из раздела файлов было нечем: кнопка гасла, и оператор
+ * оставался с файлом, который не удаляется. Теперь сервер присылает вместе со
+ * списком (`deletionCascade`) те задания, которые готов отменить вместе с
+ * файлом, и здесь проверяется вся цепочка на живой странице: кнопка активна,
+ * окно называет задание ПОИМЁННО (согласие даётся на отмену печати, а не только
+ * на удаление байтов), а на backend уходит ровно один DELETE — с флагом
+ * каскада, а не два отдельных запроса, второй из которых мог бы не дойти.
+ */
+test("каскад: кнопка жива, окно называет задание, DELETE уходит с ?cascade=true", { skip: version ? false : `no CDP browser at ${CDP_URL}` }, async () => {
+  let artifacts = [row("art_q", "3U-default.3mf", QUEUED_BLOCKER, QUEUED_CASCADE)];
+  const mock = await startMockServer({
+    handle: (req, key) => {
+      if (key === "/api/print/artifacts" && req.method === "GET") {
+        return { status: 200, body: { artifacts } };
+      }
+      if (req.method === "DELETE" && key === "/api/print/artifacts/art_q") {
+        artifacts = [];
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            artifactId: "art_q",
+            blobKey: "sha256/ab/cd",
+            blobRemoved: true,
+            removedSliceVariants: [],
+            cancelledTasks: ["task-art_q"]
+          }
+        };
+      }
+      return null;
+    }
+  });
+
+  const target = await (await fetch(`${CDP_URL}/json/new?${encodeURIComponent(mock.url)}`, { method: "PUT" })).json();
+  const cdp = await connect(target.webSocketDebuggerUrl);
+
+  const evalValue = async (expression) => {
+    const { result } = await cdp.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+    return result.value;
+  };
+  const until = async (expression, what) => {
+    for (let i = 0; i < 80; i++) {
+      if (await evalValue(expression)) return;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    throw new Error(`timeout waiting for ${what}`);
+  };
+
+  try {
+    await cdp.send("Page.enable");
+    await cdp.send("Runtime.enable");
+    await cdp.send("Page.navigate", { url: mock.url });
+    await until('document.querySelectorAll("#worknav .work-tab").length > 0', "the app to boot");
+    await evalValue('document.querySelector(\'.mode-tab[data-mode="works"]\').click(), 1');
+    await until('document.getElementById("mode-works") && !document.getElementById("mode-works").hidden', "the works mode");
+    await until("document.querySelectorAll('#upload-list .upload-item').length === 1", "the file card");
+
+    // ── Занятый очередью файл кнопку ДАЁТ, и подсказка обещает отмену ──
+    const btn = await evalValue(
+      `(() => {
+         const li = document.querySelector('[data-upload="art_q"]');
+         const b = li && li.querySelector('.upload-head-side button');
+         return b ? { disabled: b.disabled, title: b.title, deletes: b.hasAttribute('data-delete-artifact') } : null;
+       })()`
+    );
+    assert.ok(btn, "the card must render its control");
+    assert.equal(btn.disabled, false, "a file held only by the scheduler must stay deletable");
+    assert.equal(btn.deletes, true, "and carry the delete handle");
+    assert.match(btn.title, /отменить задание «Кронштейн»/, "the tooltip promises the cancellation");
+
+    // ── Окно подтверждения называет задание, а не только файл ──
+    await evalValue("document.querySelector('[data-delete-artifact=\"art_q\"]').click(), 1");
+    await until("Boolean(document.querySelector('.modal-confirm'))", "the confirmation dialog");
+    const dialogText = await evalValue("document.querySelector('.modal-confirm').textContent");
+    assert.match(dialogText, /3U-default\.3mf/, "the dialog names the file");
+    assert.match(dialogText, /Кронштейн/, "and the task it is about to cancel");
+    assert.match(dialogText, /отменено/, "in the words of what will happen to it");
+
+    assert.equal(
+      mock.requests.filter((r) => r.method === "DELETE").length,
+      0,
+      "opening the dialog must not cancel anything"
+    );
+
+    await evalValue("document.querySelector('[data-confirm-yes]').click(), 1");
+    await until('!document.querySelector(\'[data-upload="art_q"]\')', "the card to disappear");
+
+    // Один запрос, с флагом — не «удалить файл», а потом «отменить задание».
+    assert.deepEqual(
+      mock.requests.filter((r) => r.method === "DELETE").map((r) => r.path + (r.query ? `?${r.query}` : "")),
+      ["/api/print/artifacts/art_q?cascade=true"],
+      "exactly one DELETE, carrying the cascade the operator agreed to"
+    );
 
     assert.deepEqual(cdp.exceptions, [], "there should be no uncaught page errors");
   } finally {

@@ -243,7 +243,12 @@ export interface PrintQueueStore {
    * Runs `fn` inside a single database transaction. Everything `fn` writes
    * through the repositories commits atomically; any thrown error rolls it all
    * back and re-throws. Synchronous, matching the underlying `node:sqlite` API.
-   * Not reentrant — do not nest.
+   *
+   * A nested call joins the transaction already open rather than starting a
+   * second one (SQLite has no nested `BEGIN` without `SAVEPOINT`), so a service
+   * method that wraps its own transaction stays callable from inside another
+   * one — how a cascading artifact delete borrows the queue's `cancelTask` — and
+   * the outermost frame alone owns the commit or the rollback.
    */
   transaction<T>(fn: () => T): T;
   /**

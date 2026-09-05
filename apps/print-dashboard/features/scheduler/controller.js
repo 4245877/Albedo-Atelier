@@ -76,6 +76,12 @@ export function setupScheduler() {
     wireDelegates();
     // Уход со страницы должен снять таймер и оборвать активный запрос.
     window.addEventListener("pagehide", () => poller.stop());
+    // Удаление файла в разделе загрузок могло отменить задание ЗДЕСЬ (каскад).
+    // Перечитываем сразу, чтобы очередь не показывала строку, которой уже нет,
+    // до следующего фонового опроса.
+    document.addEventListener("artifact-deleted", (e) => {
+      if (e.detail?.cancelledTasks?.length) poller.refresh({ fromPoll: false });
+    });
     wired = true;
   }
   // Первичная загрузка — не «фоновая»: снимок форм неактуален, можно рендерить.
