@@ -170,7 +170,7 @@ test("two concurrent start-next requests dispatch the single ready job exactly o
   await store.stop();
 });
 
-test("a printer's DECLARED material list is not a statement about the loaded spool", async () => {
+test("a printer's DECLARED material list never becomes the reason a start is refused", async () => {
   // The config says `material: "PLA"`, and this job wants PETG. That used to be
   // a hard `material_mismatch`: the field was read as the filament physically in
   // the machine, and `materialsClash` reduced a capability list like
@@ -178,8 +178,14 @@ test("a printer's DECLARED material list is not a statement about the loaded spo
   // «заправлен PLA», a sentence nobody had written about that spool.
   //
   // Nothing here reports a live filament, so the honest answer is "unknown", and
-  // unknown is a question for the operator, never a contradiction. The start is
-  // still refused — fail-closed is unchanged — but for a reason that is true.
+  // unknown is a question for the operator, never a contradiction. The material
+  // therefore drops out of the refusal entirely and the next real obstacle — an
+  // undelivered file — is what the operator is told about. Fail-closed is
+  // unchanged; only the reason moved to one that is true.
+  //
+  // That the unknown becomes a *confirmable question* rather than nothing at all
+  // is asserted where it is observable: `launch/executablePath.test.ts`,
+  // «material unknown: no false mismatch, a confirmable question instead».
   const store = new FarmStore(file);
   await store.start();
   store.addQueueJob({ title: "Vase", printer: "k2", material: "PETG", file: "vase.gcode" });
@@ -188,10 +194,16 @@ test("a printer's DECLARED material list is not a statement about the loaded spo
     () => store.startNext(),
     (err: unknown) => {
       assert.ok(err instanceof JobError);
-      assert.doesNotMatch(
-        (err as JobError).message,
-        /не совпадает/,
-        "an unread spool is not a mismatch"
+      const message = (err as JobError).message;
+      assert.doesNotMatch(message, /не совпадает/, "an unread spool is not a mismatch");
+      // A bare "not a mismatch" would also pass if the refusal had become
+      // meaningless, so pin what it IS: the next genuine obstacle, named with an
+      // action. The declared "PLA" must not appear anywhere in it.
+      assert.doesNotMatch(message, /PLA/, "the config's capability list is not evidence");
+      assert.match(
+        message,
+        /файл не подготовлен на принтере/,
+        "the operator is told the real obstacle instead"
       );
       return true;
     }

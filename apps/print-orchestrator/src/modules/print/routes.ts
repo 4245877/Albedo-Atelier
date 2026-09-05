@@ -102,6 +102,14 @@ export async function registerPrintQueueRoutes(
   app.post<{ Body: unknown }>("/tasks", async (request, reply) => {
     reply.header("Deprecation", "true");
     reply.header("Link", '</api/print/artifacts>; rel="successor-version"');
+    // The same three headers `POST /api/queue` sends. A client that only looks
+    // for `Warning` — the one a browser console surfaces on its own — learned
+    // nothing from the two silent ones, so the deprecation was announced to
+    // exactly the clients already reading the docs.
+    reply.header(
+      "Warning",
+      '299 - "POST /api/print/tasks creates a task with no artifact or analysis; upload the file instead"'
+    );
     return { ok: true, task: services.printQueue.createTask(shapeCreateInput(request.body)) };
   });
 

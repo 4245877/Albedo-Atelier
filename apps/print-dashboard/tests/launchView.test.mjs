@@ -383,11 +383,20 @@ test("показывается ОДНА главная причина, выбр�
   assert.match(html, /Переустановите карту/, "и что с этим делать");
   assert.equal(ctaEnabled(html), false);
 
-  // Остальные причины не исчезли — они ушли в диагностику, ниже <details>.
+  // Правило «одна причина» действует между ОТКАЗАМИ: три блокера из четырёх
+  // были следствиями первого, и место им в диагностике.
   const main = html.split("<details")[0];
   assert.doesNotMatch(main, /Посмотрите экран принтера/, "следствие не спорит с причиной");
-  assert.doesNotMatch(main, /Диаметр сопла неизвестен/);
-  assert.match(html, /printer_nozzle_unknown/, "но остаётся доступной для разбора");
+
+  // А вот открытый вопрос — не следствие отказа, а отдельное требование, и
+  // прятать его вместе со следствиями значило отвечать на «почему не печатает»
+  // по частям: оператор чинил карту памяти и только тогда узнавал, что сопло
+  // всё ещё не указано. Он остаётся на виду, но подписан как «понадобится
+  // дальше» и приглушён, чтобы не соперничать с причиной отказа.
+  assert.match(main, /Диаметр сопла неизвестен/, "требование не прячется за отказом");
+  assert.match(main, /launch-open is-later/, "но и не выдаётся за вторую причину");
+  assert.doesNotMatch(main, /Требует внимания/, "заголовок уступает: не «сейчас», а «дальше»");
+  assert.match(html, /printer_nozzle_unknown/, "и остаётся доступной для разбора");
 });
 
 /* ── Неподтверждённый запуск ──────────────────────────────────── */
@@ -603,4 +612,79 @@ test("физические подтверждения не подменяютс�
     ui({ overrideAccepted: true, overrideReason: "проверил катушку", confirmed: new Set(["bed_clear"]) })
   );
   assert.equal(ctaEnabled(done), true);
+});
+
+/* ── Открытые вопросы рядом с жёстким отказом ───────────────────
+
+   Дефект: блок «Требует внимания» исчезал целиком, если у кандидата был хоть
+   один блокер. Профиль не утверждён, габариты не подтверждены, раскладка
+   филаментов не задана — всё это оставалось только в свёрнутых «Технических
+   подробностях». Оператор снимал блокер и узнавал о следующем требовании со
+   следующего запроса, по одному пункту за круг.
+
+   Правило: полнота ответа и приоритет причины — разные вещи. Список остаётся
+   на месте всегда; при блокере он подписан как «понадобится дальше» и
+   приглушён, а заметной остаётся ровно одна причина отказа. */
+
+const OPEN_QUESTION = {
+  code: "PROFILE_SET_NOT_APPROVED",
+  kind: "confirmable",
+  title: "Профиль не утверждён",
+  action: "Утвердите набор профилей в разделе слайсинга.",
+  technical: "PROFILE_SET_NOT_APPROVED: набор профилей не утверждён",
+  overridable: false
+};
+
+const HARD_BLOCKER = {
+  code: "PRINTER_OFFLINE",
+  kind: "blocker",
+  title: "Принтер недоступен",
+  action: "Принтер не отвечает по сети. Проверьте питание и подключение.",
+  technical: "PRINTER_OFFLINE: принтер не в сети",
+  overridable: false
+};
+
+test("открытые вопросы видны и без блокера, и вместе с ним", () => {
+  const clean = launchModalHtml(
+    preview({ candidates: [candidate({ problems: [OPEN_QUESTION] })] }),
+    ui()
+  );
+  assert.match(clean, /Требует внимания/);
+  assert.match(clean, /Профиль не утверждён/);
+});
+
+test("при жёстком отказе список остаётся, но уступает первенство причине", () => {
+  const html = launchModalHtml(
+    preview({
+      state: "blocked",
+      recommendedPrinterId: null,
+      primaryProblem: HARD_BLOCKER,
+      candidates: [
+        candidate({ eligible: false, blockers: [HARD_BLOCKER], problems: [HARD_BLOCKER, OPEN_QUESTION] })
+      ]
+    }),
+    ui()
+  );
+
+  // Причина отказа — по-прежнему одна и заметная.
+  assert.match(html, /launch-reason is-blocked/);
+  assert.match(html, /Принтер недоступен/);
+  // …но и то, что понадобится дальше, больше не прячется в «Технических
+  // подробностях»: оператор видит полный список требований сразу.
+  assert.match(html, /Понадобится после этого/);
+  assert.match(html, /Профиль не утверждён/);
+  assert.match(html, /launch-open is-later/, "и оформлен приглушённо, а не как второй отказ");
+});
+
+test("нечего показывать — блок не появляется вовсе", () => {
+  const html = launchModalHtml(
+    preview({
+      state: "blocked",
+      recommendedPrinterId: null,
+      primaryProblem: HARD_BLOCKER,
+      candidates: [candidate({ eligible: false, blockers: [HARD_BLOCKER], problems: [HARD_BLOCKER] })]
+    }),
+    ui()
+  );
+  assert.doesNotMatch(html, /launch-open/);
 });

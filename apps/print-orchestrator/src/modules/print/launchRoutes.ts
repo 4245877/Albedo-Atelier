@@ -19,6 +19,7 @@ import { ValidationError } from "../../core/errors";
  *
  * Reads:
  *   GET  /launch                     launch readiness for every open queue row
+ *   GET  /launch?task=…              launch readiness for one task, in or out of the queue
  *   GET  /launch/:taskId?printer=…   launch preview (candidates, ranking, checks)
  *
  * Actions (guarded by the shared CSRF/token middleware):
@@ -32,7 +33,14 @@ export function registerLaunchRoutes(
   // launch runs. It exists so a queue row can say «Можно запустить на A1» or
   // «Стол занят» instead of restating that the task is QUEUED — a fact about two
   // columns that was being rendered as «готово к запуску».
-  app.get<{ Querystring: { limit?: string } }>("/launch", async (request) => {
+  app.get<{ Querystring: { limit?: string; task?: string } }>("/launch", async (request) => {
+    // `?task=` answers for exactly one job — the task panel's question. Without
+    // it that panel fetched the whole page and filtered client-side, which cost
+    // one full farm evaluation per row and returned nothing at all for a task
+    // outside the page (or one that had already left the queue).
+    const taskId = request.query.task?.trim();
+    if (taskId) return { ok: true, rows: [services.launch.readinessForTaskId(taskId)] };
+
     const limit = Number.parseInt(request.query.limit ?? "", 10);
     return {
       ok: true,

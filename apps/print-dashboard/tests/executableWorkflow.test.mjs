@@ -190,6 +190,30 @@ test("QUEUED без пригодного принтера больше не по
   assert.match(st.reason, /Принтер занят/);
 });
 
+test("готовность спросили и не получили — строка говорит «неизвестно», а не «готово»", () => {
+  /* Отказ /api/print/launch раньше возвращал строку к прежней логике по двум
+     колонкам БД: QUEUED + WAITING снова читались как «готово к запуску». То
+     есть чем хуже отвечал сервер, тем увереннее доска утверждала, что печатать
+     можно — ровно то обещание, ради снятия которого готовность и появилась. */
+  const st = queueJobStatus(
+    { id: "tsk_9", title: "bracket", status: "ready", reason: "" },
+    null,
+    true
+  );
+  assert.equal(st.key, "unknown");
+  assert.notEqual(st.badge, "badge-idle", "зелёного «готово» здесь быть не может");
+  assert.match(st.label, /готовность неизвестна/);
+  assert.match(st.detail, /не ответил/);
+  assert.match(st.actionLabel, /Проверить/);
+});
+
+test("готовность просто ещё не пришла — прежнее поведение сохраняется", () => {
+  // Отличие от отказа: никто не спрашивал (первый тик, старый payload).
+  const st = queueJobStatus({ id: "tsk_9", title: "bracket", status: "ready", reason: "" }, null, false);
+  assert.equal(st.key, "ready");
+  assert.equal(st.badge, "badge-idle");
+});
+
 test("кнопка запуска есть у каждой строки, а не только у первой", () => {
   const html = queueRow(
     { id: "tsk_7", title: "bracket", status: "ready", reason: "" },

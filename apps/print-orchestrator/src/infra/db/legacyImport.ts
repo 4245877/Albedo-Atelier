@@ -143,10 +143,14 @@ function importOne(
     priority: 0,
     state: review ? "NEEDS_REVIEW" : "QUEUED",
     reason: opts.forceReview ?? orNull(job.reason),
+    // One fact, two columns. `dayNightPreference` is the field the dispatch gate
+    // reads and `night` is its persisted projection, so an imported night job
+    // must set BOTH — hard-coding the preference to "any" beside a true boolean
+    // produced a task the night planner offered and the night gate refused.
     night: job.night === true,
     notBefore: null,
     deadline: null,
-    dayNightPreference: "any",
+    dayNightPreference: job.night === true ? "night" : "any",
     pinnedPrinterId: null,
     unattendedAllowed: false,
     createdAt: iso,

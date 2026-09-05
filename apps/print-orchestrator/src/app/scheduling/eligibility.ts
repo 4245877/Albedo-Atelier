@@ -398,7 +398,3 @@ function readString(source: Record<string, unknown> | null | undefined, key: str
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
-function readStringArray(source: Record<string, unknown>, key: string): string[] {
-  const value = source[key];
-  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
-}

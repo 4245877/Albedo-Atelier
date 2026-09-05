@@ -165,15 +165,29 @@ const dashboardPoller = createPoller({
    * сказать лишь «QUEUED + WAITING» — то есть «готово к запуску» про задание,
    * у которого нет ни одного пригодного принтера.
    *
-   * Отказ второго запроса не роняет доску: очередь по-прежнему видна, просто
-   * без готовности (readiness остаётся пустым, и строка честно молчит).
+   * Отказ второго запроса не роняет доску: очередь по-прежнему видна. Но и
+   * молчанием он не остаётся — `launchReadinessFailed` отличает «готовность не
+   * спрашивали» от «готовность спросили и не получили». Без этого различия
+   * единственная ошибка `/api/print/launch` возвращала строки к прежнему
+   * зелёному «готово к запуску» по двум колонкам БД — то есть отвечала на
+   * вопрос о принтерах, ничего о них не зная, и делала это тем увереннее, чем
+   * хуже работал сервер.
    */
   run: async (signal) => {
+    let launchFailed = false;
     const [data, launch] = await Promise.all([
       apiGet("/api/dashboard", { signal }),
-      apiGet("/api/print/launch", { signal }).catch(() => null)
+      apiGet("/api/print/launch", { signal }).catch((err) => {
+        // Отмена по новому тику — не отказ сервера: доска просто перезапросит.
+        if (err?.name !== "AbortError") launchFailed = true;
+        return null;
+      })
     ]);
-    return { ...data, launchReadiness: launch?.rows ?? null };
+    return {
+      ...data,
+      launchReadiness: launch?.rows ?? null,
+      launchReadinessFailed: launchFailed
+    };
   },
   apply: (data, { wasReachable }) => {
     state = data;

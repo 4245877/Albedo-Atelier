@@ -405,7 +405,14 @@ function bedClear(printerId: string): void {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// G-code: upload → analyze → enqueue → preview → launch → run
+// G-code: enqueue → preview → launch → run
+//
+// The analysis is seeded, not produced: `seedUpload` writes the artifact row,
+// the blob and the analysis row directly, so what follows exercises the real
+// enqueue, launch, delivery and dispatch services over a real SQLite store with
+// fake device adapters. The upload+analyzer half of the chain has its own
+// coverage over HTTP with the real worker-thread analyzer, in
+// `modules/print/artifactRoutes.test.ts`.
 // ═══════════════════════════════════════════════════════════════════════════
 
 test("G-code: an uploaded ready file reaches a printer through enqueue → preview → launch", async () => {
@@ -480,7 +487,8 @@ test("a model is refused by the executable path with the slicing step named", ()
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Sliced 3MF: upload → review → confirm → enqueue → preview → launch
+// Sliced 3MF: review → confirm → enqueue → preview → launch
+// (analysis seeded, as above — see the note on the G-code section)
 // ═══════════════════════════════════════════════════════════════════════════
 
 test("sliced 3MF: the enqueue is refused until a named operator accepts the review", async () => {
@@ -665,6 +673,32 @@ test("idempotency: repeating a launch key returns the original run, not a second
   assert.equal(h.startCalls.length, 1, "exactly one physical start");
 });
 
+test("two operators launching the same job at once produce ONE physical start", async () => {
+  // Sequential idempotency is the easy half. This is the hard one: both calls
+  // run their preflight before either has reserved anything, and both then
+  // suspend on the upload — so the second is *inside* the operation when the
+  // first commits. Only the reserve transaction, which re-reads the rows it
+  // decides on, can separate them. The two callers are different people with
+  // different keys, so the idempotency key cannot help here.
+  const { task } = seedGcodeUpload();
+  h.queue.enqueueExecutableArtifact(task.id);
+  bedClear("bambu-a1");
+
+  const results = await Promise.allSettled([
+    h.launch.launch(task.id, { actor: "anna", idempotencyKey: "launch:anna" }),
+    h.launch.launch(task.id, { actor: "boris", idempotencyKey: "launch:boris" })
+  ]);
+
+  assert.equal(h.startCalls.length, 1, "exactly one start command reached the device");
+  assert.equal(
+    results.filter((r) => r.status === "fulfilled").length,
+    1,
+    "and exactly one caller was told the print began"
+  );
+  const runs = h.store.repositories.printRuns.listByTask(task.id);
+  assert.equal(runs.length, 1, "one run row, not two");
+});
+
 test("delivery race: a bed occupied DURING the transfer is caught by the final gate", async () => {
   const { task } = seedGcodeUpload();
   h.queue.enqueueExecutableArtifact(task.id);
@@ -710,6 +744,62 @@ test("queue readiness answers per row, from the same preflight the launch runs",
   assert.equal(row.canLaunch, true);
   assert.match(row.summary, /Можно запустить/);
   assert.equal(row.printerId, "bambu-a1");
+});
+
+test("the queue's readiness page reads the queue once, not once per row", () => {
+  // `readinessFor` needs the per-printer queue depth (a ranking tie-break), and
+  // read it for itself. On a page that is itself a queue listing that made 26
+  // full projections of the same queue — and the projection is the expensive
+  // half: measured on a 25-row store it costs ~45 ms against ~1 ms for the raw
+  // SELECT, because it joins the artifact, analysis and run of every row. At a
+  // 6-second dashboard poll that was over a second of blocked event loop per
+  // tick, spent re-deriving one Map.
+  const seen: number[] = [];
+  const service = h.queue as unknown as { listOpenQueue: () => unknown[] };
+  const original = service.listOpenQueue.bind(h.queue);
+  let calls = 0;
+  service.listOpenQueue = () => {
+    calls += 1;
+    return original();
+  };
+  try {
+    for (let i = 0; i < 5; i += 1) {
+      const s = seedGcodeUpload();
+      h.queue.enqueueExecutableArtifact(s.task.id);
+    }
+    calls = 0;
+    const rows = h.launch.queueReadiness();
+    seen.push(rows.length);
+  } finally {
+    service.listOpenQueue = original;
+  }
+
+  assert.equal(seen[0], 5, "all five rows answered");
+  assert.equal(calls, 1, "and the queue was projected exactly once for the whole page");
+});
+
+test("readiness is answerable for one task by id, in the queue or out of it", () => {
+  // The task panel's question, and the reason it needs its own answer: asking
+  // for the queue page and filtering client-side evaluated the whole farm once
+  // per row for a single row's answer, and returned NOTHING for a task past the
+  // page limit or already out of the queue — a diagnostic screen going silent
+  // for exactly the backlog nobody can see.
+  const queued = seedGcodeUpload();
+  h.queue.enqueueExecutableArtifact(queued.task.id);
+  bedClear("bambu-a1");
+  assert.equal(h.launch.readinessForTaskId(queued.task.id).canLaunch, true);
+
+  // A DRAFT never appears in `listOpenQueue`, so the page could not answer for it.
+  const draft = seedGcodeUpload();
+  assert.equal(
+    h.launch.queueReadiness().find((r) => r.taskId === draft.task.id),
+    undefined,
+    "the queue page has nothing to say about a task that is not in the queue"
+  );
+  const row = h.launch.readinessForTaskId(draft.task.id);
+  assert.equal(row.taskId, draft.task.id);
+  assert.equal(row.canLaunch, false);
+  assert.ok(row.summary.length > 0, "and the per-task answer still says something useful");
 });
 
 test("queue readiness names the obstacle instead of reporting QUEUED as ready", () => {

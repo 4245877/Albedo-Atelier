@@ -17,6 +17,7 @@ import { migration012 } from "./012_printers";
 import { migration013 } from "./013_printer_discovery";
 import { migration014 } from "./014_artifact_reference_indexes";
 import { migration015 } from "./015_artifact_source_index";
+import { migration016 } from "./016_day_night_reconcile";
 
 /** Re-exported from `./types` so existing importers keep working. */
 export type { Migration } from "./types";
@@ -41,7 +42,8 @@ export const MIGRATIONS: readonly Migration[] = [
   migration012,
   migration013,
   migration014,
-  migration015
+  migration015,
+  migration016
 ];
 
 const MIGRATIONS_TABLE = "schema_migrations";

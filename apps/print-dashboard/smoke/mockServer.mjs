@@ -68,7 +68,10 @@ const state = {
     }
   ],
   lights: [],
-  queue: [{ title: "Кронштейн", printer: "Creality K2", material: "PETG", eta: "3 ч", status: "ready", at: "22:00" }],
+  // `id` — не косметика: готовность из `/api/print/launch` сопоставляется со
+  // строкой очереди именно по нему, и строка без id всегда читалась бы по
+  // запасной ветке «QUEUED значит готово».
+  queue: [{ id: "q1", title: "Кронштейн", printer: "Creality K2", material: "PETG", eta: "3 ч", status: "ready", at: "22:00" }],
   night: { window: "21:30 – 07:30", windowStart: "21:30", windowEnd: "07:30", pick: 0, candidates: [] },
   critical: [],
   materials: {
@@ -93,6 +96,25 @@ const state = {
 const API = {
   "/api/dashboard": state,
   "/api/print/artifacts": { artifacts: [] },
+  // Готовность строк очереди. Без неё доска била бы по деградированной ветке
+  // («готовность неизвестна») на каждом тике, и smoke проверял бы отказ сервера
+  // вместо здорового бэкенда. Строка одна — та же, что в `state.queue`.
+  "/api/print/launch": {
+    ok: true,
+    rows: [
+      {
+        taskId: "q1",
+        state: "ready",
+        summary: "Можно запустить на «Creality K2»",
+        printerId: "k2",
+        printerName: "Creality K2",
+        canLaunch: true,
+        needsConfirmation: false,
+        alternativeCount: 0,
+        primaryProblem: null
+      }
+    ]
+  },
   "/api/print/slicing/runtime": { runtime: { available: false, error: "mock" }, profileCounts: { active: 0, quarantined: 0, invalid: 0 }, missingParents: [], coverage: [] },
   "/api/print/slicing/profiles": { profiles: [] },
   "/api/print/slicing/profile-sets": { sets: [] },

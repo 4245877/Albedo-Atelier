@@ -159,12 +159,6 @@ function problemsBlock(candidate, confirmations) {
    пункт стоит в основной части окна вместе с действием, которое его снимает. */
 function openQuestionsBlock(candidate, confirmations, ui) {
   if (!candidate) return "";
-  // Пока стоит жёсткий отказ, открытые вопросы не показываем: их всё равно
-  // нельзя закрыть в обход блокера, и рядом с одной настоящей причиной они
-  // становятся тремя равноправными строками — ровно тот шум, из-за которого
-  // главную причину и перестают находить. Как только блокер снят, они
-  // возвращаются: тогда они и есть то, что мешает запуску.
-  if (candidate.problems.some((p) => p.kind === "blocker")) return "";
   const covered = new Set(confirmations.map((c) => c.code));
   const inOverride = new Set(overridableProblems(candidate).map((p) => p.code));
   const open = candidate.problems.filter(
@@ -174,9 +168,22 @@ function openQuestionsBlock(candidate, confirmations, ui) {
       !inOverride.has(p.code)
   );
   if (!open.length) return "";
+
+  /* Жёсткий отказ не отменяет остальных вопросов — он только меняет их
+     очерёдность.
+
+     Раньше блок целиком исчезал, если у кандидата был хоть один блокер: чтобы
+     не спорить с главной причиной за внимание. Ценой было то, что оператор,
+     сняв блокер, узнавал о непройденном профиле и неподтверждённых габаритах
+     только со следующего запроса — по одному пункту за круг, и каждый раз
+     заново. Ответ на «почему не печатает» обязан быть полным с первого раза;
+     а вот равноправным с причиной отказа он быть не должен. Поэтому при
+     блокере тот же список остаётся на месте, но подписан как «понадобится
+     дальше» и приглушён (класс is-later), а заметной остаётся одна причина. */
+  const blocked = candidate.problems.some((p) => p.kind === "blocker");
   return `
-    <div class="launch-open">
-      <div class="launch-reason-title">Требует внимания</div>
+    <div class="launch-open ${blocked ? "is-later" : ""}">
+      <div class="launch-reason-title">${blocked ? "Понадобится после этого" : "Требует внимания"}</div>
       <ul class="launch-open-list">
         ${open
           .map(

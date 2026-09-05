@@ -27,6 +27,19 @@ test("import creates tasks/entries/artifacts, preserving legacy ids as legacyRef
   assert.equal(ready?.targetPrinter, "K2");
   assert.equal(ready?.material, "PLA");
   assert.equal(ready?.night, true);
+  // Both columns, not just the boolean. `dayNightPreference` is what the
+  // dispatch gate reads; leaving it at "any" beside `night: true` imported a job
+  // the night planner offers and the night gate refuses with «не отмечено для
+  // ночного запуска» — a contradiction created at import time, on every import.
+  assert.equal(
+    ready?.dayNightPreference,
+    "night",
+    "the preference is the field the gate reads and must carry the same fact"
+  );
+
+  const review0 = s.repositories.tasks.findByLegacyRef("q2");
+  assert.equal(review0?.night, false);
+  assert.equal(review0?.dayNightPreference, "any", "a job with no night flag stays neutral");
   assert.equal(ready?.metadata.eta, "2ч");
   // The file became an artifact linked to the task.
   const art = ready?.artifactId ? s.repositories.artifacts.getById(ready.artifactId) : null;

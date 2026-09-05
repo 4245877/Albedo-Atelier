@@ -560,6 +560,57 @@ test("confirming the bed clears the cycle and lets the same launch through", asy
   assert.equal(h.startCalls.length, 1, "the print started after the confirmation");
 });
 
+test("a plate held by another job is a blocker, not a checkbox nobody can satisfy", async () => {
+  // Both `AWAITING_CLEARANCE` and `RESERVED`/`RUNNING` arrive as the same
+  // `BED_NOT_CLEAR` code, and only the first is a question for the operator:
+  // `RunLifecycleService.clearBed` refuses the other two outright («стол занят
+  // активной печатью»). Keying the confirmation off the code alone therefore did
+  // two wrong things at once — it moved a hard blocker into the confirmable
+  // bucket, so a printer whose plate another job holds counted as `eligible` and
+  // could be auto-recommended; and it offered a tick whose only possible outcome
+  // was the launch throwing when the server tried to honour it.
+  const { task: first } = seedQueuedBambuJob();
+  bedClear();
+  await h.launch.launch(first.id, {});
+  h.startCalls.length = 0;
+
+  const bed = h.store.repositories.bedCycles.findOpenByPrinter("bambu-a1");
+  assert.ok(bed && (bed.state === "RESERVED" || bed.state === "RUNNING"), `bed is ${bed?.state}`);
+
+  const { task } = seedQueuedBambuJob();
+  const preview = h.launch.preview(task.id);
+  const a1 = preview.candidates.find((c) => c.printerId === "bambu-a1")!;
+
+  assert.equal(
+    preview.confirmations.find((c) => c.code === "bed_clear"),
+    undefined,
+    "no tick is offered for a plate the server will not clear"
+  );
+  assert.ok(
+    a1.blockers.some((b) => b.code === "BED_NOT_CLEAR"),
+    "and the reason stays a hard blocker rather than moving to the confirmable bucket"
+  );
+  assert.equal(a1.eligible, false);
+  assert.notEqual(preview.recommendedPrinterId, "bambu-a1");
+
+  // And ticking it anyway does not reach the device.
+  await assert.rejects(() => h.launch.launch(task.id, { confirmations: ["bed_clear"] }));
+  assert.deepEqual(h.startCalls, [], "nothing was sent");
+});
+
+test("a finished part on the plate keeps its confirmation — that one an operator CAN clear", async () => {
+  await leaveFinishedPartOnBed();
+  const { task } = seedQueuedBambuJob();
+  const preview = h.launch.preview(task.id);
+  const a1 = preview.candidates.find((c) => c.printerId === "bambu-a1")!;
+
+  assert.ok(preview.confirmations.some((c) => c.code === "bed_clear"));
+  assert.ok(
+    a1.reviews.some((r) => r.code === "BED_NOT_CLEAR" && r.confirmation === "bed_clear"),
+    "AWAITING_CLEARANCE is the one bed state a tick genuinely resolves"
+  );
+});
+
 test("confirming a bed with no tracked history at all establishes a CLEAR cycle", () => {
   // The farm's real starting state: `bed_cycles` is empty because no print has
   // ever run under this model. `clearBed` used to refuse with "открытый цикл

@@ -3,7 +3,7 @@
 
    Читает `GET /api/print/tasks/:id` (вся durable-цепочка: файл, анализы,
    варианты слайсинга, запись очереди, назначения, доставка, попытки запуска,
-   прогоны, журнал) и `GET /api/print/launch/:taskId` (готовность к запуску из
+   прогоны, журнал) и `GET /api/print/launch?task=…` (готовность к запуску из
    того же preflight, что и сам запуск). Ничего не вычисляет само: решение о
    готовности принимает сервер, здесь оно только показывается.
 
@@ -53,7 +53,11 @@ export function createTaskController({ mount, onLaunch }) {
       // уже вышло из очереди) — это не ошибка окна.
       const [chain, launch] = await Promise.all([
         apiGet(`/api/print/tasks/${encodeURIComponent(id)}`),
-        apiGet("/api/print/launch").catch(() => null)
+        // Готовность ИМЕННО этого задания (`?task=`), а не первая страница
+        // очереди с фильтром на клиенте: страница обсчитывает ферму по разу на
+        // строку ради одного ответа и для задания за её пределами — или уже
+        // ушедшего из очереди — молча возвращает пусто.
+        apiGet(`/api/print/launch?task=${encodeURIComponent(id)}`).catch(() => null)
       ]);
       if (mine !== seq) return;
       detail = chain;

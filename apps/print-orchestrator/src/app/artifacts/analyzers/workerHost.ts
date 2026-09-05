@@ -20,16 +20,60 @@ export interface WorkerHostOptions {
 
 /**
  * Resolves the worker script + node args for the current runtime. Under tsx
- * (`__filename` ends in `.ts`) it loads the `.ts` worker with the tsx loader;
- * from the compiled build it loads the sibling `.js` with plain node. The module
- * is CommonJS, so `__dirname`/`__filename` (not `import.meta`) are used.
+ * (`__filename` ends in `.ts`) it loads the `.ts` worker; from the compiled
+ * build it loads the sibling `.js` with plain node. The module is CommonJS, so
+ * `__dirname`/`__filename` (not `import.meta`) are used.
+ *
+ * No `execArgv` for the TypeScript case: `--import tsx` is accepted there and
+ * does nothing. A worker thread starts with a fresh module loader, and loader
+ * hooks are registered per-thread — the parent's `--import tsx` does not reach
+ * it, and `execArgv` is applied too late to install any. The worker therefore
+ * has to register the hooks itself; see {@link spawnWorker}.
  */
 function defaultWorker(): { workerPath: string; execArgv: string[] } {
   const isTs = __filename.endsWith(".ts");
   return {
     workerPath: path.join(__dirname, isTs ? "analyzeWorker.ts" : "analyzeWorker.js"),
-    execArgv: isTs ? ["--import", "tsx"] : []
+    execArgv: []
   };
+}
+
+/**
+ * Starts the analyzer worker, installing the TypeScript loader **inside the
+ * thread** when the target is a `.ts` file.
+ *
+ * A `Worker` gets its own module loader, and ESM customization hooks are
+ * per-thread: `node --import tsx` on the parent registers nothing in the child,
+ * and `execArgv: ["--import", "tsx"]` is accepted but inert (the option is read
+ * after the thread's loader is already built). The result was a worker that
+ * always died with `ERR_UNKNOWN_FILE_EXTENSION ".ts"` under the dev/test
+ * runtime — which the host reported as an analysis failure, so every test that
+ * went through the real analyzer saw `state: "failed"` and a null verdict
+ * instead of the analysis it was asserting on.
+ *
+ * The fix is a two-line CommonJS bootstrap evaluated in the worker: install
+ * tsx's require hook, then load the real worker through it. The compiled `.js`
+ * build never takes this path — it spawns the file directly, as before — so
+ * nothing about a deployed analysis changes.
+ */
+function spawnWorker(
+  workerPath: string,
+  execArgv: string[],
+  workerData: unknown
+): Worker {
+  if (!workerPath.endsWith(".ts")) {
+    return new Worker(workerPath, { workerData, execArgv });
+  }
+  const bootstrap = [
+    // tsx's CommonJS hook, and deliberately not the ESM one. The project
+    // compiles to CommonJS (`tsconfig.json`), and the analyzer modules import
+    // each other cyclically — which CommonJS resolves and `require(esm)` refuses
+    // outright (`ERR_REQUIRE_CYCLE_MODULE`). Transpiling to CJS here keeps the
+    // worker's module graph identical to the one the compiled build runs.
+    'require("tsx/cjs");',
+    `require(${JSON.stringify(workerPath)});`
+  ].join("\n");
+  return new Worker(bootstrap, { eval: true, workerData, execArgv });
 }
 
 /**
@@ -56,7 +100,7 @@ export function analyzeInWorker(
   return (input, limits) =>
     new Promise<AnalyzerResult>((resolve, reject) => {
       const timeoutMs = analysisBudgetMs(input.sizeBytes, baseTimeoutMs);
-      const worker = new Worker(workerPath, { workerData: { input, limits }, execArgv });
+      const worker = spawnWorker(workerPath, execArgv, { input, limits });
       let settled = false;
 
       const finish = (fn: () => void): void => {

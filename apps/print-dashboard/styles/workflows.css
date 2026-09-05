@@ -1753,6 +1753,16 @@
 .launch-open-what { font-weight: 600; color: var(--ink); }
 .launch-open-how { display: block; color: var(--ink-soft); }
 
+/* Тот же список, но когда впереди него стоит жёсткий отказ: он остаётся
+   читаемым (оператор должен знать, что ждёт дальше), но перестаёт спорить с
+   причиной отказа за внимание — нейтральная рамка вместо предупреждающей. */
+.launch-open.is-later {
+  border-color: var(--card-edge);
+  background: transparent;
+}
+.launch-open.is-later .launch-reason-title,
+.launch-open.is-later .launch-open-what { color: var(--ink-soft); font-weight: 500; }
+
 /* ── Принятие ответственности за «review» ────────────────────
    Не danger (это не отказ) и не обычное подтверждение (это не факт, который
    оператор просто отмечает) — отдельный блок с собственной рамкой, чтобы

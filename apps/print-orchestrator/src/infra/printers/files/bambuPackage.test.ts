@@ -165,6 +165,26 @@ test("Bambu model ids map from catalogue codes, and refuse to guess", () => {
 // response, no monitoring-lease renewal — and it happens in the middle of a
 // launch, which is exactly when the dashboard is watching.
 
+/*
+ * Both stall tests below used a bare wall-clock bound, and a bare bound measures
+ * the machine as much as the code: with the rest of this suite, a browser
+ * container and a build sharing the box, the idle loop alone drifts tens of
+ * milliseconds and the test fails for a reason that has nothing to do with
+ * compression. That is the failure mode that teaches a team to ignore red tests
+ * — this suite spent months carrying 38 "expected" ones.
+ *
+ * So each now asserts the invariant it actually claims, as a RATIO, which is
+ * machine-independent because load inflates both sides together:
+ *
+ *   - one synchronous pass must not dominate the build (worst gap vs build time);
+ *   - the stall must not scale with the file (40 MB gap vs 4 MB gap).
+ *
+ * Both still fail decisively on the regression they exist for: the unchunked
+ * code spent essentially the *whole* build inside one block (154 ms of a 160 ms
+ * 10 MB build) and grew linearly with the input (>200 ms at 40 MB against ~30 ms
+ * at 4 MB).
+ */
+
 test("building a package does not block the event loop", async (t) => {
   // A realistic sliced body: large and highly repetitive, as G-code is.
   const line = "G1 X120.456 Y98.765 E.03338\n";
@@ -181,22 +201,34 @@ test("building a package does not block the event loop", async (t) => {
   }, 10);
 
   let pkg;
+  let buildMs = 0;
   try {
     await new Promise((resolve) => setTimeout(resolve, 30));
     last = process.hrtime.bigint();
+    const started = process.hrtime.bigint();
     pkg = await buildBambuPlatePackage({ ...INPUT, gcode });
+    buildMs = Number(process.hrtime.bigint() - started) / 1e6;
     await new Promise((resolve) => setTimeout(resolve, 30));
   } finally {
     clearInterval(probe);
   }
 
-  t.diagnostic(`10 MB package: worst event-loop gap ${worstGapMs.toFixed(0)} ms`);
+  // The original fixed 80 ms, WIDENED by a share of the build — never narrowed.
+  // A chunked build spends its worst single gap on one chunk (a few percent),
+  // while the synchronous form spent ~154 ms of a ~160 ms build inside one
+  // block, so half the build is a bound the regression cannot pass and a slow
+  // machine cannot trip. The fixed floor is what protects a *fast* build, where
+  // half of it is less than a stray GC pause.
+  const budget = Math.max(80, buildMs * 0.5);
+  t.diagnostic(
+    `10 MB package: build ${buildMs.toFixed(0)} ms, worst event-loop gap ` +
+      `${worstGapMs.toFixed(0)} ms (budget ${budget.toFixed(0)} ms)`
+  );
   assert.ok(pkg.bytes.byteLength > 0);
-  // The synchronous form measured ~154 ms here. The bound is loose because CI
-  // hardware varies; what it catches is a return to blocking the loop outright.
   assert.ok(
-    worstGapMs < 80,
-    `the event loop stalled ${worstGapMs.toFixed(0)} ms while packaging — compression is back on the main thread`
+    worstGapMs < budget,
+    `one gap of ${worstGapMs.toFixed(0)} ms out of a ${buildMs.toFixed(0)} ms build ` +
+      "— compression is back on the main thread"
   );
 });
 
@@ -250,16 +282,21 @@ test("the stall does not grow with the file — every whole-buffer pass is chunk
 
   const small = await worstLoopGapMs(() => buildBambuPlatePackage({ ...INPUT, gcode: smallGcode }));
   const large = await worstLoopGapMs(() => buildBambuPlatePackage({ ...INPUT, gcode: largeGcode }));
-  t.diagnostic(`worst event-loop gap: 4 MB → ${small.toFixed(0)} ms, 40 MB → ${large.toFixed(0)} ms`);
-
-  // Ten times the bytes must not mean ten times the stall. The bound is a
-  // wall-clock one and deliberately loose — CI hardware varies and a collection
-  // can land inside any chunk — but the unchunked code produced a >200 ms gap
-  // at this size on hardware where the chunked code produces ~30 ms, so there is
-  // room for a slow machine without room for a regression.
+  // Ten times the bytes must not mean ten times the stall. The original fixed
+  // 120 ms stands as the floor; the 4 MB gap only ever WIDENS it, because
+  // whatever is interfering with the big measurement interfered with the small
+  // one too. So a loaded host stops producing false failures without the quiet
+  // case getting stricter — and the regression (>200 ms at 40 MB against ~30 ms
+  // at 4 MB) fails either way.
+  const budget = Math.max(120, small * 4);
+  t.diagnostic(
+    `worst event-loop gap: 4 MB → ${small.toFixed(0)} ms, 40 MB → ${large.toFixed(0)} ms ` +
+      `(budget ${budget.toFixed(0)} ms)`
+  );
   assert.ok(
-    large < 120,
-    `40 MB stalled the loop ${large.toFixed(0)} ms — a whole-buffer pass is back on the main thread`
+    large < budget,
+    `40 MB stalled the loop ${large.toFixed(0)} ms against ${small.toFixed(0)} ms at 4 MB ` +
+      "— the stall scales with the file, so a whole-buffer pass is back on the main thread"
   );
 });
 

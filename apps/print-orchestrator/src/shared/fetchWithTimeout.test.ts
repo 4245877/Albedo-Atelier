@@ -43,7 +43,13 @@ after(async () => {
 });
 
 test("resolves for a request that completes within the deadline", async () => {
-  const res = await fetchWithTimeout(`${base}/ok`, { timeoutMs: 1000 });
+  // Generous on purpose: this asserts that a *successful* request is not
+  // cancelled, and the deadline is only scenery. A tight one made the check
+  // about the machine instead — a loopback round-trip that normally takes a
+  // millisecond overran a 1 s budget when the rest of the suite (analyzer worker
+  // threads included) had the CPU, and the failure looked like a fetch bug. The
+  // deadline's own behaviour is asserted by the next test, which needs no room.
+  const res = await fetchWithTimeout(`${base}/ok`, { timeoutMs: 15_000 });
   assert.equal(res.status, 200);
   assert.equal(await res.text(), "ok");
 });

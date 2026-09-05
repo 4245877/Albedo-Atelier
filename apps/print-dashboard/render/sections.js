@@ -105,13 +105,16 @@ export function renderHero(state) {
  *
  * @param job строка очереди (проекция задания)
  * @param readiness ответ сервера о готовности к запуску (GET /api/print/launch),
- *        или null, когда он недоступен — тогда работает прежняя логика по job.
+ *        или null, когда её ещё не спрашивали — тогда работает прежняя логика по job.
+ * @param readinessFailed true, когда готовность спрашивали и НЕ получили. Это
+ *        не то же самое, что null: «не знаем» и «не спрашивали» дают разные
+ *        ответы, и только первое обязано снять зелёное «готово к запуску».
  * @returns {{key:string,label:string,badge:string,row:string,blocked:boolean,
  *            reason:string,detail?:string,actionLabel:string}}
  *          `reason` — то, что мешает (со знаком, заметно); `detail` — что
  *          произойдёт при нажатии («Можно запустить на A1»), спокойным тоном.
  */
-export function queueJobStatus(job, readiness = null) {
+export function queueJobStatus(job, readiness = null, readinessFailed = false) {
   const reason = typeof job.reason === "string" ? job.reason.trim() : "";
 
   // Готовность приходит с сервера и считается тем же preflight, что и сам
@@ -197,6 +200,25 @@ export function queueJobStatus(job, readiness = null) {
     };
   }
 
+  // Готовность спрашивали и не получили. «Готово к запуску» здесь было бы
+  // утверждением о принтерах, сделанным без единого факта о них: до появления
+  // /api/print/launch именно так строка и врала — QUEUED + WAITING выдавались
+  // за «можно печатать» у задания, которому не подходил ни один принтер. Когда
+  // сервер молчит, честный ответ — «неизвестно», и кнопка ведёт в окно запуска,
+  // где отказ (если он есть) будет назван по имени.
+  if (readinessFailed) {
+    return {
+      key: "unknown",
+      label: "готовность неизвестна",
+      badge: "badge-paused",
+      row: "row-warn",
+      blocked: false,
+      reason: "",
+      detail: "Сервер не ответил, можно ли это запустить — откройте окно запуска",
+      actionLabel: "Проверить запуск"
+    };
+  }
+
   return {
     key: "ready", label: "готово к запуску", badge: "badge-idle",
     row: "", blocked: false, reason: "", actionLabel: "Запустить печать"
@@ -209,8 +231,8 @@ export function queueJobStatus(job, readiness = null) {
    Блокирующая причина — СВОЯ строка с собственным знаком, а не хвост
    приглушённой подписи: подпись читают последней, а причина отказа обязана
    попадаться на глаза первой. */
-export function queueRow(job, printers, readiness = null) {
-  const st = queueJobStatus(job, readiness);
+export function queueRow(job, printers, readiness = null, readinessFailed = false) {
+  const st = queueJobStatus(job, readiness, readinessFailed);
   // Кнопка есть у КАЖДОЙ строки и ведёт в одно и то же окно запуска.
   //
   // Раньше её получали только заблокированные строки, а запустить можно было
@@ -288,12 +310,17 @@ export const QUEUE_VISIBLE_LIMIT = 8;
  * Хвост очереди, не поместившийся в Зал.
  * @returns {{hidden:number, blocked:number}|null} null — если поместилось всё.
  */
-export function queueOverflow(queue, limit = QUEUE_VISIBLE_LIMIT, readinessFor = () => null) {
+export function queueOverflow(
+  queue,
+  limit = QUEUE_VISIBLE_LIMIT,
+  readinessFor = () => null,
+  readinessFailed = false
+) {
   const rest = (queue || []).slice(limit);
   if (!rest.length) return null;
   return {
     hidden: rest.length,
-    blocked: rest.filter((j) => queueJobStatus(j, readinessFor(j.id)).blocked).length
+    blocked: rest.filter((j) => queueJobStatus(j, readinessFor(j.id), readinessFailed).blocked).length
   };
 }
 
@@ -330,11 +357,16 @@ export function renderQueue(state) {
   // задание: у «ready» с блокирующей причиной запуск невозможен, и предлагать
   // его крупной золотой кнопкой — то же самое враньё, что и зелёный статус.
   const readinessFor = (id) => readinessOf(state, id);
+  const readinessFailed = state.launchReadinessFailed === true;
   // «Ближайшее» — теперь действительно запускаемое, а не просто незаблокированное:
   // готовность считает сервер, и строка без пригодного принтера в кандидаты на
-  // главную кнопку не попадает.
-  const next = state.queue.find((j) => readinessFor(j.id)?.canLaunch ?? !queueJobStatus(j).blocked);
-  const overflow = queueOverflow(state.queue, QUEUE_VISIBLE_LIMIT, readinessFor);
+  // главную кнопку не попадает. Если готовность не пришла — главной кнопки нет
+  // вовсе: предлагать «Запустить печать» крупной кнопкой, не зная, можно ли,
+  // это то же самое обещание, ради снятия которого готовность и появилась.
+  const next = readinessFailed
+    ? null
+    : state.queue.find((j) => readinessFor(j.id)?.canLaunch ?? !queueJobStatus(j).blocked);
+  const overflow = queueOverflow(state.queue, QUEUE_VISIBLE_LIMIT, readinessFor, readinessFailed);
   $("#queue-meta").textContent = `${active.length} активных · ${state.queue.length} в очереди`;
 
   $("#queue-body").innerHTML = `
@@ -358,7 +390,7 @@ export function renderQueue(state) {
         <ul class="row-list">${
           state.queue
             .slice(0, QUEUE_VISIBLE_LIMIT)
-            .map((j) => queueRow(j, state.printers, readinessFor(j.id)))
+            .map((j) => queueRow(j, state.printers, readinessFor(j.id), readinessFailed))
             .join("")
           || emptyRow("Очередь пуста — Назарик ожидает ваших повелений")
         }${queueMoreRow(overflow)}</ul>

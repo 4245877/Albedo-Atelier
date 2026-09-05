@@ -102,6 +102,25 @@ const CONFIRMATION_FOR_CODE: Readonly<Record<string, LaunchConfirmationKey>> = {
   MATERIAL_UNKNOWN: "material_loaded"
 };
 
+/**
+ * Bed states a `bed_clear` tick genuinely resolves.
+ *
+ * `BED_NOT_CLEAR` is emitted for three different situations, and only one of
+ * them is a question for the person at the machine. `AWAITING_CLEARANCE` means a
+ * finished part is on the plate — that is exactly what an operator removes, and
+ * confirming it writes the `CLEAR` cycle the gate then reads. `RESERVED` and
+ * `RUNNING` mean *another job holds this plate*, and `RunLifecycleService.clearBed`
+ * refuses them outright («стол занят активной печатью»).
+ *
+ * Attaching the confirmation to those two was wrong twice over: it moved a hard
+ * blocker into the confirmable bucket, so a printer whose plate was held by a
+ * live job counted as `eligible` and could be auto-recommended; and it put a tick
+ * on screen whose only possible outcome was the launch throwing when the server
+ * tried to honour it. An unknown bed keeps its confirmation — nobody else holds
+ * that plate, and looking at it is precisely how the unknown is resolved.
+ */
+const CONFIRMABLE_BED_STATES: ReadonlySet<string> = new Set(["AWAITING_CLEARANCE"]);
+
 /** Where a task stands on the road from "prepared" to "printing". */
 export type LaunchState =
   /** The artifact is still being analysed/sliced — nothing to launch yet. */
@@ -352,14 +371,39 @@ export class LaunchService {
     // turn a 200-job backlog into 600 evaluations every few seconds, for rows
     // nobody is looking at. The head of the queue is what an operator acts on;
     // the rest is the planner's job, and the planner asks per task.
-    return this.deps.printQueue
-      .listOpenQueue()
-      .slice(0, Math.max(1, limit))
-      .map((row) => this.readinessFor(row.task));
+    //
+    // The listing itself is read ONCE for the whole page. `readinessFor` needs
+    // the open queue too — it is the per-printer tie-break depth — and reading
+    // it per row made a 25-row page project the same queue 26 times over. The
+    // projection is the expensive half (it joins each row's artifact, analysis
+    // and run: ~45 ms against ~1 ms for the raw SELECT), so at a 6-second poll
+    // that was over a second of blocked event loop per tick, spent re-deriving
+    // one Map.
+    const open = this.deps.printQueue.listOpenQueue();
+    const depth = queueDepthOf(open);
+    return open.slice(0, Math.max(1, limit)).map((row) => this.readinessFor(row.task, depth));
   }
 
-  /** Readiness for one task — the row-level answer, shared with {@link queueReadiness}. */
-  readinessFor(task: PrintTask): QueueLaunchReadiness {
+  /**
+   * Readiness for **one** task, by id — the same answer a queue row gets.
+   *
+   * Exists because the task panel needs it for a job that may not be in the
+   * queue's first page, or in the queue at all. Asking for the whole page and
+   * picking one row out of it (which is what the panel did) both evaluated the
+   * farm 25 times over for one answer and silently returned nothing for any task
+   * past the limit — a diagnostic screen going quiet exactly for the backlog
+   * nobody can see.
+   */
+  readinessForTaskId(taskId: string): QueueLaunchReadiness {
+    return this.readinessFor(this.requireTask(taskId));
+  }
+
+  /**
+   * Readiness for one task — the row-level answer, shared with
+   * {@link queueReadiness}. `depth` is the pre-computed per-printer queue depth;
+   * omitted, it is read here, which is what a single-task caller wants.
+   */
+  readinessFor(task: PrintTask, depth?: ReadonlyMap<string, number>): QueueLaunchReadiness {
     const repos = this.deps.store.repositories;
     const artifact = task.artifactId ? repos.artifacts.getById(task.artifactId) : null;
     const analysis = artifact ? repos.artifactAnalyses.latestForArtifact(artifact.id) : null;
@@ -398,7 +442,7 @@ export class LaunchService {
     }
 
     const { candidates, recommendedPrinterId, alternativeCount } = selectLaunchPrinter(
-      this.buildCandidates(task, material, nozzleMm)
+      this.buildCandidates(task, material, nozzleMm, depth)
     );
     const views: LaunchCandidateView[] = candidates.map((c) => ({
       ...c,
@@ -767,9 +811,10 @@ export class LaunchService {
   private buildCandidates(
     task: PrintTask,
     requiredMaterial: string | null,
-    requiredNozzleMm: number | null
+    requiredNozzleMm: number | null,
+    depth?: ReadonlyMap<string, number>
   ): LaunchCandidateInput[] {
-    const openByPrinter = this.openQueueDepth();
+    const openByPrinter = depth ?? this.openQueueDepth();
     return this.preflight(task).map(({ printer, eligibility }) => {
       const config = this.deps.resolvePrinter(printer.id);
       const split = splitReasons(eligibility);
@@ -802,13 +847,7 @@ export class LaunchService {
 
   /** Open queue rows already pointing at each printer — the tie-break depth. */
   private openQueueDepth(): Map<string, number> {
-    const depth = new Map<string, number>();
-    for (const row of this.deps.printQueue.listOpenQueue()) {
-      const target = row.task.pinnedPrinterId ?? row.task.targetPrinter;
-      if (!target) continue;
-      depth.set(target, (depth.get(target) ?? 0) + 1);
-    }
-    return depth;
+    return queueDepthOf(this.deps.printQueue.listOpenQueue());
   }
 
   /**
@@ -829,15 +868,21 @@ export class LaunchService {
     // Every reason the candidate carries, whichever bucket it landed in: a bed
     // that is not clear is a *blocker* in the dispatch vocabulary and still the
     // most confirmable fact on the screen.
-    const codes = new Set(
-      [...candidate.blockers, ...candidate.reviews, ...candidate.warnings].map((r) => r.code)
-    );
+    //
+    // Keyed off the reason's own `confirmation`, not off its code. The two are
+    // not the same question for the bed: `BED_NOT_CLEAR` is raised both for a
+    // plate holding a finished part (an operator empties it) and for a plate
+    // another job is running on (nobody empties that, and `clearBed` refuses).
+    // `confirmationFor` has already made that distinction — reading the raw
+    // codes here would undo it and put the impossible tick back on screen.
+    const reasons = [...candidate.blockers, ...candidate.reviews, ...candidate.warnings];
+    const bed = reasons.filter((r) => r.confirmation === "bed_clear");
 
-    if (codes.has("BED_STATE_UNKNOWN") || codes.has("BED_NOT_CLEAR")) {
+    if (bed.length > 0) {
       out.push({
         code: "bed_clear",
         label: "Стол свободен",
-        detail: codes.has("BED_NOT_CLEAR")
+        detail: bed.some((r) => r.code === "BED_NOT_CLEAR")
           ? "На столе осталась готовая модель — снимите её перед запуском."
           : "Система не знает, что сейчас на столе. Проверьте, что он пуст.",
         required: true,
@@ -909,6 +954,17 @@ export class LaunchService {
   }
 }
 
+/** Open queue rows already pointing at each printer — the tie-break depth. */
+function queueDepthOf(rows: readonly { task: PrintTask }[]): Map<string, number> {
+  const depth = new Map<string, number>();
+  for (const row of rows) {
+    const target = row.task.pinnedPrinterId ?? row.task.targetPrinter;
+    if (!target) continue;
+    depth.set(target, (depth.get(target) ?? 0) + 1);
+  }
+  return depth;
+}
+
 /**
  * The eligibility's reasons, split into the three buckets the launch screen
  * speaks — and *only* by facts the domain already decided.
@@ -953,12 +1009,14 @@ function splitReasons(eligibility: DispatchEligibility): {
 }
 
 function toLaunchReason(r: EligibilityReason): LaunchReason {
-  const evidence = r.evidence as { stage?: string; code?: string; origin?: string } | undefined;
+  const evidence = r.evidence as
+    | { stage?: string; code?: string; origin?: string; bedState?: unknown }
+    | undefined;
   const fromPreflight = evidence?.stage === "preflight";
   const preflightCode =
     fromPreflight && typeof evidence?.code === "string" ? evidence.code : undefined;
   const origin = fromPreflight && typeof evidence?.origin === "string" ? evidence.origin : undefined;
-  const confirmation = CONFIRMATION_FOR_CODE[r.code];
+  const confirmation = confirmationFor(r, evidence);
   return {
     code: r.code,
     message: r.message,
@@ -967,6 +1025,37 @@ function toLaunchReason(r: EligibilityReason): LaunchReason {
     ...(confirmation ? { confirmation } : {}),
     overridable: !NON_OVERRIDABLE.has(r.code)
   };
+}
+
+/**
+ * The confirmation that would *resolve* this reason, if any.
+ *
+ * Only `BED_NOT_CLEAR` needs more than the code to decide, because the same code
+ * covers both a plate an operator can empty and a plate another job is using —
+ * see {@link CONFIRMABLE_BED_STATES}. Two sources answer that, and the reason
+ * carries whichever its origin knew:
+ *
+ *  - the dispatch rule states the bed state outright (`evidence.bedState`);
+ *  - the lifted preflight reason states its own code, and
+ *    `bed_awaiting_clearance` is raised for exactly one state — a finished part
+ *    waiting to be taken off. (`RUNNING`/`RESERVED` become `printer_busy` there,
+ *    never this.)
+ *
+ * A reason carrying neither gets no tick: an unattributed "стол не свободен" is
+ * not evidence that removing something would help.
+ */
+function confirmationFor(
+  reason: EligibilityReason,
+  evidence: { code?: string; bedState?: unknown } | undefined
+): LaunchConfirmationKey | undefined {
+  const confirmation = CONFIRMATION_FOR_CODE[reason.code];
+  if (!confirmation) return undefined;
+  if (reason.code !== "BED_NOT_CLEAR") return confirmation;
+  if (evidence?.code === "bed_awaiting_clearance") return confirmation;
+  const bedState = evidence?.bedState;
+  return typeof bedState === "string" && CONFIRMABLE_BED_STATES.has(bedState)
+    ? confirmation
+    : undefined;
 }
 
 /**

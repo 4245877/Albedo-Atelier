@@ -368,3 +368,40 @@ test("DELETE /artifacts/:id on an unknown id is a 404, not a silent success", as
   });
   assert.equal(res.statusCode, 404);
 });
+
+/* ── Deprecation of the artifact-less lifecycle ─────────────────────────────
+ *
+ * `POST /api/print/tasks` mints a task around a TYPED on-printer file name: no
+ * artifact, no content hash, no analysis, so nothing downstream can prove that
+ * what starts is what anybody inspected. The dashboard no longer offers it and
+ * the supported route is an upload — but the endpoint is still served, because
+ * external callers and a good deal of this suite build fixtures through it.
+ *
+ * The announcement is therefore the whole of the deprecation, and it is the part
+ * nothing was pinning: the headers had drifted from its sibling
+ * `POST /api/queue`, which sends three where this sent two — and the missing one
+ * was `Warning`, the only header a browser console surfaces unprompted. A
+ * deprecation that reaches nobody is a comment.
+ */
+test("the artifact-less task route announces its deprecation, and still works", async () => {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/print/tasks",
+    headers: { authorization: `Bearer ${TOKEN}` },
+    payload: { title: "Legacy task", printer: "k2", file: "legacy.gcode" }
+  });
+
+  assert.equal(res.statusCode, 200, "deprecated is not removed — existing callers keep working");
+  // The route returns a whole `TaskDetail`, so the task is one level in.
+  assert.ok(res.json().task.task.id);
+
+  assert.equal(res.headers.deprecation, "true");
+  assert.match(String(res.headers.link), /rel="successor-version"/);
+  assert.match(String(res.headers.link), /\/api\/print\/artifacts/, "and names the replacement");
+  assert.match(
+    String(res.headers.warning),
+    /^299 /,
+    "the miscellaneous-warning code, the one a client surfaces on its own"
+  );
+  assert.match(String(res.headers.warning), /artifact or analysis/);
+});
