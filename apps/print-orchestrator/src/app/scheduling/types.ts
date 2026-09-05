@@ -21,8 +21,13 @@ export interface SchedulerPrinterRef {
   protocol: string | null;
   /** Interchangeability class (config `printerClass`); null/empty when none. */
   printerClass?: string | null;
-  /** Loaded material (live telemetry or config fallback); null when unknown. */
+  /**
+   * The filament the printer reports **loaded right now**; null when no live
+   * telemetry knows. Never the config declaration — see {@link supportedMaterials}.
+   */
   material: string | null;
+  /** Material families the printer is *declared* to handle (config). Context only. */
+  supportedMaterials?: readonly string[];
   /** Nozzle diameter (live or config); null when unknown. */
   nozzleMm: number | null;
   /** Build volume in mm from config; null when not configured. */

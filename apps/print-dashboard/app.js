@@ -155,7 +155,26 @@ function renderBackendError(err) {
    а stop() (на pagehide) снимает таймер и обрывает активный запрос. */
 const DASHBOARD_POLL_MS = 6000;
 const dashboardPoller = createPoller({
-  run: (signal) => apiGet("/api/dashboard", { signal }),
+  /*
+   * Две выборки за тик, а не одна.
+   *
+   * `/api/dashboard` описывает, ЧТО стоит в очереди; `/api/print/launch` —
+   * можно ли это запустить и на чём. Второе не является свойством строки
+   * очереди: оно зависит от состояния каждого принтера здесь и сейчас, и
+   * считается тем же preflight, что и сам запуск. Без него строка могла
+   * сказать лишь «QUEUED + WAITING» — то есть «готово к запуску» про задание,
+   * у которого нет ни одного пригодного принтера.
+   *
+   * Отказ второго запроса не роняет доску: очередь по-прежнему видна, просто
+   * без готовности (readiness остаётся пустым, и строка честно молчит).
+   */
+  run: async (signal) => {
+    const [data, launch] = await Promise.all([
+      apiGet("/api/dashboard", { signal }),
+      apiGet("/api/print/launch", { signal }).catch(() => null)
+    ]);
+    return { ...data, launchReadiness: launch?.rows ?? null };
+  },
   apply: (data, { wasReachable }) => {
     state = data;
     backendReachable = true;

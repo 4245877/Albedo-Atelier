@@ -1816,3 +1816,33 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
   .hall-rail .card { padding: var(--s-4) var(--s-3); }
   .printer-actions .btn span { font-size: var(--t-12); }
 }
+
+/* ── Состояние стола на карточке принтера ──────────────────────
+   Отдельный факт, регулярно расходящийся с телеметрией: принтер сообщает
+   «свободен», пока готовая деталь лежит на площадке. Свободный стол — тихая
+   строка; ожидающий снятия — заметная, с действием, потому что именно он
+   держит очередь. */
+.printer-bed {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font-size: 12.5px;
+}
+.printer-bed-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.printer-bed.bed-ok { color: var(--ink-faint); }
+.printer-bed.bed-info { color: var(--ink-soft); }
+.printer-bed.bed-warn {
+  padding: 7px 9px;
+  border: 1px solid var(--warn-line);
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft);
+  color: var(--warn-ink);
+}
+.printer-bed .btn { margin-left: auto; }

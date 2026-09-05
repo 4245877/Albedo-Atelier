@@ -115,6 +115,16 @@
 }
 .row-reason .ico { margin-top: 2px; font-size: 14px; }
 .row-warn .row-reason { color: var(--warn-ink); }
+
+/* Готовность к запуску: «Можно запустить на A1», «Нужно подтвердить материал».
+   Не отказ (для него есть .row-reason со знаком), а ответ на вопрос «что будет,
+   если нажать» — поэтому спокойным тоном, отдельной строкой под подписью. */
+.row-detail {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
 .row-blocked .row-reason { color: var(--blocked-ink); }
 
 .row-time {

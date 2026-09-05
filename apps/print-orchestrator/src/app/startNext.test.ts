@@ -170,7 +170,16 @@ test("two concurrent start-next requests dispatch the single ready job exactly o
   await store.stop();
 });
 
-test("a declared material contradiction refuses the start (fail-closed 409)", async () => {
+test("a printer's DECLARED material list is not a statement about the loaded spool", async () => {
+  // The config says `material: "PLA"`, and this job wants PETG. That used to be
+  // a hard `material_mismatch`: the field was read as the filament physically in
+  // the machine, and `materialsClash` reduced a capability list like
+  // "PLA / PETG / TPU" to its first token — so a PETG job was refused with
+  // «заправлен PLA», a sentence nobody had written about that spool.
+  //
+  // Nothing here reports a live filament, so the honest answer is "unknown", and
+  // unknown is a question for the operator, never a contradiction. The start is
+  // still refused — fail-closed is unchanged — but for a reason that is true.
   const store = new FarmStore(file);
   await store.start();
   store.addQueueJob({ title: "Vase", printer: "k2", material: "PETG", file: "vase.gcode" });
@@ -179,11 +188,15 @@ test("a declared material contradiction refuses the start (fail-closed 409)", as
     () => store.startNext(),
     (err: unknown) => {
       assert.ok(err instanceof JobError);
-      assert.match((err as JobError).message, /не совпадает/);
+      assert.doesNotMatch(
+        (err as JobError).message,
+        /не совпадает/,
+        "an unread spool is not a mismatch"
+      );
       return true;
     }
   );
-  assert.equal(startCalls.length, 0);
+  assert.equal(startCalls.length, 0, "and nothing was started");
   assert.equal(store.reads.getQueue().length, 1, "the job stays queued for the operator");
 
   await store.stop();

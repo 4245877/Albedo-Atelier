@@ -10,8 +10,10 @@ import {
   type DispatchEligibility,
   type DispatchFacts,
   type DispatchMode,
-  type DispatchReservation
+  type DispatchReservation,
+  type EligibilityStage
 } from "../../domain/dispatch/eligibility";
+import { readAnalysisReview } from "../../domain/print/analysisReview";
 import { supportsPrinterUpload } from "../../infra/printers/files";
 import { ANALYZER_VERSION } from "../artifacts/analyzers";
 import { profileRevisionIdsOf, resolveTaskBinding } from "../dispatch/binding";
@@ -25,6 +27,13 @@ export interface EligibilityRequest {
   taskId: string;
   printerId: string;
   mode: DispatchMode;
+  /**
+   * Which half of the launch is being decided — see {@link EligibilityStage}.
+   * Defaults to `dispatch` (the complete rule set); the preview and the
+   * pre-delivery re-check pass `preflight`, which drops only the two rules that
+   * cannot be answered until the file is on the device.
+   */
+  stage?: EligibilityStage;
   /** How far the on-device file check got. Defaults to `unchecked` (a preview). */
   deviceFileIdentity?: DeviceFileIdentity;
   /** The path the dispatch would actually start, when it differs from the task hint. */
@@ -90,11 +99,22 @@ export class EligibilityQueries {
 
     const file = request.file !== undefined ? request.file : readTaskFile(task, resolved.artifact);
 
+    // The operator's acceptance of a `review` verdict, resolved against the bytes
+    // and the analysis as they stand now (a re-upload or a re-analysis lapses it).
+    const review =
+      resolved.artifact && resolved.analysis
+        ? readAnalysisReview(resolved.artifact, resolved.analysis)
+        : null;
+    const reviewAccepted = review !== null && !review.stale;
+
     const facts: DispatchFacts = {
       mode: request.mode,
+      stage: request.stage ?? "dispatch",
       taskState: task.state,
       entryState: entry?.state ?? null,
-      night: task.night,
+      // One field decides "when", and it is the task's day/night preference.
+      // `task.night` is its persisted projection, kept in step by the write path.
+      night: task.dayNightPreference === "night",
       unattendedAllowed: task.unattendedAllowed,
 
       file,
@@ -117,7 +137,11 @@ export class EligibilityQueries {
             analyzerVersion: resolved.analysis.analyzerVersion,
             updatedAt: resolved.analysis.updatedAt,
             declaredTargetPrinter: readString(resolved.analysis.data, "printerModel"),
-            declaredGcodeFlavor: readString(resolved.analysis.data, "flavor")
+            declaredGcodeFlavor: readString(resolved.analysis.data, "flavor"),
+            containsGcodePayload: readGcodePayload(resolved.analysis.data),
+            reviewAccepted,
+            reviewAcceptedBy: reviewAccepted ? review!.acknowledgement.confirmedBy : null,
+            reviewAcceptedAt: reviewAccepted ? review!.acknowledgement.confirmedAt : null
           }
         : null,
       currentAnalyzerVersion: ANALYZER_VERSION,
@@ -354,6 +378,19 @@ function etaMinutesOf(sliceEtaS: number | null, gcodeEtaS: number | null): numbe
 
 function positive(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * Whether a 3MF archive was found to hold a real sliced plate, from the 3MF
+ * analyzer's own classification. `null` when the analysis says nothing — which
+ * the domain treats as a refusal, not as a pass.
+ */
+function readGcodePayload(data: Record<string, unknown> | null | undefined): boolean | null {
+  if (!data) return null;
+  if (data.hasGcodePayload === true) return true;
+  if (data.threeMfClass === "sliced") return true;
+  if (data.hasGcodePayload === false) return false;
+  return null;
 }
 
 function readString(source: Record<string, unknown> | null | undefined, key: string): string | null {

@@ -623,11 +623,14 @@ test("an incompatible material blocks the printer and says so in operator langua
   const preview = h.launch.preview(task.id);
   const a1 = preview.candidates.find((c) => c.printerId === "bambu-a1")!;
   assert.equal(a1.eligible, false);
-  const problem = a1.problems.find((p) => p.code === "material_mismatch");
+  // The preview now speaks the dispatch contract's vocabulary, because it runs
+  // the dispatch policy. The originating preflight code survives in the
+  // diagnostics line — and, invisibly, as what picks the operator wording.
+  const problem = a1.problems.find((p) => p.code === "MATERIAL_MISMATCH");
   assert.ok(problem, "the mismatch must be reported");
   assert.equal(problem.kind, "blocker");
   assert.match(problem.title, /материал/i);
-  assert.ok(problem.technical.includes("material_mismatch"), "the code stays in diagnostics");
+  assert.ok(problem.technical.includes("MATERIAL_MISMATCH"), "the code stays in diagnostics");
 });
 
 test("a nozzle mismatch blocks the launch", () => {
@@ -637,7 +640,7 @@ test("a nozzle mismatch blocks the launch", () => {
   const preview = h.launch.preview(task.id);
   const a1 = preview.candidates.find((c) => c.printerId === "bambu-a1")!;
   assert.equal(a1.eligible, false);
-  assert.ok(a1.problems.some((p) => p.code === "nozzle_mismatch" && p.kind === "blocker"));
+  assert.ok(a1.problems.some((p) => p.code === "NOZZLE_MISMATCH" && p.kind === "blocker"));
 });
 
 // ── Printer availability ─────────────────────────────────────────────────────
@@ -651,7 +654,7 @@ test("an offline printer is not recommended and explains itself", () => {
   assert.equal(preview.recommendedPrinterId, null);
   assert.equal(preview.state, "blocked");
   const a1 = preview.candidates.find((c) => c.printerId === "bambu-a1")!;
-  assert.ok(a1.problems.some((p) => p.code === "printer_offline"));
+  assert.ok(a1.problems.some((p) => p.code === "PRINTER_OFFLINE"));
 });
 
 test("a busy printer does not accept a second job", async () => {
@@ -800,14 +803,14 @@ test("a failed launch does not make the printer report itself busy", async () =>
   // The bed this launch reserved used to read back as «принтер занят» — the
   // printer blocking itself, with the real cause invisible.
   assert.ok(
-    !a1.warnings.some((w) => w.code === "printer_busy"),
+    !a1.warnings.some((w) => w.code === "PRINTER_BUSY"),
     "an unresolved attempt is not an occupancy"
   );
   assert.ok(
-    a1.blockers.some((b) => b.code === "launch_unconfirmed"),
+    a1.blockers.some((b) => b.code === "LAUNCH_UNCONFIRMED"),
     "it is reported as what it is: a start nobody confirmed"
   );
-  assert.equal(preview.primaryProblem?.code, "launch_unconfirmed", "one cause, and it is the cause");
+  assert.equal(preview.primaryProblem?.code, "LAUNCH_UNCONFIRMED", "one cause, and it is the cause");
 });
 
 test("resolving «печать не началась» releases everything and re-queues the task", async () => {
@@ -904,9 +907,9 @@ test("a device fault is the headline, and the consequences are not repeated besi
   const a1 = preview.candidates.find((c) => c.printerId === "bambu-a1");
   assert.ok(a1);
 
-  assert.equal(preview.primaryProblem?.code, "printer_fault");
+  assert.equal(preview.primaryProblem?.code, "PRINTER_FAULT");
   assert.match(preview.primaryProblem?.action ?? "", /0500-C010/);
-  const errorBlockers = a1.blockers.filter((b) => b.code === "printer_error");
+  const errorBlockers = a1.blockers.filter((b) => b.code === "PRINTER_ERROR");
   assert.equal(
     errorBlockers.length,
     0,

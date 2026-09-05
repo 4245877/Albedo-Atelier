@@ -1,6 +1,7 @@
 import { NotFoundError } from "../../core/errors";
 import type { Artifact, ArtifactAnalysis, AuditEvent, PrintTask } from "../../domain/print/types";
 import type { ArtifactContext } from "./context";
+import { resolveArtifactStatus, type ArtifactStatusView } from "./nextAction";
 import { deletionBlocker } from "./retention";
 
 export interface ArtifactSummary {
@@ -15,6 +16,13 @@ export interface ArtifactSummary {
    * the delete, and the transaction re-checks.
    */
   deletionBlocker: string | null;
+  /**
+   * The single obvious next step for this file, decided by the server — see
+   * {@link resolveArtifactStatus}. The acceptance rule for the whole intake is
+   * that this is never «nothing»: either an action, or a sentence saying why
+   * printing is impossible.
+   */
+  status: ArtifactStatusView;
 }
 
 export interface ArtifactDetail {
@@ -24,6 +32,8 @@ export interface ArtifactDetail {
   audit: AuditEvent[];
   /** @see {@link ArtifactSummary.deletionBlocker} */
   deletionBlocker: string | null;
+  /** @see {@link ArtifactSummary.status} */
+  status: ArtifactStatusView;
 }
 
 /** Read side of the artifact store: listings and the per-artifact detail. */
@@ -34,12 +44,17 @@ export class ArtifactQueries {
     const repos = this.ctx.store.repositories;
     return repos.artifacts
       .list()
-      .map((artifact) => ({
-        artifact,
-        task: repos.tasks.findByArtifactId(artifact.id),
-        analysis: repos.artifactAnalyses.latestForArtifact(artifact.id),
-        deletionBlocker: deletionBlocker(repos, artifact.id)
-      }))
+      .map((artifact) => {
+        const task = repos.tasks.findByArtifactId(artifact.id);
+        const analysis = repos.artifactAnalyses.latestForArtifact(artifact.id);
+        return {
+          artifact,
+          task,
+          analysis,
+          deletionBlocker: deletionBlocker(repos, artifact.id),
+          status: resolveArtifactStatus(artifact, analysis, task)
+        };
+      })
       .reverse(); // newest upload first
   }
 
@@ -52,12 +67,18 @@ export class ArtifactQueries {
       ...repos.audit.listByEntity("artifact", id),
       ...(task ? repos.audit.listByEntity("print_task", task.id) : [])
     ].sort((a, b) => (a.at < b.at ? 1 : -1));
+    const analyses = repos.artifactAnalyses.listByArtifact(id);
     return {
       artifact,
       task,
-      analyses: repos.artifactAnalyses.listByArtifact(id),
+      analyses,
       audit,
-      deletionBlocker: deletionBlocker(repos, id)
+      deletionBlocker: deletionBlocker(repos, id),
+      status: resolveArtifactStatus(
+        artifact,
+        repos.artifactAnalyses.latestForArtifact(id),
+        task
+      )
     };
   }
 }

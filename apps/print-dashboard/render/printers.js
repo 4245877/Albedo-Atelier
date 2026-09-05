@@ -143,11 +143,51 @@ function printerCard(p, lightEntry) {
         <div class="printer-job">${jobLine(p)}</div>
         ${progressBlock}
         ${teleBlock(p)}
+        ${bedBlock(p)}
         ${materialBlock(p)}
         ${lightLine}
         ${actionBar(p, { context: "card" })}
       </div>
     </article>`;
+}
+
+/* ── Состояние стола ────────────────────────────────────────────
+
+   Отдельная строка на карточке, потому что это отдельный факт, и он регулярно
+   расходится с тем, что показывает сам принтер: машина, только что закончившая
+   печать, честно сообщает «свободен», пока готовая деталь лежит на площадке. До
+   сих пор это состояние жило только внутри dispatch gate — оператор видел
+   зелёный «свободен» и не понимал, почему следующее задание не стартует.
+
+   Действие ведёт в уже существующий жизненный цикл: сервер сам создаёт операцию
+   PART_REMOVAL после печати, и её подтверждение — единственный переход из
+   AWAITING_CLEARANCE. Параллельной логики очистки здесь нет. */
+const BED_LABEL = {
+  CLEAR: { text: "стол свободен", cls: "ok" },
+  RESERVED: { text: "стол зарезервирован под запуск", cls: "info" },
+  RUNNING: { text: "идёт печать", cls: "info" },
+  AWAITING_CLEARANCE: { text: "ожидает снятия детали", cls: "warn" },
+  UNKNOWN: { text: "состояние стола неизвестно", cls: "warn" }
+};
+
+export function bedBlock(p) {
+  const bed = p.bedCycle;
+  // null — стол не отслеживается (нет БД). Молчим: выдумывать «свободен» тут
+  // хуже всего, а «неизвестно» уже занято отслеживаемым UNKNOWN.
+  if (!bed) return "";
+  const label = BED_LABEL[bed.state] || { text: bed.state, cls: "warn" };
+  const action = bed.awaitingClearance
+    ? `<button type="button" class="btn btn-sm btn-primary"
+         data-act="clear-bed" data-printer="${esc(p.id)}"
+         ${bed.operationId ? `data-operation="${esc(bed.operationId)}"` : ""}>
+         Снять модель и освободить стол
+       </button>`
+    : "";
+  return `
+    <div class="printer-bed bed-${esc(label.cls)}">
+      <span class="printer-bed-state">${icon(label.cls === "ok" ? "check" : "warn")}<span>${esc(label.text)}</span></span>
+      ${action}
+    </div>`;
 }
 
 export function renderPrinters(state) {

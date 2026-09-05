@@ -288,6 +288,70 @@
 .upload-actions {
   margin-top: 10px;
 }
+
+/* ── Следующий шаг карточки загрузки ───────────────────────────
+   Единственная строка, отвечающая на «и что теперь?». Она обрамлена и слегка
+   подсвечена, потому что это НЕ ещё одна заметка о файле: остальное на карточке
+   описывает состояние, а это — то, что можно сделать. Когда действия нет
+   (`is-inert`), рамка гаснет: обещать кнопку там, где её нет, хуже, чем честно
+   объяснить, почему печать невозможна. */
+.upload-next {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--ok-line);
+  border-radius: var(--radius-sm);
+  background: var(--ok-soft);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.upload-next.is-inert {
+  border-color: var(--card-edge);
+  background: var(--card-inner);
+}
+.upload-next-text {
+  margin: 0;
+  flex: 1 1 240px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--ink);
+}
+.upload-next.is-inert .upload-next-text { color: var(--ink-soft); }
+
+/* Подтверждённый факт (единицы, проверка) — та же строка-заметка, но со знаком
+   и цветом: кто и когда это сказал, читается за один взгляд. */
+.upload-note-ok,
+.upload-note-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.upload-note-ok { color: var(--ok-ink); }
+.upload-note-warn { color: var(--warn-ink); }
+.upload-note-ok > .ico,
+.upload-note-warn > .ico { margin-top: 2px; flex: none; }
+
+/* Выбор единиц модели: четыре равноправных варианта, у каждого — во что
+   превратится прочитанный габарит. Выбор без этого числа делается вслепую. */
+.units-choice {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.units-choice .btn {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 10px 12px;
+  text-align: left;
+}
+.units-hint {
+  font-size: 12px;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
 .upload-task {
   margin-top: 12px;
   font-size: 13px;
@@ -521,6 +585,33 @@
   color: var(--warn-ink);
   font-size: 13px;
 }
+
+/* Настройки, найденные ВНУТРИ проекта 3MF, — рядом с выбором профиля системы.
+   Не предупреждение об ошибке (ничего не сломано) и не подсказка (это факт о
+   файле): спокойная информационная врезка, в которой видно оба варианта сразу. */
+.slice-project {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius-sm);
+  background: var(--card-inner);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.slice-project > .ico { flex: none; margin-top: 2px; color: var(--ink-soft); }
+
+.slice-project-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin: 8px 0 0;
+  font-size: 12.5px;
+}
+.slice-project-list dt { color: var(--ink-faint); }
+.slice-project-list dd { margin: 0; color: var(--ink); }
 /* Баннер частичной ошибки загрузки раздела: показан вместе с последними данными. */
 .slice-errbox {
   display: flex;
@@ -1579,6 +1670,18 @@
 
 .launch-reason-action { margin-top: 3px; }
 
+/* Ручной выбор оператора: тот же абзац, но со знаком и в цвете подтверждения —
+   чтобы «Принтер выбран вручную» нельзя было спутать с объяснением, которое
+   система дала бы сама. */
+.launch-reason.is-manual {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--ok-ink);
+}
+.launch-reason.is-manual > .ico { flex: none; align-self: center; }
+.launch-reason .btn { margin-left: 8px; vertical-align: baseline; }
+
 /* ── Неподтверждённый запуск ─────────────────────────────────── */
 
 .launch-unresolved {
@@ -1619,6 +1722,36 @@
 .launch-confirm span { display: block; min-width: 0; }
 .launch-confirm-lbl { font-size: 13.5px; font-weight: 700; color: var(--ink); }
 .launch-confirm-hint { margin-top: 2px; font-size: 12px; color: var(--ink-soft); }
+/* Последствие галочки — что именно сервер сделает и запишет от имени оператора.
+   Тише подсказки: подтверждают факт, а это его следствие. */
+.launch-confirm-effect {
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+}
+
+/* ── Открытые вопросы без своей галочки ──────────────────────
+   Профиль не утверждён, габариты не подтверждены, раскладка филаментов не
+   задана. Раньше это жило только в «Технических подробностях», и «Нужно
+   подтверждение» в шапке оставалось без ответа на вопрос «что подтвердить». */
+.launch-open {
+  margin-top: 12px;
+  padding: 11px 12px;
+  border: 1px solid var(--warn-line);
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.launch-open-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+}
+
+.launch-open-what { font-weight: 600; color: var(--ink); }
+.launch-open-how { display: block; color: var(--ink-soft); }
 
 /* ── Принятие ответственности за «review» ────────────────────
    Не danger (это не отказ) и не обычное подтверждение (это не факт, который
@@ -1940,3 +2073,111 @@
   .prn-actions .menu-host { margin-left: auto; }
   .mx-cell { min-width: 140px; }
 }
+
+/* ── Карточка задания ──────────────────────────────────────────
+   Диагностическое окно: цепочка artifact → анализ → слайсинг → очередь →
+   назначение → доставка → запуск → прогон. Читается сверху вниз как история,
+   поэтому звенья — нумерованный список с левой линией, а не набор карточек:
+   важно видеть, докуда дошло дело, а не каждое звено по отдельности. */
+.task-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.task-id {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+}
+
+.task-readiness {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius-sm);
+  background: var(--card-inner);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.task-readiness.tone-ok { border-color: var(--ok-line); background: var(--ok-soft); color: var(--ok-ink); }
+.task-readiness.tone-warn { border-color: var(--warn-line); background: var(--warn-soft); color: var(--warn-ink); }
+.task-readiness.tone-blocked { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger-ink); }
+.task-readiness > .ico { flex: none; margin-top: 2px; }
+.task-readiness-text { font-weight: 600; }
+.task-readiness-action { margin-top: 3px; font-weight: 400; color: var(--ink-soft); }
+
+.task-chain {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0 0 0 14px;
+  border-left: 2px solid var(--card-edge);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.task-step { position: relative; font-size: 13px; }
+.task-step::before {
+  content: "";
+  position: absolute;
+  left: -19px;
+  top: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--card-edge);
+}
+.task-step.tone-ok::before { background: var(--ok); }
+.task-step.tone-warn::before { background: var(--warn); }
+.task-step.tone-error::before { background: var(--danger); }
+
+.task-step-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.task-step-name { font-weight: 600; color: var(--ink); }
+.task-step-state { color: var(--ink-soft); font-size: 12.5px; }
+.task-step.tone-error .task-step-state { color: var(--danger-ink); }
+
+.task-step-rows {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1px 12px;
+  margin: 5px 0 0;
+  font-size: 12.5px;
+}
+.task-step-rows dt { color: var(--ink-faint); }
+.task-step-rows dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+
+.task-list {
+  list-style: none;
+  margin: 5px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+}
+.task-list li { color: var(--ink); }
+.task-sub { display: block; color: var(--ink-faint); }
+.task-err { color: var(--danger-ink); }
+.task-strike { display: block; color: var(--ink-faint); text-decoration: line-through; }
+
+.task-ops { margin-top: 14px; }
+.task-audit { margin-top: 14px; font-size: 12.5px; }
+.task-audit summary { cursor: pointer; color: var(--ink-soft); }
+
+/* Заголовок строки очереди как кнопка: выглядит текстом, ведёт в карточку. */
+.row-title-link {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.row-title-link:hover,
+.row-title-link:focus-visible { text-decoration: underline; }

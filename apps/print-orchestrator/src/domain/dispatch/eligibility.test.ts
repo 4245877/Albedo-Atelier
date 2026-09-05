@@ -755,3 +755,209 @@ test("a bare .3mf holding G-code keeps its old meaning — refused", () => {
   });
   assert.ok(result.reasons.some((r) => r.code === REASON.FORMAT_MISMATCH));
 });
+
+/* ── Preflight vs dispatch: one rule set, two stages ────────────────────────
+ *
+ * The two used to be different *rule sets*: the preview ran
+ * `evaluateCompatibility` alone, so it never saw the file's declared target, the
+ * G-code flavor, remote-start support or the queue shape — and cheerfully
+ * offered a printer whose refusal was already certain, after which the operator
+ * confirmed, the file was uploaded, and only then the gate said no.
+ *
+ * The invariant these tests hold: `preflight` refuses everything `dispatch`
+ * refuses EXCEPT the two facts that need the bytes to have moved. So a preview
+ * that passes can only be overtaken by a change, never by something that was
+ * already true.
+ */
+
+test("preflight drops only the rules that need the file to be on the device", () => {
+  const before = evaluate("manual", {
+    facts: { stage: "preflight", deviceFileIdentity: "unchecked", deviceArtifact: null }
+  });
+  // At `dispatch` those same facts are exactly what refuses the start.
+  const after = evaluate("manual", {
+    facts: { stage: "dispatch", deviceFileIdentity: "unchecked", deviceArtifact: null }
+  });
+
+  assert.equal(before.status, "eligible", "an undelivered file is not a preview refusal");
+  assert.equal(after.status, "blocked");
+  assert.ok(codes(after).includes(REASON.DEVICE_FILE_NOT_VERIFIED));
+  assert.ok(codes(after).includes(REASON.DEVICE_TRANSFER_NOT_CONFIRMED));
+});
+
+test("preflight still refuses a file built for another printer — before any transfer", () => {
+  const result = evaluate("manual", {
+    facts: {
+      stage: "preflight",
+      deviceArtifact: null,
+      deviceFileIdentity: "unchecked",
+      analysis: {
+        id: "an1",
+        state: "ready",
+        verdict: "schedulable",
+        detectedFormat: "gcode",
+        blockers: [],
+        analyzerVersion: "1.0.0",
+        updatedAt: "2026-07-26T11:00:00Z",
+        declaredTargetPrinter: "Bambu Lab A1",
+        declaredGcodeFlavor: "klipper"
+      }
+    }
+  });
+  assert.equal(result.status, "blocked");
+  assert.ok(codes(result).includes(REASON.TARGET_PRINTER_MISMATCH));
+});
+
+test("preflight still refuses an adapter that cannot start remotely", () => {
+  const result = evaluate("manual", {
+    facts: { stage: "preflight", deviceArtifact: null, remoteStartSupported: false }
+  });
+  assert.ok(codes(result).includes(REASON.REMOTE_START_UNSUPPORTED));
+  assert.equal(result.status, "blocked");
+});
+
+test("preflight still refuses a task that is not actually in the queue", () => {
+  const result = evaluate("manual", {
+    facts: { stage: "preflight", deviceArtifact: null, taskState: "DRAFT", entryState: null }
+  });
+  assert.ok(codes(result).includes(REASON.TASK_STATE));
+  assert.ok(codes(result).includes(REASON.NO_QUEUE_ENTRY));
+});
+
+test("the default stage is the STRICT one — a caller that forgets does not get leniency", () => {
+  // `stage` omitted entirely.
+  const result = evaluate("manual", {
+    facts: { deviceFileIdentity: "unchecked", deviceArtifact: null }
+  });
+  assert.equal(result.status, "blocked", "fail-closed by construction");
+});
+
+/* ── The review acknowledgement ─────────────────────────────────────────── */
+
+const REVIEWED = {
+  id: "an1",
+  state: "ready",
+  verdict: "review",
+  detectedFormat: "gcode",
+  blockers: [] as { code: string; message: string }[],
+  analyzerVersion: "1.0.0",
+  updatedAt: "2026-07-26T11:00:00Z",
+  declaredTargetPrinter: "K2 Plus",
+  declaredGcodeFlavor: "klipper"
+};
+
+test("an unread `review` verdict refuses the start", () => {
+  const result = evaluate("manual", { facts: { analysis: { ...REVIEWED } } });
+  assert.equal(result.status, "blocked");
+  assert.ok(codes(result).includes(REASON.ANALYSIS_VERDICT));
+});
+
+test("a review a named operator accepted becomes a warning, not a pass in silence", () => {
+  const result = evaluate("manual", {
+    facts: {
+      analysis: { ...REVIEWED, reviewAccepted: true, reviewAcceptedBy: "мастер", reviewAcceptedAt: "t" }
+    }
+  });
+  assert.equal(result.status, "review", "the reason is still on screen and still in the ledger");
+  const reason = result.reasons.find((r) => r.code === REASON.ANALYSIS_VERDICT)!;
+  assert.equal(reason.severity, "warning");
+  assert.match(reason.message, /мастер/, "and it names who accepted it");
+});
+
+test("an accepted review does NOT authorise an unattended start", () => {
+  const result = evaluate("night", {
+    facts: {
+      analysis: { ...REVIEWED, reviewAccepted: true, reviewAcceptedBy: "мастер", reviewAcceptedAt: "t" }
+    }
+  });
+  // Nobody is present at night to have accepted anything on the machine's behalf.
+  const reason = result.reasons.find((r) => r.code === REASON.ANALYSIS_VERDICT)!;
+  assert.equal(reason.severity, "blocker");
+});
+
+test("an acknowledgement never clears an analysis BLOCKER", () => {
+  const result = evaluate("manual", {
+    facts: {
+      analysis: {
+        ...REVIEWED,
+        reviewAccepted: true,
+        reviewAcceptedBy: "мастер",
+        blockers: [{ code: "gcode_forbidden", message: "M502 вне контекста калибровки" }]
+      }
+    }
+  });
+  assert.equal(result.status, "blocked");
+  assert.ok(codes(result).includes(REASON.ANALYSIS_BLOCKERS));
+});
+
+/* ── The `.gcode.3mf` container ─────────────────────────────────────────── */
+
+test("an uploaded sliced 3MF is accepted as the container its name promises", () => {
+  const result = evaluate("manual", {
+    facts: {
+      file: "chalice.gcode.3mf",
+      deviceArtifact: {
+        state: "VERIFIED",
+        transferMode: "adapter_upload",
+        verification: "name_and_size",
+        remotePath: "chalice.gcode.3mf",
+        lastError: null,
+        stale: false,
+        staleReason: null
+      },
+      analysis: {
+        ...REVIEWED,
+        verdict: "schedulable",
+        detectedFormat: "3mf",
+        containsGcodePayload: true
+      }
+    }
+  });
+  assert.ok(
+    !codes(result).includes(REASON.FORMAT_MISMATCH),
+    "a plate package IS what «.gcode.3mf» claims — this refused every such upload"
+  );
+});
+
+test("a plain model renamed to .gcode.3mf is still a contradiction", () => {
+  const result = evaluate("manual", {
+    facts: {
+      file: "chalice.gcode.3mf",
+      deviceArtifact: {
+        state: "VERIFIED",
+        transferMode: "adapter_upload",
+        verification: "name_and_size",
+        remotePath: "chalice.gcode.3mf",
+        lastError: null,
+        stale: false,
+        staleReason: null
+      },
+      analysis: {
+        ...REVIEWED,
+        verdict: "schedulable",
+        detectedFormat: "3mf",
+        containsGcodePayload: false
+      }
+    }
+  });
+  assert.ok(codes(result).includes(REASON.FORMAT_MISMATCH));
+});
+
+test("an unanswered payload question refuses — «probably a print» is not evidence", () => {
+  const result = evaluate("manual", {
+    facts: {
+      file: "chalice.gcode.3mf",
+      deviceArtifact: {
+        state: "VERIFIED",
+        transferMode: "adapter_upload",
+        verification: "name_and_size",
+        remotePath: "chalice.gcode.3mf",
+        lastError: null,
+        stale: false,
+        staleReason: null
+      },
+      analysis: { ...REVIEWED, verdict: "schedulable", detectedFormat: "3mf" }
+    }
+  });
+  assert.ok(codes(result).includes(REASON.FORMAT_MISMATCH));
+});

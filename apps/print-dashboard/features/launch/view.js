@@ -109,18 +109,25 @@ function candidateCard(c, selectedId) {
 
 /* ── Подтверждения оператора ───────────────────────────────── */
 
+/* Галочка обязана отвечать на четыре вопроса: что подтверждают, как это
+   проверить, что произойдёт после подтверждения и кто за это отвечает. Раньше
+   были только первые два — «Стол свободен» и пояснение, — и оператор ставил
+   галочку, не зная, что сервер запишет от его имени очистку стола. `effect`
+   приходит с backend вместе с самой галочкой. */
 function confirmationsBlock(confirmations, confirmed) {
   if (!confirmations.length) return "";
   return `
     <div class="launch-confirms">
+      <div class="launch-reason-title">Подтвердите перед запуском</div>
       ${confirmations
         .map(
           (c) => `
         <label class="launch-confirm">
           <input type="checkbox" value="${esc(c.code)}" ${confirmed.has(c.code) ? "checked" : ""} data-launch-confirm />
           <span>
-            <span class="launch-confirm-lbl">${esc(c.label)}</span>
+            <span class="launch-confirm-lbl">${esc(c.label)}${c.required ? "" : " (необязательно)"}</span>
             <span class="launch-confirm-hint">${esc(c.detail)}</span>
+            ${c.effect ? `<span class="launch-confirm-effect">${esc(c.effect)}</span>` : ""}
           </span>
         </label>`
         )
@@ -130,7 +137,7 @@ function confirmationsBlock(confirmations, confirmed) {
 
 /* ── Проблемы: подтверждаемое и просто информация ───────────── */
 
-function problemsBlock(candidate) {
+function problemsBlock(candidate, confirmations) {
   if (!candidate) return "";
   // Блокеры уже сказаны крупно (кнопка выключена, причина в шапке) — здесь
   // только то, что оператору полезно знать, но что не мешает запуску.
@@ -140,6 +147,45 @@ function problemsBlock(candidate) {
     <ul class="launch-notes">
       ${infos.map((p) => `<li>${esc(p.title)}</li>`).join("")}
     </ul>`;
+}
+
+/* Открытые вопросы, у которых НЕТ своей галочки и которые не попали в блок
+   «под ответственность»: профиль не утверждён, габариты не подтверждены,
+   раскладка филаментов не задана.
+
+   Раньше они были видны только в «Технических подробностях» — то есть за
+   свёрнутым блоком с кодами отказов. Оператор читал «Нужно подтверждение» в
+   шапке и не имел способа узнать, ЧТО именно подтвердить. Теперь каждый такой
+   пункт стоит в основной части окна вместе с действием, которое его снимает. */
+function openQuestionsBlock(candidate, confirmations, ui) {
+  if (!candidate) return "";
+  // Пока стоит жёсткий отказ, открытые вопросы не показываем: их всё равно
+  // нельзя закрыть в обход блокера, и рядом с одной настоящей причиной они
+  // становятся тремя равноправными строками — ровно тот шум, из-за которого
+  // главную причину и перестают находить. Как только блокер снят, они
+  // возвращаются: тогда они и есть то, что мешает запуску.
+  if (candidate.problems.some((p) => p.kind === "blocker")) return "";
+  const covered = new Set(confirmations.map((c) => c.code));
+  const inOverride = new Set(overridableProblems(candidate).map((p) => p.code));
+  const open = candidate.problems.filter(
+    (p) =>
+      p.kind === "confirmable" &&
+      !(p.confirmation && covered.has(p.confirmation)) &&
+      !inOverride.has(p.code)
+  );
+  if (!open.length) return "";
+  return `
+    <div class="launch-open">
+      <div class="launch-reason-title">Требует внимания</div>
+      <ul class="launch-open-list">
+        ${open
+          .map(
+            (p) => `<li><span class="launch-open-what">${esc(p.title)}</span>
+                    <span class="launch-open-how">${esc(p.action)}</span></li>`
+          )
+          .join("")}
+      </ul>
+    </div>`;
 }
 
 /* ── Принятие ответственности за «review» ───────────────────────
@@ -164,7 +210,11 @@ export function overridableProblems(candidate) {
   const problems = candidate.problems || [];
   // Хоть один жёсткий блокер — и обсуждать нечего.
   if (problems.some((p) => p.kind === "blocker")) return [];
-  const confirmable = problems.filter((p) => p.kind === "confirmable");
+  // Пункты со своей галочкой (стол, материал) сюда не относятся: их не «снимают
+  // под ответственность», их ЗАКРЫВАЮТ — сервер по галочке выполняет реальное
+  // действие. Складывать их в один список с override значило бы предлагать
+  // оператору принять на себя то, что он и так собирается сделать.
+  const confirmable = problems.filter((p) => p.kind === "confirmable" && !p.confirmation);
   if (!confirmable.length) return [];
   // Либо снимается всё, либо ничего: одна неснимаемая проверка отклонит запуск
   // целиком, и предложение её принять было бы ложным обещанием.
@@ -209,6 +259,35 @@ function overrideBlock(candidate, ui) {
           >${esc(ui.overrideReason || "")}</textarea>
       </label>
     </div>`;
+}
+
+/* Почему именно этот принтер — и что ещё было доступно.
+
+   Раньше здесь стояла строка `candidate.reason` и только в автоматическом
+   режиме. Отсюда две неприятности. Во-первых, при нескольких подходящих машинах
+   оператор не узнавал, что выбор вообще был: «Выбран A1» читается как «другого
+   нет». Во-вторых, после ручного выбора объяснение исчезало не полностью —
+   оставалось описание ПРЕДЫДУЩЕГО, автоматического решения, то есть текст про
+   другую машину.
+
+   Теперь фразу целиком составляет backend (`preview.selectionNote`), включая
+   «Принтер выбран вручную», и здесь только отрисовка. */
+function selectionNoteHtml(preview, candidate, ui) {
+  if (!preview.selectionNote) return "";
+  const manual = preview.selectionSource === "manual";
+  // При отказе причину показывает blockedBlock — дублировать её пояснением
+  // выбора значит сказать одно и то же дважды разными словами.
+  if (!manual && !preview.recommendedPrinterId) return "";
+  const more =
+    !manual && preview.alternativeCount > 0 && ui.mode === "auto"
+      ? `<button type="button" class="btn btn-sm btn-ghost" data-launch-mode="manual">${icon(
+          "chevronRight"
+        )}<span>Посмотреть остальные</span></button>`
+      : "";
+  return `
+    <p class="launch-reason ${manual ? "is-manual" : ""}">
+      ${manual ? icon("check") : ""}<span>${esc(preview.selectionNote)}</span>${more}
+    </p>`;
 }
 
 /* Ровно ОДНА причина отказа, и её выбирает backend (preview.primaryProblem).
@@ -357,22 +436,26 @@ export function launchModalHtml(preview, ui) {
       <span class="badge ${st.cls}">${esc(st.text)}</span>
     </div>
 
-    ${
-      candidate && candidate.eligible && ui.mode === "auto"
-        ? `<p class="launch-reason">${esc(candidate.reason)}</p>`
-        : ""
-    }
+    ${selectionNoteHtml(preview, candidate, ui)}
 
     ${unresolved ? unresolvedBlock(preview, ui) : blockedBlock(preview, candidate)}
 
-    ${unresolved ? "" : overrideBlock(candidate, ui)}
     ${unresolved ? "" : confirmationsBlock(confirmations, ui.confirmed)}
-    ${unresolved ? "" : problemsBlock(candidate)}
+    ${unresolved ? "" : openQuestionsBlock(candidate, confirmations, ui)}
+    ${unresolved ? "" : overrideBlock(candidate, ui)}
+    ${unresolved ? "" : problemsBlock(candidate, confirmations)}
 
     ${
-      ui.mode === "manual" && !unresolved
+      // Список машин раскрывается сам, когда запускать не на чем. «Нет готового
+      // принтера» без списка — это отказ без разбора: оператор не знает, у кого
+      // занят стол, кому файл не подходит и кого просто нет в сети, и не может
+      // выбрать, что чинить. Показать причины по каждой машине дешевле, чем
+      // заставить их выяснять.
+      !unresolved && (ui.mode === "manual" || !preview.recommendedPrinterId)
         ? `<div class="launch-cands">
-             <p class="sub-head">Выберите принтер</p>
+             <p class="sub-head">${
+               preview.recommendedPrinterId ? "Выберите принтер" : "Почему ни один принтер не подходит"
+             }</p>
              ${preview.candidates.map((c) => candidateCard(c, ui.selectedPrinterId)).join("")}
            </div>`
         : ""

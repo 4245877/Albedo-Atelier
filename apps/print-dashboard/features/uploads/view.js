@@ -129,11 +129,16 @@ function analysisHtml(item, a, detailsOpen) {
   const blocks = (a.blockers || []).map((b) => findingHtml(b, "upload-block", "blocked")).join("");
 
   // Порядок намеренный: сначала вердикт и находки (почему файл нельзя печатать),
-  // и только потом — таблица свойств. Свойства нужны при разборе, находки — всегда.
+  // потом — ЧТО ДЕЛАТЬ ДАЛЬШЕ, и только затем таблица свойств. Свойства нужны
+  // при разборе, находки — всегда, а следующий шаг — это то, ради чего оператор
+  // вообще смотрит на карточку.
   return `
     <div class="upload-analysis">
       ${verdictNote(a)}
       ${warns || blocks ? `<ul class="upload-findings">${blocks}${warns}</ul>` : ""}
+      ${reviewHtml(item)}
+      ${nextActionHtml(item)}
+      ${scaleHtml(item)}
       ${
         rows
           ? `<details class="upload-details" data-upload-details${detailsOpen ? " open" : ""}>
@@ -145,6 +150,82 @@ function analysisHtml(item, a, detailsOpen) {
       ${taskHtml(item)}
     </div>`;
 }
+
+/* ── Следующий шаг ──────────────────────────────────────────────
+
+   Единственное место, где карточка отвечает на вопрос «и что теперь?».
+   Раньше ответа не было вовсе: загруженный G-code проходил анализ, получал
+   зелёный вердикт «готово к планированию» — и на этом всё заканчивалось. В
+   интерфейсе не существовало действия, которое сдвинуло бы его к принтеру:
+   очередь пополнялась только через слайсинг, а у уже нарезанного файла
+   слайсить нечего.
+
+   Решение о том, ЧТО именно является следующим шагом, принимает сервер
+   (`status.next` из GET /api/print/artifacts) — оно зависит от вердикта,
+   подтверждений и состояния задания, и второй его копии в браузере быть не
+   должно. Здесь только отрисовка. */
+function nextActionHtml(item) {
+  const next = item.status?.next;
+  if (!next) return "";
+  // «Ждём» рисуется значком статуса в шапке — вторая строка о том же лишняя.
+  if (next.kind === "wait") return "";
+
+  const button = ACTION_BUTTON[next.kind];
+  const control =
+    button && next.actionable && item.artifact
+      ? `<button type="button" class="btn btn-sm ${button.cls}"
+           ${button.attr}="${esc(item.artifact.id)}"${next.taskId ? ` data-task="${esc(next.taskId)}"` : ""}>
+           ${icon(button.icon)}<span>${esc(next.label)}</span>
+         </button>`
+      : "";
+
+  return `
+    <div class="upload-next ${control ? "" : "is-inert"}">
+      <p class="upload-next-text">${esc(next.explanation)}</p>
+      ${control}
+    </div>`;
+}
+
+/* Какой контроль соответствует шагу. `reanalyze` уже живёт в блоке ошибки
+   анализа, поэтому здесь его нет — иначе на карточке было бы две одинаковые
+   кнопки «Повторить анализ». */
+const ACTION_BUTTON = {
+  enqueue: { attr: "data-enqueue", cls: "btn-primary", icon: "queue" },
+  confirm_review: { attr: "data-confirm-review", cls: "btn-primary", icon: "check" },
+  confirm_scale: { attr: "data-confirm-scale", cls: "btn-primary", icon: "ruler" },
+  slice: { attr: "data-goto-slicing", cls: "", icon: "play" }
+};
+
+/* ── Единицы модели ─────────────────────────────────────────────
+
+   STL не хранит единиц измерения — его габариты это просто числа. Пока никто
+   не сказал, что они значат, размеры недоказуемы: модель может оказаться в
+   25.4 раза меньше, а проверка «влезает ли в стол» этого не заметит. Сервер
+   уже умеет принимать такое утверждение (POST /artifacts/:id/scale) и уже
+   отказывает в ночном запуске без него — не хватало только места, где его
+   можно сделать.
+
+   Показываем ПОСЛЕ подтверждения тоже: кто и когда сказал — часть того же
+   факта, и без этого «подтверждено» неотличимо от «никто не спрашивал». */
+function scaleHtml(item) {
+  const scale = item.status?.scale;
+  if (!scale) return "";
+  if (scale.confirmedBy && !scale.stale) {
+    return `<p class="upload-note upload-note-ok">${icon("check")}<span>Единицы подтверждены: ${esc(
+      SCALE_LABEL[scale.units] || scale.units
+    )}${scale.scaleFactor && scale.scaleFactor !== 1 ? ` × ${scale.scaleFactor}` : ""} — ${esc(
+      scale.confirmedBy
+    )}${scale.confirmedAt ? `, ${esc(scale.confirmedAt.slice(0, 16).replace("T", " "))}` : ""}</span></p>`;
+  }
+  if (scale.stale && scale.confirmedBy) {
+    return `<p class="upload-note upload-note-warn">${icon(
+      "warn"
+    )}<span>Подтверждение единиц устарело: файл изменился. Подтвердите заново.</span></p>`;
+  }
+  return "";
+}
+
+const SCALE_LABEL = { mm: "миллиметры", cm: "сантиметры", inch: "дюймы", m: "метры" };
 
 /* Сводка над списком: сколько файлов и в каком они состоянии. С десятками
    загрузок «сколько всего» и «сколько с ошибкой» — первое, что нужно знать,
@@ -192,6 +273,27 @@ const VERDICT_NOTE = {
 function verdictNote(a) {
   const note = VERDICT_NOTE[a.verdict];
   return note ? `<p class="upload-note">${esc(note)}</p>` : "";
+}
+
+/* Подтверждение проверки: кто прочитал чужие параметры и взял их на себя.
+   Отдельная строка, а не пометка внутри «Технических подробностей»: это факт об
+   ответственности, и он должен быть виден там же, где принимается решение. */
+export function reviewHtml(item) {
+  const review = item.status?.review;
+  if (!review) return "";
+  if (review.confirmedBy && !review.stale) {
+    return `<p class="upload-note upload-note-ok">${icon("check")}<span>Проверку подтвердил ${esc(
+      review.confirmedBy
+    )}${review.confirmedAt ? `, ${esc(review.confirmedAt.slice(0, 16).replace("T", " "))}` : ""}${
+      review.note ? ` — ${esc(review.note)}` : ""
+    }</span></p>`;
+  }
+  if (review.stale && review.staleReason) {
+    return `<p class="upload-note upload-note-warn">${icon("warn")}<span>Подтверждение устарело: ${esc(
+      review.staleReason
+    )}</span></p>`;
+  }
+  return "";
 }
 
 function taskHtml(item) {

@@ -88,6 +88,69 @@ test("every preflight reason has operator language written for it", () => {
   }
 });
 
+test("every DISPATCH reason has operator language too — the preview now shows them", () => {
+  // Before the preview ran the real eligibility, only preflight codes ever
+  // reached a person, and only those needed wording. Now the launch screen
+  // renders the dispatch vocabulary directly (`TARGET_PRINTER_MISMATCH`,
+  // `REMOTE_START_UNSUPPORTED`, the bed rules, the delivery rules), so a code
+  // without an entry would show the engine's own sentence — written for whoever
+  // reads the ledger, not for whoever is standing at the printer.
+  for (const code of ALL_REASONS) {
+    assert.ok(
+      TRANSLATED_CODES.has(code),
+      `«${code}» has no entry in the launch screen's translations — an operator ` +
+        "would read the engine's wording instead of what to do about it"
+    );
+    const problem = explainReason({ code, message: `сообщение для ${code}` }, "blocker");
+    assert.ok(problem.title.length > 0, `«${code}» has no title`);
+    assert.ok(problem.action.length > 0, `«${code}» has no action`);
+  }
+});
+
+test("a lifted preflight reason is worded by its ORIGINAL code, not the dispatch one", () => {
+  // `MATERIAL_UNKNOWN` is one dispatch code standing for two different preflight
+  // facts — "the task states no material" and "the printer does not report its
+  // spool" — and they need different sentences. The preflight code travels with
+  // the reason precisely so the right one is chosen.
+  const fromPrinter = explainReason(
+    {
+      code: REASON.MATERIAL_UNKNOWN,
+      preflightCode: "printer_material_unknown",
+      message: "…"
+    },
+    "confirmable"
+  );
+  const fromTask = explainReason(
+    { code: REASON.MATERIAL_UNKNOWN, preflightCode: "task_material_unknown", message: "…" },
+    "confirmable"
+  );
+  assert.notEqual(fromPrinter.title, fromTask.title, "one code, two facts, two sentences");
+  assert.equal(fromPrinter.code, REASON.MATERIAL_UNKNOWN, "but the contract code is unchanged");
+});
+
+test("overridability travels with the reason instead of being re-derived", () => {
+  // Re-deriving it here (by mapping the code a second time) is what made the
+  // launch screen offer checkboxes the gate would then refuse — and, once the
+  // codes became SCREAMING_SNAKE, would have made every one of them silently
+  // non-overridable.
+  const waivable = explainReason(
+    { code: REASON.PROFILE_SET_NOT_APPROVED, message: "…", overridable: true },
+    "confirmable"
+  );
+  const hard = explainReason(
+    { code: REASON.BED_NOT_CLEAR, message: "…", overridable: false },
+    "confirmable"
+  );
+  assert.equal(waivable.overridable, true);
+  assert.equal(hard.overridable, false);
+  // A blocker is never overridable, whatever the flag says.
+  assert.equal(
+    explainReason({ code: REASON.PROFILE_SET_NOT_APPROVED, message: "…", overridable: true }, "blocker")
+      .overridable,
+    false
+  );
+});
+
 test("every dispatch reason code has an explicit override policy decision", () => {
   // Not "is in NON_OVERRIDABLE" — that would be trivially true. The invariant is
   // that the set only contains codes that exist, so a rename cannot leave a

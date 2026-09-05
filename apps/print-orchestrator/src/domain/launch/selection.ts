@@ -1,4 +1,36 @@
-import type { CompatibilityReason, CompatibilityVerdict } from "../scheduling/compatibility";
+import type { CompatibilityVerdict } from "../scheduling/compatibility";
+
+/**
+ * One refusal/《confirm this》/note, in the vocabulary the *launch* speaks.
+ *
+ * Deliberately not `CompatibilityReason`: the launch admission is now the whole
+ * {@link file://../dispatch/eligibility.ts DispatchEligibility} at its
+ * `preflight` stage, whose codes are the SCREAMING_SNAKE dispatch contract, and
+ * whose lifted preflight reasons carry their original lower-case code as
+ * evidence. Both must survive to the operator, so this is the shape that carries
+ * both plus the one thing the UI must never guess: whether a human may accept it.
+ */
+export interface LaunchReason {
+  /** The dispatch contract code (`TARGET_PRINTER_MISMATCH`, …). */
+  code: string;
+  message: string;
+  /** The originating preflight code, when this reason was lifted from one. */
+  preflightCode?: string;
+  /**
+   * Which preflight bucket it came from — `blocker` | `review` | `warning`.
+   * Severity says whether the launch may proceed; this says whether there is an
+   * open question a human could close, which the flattened severity cannot.
+   */
+  origin?: string;
+  /** Whether a named operator may accept this and proceed. Decided upstream. */
+  overridable?: boolean;
+  /**
+   * The confirmation code that *resolves* this reason by causing a real
+   * server-side action (writing a bed-clear event, recording a material
+   * assertion) — as opposed to waiving it. Absent when there is none.
+   */
+  confirmation?: string;
+}
 
 /**
  * Choosing the printer to launch a task on — and being able to say *why*.
@@ -46,11 +78,11 @@ export type DeviceFileState =
 export interface LaunchCandidateInput {
   printerId: string;
   printerName: string;
-  /** From `evaluateCompatibility` — never recomputed here. */
+  /** From the preflight eligibility — never recomputed here. */
   verdict: CompatibilityVerdict;
-  blockers: CompatibilityReason[];
-  reviews: CompatibilityReason[];
-  warnings: CompatibilityReason[];
+  blockers: LaunchReason[];
+  reviews: LaunchReason[];
+  warnings: LaunchReason[];
   online: boolean;
   status: "offline" | "idle" | "printing" | "paused" | "error" | "unknown";
   /** Material the printer physically holds, when known. */
@@ -85,6 +117,10 @@ export interface SelectionResult {
   candidates: LaunchCandidate[];
   /** The auto-selected printer, or null when nothing is startable unattended. */
   recommendedPrinterId: string | null;
+  /** How many *other* printers could also take this job right now. */
+  alternativeCount: number;
+  /** One sentence naming the automatic choice and its alternatives; null when none. */
+  recommendation: string | null;
 }
 
 /**
@@ -107,42 +143,18 @@ export function materialMatches(required: string | null, loaded: string | null):
 }
 
 /**
- * The here-and-now refusal a compatibility verdict does not carry: a printer
- * that is not reachable and confirmed free cannot be started at this instant,
- * whatever its profile compatibility says.
+ * `launchAdmission` used to live here: a second, private copy of "offline and
+ * busy are refusals *now*, whatever the planner thinks". It existed because the
+ * preview ran `evaluateCompatibility`, which files those as things a human
+ * should look at rather than as blockers.
  *
- * Fail-closed on `unknown`: an unconfirmed state is not permission. This mirrors
- * the dispatch gate, which also demands a *confirmed* idle before it fires — the
- * point is that the preview refuses for the same reason the dispatch would,
- * instead of promising a start that is about to be rejected.
+ * The preview now runs the real {@link evaluateDispatchEligibility} at its
+ * `preflight` stage, which already says exactly that — and says a dozen more
+ * things the local copy never knew (the file's declared target printer, the
+ * G-code flavor, remote-start support, the queue shape). A second implementation
+ * of an admission rule is precisely what the launch service is documented not to
+ * have, so it is gone: `blockers` arrives decided.
  */
-function launchAdmission(input: LaunchCandidateInput): CompatibilityReason | null {
-  if (!input.online) {
-    return { code: "printer_offline", message: `Принтер «${input.printerName}» не в сети` };
-  }
-  if (input.status !== "idle") {
-    // When the compatibility rules already named the *cause* — the code the
-    // machine is showing on its own screen — restating it as "недоступен
-    // (error)" adds a line and subtracts information. The named fault stands
-    // alone; only an unexplained error state needs this fallback.
-    if (input.status === "error") {
-      return input.blockers.some((b) => NAMED_FAULT_CODES.has(b.code))
-        ? null
-        : {
-            code: "printer_error",
-            message: `Принтер «${input.printerName}» сейчас недоступен (${input.status})`
-          };
-    }
-    return {
-      code: "printer_busy",
-      message: `Принтер «${input.printerName}» сейчас недоступен (${input.status})`
-    };
-  }
-  return null;
-}
-
-/** Compatibility codes that already carry a specific physical cause. */
-const NAMED_FAULT_CODES = new Set(["printer_fault", "printer_media_missing"]);
 
 const WEIGHTS = {
   materialLoaded: 40,
@@ -245,21 +257,7 @@ function buildReason(input: LaunchCandidateInput, parts: ScoreComponent[], eligi
  */
 export function selectLaunchPrinter(inputs: readonly LaunchCandidateInput[]): SelectionResult {
   const candidates: LaunchCandidate[] = inputs.map((input) => {
-    // Compatibility answers "could this printer ever run this?" — a planning
-    // question, which is why it files "offline" and "busy" as things a human
-    // should look at rather than as refusals. A launch is a physical act *now*,
-    // so those become hard blockers here. Without this, auto-select happily
-    // recommends a printer that is switched off (the dispatch then refuses it,
-    // and the operator is told "не готово" about a printer the UI just chose).
-    const admission = launchAdmission(input);
-    // Deduplicated by code: the here-and-now check and the compatibility rules
-    // describe the same machine, so a printer in error used to produce two
-    // near-identical `printer_error` lines — and an operator reading four
-    // reasons for one physical fault stops reading them.
-    const blockers =
-      admission && !input.blockers.some((b) => b.code === admission.code)
-        ? [...input.blockers, admission]
-        : input.blockers;
+    const blockers = input.blockers;
     const eligible = blockers.length === 0;
     const scoreBreakdown = eligible ? scoreOf(input) : [];
     const score = scoreBreakdown.reduce((sum, p) => sum + p.points, 0);
@@ -282,5 +280,42 @@ export function selectLaunchPrinter(inputs: readonly LaunchCandidateInput[]): Se
   });
 
   const best = candidates.find((c) => c.eligible && c.remoteStartSupported) ?? null;
-  return { candidates, recommendedPrinterId: best ? best.printerId : null };
+  const startable = candidates.filter((c) => c.eligible && c.remoteStartSupported);
+  return {
+    candidates,
+    recommendedPrinterId: best ? best.printerId : null,
+    alternativeCount: Math.max(0, startable.length - 1),
+    recommendation: best ? recommendationSentence(best, startable.length - 1) : null
+  };
+}
+
+/**
+ * Why *this* printer was chosen, in the operator's words — and how many others
+ * would also have worked.
+ *
+ * The count is the half that was missing. "Выбран A1" with no alternatives named
+ * reads as the only option, so an operator with a free second machine never
+ * learns they had a choice; and when there genuinely is only one, saying so is
+ * more useful than any ranking explanation.
+ */
+function recommendationSentence(best: LaunchCandidate, others: number): string {
+  if (others <= 0) {
+    return `${best.printerName} — единственный принтер, готовый принять это задание`;
+  }
+  const positives = best.scoreBreakdown
+    .filter((p) => p.points > 0)
+    .sort((a, b) => b.points - a.points)
+    .slice(0, 2)
+    .map((p) => p.label);
+  const because = positives.length > 0 ? `: ${positives.join(", ")}` : "";
+  return `Выбран ${best.printerName} автоматически${because}. Ещё ${others} ${plural(others, "подходит", "подходят", "подходят")}`;
+}
+
+function plural(n: number, one: string, few: string, many: string): string {
+  const abs = Math.abs(n) % 100;
+  const last = abs % 10;
+  if (abs > 10 && abs < 20) return many;
+  if (last > 1 && last < 5) return few;
+  if (last === 1) return one;
+  return many;
 }

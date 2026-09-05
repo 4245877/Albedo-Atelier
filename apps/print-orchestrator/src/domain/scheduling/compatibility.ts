@@ -160,8 +160,26 @@ export interface CompatibilityPrinterInput {
   model: string | null;
   /** Transport/firmware family: moonraker | bambu | creality; null when unknown. */
   protocol: string | null;
-  /** Loaded material, or null when unknown. */
+  /**
+   * The material the printer is **physically loaded with right now**, or null
+   * when nothing living said. Null is an honest unknown and must stay one: it is
+   * a `review` the operator closes by looking at the machine, never a mismatch.
+   *
+   * The field used to be filled from the printer's *config* — a declaration like
+   * `"PLA / PETG / TPU"` that says what the machine is *able* to print. Read as a
+   * loaded filament it is simply false, and worse, `materialsClash` reduces it to
+   * its first token, so every PETG job on that printer was refused with
+   * «заправлен PLA» — a hard blocker built out of a sentence nobody wrote about
+   * the spool. What the machine supports now lives in {@link supportedMaterials}
+   * and never decides a mismatch.
+   */
   material: string | null;
+  /**
+   * The material families this printer is declared to handle (from its config).
+   * Context for the operator and for the confirmation prompt — never evidence
+   * about what is loaded, and never grounds for a mismatch.
+   */
+  supportedMaterials?: readonly string[];
   /** Nozzle diameter in mm, or null when unknown. */
   nozzleMm: number | null;
   /** Build volume in mm, or null when unknown. */
@@ -272,6 +290,24 @@ function approxEqual(a: number, b: number, eps = NOZZLE_EPS): boolean {
 /** Leading material family token, upper-cased ("PETG-CF Foo" → "PETG"). */
 function materialFamily(material: string): string {
   return material.toUpperCase().split(/[\s\-_/,|+]+/).filter(Boolean)[0] ?? "";
+}
+
+/**
+ * Whether the printer's *declared* material list covers what the job needs.
+ * `null` when nothing was declared — an absent list is not a refusal, it is the
+ * absence of information, and only ever changes the wording of the prompt.
+ */
+function supportsMaterial(
+  supported: readonly string[] | undefined,
+  required: string
+): boolean | null {
+  if (!supported || supported.length === 0) return null;
+  const needed = materialFamily(required);
+  if (!needed) return null;
+  return supported.some((entry) => {
+    const family = materialFamily(entry);
+    return family === needed || family.startsWith(needed) || needed.startsWith(family);
+  });
 }
 
 /** A concrete material contradiction (both known and different families). */
@@ -395,7 +431,16 @@ export function evaluateCompatibility(
   if (task.material === null) {
     review("task_material_unknown", "Материал задания не задан");
   } else if (printer.material === null) {
-    review("printer_material_unknown", `Материал, заправленный в «${printer.name}», неизвестен`);
+    // Deliberately a `review`, not a blocker, and phrased as the question the
+    // operator can actually answer. A printer that reports no filament is a
+    // printer nobody asked yet — the only safe reading is "confirm it", and the
+    // launch screen turns exactly this reason into its `material_loaded` tick.
+    review(
+      "printer_material_unknown",
+      supportsMaterial(printer.supportedMaterials, task.material) === false
+        ? `«${printer.name}» не сообщает загруженный материал, а ${task.material} не заявлен среди его материалов (${(printer.supportedMaterials ?? []).join(", ")}) — подтвердите, что установлен ${task.material}`
+        : `«${printer.name}» не сообщает загруженный материал — подтвердите, что установлен ${task.material}`
+    );
   } else if (materialsClash(task.material, printer.material)) {
     block(
       "material_mismatch",

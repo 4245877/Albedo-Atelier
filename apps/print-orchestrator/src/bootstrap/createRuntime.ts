@@ -4,6 +4,7 @@ import { NotFoundError } from "../core/errors";
 import type { AmsTraySnapshot } from "../infra/printers/status/types";
 import type { PrintQueueStore } from "../domain/print/repositories";
 import type { PrintRun } from "../domain/print/types";
+import type { PrinterBedView } from "../domain/printers/types";
 import { env, slicing, uploads } from "../shared/env";
 import type { StoreLogger } from "../shared/logger";
 import { importLegacyQueue } from "../infra/db/legacyImport";
@@ -343,7 +344,8 @@ export class FarmRuntime implements PrintServices {
       // Readiness must reflect the database, not just the poll loop: poll
       // failures are swallowed by a logging try/catch, so a dead queue.db used
       // to leave /ready answering 200 while dispatch was completely broken.
-      () => this.printQueueStoreRef?.probe() ?? { ok: false, error: "queue store not open" }
+      () => this.printQueueStoreRef?.probe() ?? { ok: false, error: "queue store not open" },
+      (printerId) => this.bedCycleFor(printerId)
     );
 
     // Snapshot the whole durable state on every save. The queue section is no
@@ -639,6 +641,31 @@ export class FarmRuntime implements PrintServices {
   activeRunForPrinter(printerId: string): PrintRun | null {
     if (!this.printQueueStoreRef) return null;
     return this.runLifecycleRef?.activeRun(printerId) ?? null;
+  }
+
+  /**
+   * What is on this printer's plate, and the intervention that would free it.
+   *
+   * Read from the two rows that actually know: the open `BedCycle`, and the open
+   * blocking `PART_REMOVAL`/`PLATE_SERVICE` operation. Deliberately not derived
+   * from telemetry — a printer that has just finished reports `idle` with the
+   * part still on the bed, which is exactly the state the operator needs told.
+   *
+   * Tolerant of a closed store (this runs on the dashboard read path): no store
+   * ⇒ `null`, meaning "not tracked", never "clear".
+   */
+  private bedCycleFor(printerId: string): PrinterBedView | null {
+    const store = this.printQueueStoreRef;
+    if (!store) return null;
+    const cycle = store.repositories.bedCycles.findOpenByPrinter(printerId);
+    const state = cycle?.state ?? "CLEAR";
+    const awaiting = state === "AWAITING_CLEARANCE";
+    const operation = awaiting
+      ? (this.manualOperationServiceRef
+          ?.openBlockingFor(printerId)
+          .find((op) => op.type === "PART_REMOVAL" || op.type === "PLATE_SERVICE") ?? null)
+      : null;
+    return { state, awaitingClearance: awaiting, operationId: operation?.id ?? null };
   }
 
   /** The explicit inputs the night-gate read model needs (no globals). */

@@ -17,6 +17,7 @@ import {
 } from "../../domain/scheduling/compatibility";
 import { OPERATION_LABELS } from "../../domain/operations/states";
 import { OPEN_OPERATION_STATES } from "../../domain/operations/types";
+import { executableKindOf } from "../../domain/print/executable";
 import { readModelScale, type ResolvedModelScale } from "../../domain/print/modelScale";
 import { resolveUnits } from "../../domain/shared/units";
 import { readFilament, readMachine } from "../../domain/slicing/orcaProfile";
@@ -86,6 +87,7 @@ export class EvidenceResolver {
       model: printer.model,
       protocol: printer.protocol,
       material: printer.material,
+      supportedMaterials: printer.supportedMaterials ?? [],
       nozzleMm: printer.nozzleMm,
       // Already resolved (config field > ready-slice machine bed > approved profile
       // bed); null only when no source knows it → an honest `review`.
@@ -113,17 +115,24 @@ export class EvidenceResolver {
     // to slice — treating it as un-sliced work would block every attended start
     // on a slice that can never exist. Its honesty is enforced elsewhere: with no
     // analysis it can never satisfy `gcodeReady`, so it stays night-ineligible.
+    // Source/output analysis for dimensions/nozzle/material when there is no slice.
+    const analysis = artifact ? repos.artifactAnalyses.latestForArtifact(artifact.id) : null;
+    // The analysed CONTENT decides, not the extension. `Artifact.kind` is derived
+    // from the file name at ingest (`.3mf` → `model`), which is right for a plain
+    // 3MF and wrong for a sliced `.gcode.3mf`: that one is a finished plate
+    // package, and calling it un-sliced source demanded a slice variant that
+    // cannot exist for it — every such upload was refused with «нет готового
+    // слайса под этот принтер», for a file that needed no slicing at all.
     const needsSlicing = artifact
-      ? artifact.kind !== "gcode"
+      ? analysis
+        ? executableKindOf(analysis) === null
+        : artifact.kind !== "gcode"
       : typeof task.metadata.file !== "string" || task.metadata.file.trim() === "";
 
     const variant = this.readyVariantFor(task.id, printer);
     const profileSet = variant ? repos.profileSets.getById(variant.profileSetId) : null;
     const machineFields = profileSet ? this.machineFieldsOf(profileSet) : null;
     const filamentFields = profileSet ? this.filamentFieldsOf(profileSet) : null;
-
-    // Source/output analysis for dimensions/nozzle/material when there is no slice.
-    const analysis = artifact ? repos.artifactAnalyses.latestForArtifact(artifact.id) : null;
     // A ready G-code file's readiness proof (the night gate uses it in place of a
     // ready slice + approved set): the analysis finished and found no blockers.
     const gcodeReady =

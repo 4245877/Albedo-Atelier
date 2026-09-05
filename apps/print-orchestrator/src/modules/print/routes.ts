@@ -39,11 +39,12 @@ export interface PrintRoutesOptions {
  *   GET  /audit         recent audit events
  *
  * Actions (guarded by the shared CSRF/token middleware like every mutation):
- *   POST /tasks              create a task           body: { title, printer?, material?, file?, night?, priority?, eta?, at? }
+ *   POST /tasks              create a task (DEPRECATED — no artifact/analysis; upload instead)
  *   POST /tasks/:id/hold     park for review         body: { reason? }
  *   POST /tasks/:id/release  return to the queue
  *   POST /tasks/:id/cancel   cancel (kept as history) body: { reason? }
  *   POST /tasks/:id/assign   bind to a printer        body: { printer }
+ *   POST /tasks/:id/enqueue  queue an already-executable upload (G-code / sliced 3MF)
  *
  * Uploads (the new SQLite-only file-analysis surface; see modules/print):
  *   GET  /artifacts              list uploaded artifacts (+ latest analysis, draft task)
@@ -51,6 +52,8 @@ export interface PrintRoutesOptions {
  *   GET  /artifacts/config       upload limits for the dashboard
  *   POST /artifacts              multipart upload of one file → Artifact + DRAFT task + pending analysis
  *   POST /artifacts/:id/analyze  re-run analysis (after a failed attempt)
+ *   POST /artifacts/:id/scale    state what an STL's units are  body: { units, scaleFactor? }
+ *   POST /artifacts/:id/review   accept a `review` verdict      body: { note?, operator? }
  *   DELETE /artifacts/:id        delete one stored file (409 while it is in use)
  */
 export async function registerPrintQueueRoutes(
@@ -86,10 +89,21 @@ export async function registerPrintQueueRoutes(
     return { events: services.printQueue.listAudit(Number.isFinite(limit) ? limit : undefined) };
   });
 
-  app.post<{ Body: unknown }>("/tasks", async (request) => ({
-    ok: true,
-    task: services.printQueue.createTask(shapeCreateInput(request.body))
-  }));
+  /**
+   * **Deprecated**, for the same reason as `POST /api/queue`: it can mint a task
+   * around a typed on-printer file name, with no artifact, no content hash and
+   * no analysis behind it. Nothing downstream can then prove that the file it
+   * starts is the file anybody looked at. The supported route is an upload
+   * (`POST /artifacts`) followed by `POST /tasks/:id/enqueue` or a slice.
+   *
+   * Still served — external clients and a large part of the test suite build
+   * fixtures through it — and still audited exactly as before.
+   */
+  app.post<{ Body: unknown }>("/tasks", async (request, reply) => {
+    reply.header("Deprecation", "true");
+    reply.header("Link", '</api/print/artifacts>; rel="successor-version"');
+    return { ok: true, task: services.printQueue.createTask(shapeCreateInput(request.body)) };
+  });
 
   app.post<{ Params: { id: string }; Body: { reason?: unknown } }>(
     "/tasks/:id/hold",
@@ -103,6 +117,29 @@ export async function registerPrintQueueRoutes(
     ok: true,
     task: services.printQueue.releaseTask(request.params.id)
   }));
+
+  // The route an uploaded G-code / sliced 3MF takes into the queue — the
+  // counterpart of `POST /slicing/variants/:id/promote` for work that needs no
+  // slicing. Deliberately NOT `release`: that moves a task to QUEUED without
+  // creating a queue entry, which for a draft produces a queued task that is in
+  // no queue. See `ExecutableEnqueue`.
+  app.post<{
+    Params: { id: string };
+    Body: { onDeviceFile?: unknown; material?: unknown; operator?: unknown };
+  }>("/tasks/:id/enqueue", async (request) => {
+    const body = request.body ?? {};
+    return {
+      ok: true,
+      task: services.printQueue.enqueueExecutableArtifact(
+        request.params.id,
+        {
+          ...(optionalString(body.onDeviceFile) ? { onDeviceFile: optionalString(body.onDeviceFile) } : {}),
+          ...(optionalString(body.material) ? { material: optionalString(body.material) } : {})
+        },
+        optionalString(body.operator)
+      )
+    };
+  });
 
   app.post<{ Params: { id: string }; Body: { reason?: unknown } }>(
     "/tasks/:id/cancel",
@@ -165,7 +202,10 @@ function registerArtifactRoutes(
     maxFileBytes: uploads.maxFileBytes,
     maxFiles: uploads.maxFiles,
     maxTotalBytes: uploads.maxTotalBytes,
-    acceptedExtensions: [".stl", ".3mf", ".gcode"]
+    // The four things the analyzers actually admit. `.gcode.3mf` is not a
+    // separate extension (it ends in `.3mf`), but naming it is what tells an
+    // operator that a finished plate package is welcome here too.
+    acceptedExtensions: [".stl", ".3mf", ".gcode", ".gco", ".g"]
   }));
 
   app.get<{ Params: { id: string } }>("/artifacts/:id", async (request) =>
@@ -223,6 +263,30 @@ function registerArtifactRoutes(
   app.delete<{ Params: { id: string } }>("/artifacts/:id/scale", async (request) => ({
     ok: true,
     ...services.artifacts.clearModelScale(request.params.id)
+  }));
+
+  // A `review` verdict is the analyzer being honest about parameters it cannot
+  // vouch for — a sliced 3MF carries someone else's machine profile. This is a
+  // named operator saying they have read it. It is bound to the artifact's hash
+  // and to the analysis id, so a re-upload or a re-analysis lapses it, and it
+  // never clears an analysis blocker or authorises an unattended start.
+  app.post<{ Params: { id: string }; Body: { note?: unknown; operator?: unknown } }>(
+    "/artifacts/:id/review",
+    async (request) => {
+      const body = request.body ?? {};
+      return {
+        ok: true,
+        ...services.artifacts.confirmAnalysisReview(request.params.id, {
+          ...(optionalString(body.operator) ? { actor: optionalString(body.operator) } : {}),
+          note: optionalString(body.note) ?? null
+        })
+      };
+    }
+  );
+
+  app.delete<{ Params: { id: string } }>("/artifacts/:id/review", async (request) => ({
+    ok: true,
+    ...services.artifacts.clearAnalysisReview(request.params.id)
   }));
 
   // Safe manual deletion of one stored file (STL / 3MF / G-code alike — an

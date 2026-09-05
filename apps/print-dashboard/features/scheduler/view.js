@@ -37,7 +37,7 @@ function queueRow(state, row, index) {
   if (t.priority) tags.push(chip(`приоритет ${t.priority}`, "info"));
   if (t.pinnedPrinterId) tags.push(chip(`закреплён: ${esc(t.pinnedPrinterId)}`, "info"));
   if (t.dayNightPreference && t.dayNightPreference !== "any") tags.push(chip(esc(DAYNIGHT[t.dayNightPreference] || t.dayNightPreference), "warn"));
-  if (t.unattendedAllowed) tags.push(chip("без присмотра", "warn"));
+  if (t.unattendedAllowed) tags.push(chip("без присмотра оператора", "warn"));
   if (t.deadline) tags.push(chip(`дедлайн ${fmtDate(t.deadline)}`, "info"));
   if (t.notBefore) tags.push(chip(`не ранее ${fmtDate(t.notBefore)}`, "info"));
 
@@ -66,13 +66,21 @@ function queueRow(state, row, index) {
         <div class="sch-tags">${tags.join("") || `<span class="slice-hint">без ограничений</span>`}</div>
         <form class="sch-edit" data-sch-form="params" hidden>
           <label>Приоритет<input type="number" name="priority" value="${t.priority}" /></label>
-          <label>День/ночь<select name="dayNightPreference">
+          <label>Когда можно печатать<select name="dayNightPreference">
             ${["any", "day", "night"].map((v) => `<option value="${v}"${t.dayNightPreference === v ? " selected" : ""}>${DAYNIGHT[v]}</option>`).join("")}
           </select></label>
           <label>Не ранее<input type="datetime-local" name="notBefore" value="${isoToInput(t.notBefore)}" /></label>
           <label>Дедлайн<input type="datetime-local" name="deadline" value="${isoToInput(t.deadline)}" /></label>
           <label>Закрепить принтер<select name="pin"><option value="">— не закреплять —</option>${printerOpts}</select></label>
-          <label class="sch-check"><input type="checkbox" name="unattended"${t.unattendedAllowed ? " checked" : ""} /> без присмотра (ночь)</label>
+          <!-- Два РАЗНЫХ вопроса, и подписи обязаны это показывать. «Когда
+               можно печатать» — время; «без присмотра» — можно ли выполнять
+               печать в отсутствие оператора. Прежняя подпись «без присмотра
+               (ночь)» склеивала их в один, и оператор, разрешивший ночь,
+               считал, что тем самым разрешил и unattended (или наоборот).
+               Флага «ночь» рядом больше нет вовсе: сервер выводит его из
+               выбора слева, а не хранит вторым полем для ручной синхронизации. -->
+          <label class="sch-check"><input type="checkbox" name="unattended"${t.unattendedAllowed ? " checked" : ""} />
+            можно печатать без присутствия оператора</label>
           <div class="sch-edit-actions">
             <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
             ${t.pinnedPrinterId ? `<button type="button" class="btn btn-sm" data-sch-action="unpin">Снять закрепление</button>` : ""}

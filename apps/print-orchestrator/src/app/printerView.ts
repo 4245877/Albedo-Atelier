@@ -131,6 +131,10 @@ export function buildPrinterView(
     latestSnapshotUrl,
     filesSupported: supportsPrinterFiles(printer),
     remoteStartSupported: supportsPrinterStart(printer),
+    // Filled by the caller (the read model reads the bed cycle + the open
+    // interventions); null here so a view built without a store is honest about
+    // knowing nothing rather than claiming the plate is clear.
+    bedCycle: null,
     // What this printer still needs CONFIGURED before its (implemented) adapter
     // can reach the device. Sent alongside the capabilities so the dashboard can
     // tell "this printer cannot do remote start" apart from "this printer needs

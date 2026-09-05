@@ -3,11 +3,14 @@ import {
   selectLaunchPrinter,
   type DeviceFileState,
   type LaunchCandidate,
-  type LaunchCandidateInput
+  type LaunchCandidateInput,
+  type LaunchReason
 } from "../../domain/launch/selection";
+import { ID_PREFIX, newId } from "../../domain/print/ids";
 import type { Assignment, PrintTask } from "../../domain/print/types";
 import type { PrintQueueStore } from "../../domain/print/repositories";
-import type { CompatibilityReason } from "../../domain/scheduling/compatibility";
+import { NON_OVERRIDABLE, type EligibilityReason } from "../../domain/dispatch/reasons";
+import type { DispatchEligibility } from "../../domain/dispatch/eligibility";
 import type { PrinterConfig } from "../../infra/printers/config";
 import { capabilitiesOf } from "../../infra/printers/capabilities";
 import type { DeviceArtifactService } from "../dispatch/deviceArtifactService";
@@ -17,6 +20,7 @@ import type { ManualOperationService } from "../operations/manualOperationServic
 import type { PrintQueueService } from "../printQueue/printQueueService";
 import { formatEta } from "../printQueue/projection";
 import type { SchedulerService } from "../scheduling/schedulerService";
+import { remainingBlockers } from "../dispatch/dispatchGate";
 import { explainLaunchFailure, primaryProblem, type LaunchProblem } from "./problems";
 
 /**
@@ -39,20 +43,64 @@ import { explainLaunchFailure, primaryProblem, type LaunchProblem } from "./prob
  *     why. Pure reads: it never uploads, reserves or starts anything.
  *   - {@link launch} — do it, in order, with the operator's confirmations.
  *
- * It adds **no** admission rules of its own. Every refusal still comes from
- * `evaluateCompatibility` and the dispatch gate; this service only sequences the
- * steps and translates the outcome into something an operator can act on.
+ * It adds **no** admission rules of its own. Every refusal comes from the one
+ * policy — `evaluateDispatchEligibility` — and this service only decides *when*
+ * to ask it, in three stages:
+ *
+ *   **A · preflight** (no side effects). Everything knowable before a byte
+ *   moves: printer state and class, the file's declared target and flavor, build
+ *   volume, nozzle, material, bed, manual operations, remote-start capability,
+ *   queue shape, reservation, telemetry freshness. Run in {@link preview}, and
+ *   run *again* at the top of {@link launch} against freshly-read rows.
+ *
+ *   **B · delivery.** Only after A passes: assign the printer, resolve the
+ *   remote name, push the file, verify what landed.
+ *
+ *   **C · final dispatch gate.** Inside `DispatchService`'s own transaction: A's
+ *   rules plus the ones that only became answerable now — the file exists, under
+ *   the expected name, at the expected size, tracked by this delivery, on a
+ *   printer whose state did not change during the transfer. Only then the start.
+ *
+ * The property this buys: a refusal after the file has been uploaded can only be
+ * caused by something that *changed*, never by something that was already true
+ * when the operator was shown a green preview. The old shape — preview on
+ * `evaluateCompatibility`, enforcement on the full gate — guaranteed the
+ * opposite for whole classes of job (a G-code sliced for another printer among
+ * them).
  */
 
 /** A physical fact only a human can assert, surfaced as a checkbox before start. */
+export type LaunchConfirmationKey = "bed_clear" | "material_loaded";
+
 export interface LaunchConfirmation {
-  code: "bed_clear" | "material_loaded";
+  code: LaunchConfirmationKey;
   /** What the operator is agreeing to. */
   label: string;
   detail: string;
   /** True when the launch is refused without it. */
   required: boolean;
+  /** What ticking it actually causes the server to do — never left to guess. */
+  effect: string;
 }
+
+/**
+ * Eligibility codes a **tick resolves by causing a real server-side action**,
+ * as opposed to ones an operator merely accepts responsibility for.
+ *
+ * The distinction is load-bearing and was previously invisible. `BED_STATE_UNKNOWN`
+ * is in `NON_OVERRIDABLE` — no amount of accepting responsibility clears it —
+ * and yet it is exactly the thing a person standing at the machine can settle,
+ * because confirming it makes the launch write a real `CLEAR` bed cycle, which
+ * the gate then reads as evidence. So it is neither a hard blocker (there IS a
+ * way through) nor an override (nothing is being waived): it is a confirmation
+ * with an effect, and the screen must say what the effect is.
+ */
+const CONFIRMATION_FOR_CODE: Readonly<Record<string, LaunchConfirmationKey>> = {
+  BED_STATE_UNKNOWN: "bed_clear",
+  BED_NOT_CLEAR: "bed_clear",
+  OPERATOR_INTERVENTION_REQUIRED: "bed_clear",
+  MATERIAL_UNKNOWN: "material_loaded"
+};
 
 /** Where a task stands on the road from "prepared" to "printing". */
 export type LaunchState =
@@ -95,6 +143,19 @@ export interface LaunchPreview {
   /** Where the material fact came from, so the UI can say "внешняя катушка". */
   materialSource: "ams" | "external" | "unknown";
   recommendedPrinterId: string | null;
+  /** How many *other* printers could also take this job right now. */
+  alternativeCount: number;
+  /** The printer this preview is actually about (chosen or recommended). */
+  selectedPrinterId: string | null;
+  /** Whether {@link selectedPrinterId} was picked by the server or by the operator. */
+  selectionSource: "auto" | "manual" | "none";
+  /**
+   * One sentence explaining the choice — «единственный доступный», «выбран
+   * автоматически: … Ещё 2 подходят», «Принтер выбран вручную», or, when nothing
+   * is startable, the invitation to read the per-printer reasons rather than a
+   * bare "нет готового принтера".
+   */
+  selectionNote: string;
   candidates: LaunchCandidateView[];
   /** Confirmations required for the recommended printer (or the one asked about). */
   confirmations: LaunchConfirmation[];
@@ -112,6 +173,28 @@ export interface LaunchPreview {
    * the way out of a failed attempt is where the attempt failed.
    */
   unresolvedRunId: string | null;
+}
+
+/**
+ * The launch answer for one queue row — enough for a button label and a sentence,
+ * never enough to decide anything client-side.
+ */
+export interface QueueLaunchReadiness {
+  taskId: string;
+  state: LaunchState;
+  /** One sentence naming the printer and what stands in the way, if anything. */
+  summary: string;
+  /** The printer the launch would use, or the one whose refusal is reported. */
+  printerId: string | null;
+  printerName: string | null;
+  /** True when the launch dialog can lead to a start right now. */
+  canLaunch: boolean;
+  /** True when a physical confirmation is the only thing missing. */
+  needsConfirmation: boolean;
+  /** How many *other* printers could also take it. */
+  alternativeCount: number;
+  /** The refusal to headline when `canLaunch` is false. */
+  primaryProblem: LaunchProblem | null;
 }
 
 export interface LaunchRequest {
@@ -161,6 +244,13 @@ export interface LaunchServiceDeps {
   automaticContinuationAllowed: (printerId: string) => boolean;
 }
 
+/**
+ * How many queue rows {@link LaunchService.queueReadiness} answers for by
+ * default. Comfortably more than the dashboard renders (8) so scrolling and the
+ * planner's own list are covered, and far short of a backlog.
+ */
+const DEFAULT_READINESS_ROWS = 25;
+
 export class LaunchService {
   constructor(private readonly deps: LaunchServiceDeps) {}
 
@@ -179,13 +269,23 @@ export class LaunchService {
     const etaSeconds = binding?.etaS ?? analysis?.estimatedDurationS ?? null;
 
     const candidates = this.buildCandidates(task, material, nozzleMm);
-    const { candidates: ranked, recommendedPrinterId } = selectLaunchPrinter(candidates);
+    const {
+      candidates: ranked,
+      recommendedPrinterId,
+      alternativeCount,
+      recommendation
+    } = selectLaunchPrinter(candidates);
     const views: LaunchCandidateView[] = ranked.map((c) => ({
       ...c,
       problems: explainLaunchFailure(c)
     }));
 
     const activeRun = repos.printRuns.findActiveByTask(task.id);
+    // An explicit `?printer=` is the operator overruling the recommendation. The
+    // distinction has to survive to the UI: showing the *automatic* choice's
+    // explanation next to a printer the operator picked themselves is the one
+    // sentence guaranteed to be about a different machine.
+    const manuallySelected = Boolean(forPrinterId) && forPrinterId !== recommendedPrinterId;
     const focusId = forPrinterId ?? recommendedPrinterId;
     const focus = views.find((c) => c.printerId === focusId) ?? null;
 
@@ -193,7 +293,7 @@ export class LaunchService {
       taskId: task.id,
       title: task.title,
       displayTitle: stripExtension(task.title),
-      state: this.resolveState(task, views, recommendedPrinterId, activeRun, focus),
+      state: this.resolveState(task, views, recommendedPrinterId, activeRun, focus, material),
       material,
       nozzleMm,
       etaSeconds,
@@ -201,6 +301,15 @@ export class LaunchService {
       filamentG: analysis?.estimatedFilamentG ?? null,
       materialSource: this.materialSourceFor(focus),
       recommendedPrinterId,
+      alternativeCount,
+      selectedPrinterId: focus?.printerId ?? null,
+      selectionSource: manuallySelected ? "manual" : recommendedPrinterId ? "auto" : "none",
+      selectionNote: manuallySelected
+        ? "Принтер выбран вручную"
+        : (recommendation ??
+          (views.length === 0
+            ? "В ферме нет ни одного настроенного принтера"
+            : "Ни один принтер сейчас не может принять это задание — причины по каждому ниже")),
       candidates: views,
       confirmations: focus ? this.confirmationsFor(focus, material) : [],
       activeRunId: activeRun?.id ?? null,
@@ -216,6 +325,124 @@ export class LaunchService {
         activeRun && activeRun.startedAt === null && activeRun.state !== "RUNNING"
           ? activeRun.id
           : null
+    };
+  }
+
+  // ── Queue readiness ────────────────────────────────────────────────────────
+
+  /**
+   * **What each queued job's launch button should actually say.**
+   *
+   * A queue row used to report `QUEUED` + `WAITING` as «готово к запуску», which
+   * is a statement about two database columns and not about any printer. A job
+   * whose only compatible machine was mid-print, whose bed still held the last
+   * part, or whose G-code was sliced for a machine this farm does not own, all
+   * read identically green — and only the first row in the queue had a launch
+   * button at all, so the honest answer for every other row was unobtainable.
+   *
+   * This answers it from the same preflight the launch itself runs, per row:
+   * «Можно запустить на A1», «Стол занят — освободите», «Нет совместимого
+   * принтера», «Нужно подтвердить материал». One evaluation per (row × printer),
+   * which for a farm-sized queue is cheap and, unlike a cached verdict, cannot be
+   * stale by the time it is read.
+   */
+  queueReadiness(limit = DEFAULT_READINESS_ROWS): QueueLaunchReadiness[] {
+    // Bounded on purpose. Each row costs one full eligibility evaluation per
+    // printer, and this is polled from the dashboard: an unbounded queue would
+    // turn a 200-job backlog into 600 evaluations every few seconds, for rows
+    // nobody is looking at. The head of the queue is what an operator acts on;
+    // the rest is the planner's job, and the planner asks per task.
+    return this.deps.printQueue
+      .listOpenQueue()
+      .slice(0, Math.max(1, limit))
+      .map((row) => this.readinessFor(row.task));
+  }
+
+  /** Readiness for one task — the row-level answer, shared with {@link queueReadiness}. */
+  readinessFor(task: PrintTask): QueueLaunchReadiness {
+    const repos = this.deps.store.repositories;
+    const artifact = task.artifactId ? repos.artifacts.getById(task.artifactId) : null;
+    const analysis = artifact ? repos.artifactAnalyses.latestForArtifact(artifact.id) : null;
+    const assignment = this.liveAssignment(task.id);
+    const material = assignment?.binding.material ?? task.material ?? analysis?.material ?? null;
+    const nozzleMm = assignment?.binding.nozzleMm ?? analysis?.nozzleDiameterMm ?? null;
+
+    const activeRun = repos.printRuns.findActiveByTask(task.id);
+    if (activeRun && activeRun.startedAt === null && activeRun.state !== "RUNNING") {
+      return {
+        taskId: task.id,
+        state: "unconfirmed",
+        summary: "Прошлый запуск не подтверждён — отметьте, что произошло",
+        printerId: activeRun.printerId,
+        printerName: this.deps.resolvePrinter(activeRun.printerId)?.name ?? activeRun.printerId,
+        canLaunch: false,
+        needsConfirmation: false,
+        alternativeCount: 0,
+        primaryProblem: null
+      };
+    }
+    if (activeRun || task.state === "PRINTING" || task.state === "DISPATCHING") {
+      return {
+        taskId: task.id,
+        state: "running",
+        summary: "Печатается",
+        printerId: activeRun?.printerId ?? task.targetPrinter,
+        printerName: activeRun
+          ? (this.deps.resolvePrinter(activeRun.printerId)?.name ?? activeRun.printerId)
+          : null,
+        canLaunch: false,
+        needsConfirmation: false,
+        alternativeCount: 0,
+        primaryProblem: null
+      };
+    }
+
+    const { candidates, recommendedPrinterId, alternativeCount } = selectLaunchPrinter(
+      this.buildCandidates(task, material, nozzleMm)
+    );
+    const views: LaunchCandidateView[] = candidates.map((c) => ({
+      ...c,
+      problems: explainLaunchFailure(c)
+    }));
+    const best = views.find((c) => c.printerId === recommendedPrinterId) ?? null;
+
+    if (best) {
+      const confirmations = this.confirmationsFor(best, material).filter((c) => c.required);
+      return {
+        taskId: task.id,
+        state: confirmations.length > 0 ? "needs_confirmation" : "ready",
+        summary:
+          confirmations.length > 0
+            ? `${confirmations.map((c) => c.label.toLowerCase()).join("; ")} — подтвердите и запускайте на «${best.printerName}»`
+            : `Можно запустить на «${best.printerName}»`,
+        printerId: best.printerId,
+        printerName: best.printerName,
+        canLaunch: true,
+        needsConfirmation: confirmations.length > 0,
+        alternativeCount,
+        primaryProblem: null
+      };
+    }
+
+    // Nothing startable. The most useful thing to say is the cause on the printer
+    // that came closest — never the bare "нет готового принтера", which names no
+    // machine, no reason and no action.
+    const closest = leastBlocked(views);
+    const problem = primaryProblem(closest?.problems ?? []);
+    return {
+      taskId: task.id,
+      state: "blocked",
+      summary: problem
+        ? views.length === 1 || !closest
+          ? problem.title
+          : `${problem.title} (${closest.printerName})`
+        : "Нет совместимого принтера",
+      printerId: closest?.printerId ?? null,
+      printerName: closest?.printerName ?? null,
+      canLaunch: false,
+      needsConfirmation: false,
+      alternativeCount: 0,
+      primaryProblem: problem
     };
   }
 
@@ -238,6 +465,45 @@ export class LaunchService {
     const actor = request.actor?.trim() || "operator";
     const steps: string[] = [];
     const task = this.requireTask(taskId);
+
+    // 0 ── Idempotency, before any admission rule runs.
+    //
+    //      A repeat of a key that already acted is not a new launch asking for
+    //      permission — it is the same launch asking what happened. Admitting it
+    //      again would refuse it, correctly and uselessly: the first attempt left
+    //      an active run on that printer, so the preflight now (rightly) reports
+    //      `ACTIVE_RUN_EXISTS`, and a double click or a retry after a lost
+    //      response would surface as «нет принтера, готового принять это задание»
+    //      about a job that is already printing. The dispatch layer has always
+    //      resolved the key this way; the launch has to reach it to benefit.
+    if (request.idempotencyKey) {
+      const existing = this.deps.store.repositories.printRuns.findByIdempotencyKey(
+        request.idempotencyKey
+      );
+      // …but only for a run that actually got somewhere. A previous attempt that
+      // was dispatched and never confirmed (`startedAt === null`, PENDING/UNKNOWN)
+      // must NOT be replayed as a success: the printer may or may not be
+      // printing, and the only honest answer is the operator's. Falling through
+      // sends the caller into the ordinary path, which reports exactly that.
+      if (existing && !isUnconfirmedRun(existing)) {
+        const printer = this.deps.resolvePrinter(existing.printerId);
+        return {
+          run: {
+            runId: existing.id,
+            taskId: existing.taskId,
+            assignmentId: existing.assignmentId,
+            attemptId: existing.dispatchAttemptId ?? "",
+            printerId: existing.printerId,
+            printerName: printer?.name ?? existing.printerId,
+            file: existing.file ?? "",
+            deduplicated: true
+          },
+          printerId: existing.printerId,
+          printerName: printer?.name ?? existing.printerId,
+          steps: ["already_started"]
+        };
+      }
+    }
 
     // 1 ── Choose the printer. An explicit choice is honoured but still admitted
     //      through the same eligibility check; "I picked it" is not an override.
@@ -283,6 +549,19 @@ export class LaunchService {
     // 3 ── The bed. Recorded as an operator assertion *before* the start, so the
     //      dispatch gate sees a real CLEAR cycle rather than being asked to trust
     //      this method's say-so.
+    if (given.has("material_loaded") && preview.material) {
+      // A physical assertion by a named person is evidence, and evidence that is
+      // not written down is not evidence. It clears no blocker on its own — the
+      // gate treats an unknown material as a warning in attended mode — but the
+      // audit trail must be able to answer "who said PETG was in that machine".
+      this.recordAudit(task.id, "material_confirmed", actor, {
+        printerId: printer.id,
+        material: preview.material,
+        source: "operator"
+      });
+      steps.push("material_confirmed");
+    }
+
     if (given.has("bed_clear")) {
       const lifecycle = this.deps.runLifecycle();
       if (!lifecycle) throw new JobError("Служба запуска ещё не инициализирована");
@@ -295,16 +574,47 @@ export class LaunchService {
       steps.push("bed_confirmed");
     }
 
-    // 4 ── An assignment for THIS printer. An existing live one on the same
-    //      printer is reused (its binding is the identity the file was built
-    //      against); one pointing elsewhere is withdrawn rather than silently
-    //      redirected, so the ledger never shows a placement that did not happen.
+    // 4 ── PREFLIGHT, again, against rows re-read now.
+    //
+    //      Stage A of the three-stage protocol. The operator has been looking at
+    //      a preview for however long it took them to tick the boxes, and the
+    //      farm moved: another job took the printer, the bed filled, telemetry
+    //      went stale. Re-running the SAME policy here is what keeps "preview
+    //      allowed it" and "the launch refused it" from meaning two different
+    //      rule sets — a divergence between them can now only be a *change*.
+    //
+    //      Nothing has been uploaded or reserved at this point, so a refusal here
+    //      costs nothing and leaves no file on the machine.
+    const gate = this.deps.scheduler.dispatchEligibility({
+      taskId: task.id,
+      printerId: printer.id,
+      mode: "manual",
+      stage: "preflight",
+      automaticContinuationAllowed: this.deps.automaticContinuationAllowed(printer.id)
+    });
+    const remaining = remainingBlockers(gate, request.override?.codes ?? []);
+    if (remaining.length > 0) {
+      throw new JobError(
+        `Нельзя запустить «${task.title}» на «${printer.name}»: ${remaining
+          .map((r) => r.message)
+          .join("; ")}`,
+        { blockers: remaining.map((r) => ({ code: r.code, message: r.message })), stage: "preflight" }
+      );
+    }
+    steps.push("preflight_passed");
+
+    // 5 ── DELIVERY. Only now, and only after the preflight passed, do bytes
+    //      move: assign the printer, resolve the remote name, push the file and
+    //      verify what landed. An existing live assignment on the same printer is
+    //      reused (its binding is the identity the file was built against); one
+    //      pointing elsewhere is withdrawn rather than silently redirected, so
+    //      the ledger never shows a placement that did not happen.
     const assignment = this.ensureAssignment(task, printer.id, actor, steps);
 
-    // 5 ── Deliver the file. `prepare` is idempotent and reconciles against the
-    //      device: a VERIFIED copy is left alone, a stale or missing one is
-    //      (re-)uploaded. This is the step the old UI made the operator do by
-    //      hand in the printer's file browser.
+    //      `prepare` is idempotent and reconciles against the device: a VERIFIED
+    //      copy is left alone, a stale or missing one is (re-)uploaded. This is
+    //      the step the old UI made the operator do by hand in the printer's file
+    //      browser.
     const delivery = await this.deps.deviceArtifacts.prepare(assignment.id, actor);
     if (!delivery.ready) {
       // Not ready means either a transfer that did not verify, or an adapter that
@@ -322,7 +632,14 @@ export class LaunchService {
     }
     steps.push("file_verified_on_device");
 
-    // 6 ── Start. The idempotency key is the caller's, so a double click or a
+    // 6 ── FINAL DISPATCH GATE, then start. `startAssignment` re-reads every row
+    //      inside its own transaction and runs the eligibility at its full
+    //      `dispatch` stage — the preflight rules plus the ones only answerable
+    //      now: the file is really there, under the expected name, at the
+    //      expected size, tracked by this delivery, on a printer whose state did
+    //      not change while the transfer ran.
+    //
+    //      The idempotency key is the caller's, so a double click or a
     //      refresh-and-retry returns the original run instead of a second print.
     const run = await dispatch.startAssignment(assignment.id, {
       mode: "manual",
@@ -342,6 +659,27 @@ export class LaunchService {
   }
 
   // ── Internals ──────────────────────────────────────────────────────────────
+
+  /** One audit line, through the store the whole service already writes to. */
+  private recordAudit(
+    taskId: string,
+    action: string,
+    actor: string,
+    detail: Record<string, unknown>
+  ): void {
+    const repos = this.deps.store.repositories;
+    repos.audit.insert({
+      id: newId(ID_PREFIX.auditEvent),
+      at: new Date().toISOString(),
+      entityType: "print_task",
+      entityId: taskId,
+      action,
+      fromState: null,
+      toState: null,
+      actor,
+      detail
+    });
+  }
 
   private requireTask(taskId: string): PrintTask {
     const task = this.deps.store.repositories.tasks.getById(taskId);
@@ -379,6 +717,13 @@ export class LaunchService {
       );
       steps.push("assignment_replaced");
     }
+    // The container the file will wear on THIS device, decided before the
+    // binding captures it. An uploaded executable was queued before any printer
+    // was chosen, so its name carries the artifact's own extension; a Bambu
+    // starts a `.gcode.3mf` plate package and must be handed one by that name.
+    // A no-op whenever the name is already right or the operator chose it.
+    const retargeted = this.deps.printQueue.retargetDeviceFile(task.id, printerId, actor);
+    if (retargeted.onDeviceFile !== task.onDeviceFile) steps.push("device_file_retargeted");
     const created = this.deps.printQueue.assignTask(
       task.id,
       printerId,
@@ -403,21 +748,36 @@ export class LaunchService {
     return "missing";
   }
 
+  /**
+   * One candidate per printer, admitted by the **same policy the dispatch runs**
+   * — {@link evaluateDispatchEligibility} at its `preflight` stage.
+   *
+   * This used to call `compatibilityForTask`, i.e. the planner's
+   * `evaluateCompatibility` and nothing else. That answered "could this printer
+   * ever make this model", which is a different question from "may this file
+   * start on this machine now", and the gap was where the launch broke: a G-code
+   * sliced for an A1 passed the preview for a K2 (the declared target is not a
+   * compatibility rule), the operator confirmed, the file was uploaded to the
+   * K2, and only the dispatch gate refused it — after the transfer.
+   *
+   * Now every refusal the dispatch would raise *and that does not depend on the
+   * bytes having moved* is already here, so the preview can only be overtaken by
+   * a change, never by something that was true all along.
+   */
   private buildCandidates(
     task: PrintTask,
     requiredMaterial: string | null,
     requiredNozzleMm: number | null
   ): LaunchCandidateInput[] {
     const openByPrinter = this.openQueueDepth();
-    return this.deps.scheduler.compatibilityForTask(task).map(({ printer, result }) => {
+    return this.preflight(task).map(({ printer, eligibility }) => {
       const config = this.deps.resolvePrinter(printer.id);
+      const split = splitReasons(eligibility);
       return {
         printerId: printer.id,
         printerName: printer.name,
-        verdict: result.verdict,
-        blockers: result.blockers,
-        reviews: result.reviews,
-        warnings: result.warnings,
+        verdict: eligibility.preflight.verdict,
+        ...split,
         online: printer.online,
         status: printer.status,
         loadedMaterial: printer.material,
@@ -430,6 +790,13 @@ export class LaunchService {
         remoteStartSupported:
           printer.remoteStartSupported && (config ? capabilitiesOf(config).supportsUpload : false)
       };
+    });
+  }
+
+  /** The shared preflight evaluation — one call site for preview and launch. */
+  private preflight(task: PrintTask) {
+    return this.deps.scheduler.launchPreflight(task, {
+      automaticContinuationAllowed: (id) => this.deps.automaticContinuationAllowed(id)
     });
   }
 
@@ -459,27 +826,37 @@ export class LaunchService {
     requiredMaterial: string | null
   ): LaunchConfirmation[] {
     const out: LaunchConfirmation[] = [];
-    const codes = new Set(candidate.reviews.map((r) => r.code));
+    // Every reason the candidate carries, whichever bucket it landed in: a bed
+    // that is not clear is a *blocker* in the dispatch vocabulary and still the
+    // most confirmable fact on the screen.
+    const codes = new Set(
+      [...candidate.blockers, ...candidate.reviews, ...candidate.warnings].map((r) => r.code)
+    );
 
-    if (codes.has("bed_unknown") || codes.has("bed_awaiting_clearance")) {
+    if (codes.has("BED_STATE_UNKNOWN") || codes.has("BED_NOT_CLEAR")) {
       out.push({
         code: "bed_clear",
         label: "Стол свободен",
-        detail: codes.has("bed_awaiting_clearance")
+        detail: codes.has("BED_NOT_CLEAR")
           ? "На столе осталась готовая модель — снимите её перед запуском."
           : "Система не знает, что сейчас на столе. Проверьте, что он пуст.",
-        required: true
+        required: true,
+        effect:
+          "Подтверждение записывает очистку стола от вашего имени: принтер получит цикл стола CLEAR, и это попадёт в журнал."
       });
     }
 
     // Only when the material genuinely cannot be read. A printer reporting its
-    // filament over telemetry has already answered this question.
+    // filament over telemetry has already answered this question — and a printer
+    // whose *config* merely lists what it can print never answered it at all,
+    // which is the false «material_mismatch» this whole split removed.
     if (requiredMaterial && candidate.loadedMaterial === null) {
       out.push({
         code: "material_loaded",
         label: `Установлен ${requiredMaterial}`,
         detail: `Принтер не сообщает загруженный материал. Убедитесь, что заправлен ${requiredMaterial}.`,
-        required: true
+        required: true,
+        effect: `Подтверждение записывается в журнал как ваше утверждение «в «${candidate.printerName}» заправлен ${requiredMaterial}».`
       });
     }
 
@@ -505,7 +882,8 @@ export class LaunchService {
     candidates: LaunchCandidateView[],
     recommendedPrinterId: string | null,
     activeRun: { state: string; startedAt: string | null } | null,
-    focus: LaunchCandidateView | null
+    focus: LaunchCandidateView | null,
+    requiredMaterial: string | null
   ): LaunchState {
     // A dispatched start the printer never confirmed. Reported as itself rather
     // than as `running`, because the physical truth is that nothing is printing
@@ -524,11 +902,80 @@ export class LaunchService {
     if (task.state === "DRAFT") return "preparing";
     const startable = focus ?? candidates.find((c) => c.printerId === recommendedPrinterId) ?? null;
     if (!startable || !startable.eligible) return "blocked";
-    return this.confirmationsFor(startable, null).some((c) => c.required) ||
+    return this.confirmationsFor(startable, requiredMaterial).some((c) => c.required) ||
       startable.reviews.length > 0
       ? "needs_confirmation"
       : "ready";
   }
+}
+
+/**
+ * The eligibility's reasons, split into the three buckets the launch screen
+ * speaks — and *only* by facts the domain already decided.
+ *
+ *  - a `blocker` an operator may never wave through → **blocker**;
+ *  - a `blocker` outside `NON_OVERRIDABLE` → **confirmable**: a named person may
+ *    accept it, and the screen must offer them the way to;
+ *  - a `warning` → **info**.
+ *
+ * The old split came from which *list* `evaluateCompatibility` put a reason in,
+ * which meant the launch screen and the dispatch gate disagreed about what was
+ * waivable: a preflight `review` that the dispatch had hardened into a
+ * non-overridable blocker was still offered as a checkbox, and the operator's
+ * confirmation was then refused by the gate.
+ */
+function splitReasons(eligibility: DispatchEligibility): {
+  blockers: LaunchReason[];
+  reviews: LaunchReason[];
+  warnings: LaunchReason[];
+} {
+  const blockers: LaunchReason[] = [];
+  const reviews: LaunchReason[] = [];
+  const warnings: LaunchReason[] = [];
+  for (const r of eligibility.reasons) {
+    const item = toLaunchReason(r);
+    if (r.severity === "blocker") {
+      // A blocker refuses the start. The one exception is a blocker a tick
+      // *resolves* by causing a real server action — an unknown bed becomes a
+      // recorded CLEAR cycle — which is a confirmation, not a waiver, and must
+      // not make the printer look impossible.
+      if (item.confirmation) reviews.push(item);
+      else blockers.push(item);
+      continue;
+    }
+    // Among warnings, only the ones that began life as a preflight *review* are
+    // open questions for a human; the rest are context. Severity decides whether
+    // the launch may proceed, `origin` decides whether there is anything to tick.
+    if (item.origin === "review") reviews.push(item);
+    else warnings.push(item);
+  }
+  return { blockers, reviews, warnings };
+}
+
+function toLaunchReason(r: EligibilityReason): LaunchReason {
+  const evidence = r.evidence as { stage?: string; code?: string; origin?: string } | undefined;
+  const fromPreflight = evidence?.stage === "preflight";
+  const preflightCode =
+    fromPreflight && typeof evidence?.code === "string" ? evidence.code : undefined;
+  const origin = fromPreflight && typeof evidence?.origin === "string" ? evidence.origin : undefined;
+  const confirmation = CONFIRMATION_FOR_CODE[r.code];
+  return {
+    code: r.code,
+    message: r.message,
+    ...(preflightCode ? { preflightCode } : {}),
+    ...(origin ? { origin } : {}),
+    ...(confirmation ? { confirmation } : {}),
+    overridable: !NON_OVERRIDABLE.has(r.code)
+  };
+}
+
+/**
+ * A start command that left and was never confirmed. `startedAt === null` is the
+ * load-bearing half: a run with a start time was observed printing, whatever it
+ * is doing now.
+ */
+function isUnconfirmedRun(run: { state: string; startedAt: string | null }): boolean {
+  return run.startedAt === null && (run.state === "PENDING" || run.state === "UNKNOWN");
 }
 
 /** The candidate closest to being startable — the most useful "why not". */
@@ -537,7 +984,7 @@ function leastBlocked(candidates: LaunchCandidateView[]): LaunchCandidateView | 
 }
 
 /** The blockers of the least-blocked candidate — the most useful "why not". */
-function firstBlockers(candidates: LaunchCandidateView[]): CompatibilityReason[] {
+function firstBlockers(candidates: LaunchCandidateView[]): LaunchReason[] {
   return leastBlocked(candidates)?.blockers ?? [];
 }
 

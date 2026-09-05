@@ -49,6 +49,7 @@
     "latestSnapshotUrl": "/api/printers/contract-printer/snapshots/snap-1",
     "filesSupported": true,
     "remoteStartSupported": true,
+    "bedCycle": null,
     "setupRequired": false,
     "setupMissing": [],
     "interfaceUrl": "http://printer.internal.example:4408"
@@ -103,6 +104,7 @@
     "latestSnapshotUrl": null,
     "filesSupported": true,
     "remoteStartSupported": true,
+    "bedCycle": null,
     "setupRequired": false,
     "setupMissing": [],
     "interfaceUrl": "http://printer.internal.example:4408"
@@ -157,6 +159,7 @@
     "latestSnapshotUrl": null,
     "filesSupported": true,
     "remoteStartSupported": true,
+    "bedCycle": null,
     "setupRequired": false,
     "setupMissing": [],
     "interfaceUrl": "http://printer.internal.example:4408",
@@ -206,6 +209,7 @@
     "latestSnapshotUrl": null,
     "filesSupported": true,
     "remoteStartSupported": true,
+    "bedCycle": null,
     "setupRequired": false,
     "setupMissing": [],
     "interfaceUrl": "http://printer.internal.example:4408"

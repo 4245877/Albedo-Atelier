@@ -1,4 +1,4 @@
-import { capabilitiesOf } from "../capabilities";
+import { anyAdapterStartableExtensions, capabilitiesOf } from "../capabilities";
 import type { PrinterConfig } from "../config";
 import { PRINTABLE_EXTENSIONS } from "./path";
 
@@ -89,10 +89,21 @@ export function isGeneratedDeviceFileName(
  * longest match first, so an artifact named `part.gcode` retargeted at a Bambu
  * becomes `part-<sha8>.gcode.3mf` rather than `part.gcode-<sha8>.gcode.3mf`.
  */
-/** The printable extension `base` declares (lower-cased), or null when it declares none. */
+/**
+ * The startable extension `base` declares (lower-cased), or null when it declares
+ * none — longest match first, over the extensions *any* implemented adapter can
+ * start.
+ *
+ * The union, not the Klipper default, and the difference is a real file: an
+ * uploaded `bracket.gcode.3mf` does not end in `.gcode`, so the narrow list found
+ * nothing and the name fell back to `.gcode`. A finished Bambu plate package was
+ * therefore renamed into something claiming to be bare G-code, which the format
+ * contradiction rule then (correctly) refused — «расширение обещает G-code,
+ * содержимое — 3mf», about a file whose original name was exactly right.
+ */
 function declaredExtension(base: string): string | null {
   const lower = base.toLowerCase();
-  for (const ext of PRINTABLE_EXTENSIONS) {
+  for (const ext of anyAdapterStartableExtensions()) {
     if (lower.endsWith(ext)) return ext;
   }
   return null;
@@ -102,6 +113,9 @@ function stripKnownExtension(base: string, printer?: PrinterConfig | null): stri
   const lower = base.toLowerCase();
   const known = [
     ...(printer ? capabilitiesOf(printer).startableExtensions : []),
+    // Without a target the union is the honest scope: the stem of a
+    // `.gcode.3mf` must lose the whole double extension, not just the `.3mf`.
+    ...anyAdapterStartableExtensions(),
     ...PRINTABLE_EXTENSIONS
   ].sort((a, b) => b.length - a.length);
   for (const ext of known) {

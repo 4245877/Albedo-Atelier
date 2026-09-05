@@ -1,6 +1,5 @@
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { MaterialOverride, Plan, PrintTask } from "../../domain/print/types";
-import type { CompatibilityResult } from "../../domain/scheduling/compatibility";
 import type { DispatchEligibility } from "../../domain/dispatch/eligibility";
 import { SchedulerContext } from "./context";
 import { EligibilityQueries, type EligibilityRequest } from "./eligibility";
@@ -78,22 +77,44 @@ export class SchedulerService {
   }
 
   /**
-   * Compatibility of ONE task against every configured printer, paired with the
-   * printer reference it was judged against.
+   * `compatibilityForTask` used to live here: one task against every printer,
+   * through `evaluateCompatibility` alone. It existed for the launch preview,
+   * and the launch preview is exactly what it got wrong — compatibility answers
+   * "could this printer ever make this model", which is not the question a start
+   * asks. It never saw the file's declared target printer, the G-code flavor,
+   * remote-start support or the queue shape, so the screen offered machines
+   * whose refusal was already certain.
    *
-   * The launch flow needs both halves — the verdict *and* the live printer facts
-   * (loaded material, nozzle, status) it must show the operator — and it must
-   * judge a task the matrix may not list at all: `compatibilityMatrix()` covers
-   * only currently-schedulable queue rows, while a launch can legitimately be
-   * previewed for a task that is already assigned.
+   * {@link launchPreflight} replaces it with the real admission policy at its
+   * `preflight` stage. Nothing else called the old method, so it is gone rather
+   * than left as a second, wronger way to ask the same question.
    */
-  compatibilityForTask(task: PrintTask): {
-    printer: SchedulerPrinterRef;
-    result: CompatibilityResult;
-  }[] {
+
+  /**
+   * **The launch admission policy, for one task against every printer.**
+   *
+   * The same {@link evaluateDispatchEligibility} the physical dispatch runs, at
+   * the `preflight` stage: everything that is knowable before a byte moves. This
+   * is what the launch preview shows and what the launch re-runs immediately
+   * before it delivers a file, so the two cannot disagree.
+   *
+   * It replaces a preview built on `evaluateCompatibility` alone — which never
+   * saw the file's declared target printer, the G-code flavor, remote-start
+   * support or the queue shape, and therefore offered printers whose refusal was
+   * already certain.
+   */
+  launchPreflight(
+    task: PrintTask,
+    options: { automaticContinuationAllowed?: (printerId: string) => boolean } = {}
+  ): { printer: SchedulerPrinterRef; eligibility: DispatchEligibility }[] {
     return this.listPrinterRefs().map((printer) => ({
       printer,
-      result: this.evidence.evaluate(task, printer)
+      eligibility: this.eligibilityQueries.evaluateFor(task, printer, {
+        mode: "manual",
+        stage: "preflight",
+        automaticContinuationAllowed:
+          options.automaticContinuationAllowed?.(printer.id) ?? false
+      })
     }));
   }
 

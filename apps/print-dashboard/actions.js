@@ -3,8 +3,8 @@ import {
   initModals,
   openFilesModal,
   openInfoModal,
-  openJobForm,
   openLaunchModal,
+  openTaskModal,
   openPrinterModal
 } from "./render/modals.js";
 import { gotoSection } from "./nav.js";
@@ -19,6 +19,11 @@ import { esc, setBusy, toast } from "./util.js";
  * состояние перезагружается через переданный `refresh`. `getState` даёт доступ
  * к текущему снимку фермы для поиска принтера по id.
  */
+/** Имя принтера по id из уже загруженного состояния — id оператору ничего не говорит. */
+function printerNameOf(state, printerId) {
+  return (state?.printers || []).find((p) => p.id === printerId)?.name || printerId;
+}
+
 export function installActions({ getState, refresh }) {
   // Модальные окна (детали принтера, форма задания, справка) используют то же
   // состояние и refresh, что и доска.
@@ -158,7 +163,15 @@ export function installActions({ getState, refresh }) {
 
     const act = el.dataset.act;
 
-    if (act === "add-job") { openJobForm(); return; }
+    // «Добавить задание» ведёт туда, где задание действительно рождается —
+    // в загрузку файла. Прежняя форма создавала задание по ТЕКСТОВОМУ имени
+    // файла на принтере, то есть второй жизненный цикл без артефакта, хеша и
+    // анализа; см. render/modals.js.
+    if (act === "add-job") {
+      document.querySelector('[data-goto="uploads"]')?.click();
+      document.getElementById("uploads")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
     if (act === "add-printer") { openInfoModal("add-printer"); return; }
     if (act === "upload-file") { openInfoModal("upload-file"); return; }
     if (act === "settings") { openInfoModal("settings"); return; }
@@ -191,9 +204,53 @@ export function installActions({ getState, refresh }) {
     // готовностью, покажет выбранный принтер и соберёт подтверждения. Ничего не
     // отправляем отсюда — прежняя прямая отправка в /api/queue/start-next
     // стартовала dispatch, ничего не зная ни про подготовку файла, ни про стол.
+    // Карточка задания — диагностика: вся цепочка и журнал в одном месте.
+    if (act === "task") {
+      const taskId = el.dataset.task;
+      if (taskId) openTaskModal(taskId);
+      return;
+    }
     if (act === "launch") {
       const taskId = el.dataset.task;
       if (taskId) openLaunchModal(taskId);
+      return;
+    }
+    /* Снятие детали и освобождение стола.
+     *
+     * Ведёт в СУЩЕСТВУЮЩИЙ жизненный цикл, а не в параллельный: если сервер уже
+     * завёл операцию PART_REMOVAL, подтверждаем именно её (это единственный
+     * законный переход из AWAITING_CLEARANCE, и он записывает, кто и когда снял
+     * деталь). Операции нет — остаётся прямое подтверждение очистки стола, тот
+     * же аудируемый переход другим путём. */
+    if (act === "clear-bed") {
+      const printerId = el.dataset.printer;
+      const operationId = el.dataset.operation;
+      if (!printerId) return;
+      void confirmAction({
+        title: "Освободить стол",
+        object: printerNameOf(getState(), printerId),
+        body: "Подтвердите, что готовая модель снята с площадки и стол пуст.",
+        points: [
+          "Подтверждение записывается в журнал вместе с вашим именем",
+          "Пока стол не освобождён, следующее задание на этот принтер не пойдёт",
+          "Система не определяет это сама: принтер сообщает «свободен» и с деталью на столе"
+        ],
+        cta: "Стол свободен",
+        tone: "warn",
+        run: async () => {
+          if (operationId) {
+            await apiPost(`/api/print/operations/${encodeURIComponent(operationId)}/complete`, {});
+          } else {
+            await apiPost(`/api/printers/${encodeURIComponent(printerId)}/bed/clear`, {
+              confirmation: "part_removed"
+            });
+          }
+        }
+      }).then((ok) => {
+        if (!ok) return;
+        toast("Стол свободен — очередь может продолжаться, Владыка", "toast-ok");
+        void refresh({ silent: false });
+      });
       return;
     }
     if (act === "start-next") {

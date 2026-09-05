@@ -103,11 +103,62 @@ export function renderHero(state) {
  * отдельной заметной строкой, а действие меняется с «Запустить» на
  * «Разобраться» — то есть на то, что действительно можно сделать.
  *
+ * @param job строка очереди (проекция задания)
+ * @param readiness ответ сервера о готовности к запуску (GET /api/print/launch),
+ *        или null, когда он недоступен — тогда работает прежняя логика по job.
  * @returns {{key:string,label:string,badge:string,row:string,blocked:boolean,
- *            reason:string,actionLabel:string}}
+ *            reason:string,detail?:string,actionLabel:string}}
+ *          `reason` — то, что мешает (со знаком, заметно); `detail` — что
+ *          произойдёт при нажатии («Можно запустить на A1»), спокойным тоном.
  */
-export function queueJobStatus(job) {
+export function queueJobStatus(job, readiness = null) {
   const reason = typeof job.reason === "string" ? job.reason.trim() : "";
+
+  // Готовность приходит с сервера и считается тем же preflight, что и сам
+  // запуск (GET /api/print/launch). Она перевешивает «QUEUED + WAITING»,
+  // потому что отвечает на другой вопрос: не «числится ли задание в очереди»,
+  // а «можно ли его сейчас запустить и на чём». Раньше второго ответа не
+  // существовало вовсе, и первый выдавался за него — зелёное «готово к
+  // запуску» стояло рядом с заданием, у которого не было ни одного пригодного
+  // принтера.
+  if (readiness && !reason) {
+    if (readiness.state === "ready") {
+      return {
+        key: "ready",
+        label: "можно запускать",
+        badge: "badge-idle",
+        row: "",
+        blocked: false,
+        reason: "",
+        detail: readiness.summary,
+        actionLabel: "Запустить печать"
+      };
+    }
+    if (readiness.state === "needs_confirmation") {
+      return {
+        key: "review",
+        label: "нужно подтверждение",
+        badge: "badge-paused",
+        row: "row-warn",
+        blocked: false,
+        reason: "",
+        detail: readiness.summary,
+        actionLabel: "Подтвердить и запустить"
+      };
+    }
+    if (readiness.state === "blocked") {
+      return {
+        key: "blocked",
+        label: "запуск невозможен",
+        badge: "badge-blocked",
+        row: "row-blocked",
+        blocked: true,
+        reason: readiness.summary,
+        detail: "",
+        actionLabel: "Разобраться"
+      };
+    }
+  }
 
   if (job.status === "unconfirmed") {
     return {
@@ -158,23 +209,42 @@ export function queueJobStatus(job) {
    Блокирующая причина — СВОЯ строка с собственным знаком, а не хвост
    приглушённой подписи: подпись читают последней, а причина отказа обязана
    попадаться на глаза первой. */
-export function queueRow(job, printers) {
-  const st = queueJobStatus(job);
-  // Кнопка есть у всего, что требует вмешательства, и ведёт в одно и то же
-  // окно запуска: разрешение проблемы живёт там, где оператор в неё упирается.
-  const action = st.blocked
-    ? `<button class="btn btn-sm" data-act="launch" data-task="${esc(job.id)}">${esc(st.actionLabel)}</button>`
-    : "";
+export function queueRow(job, printers, readiness = null) {
+  const st = queueJobStatus(job, readiness);
+  // Кнопка есть у КАЖДОЙ строки и ведёт в одно и то же окно запуска.
+  //
+  // Раньше её получали только заблокированные строки, а запустить можно было
+  // единственное задание — то, что оказалось первым пригодным (карточка
+  // «Ближайшее к запуску»). Всё остальное в очереди действия не имело вовсе:
+  // чтобы напечатать третью строку, оператору полагалось сначала избавиться от
+  // двух первых. Порядок очереди при этом строгим контрактом не является —
+  // планировщик сам расставляет задания по принтерам, а `position` задаёт
+  // рекомендацию, — поэтому кнопка называется «Запустить», а не «Запустить
+  // сейчас»: она не нарушает обещания, которого система не давала.
   return `
     <li class="row ${st.row}">
       <div class="grow">
-        <div class="row-title">${esc(queueJobTitle(job))}</div>
+        <!-- Название ведёт в карточку задания: вся цепочка от файла до прогона,
+             с журналом. Это ответ на «почему не печатает», и он должен быть в
+             одном клике от строки, у которой вопрос и возникает. -->
+        <button type="button" class="row-title row-title-link" data-act="task" data-task="${esc(job.id)}">
+          ${esc(queueJobTitle(job))}
+        </button>
         <div class="row-sub">${esc(queueJobSubtitle(job, printers))}</div>
         ${st.reason ? `<p class="row-reason">${icon(st.key === "blocked" ? "blocked" : "warn")}<span>${esc(st.reason)}</span></p>` : ""}
+        ${st.detail ? `<p class="row-detail">${esc(st.detail)}</p>` : ""}
       </div>
       <span class="badge ${st.badge}">${esc(st.label)}</span>
-      ${action}
+      <button class="btn btn-sm ${st.key === "ready" ? "btn-primary" : ""}"
+        data-act="launch" data-task="${esc(job.id)}">${esc(st.actionLabel)}</button>
     </li>`;
+}
+
+/** Готовность строки очереди по taskId, из ответа GET /api/print/launch. */
+export function readinessOf(state, taskId) {
+  const rows = state?.launchReadiness;
+  if (!Array.isArray(rows)) return null;
+  return rows.find((r) => r.taskId === taskId) ?? null;
 }
 
 /** «3U-default.3mf» → «3U-default»: оператор назвал модель, а не контейнер. */
@@ -218,10 +288,13 @@ export const QUEUE_VISIBLE_LIMIT = 8;
  * Хвост очереди, не поместившийся в Зал.
  * @returns {{hidden:number, blocked:number}|null} null — если поместилось всё.
  */
-export function queueOverflow(queue, limit = QUEUE_VISIBLE_LIMIT) {
+export function queueOverflow(queue, limit = QUEUE_VISIBLE_LIMIT, readinessFor = () => null) {
   const rest = (queue || []).slice(limit);
   if (!rest.length) return null;
-  return { hidden: rest.length, blocked: rest.filter((j) => queueJobStatus(j).blocked).length };
+  return {
+    hidden: rest.length,
+    blocked: rest.filter((j) => queueJobStatus(j, readinessFor(j.id)).blocked).length
+  };
 }
 
 function queueMoreRow(overflow) {
@@ -256,8 +329,12 @@ export function renderQueue(state) {
   // Главной кнопкой раздела становится только ДЕЙСТВИТЕЛЬНО запускаемое
   // задание: у «ready» с блокирующей причиной запуск невозможен, и предлагать
   // его крупной золотой кнопкой — то же самое враньё, что и зелёный статус.
-  const next = state.queue.find((j) => !queueJobStatus(j).blocked);
-  const overflow = queueOverflow(state.queue);
+  const readinessFor = (id) => readinessOf(state, id);
+  // «Ближайшее» — теперь действительно запускаемое, а не просто незаблокированное:
+  // готовность считает сервер, и строка без пригодного принтера в кандидаты на
+  // главную кнопку не попадает.
+  const next = state.queue.find((j) => readinessFor(j.id)?.canLaunch ?? !queueJobStatus(j).blocked);
+  const overflow = queueOverflow(state.queue, QUEUE_VISIBLE_LIMIT, readinessFor);
   $("#queue-meta").textContent = `${active.length} активных · ${state.queue.length} в очереди`;
 
   $("#queue-body").innerHTML = `
@@ -279,12 +356,15 @@ export function renderQueue(state) {
       <div>
         <p class="sub-head">Очередь <span class="count">${state.queue.length}</span></p>
         <ul class="row-list">${
-          state.queue.slice(0, QUEUE_VISIBLE_LIMIT).map((j) => queueRow(j, state.printers)).join("")
+          state.queue
+            .slice(0, QUEUE_VISIBLE_LIMIT)
+            .map((j) => queueRow(j, state.printers, readinessFor(j.id)))
+            .join("")
           || emptyRow("Очередь пуста — Назарик ожидает ваших повелений")
         }${queueMoreRow(overflow)}</ul>
       </div>
     </div>
-    ${next ? nextJobCard(next, state.printers) : ""}`;
+    ${next ? nextJobCard(next, state.printers, readinessFor(next.id)) : ""}`;
 }
 
 /**
@@ -296,7 +376,7 @@ export function renderQueue(state) {
  * известно. Кнопка НЕ ведёт в файловый браузер и не требует, чтобы оператор
  * сам нашёл подготовленный пакет на принтере, — это и была прежняя поломка.
  */
-function nextJobCard(next, printers) {
+function nextJobCard(next, printers, readiness) {
   return `
     <div class="next-job">
       <span class="star" aria-hidden="true">${icon("sigilFilled", { cls: "ico-md" })}</span>
@@ -304,6 +384,7 @@ function nextJobCard(next, printers) {
         <p class="next-job-lbl">Ближайшее к запуску</p>
         <div class="row-title">${esc(queueJobTitle(next))}</div>
         <div class="row-sub">${esc(queueJobSubtitle(next, printers))}</div>
+        ${readiness?.summary ? `<p class="row-detail">${esc(readiness.summary)}</p>` : ""}
       </div>
       <button class="btn btn-primary" data-act="launch" data-task="${esc(next.id)}">
         ${icon("play")}<span>Запустить печать</span>
@@ -615,8 +696,10 @@ export function renderMaintenance(state) {
    разделами теперь делает навигация режимов, и дублировать её плиткой
    «Открыть очередь» больше незачем. */
 const QUICK = [
-  ["queue", "Добавить задание", { act: "add-job" }],
-  ["upload", "Загрузить файл", { goto: "uploads" }],
+  // Одно действие, а не два: «добавить задание» и «загрузить файл» вели в разные
+  // места и создавали два разных жизненных цикла — второй без артефакта, хеша и
+  // анализа. Задание теперь рождается ровно одним путём.
+  ["upload", "Добавить задание — загрузить файл", { goto: "uploads" }],
   ["printer", "Принять принтер", { goto: "hardware" }],
   ["gear", "Настройки", { act: "settings" }],
 ];

@@ -54,6 +54,16 @@ export interface PrinterFault {
  * Every telemetry field is nullable: `null` means the device did not report
  * the value, and the dashboard must show it as unknown rather than invent one.
  */
+/** The tracked plate state of one printer, with the intervention it is waiting on. */
+export interface PrinterBedView {
+  /** `CLEAR` | `RESERVED` | `RUNNING` | `AWAITING_CLEARANCE` | `UNKNOWN`. */
+  state: string;
+  /** True when a finished part is (as far as the system knows) still on it. */
+  awaitingClearance: boolean;
+  /** The open PART_REMOVAL/PLATE_SERVICE operation to confirm, when there is one. */
+  operationId: string | null;
+}
+
 export interface PrinterView {
   id: string;
   name: string;
@@ -161,6 +171,21 @@ export interface PrinterView {
   filesSupported: boolean;
   /** Whether the backend can remote-start an on-device file (Moonraker only). */
   remoteStartSupported: boolean;
+  /**
+   * What is on the plate, as the system tracks it — not as the printer's own
+   * `status` implies. The two are routinely different in the way that matters:
+   * a machine that has just finished reports `idle` while the finished part is
+   * still sitting on the bed, and the queue will not advance onto it. Without
+   * this field the card showed «свободен» and the operator had no way to know a
+   * removal was owed, or that it was the thing holding the next job.
+   *
+   * `null` when nothing is tracked (no store wired) — distinct from `UNKNOWN`,
+   * which is a tracked "we do not know".
+   *
+   * Named `bedCycle`, not `bed`: `bed` is already this view's bed *temperature*
+   * pair, and the two facts have nothing to do with each other.
+   */
+  bedCycle: PrinterBedView | null;
   /** True when the adapter is implemented but this printer lacks configuration. */
   setupRequired: boolean;
   /** Exactly which fields are missing, each with where to obtain it. */

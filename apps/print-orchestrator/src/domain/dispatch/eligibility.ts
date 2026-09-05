@@ -36,6 +36,7 @@ import {
   type CompatibilityTaskInput,
   type PreflightReasonCode
 } from "../scheduling/compatibility";
+import { ACKNOWLEDGEABLE_VERDICTS } from "../print/analysisReview";
 import { evaluateNightWindowFit, type NightWindowFit } from "../scheduling/nightWindow";
 import {
   REASON,
@@ -47,6 +48,33 @@ import {
 } from "./reasons";
 
 export type DispatchMode = "manual" | "night";
+
+/**
+ * **Which half of the launch this evaluation is deciding.**
+ *
+ * The rules are one set; what differs is how much of the world is knowable yet.
+ *
+ *  - `preflight` — everything that can be answered *before a byte moves*: the
+ *    printer's state and class, the file's declared target and flavor, the build
+ *    volume, the nozzle, the material, the bed, manual operations, remote-start
+ *    capability, the queue and the reservation, telemetry freshness. Run twice:
+ *    once for the preview the operator reads, once again immediately before the
+ *    delivery starts.
+ *  - `dispatch` — the preflight rules **plus** the ones that only become
+ *    answerable once the file is on the device: it exists, under the expected
+ *    name, at the expected size, tracked by a delivery of ours.
+ *
+ * The split exists because the two used to be *different rule sets*. The preview
+ * ran `evaluateCompatibility` alone, so it never checked the file's declared
+ * target printer, the G-code flavor, remote-start support or the queue shape —
+ * and cheerfully offered a K2 for a file sliced for an A1. The operator
+ * confirmed, the file was uploaded to the K2, and only then did the dispatch
+ * gate refuse. Every such refusal was knowable before the transfer, and now is:
+ * `preflight` is a strict subset of `dispatch`, so a preview that passes can only
+ * be overtaken by something that *changed*, never by something that was already
+ * true.
+ */
+export type EligibilityStage = "preflight" | "dispatch";
 
 /** How strongly the on-device file was matched against the registered artifact. */
 export type DeviceFileIdentity =
@@ -99,11 +127,28 @@ export interface DeviceArtifactFacts {
 
 export interface DispatchFacts {
   mode: DispatchMode;
+  /**
+   * How far the launch has got. Defaults to `dispatch` (the strict, complete
+   * rule set) when a caller does not say — an evaluator that forgets to declare
+   * its stage must not accidentally get the lenient one.
+   */
+  stage?: EligibilityStage;
 
   // ── Task / queue shape ────────────────────────────────────────────────────
   taskState: string;
   entryState: string | null;
+  /**
+   * **When** the operator allows this job to run — the time preference, derived
+   * by the caller from the task's single `dayNightPreference` field.
+   *
+   * Distinct from {@link unattendedAllowed}, which answers a different question:
+   * whether it may run with nobody present. The two used to be a boolean `night`
+   * flag *and* a `dayNightPreference` enum that the operator had to keep in sync
+   * by hand, with the enum read by nothing at all. There is now one field, and
+   * this is its projection.
+   */
   night: boolean;
+  /** Whether the job may run with no operator present. A permission, not a time. */
   unattendedAllowed: boolean;
 
   // ── File identity ─────────────────────────────────────────────────────────
@@ -124,6 +169,24 @@ export interface DispatchFacts {
     declaredTargetPrinter: string | null;
     /** G-code flavor the file itself declares, when any. */
     declaredGcodeFlavor: string | null;
+    /**
+     * For a 3MF: whether the archive was found to carry a real sliced plate
+     * payload, as opposed to being a model or a slicer project. `null` when the
+     * question does not apply or the analysis did not answer it — and `null`
+     * refuses, because "probably a print" is not evidence.
+     */
+    containsGcodePayload?: boolean | null;
+    /**
+     * Whether a named operator has read and accepted a `review` verdict for
+     * *this* analysis of *these* bytes — see
+     * {@link file://../print/analysisReview.ts}. Resolved by the caller, never
+     * inferred here, and it clears exactly one refusal: the verdict itself.
+     * Analysis blockers, night mode and every other gate are untouched.
+     */
+    reviewAccepted?: boolean;
+    /** Who accepted it and when, for the refusal text and the audit trail. */
+    reviewAcceptedBy?: string | null;
+    reviewAcceptedAt?: string | null;
   } | null;
   currentAnalyzerVersion: string;
   deviceFileIdentity: DeviceFileIdentity;
@@ -387,23 +450,53 @@ function liftPreflight(preflight: CompatibilityResult, facts: DispatchFacts): El
   const out: EligibilityReason[] = [];
   for (const b of preflight.blockers) {
     if (b.code === "maintenance" && supersededByOperations) continue;
-    out.push(reason(mapPreflightCode(b.code), "blocker", b.message, { stage: "preflight", code: b.code }));
+    out.push(
+      reason(mapPreflightCode(b.code), "blocker", b.message, {
+        stage: "preflight",
+        code: b.code,
+        origin: "blocker"
+      })
+    );
   }
   for (const r of preflight.reviews) {
     const code = mapPreflightCode(r.code);
-    out.push(reason(code, reviewSeverity(code, mode), r.message, { stage: "preflight", code: r.code }));
+    // `origin` is what lets a consumer tell a preflight *review* — an open
+    // question a human closes — from a preflight *warning*, once both have been
+    // flattened into this layer's single `warning` severity. Without it the
+    // launch screen cannot know which notes deserve a confirmation control and
+    // which are just context.
+    out.push(
+      reason(code, reviewSeverity(code, mode), r.message, {
+        stage: "preflight",
+        code: r.code,
+        origin: "review"
+      })
+    );
   }
   for (const w of preflight.warnings) {
     const code = mapPreflightCode(w.code);
+    // `manual_start_only` and `REMOTE_START_UNSUPPORTED` are the same fact at two
+    // altitudes: the planner wants a soft "a human will press the button", the
+    // launch wants a refusal, because there is no button for it to press. Keeping
+    // both put a *warning* about remote start next to a *blocker* about remote
+    // start, and the launch screen showed the printer as "совместим".
+    if (code === REASON.REMOTE_START_UNSUPPORTED) continue;
     // A G-code flavor the firmware does not speak is advisory when *planning*
     // but a refusal when actually sending the file to that firmware.
     const severity: "warning" | "blocker" =
       code === REASON.GCODE_FLAVOR_MISMATCH || (mode === "night" && code === REASON.PRINTER_BUSY)
         ? "blocker"
         : "warning";
-    out.push(reason(code, severity, w.message, { stage: "preflight", code: w.code }));
+    out.push(
+      reason(code, severity, w.message, { stage: "preflight", code: w.code, origin: "warning" })
+    );
   }
   return out;
+}
+
+/** The stage this evaluation runs at; absent means the strict, complete one. */
+function stageOf(f: DispatchFacts): EligibilityStage {
+  return f.stage ?? "dispatch";
 }
 
 function pushQueueShape(f: DispatchFacts, push: (r: EligibilityReason) => void): void {
@@ -456,26 +549,49 @@ function pushFileIdentity(f: DispatchFacts, push: (r: EligibilityReason) => void
         );
       }
       if (a.verdict && a.verdict !== "schedulable") {
+        // A `review` a named operator has read and accepted is not the same
+        // fact as an unread one. Accepting it is the documented way an uploaded
+        // sliced 3MF — startable, but produced against somebody else's machine
+        // profile — becomes launchable, and it stays a `warning` so the reason
+        // is still on screen, still in the audit trail, and still a refusal for
+        // an unattended start (which has nobody to have accepted anything).
+        const acknowledged =
+          a.reviewAccepted === true &&
+          ACKNOWLEDGEABLE_VERDICTS.has(a.verdict) &&
+          f.mode !== "night";
         push(
           reason(
             REASON.ANALYSIS_VERDICT,
-            "blocker",
-            `вердикт анализа «${a.verdict}» не допускает запуск (нужен schedulable)`,
-            { verdict: a.verdict }
+            acknowledged ? "warning" : "blocker",
+            acknowledged
+              ? `вердикт анализа «${a.verdict}» принят оператором${a.reviewAcceptedBy ? ` (${a.reviewAcceptedBy})` : ""}`
+              : `вердикт анализа «${a.verdict}» не допускает запуск (нужен schedulable)`,
+            {
+              verdict: a.verdict,
+              reviewAccepted: a.reviewAccepted === true,
+              reviewAcceptedBy: a.reviewAcceptedBy ?? null,
+              reviewAcceptedAt: a.reviewAcceptedAt ?? null
+            }
           )
         );
       }
       if (a.detectedFormat === "unknown") {
         push(reason(REASON.FORMAT_UNKNOWN, "blocker", "формат файла не распознан по содержимому"));
       }
-      pushFormatContradiction(f.file, a.detectedFormat, push);
+      pushFormatContradiction(f.file, a.detectedFormat, a.containsGcodePayload ?? null, push);
       pushStaleness(f, a, push);
       pushDeclaredTarget(f, a, push);
     }
   }
 
-  pushDeviceFile(f, push);
-  pushDeviceDelivery(f, push);
+  // The two rules that need the bytes to have moved. Asking them before the
+  // delivery would report "файл не найден на принтере" about a file nobody has
+  // sent yet — a true statement that is not a refusal, and that would make every
+  // preview of every un-delivered job look blocked.
+  if (stageOf(f) === "dispatch") {
+    pushDeviceFile(f, push);
+    pushDeviceDelivery(f, push);
+  }
 
   if (f.mode === "night") {
     if (!f.artifact) {
@@ -520,19 +636,36 @@ const GCODE_CONTAINER_RE = /\.gcode\.3mf$/i;
 function pushFormatContradiction(
   file: string | null,
   detectedFormat: string | null,
+  containsGcodePayload: boolean | null | undefined,
   push: (r: EligibilityReason) => void
 ): void {
   if (!file || !detectedFormat) return;
   if (GCODE_CONTAINER_RE.test(file)) {
-    // The wrapper must contain what it claims: a plate package built around
-    // anything other than G-code is a contradiction in the other direction.
-    if (detectedFormat !== "gcode") {
+    // The wrapper must contain what it claims. Two analyses legitimately answer
+    // that, and they are two different files:
+    //
+    //  - `gcode`, when the container is built *here* at the transport boundary
+    //    around one of our slices — the analysed artifact is the bare G-code;
+    //  - `3mf` **carrying a sliced plate payload**, when the operator uploaded a
+    //    finished `.gcode.3mf` and the analyzer opened the archive and found one.
+    //
+    // The second used to be refused outright, which made every uploaded sliced
+    // 3MF fail with "имя обещает G-code, а содержимое — 3mf" about a file that is
+    // exactly what its name says. Accepting the format alone would go too far the
+    // other way: a plain model renamed to `.gcode.3mf` also analyses as `3mf`, and
+    // that one is a genuine contradiction. So the payload decides, and an
+    // unanswered payload question refuses.
+    const container =
+      detectedFormat === "gcode" || (detectedFormat === "3mf" && containsGcodePayload === true);
+    if (!container) {
       push(
         reason(
           REASON.FORMAT_MISMATCH,
           "blocker",
-          `имя обещает G-code внутри 3MF-пакета, а содержимое — «${detectedFormat}»`,
-          { file, detectedFormat }
+          detectedFormat === "3mf"
+            ? "имя обещает нарезанный 3MF-пакет, а внутри архива нет G-code"
+            : `имя обещает G-code внутри 3MF-пакета, а содержимое — «${detectedFormat}»`,
+          { file, detectedFormat, containsGcodePayload: containsGcodePayload ?? null }
         )
       );
     }
@@ -1071,7 +1204,11 @@ function basename(p: string): string {
 function pushNight(f: DispatchFacts, push: (r: EligibilityReason) => void): NightWindowFit | null {
   if (!f.night) {
     push(
-      reason(REASON.NOT_NIGHT_FLAGGED, "blocker", "задание не отмечено для печати без присмотра — подтвердите явно")
+      reason(
+        REASON.NOT_NIGHT_FLAGGED,
+        "blocker",
+        "задание не отмечено для ночного запуска — выберите «ночью» в параметрах планирования"
+      )
     );
   }
   if (!f.unattendedAllowed) {

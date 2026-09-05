@@ -531,8 +531,14 @@ export function newSliceHtml(state) {
     return `<div class="slice-panel"><div class="slice-panel-head"><b>Запуск слайсинга</b></div>
       <div class="slice-empty">Чтобы запустить: ${why}.</div></div>`;
   }
+  const chosen = state.sliceFormArtifactId;
   const modelOpts = state.models
-    .map((m) => `<option value="${esc(m.artifact.id)}">${esc(m.artifact.name)}</option>`)
+    .map(
+      (m) =>
+        `<option value="${esc(m.artifact.id)}"${m.artifact.id === chosen ? " selected" : ""}>${esc(
+          m.artifact.name
+        )}</option>`
+    )
     .join("");
   const setOpts = approvedSets.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
 
@@ -559,11 +565,50 @@ export function newSliceHtml(state) {
         <label>Модель<select name="artifactId" required>${modelOpts}</select></label>
         <label>Набор профилей<select name="profileSetId" required>${setOpts}</select></label>
       </div>
+      ${projectSettingsNote(state)}
       ${runtimeBlock}
       <div class="sch-edit-actions">
         <button type="submit" class="btn btn-primary btn-sm"${disabledAttr}>Нарезать</button>
       </div>
     </form>`;
+}
+
+/* ── Собственные настройки проекта 3MF ──────────────────────────
+
+   Проект, экспортированный из слайсера, несёт внутри свой принтер, материал,
+   сопло и высоту слоя. Мы их НЕ применяем — нарезка идёт по выбранному здесь
+   набору профилей, и это правильно: чужой машинный профиль не проверен и
+   доверять его скоростям и температурам нельзя. Неправильно было молчать об
+   этом: оператор, аккуратно настроивший проект, узнавал о подмене по результату.
+
+   Поэтому анализатор читает настройки проекта (только читает — ничего оттуда не
+   применяется), а здесь они показаны рядом с выбором профиля, чтобы решение
+   принималось со знанием обоих вариантов. */
+function projectSettingsNote(state) {
+  // Показываем для той модели, которая реально выбрана в форме; до первого
+  // взаимодействия это первая в списке — та же, что отправится по «Нарезать».
+  const chosenId = state.sliceFormArtifactId || state.models[0]?.artifact?.id;
+  const model = state.models.find((m) => m.artifact?.id === chosenId);
+  const project = model?.analysis?.data?.projectSettings;
+  if (!project) return "";
+  const parts = [];
+  if (project.printer) parts.push(["Принтер проекта", project.printer]);
+  if (project.material) parts.push(["Материал", project.material]);
+  if (project.nozzleMm != null) parts.push(["Сопло", `${project.nozzleMm} мм`]);
+  if (project.layerHeightMm != null) parts.push(["Высота слоя", `${project.layerHeightMm} мм`]);
+  if (!parts.length) return "";
+
+  return `
+    <div class="slice-project">
+      ${icon("info")}
+      <div>
+        <b>В проекте обнаружены собственные настройки печати.</b>
+        Они не применяются — нарезка пойдёт по выбранному набору профилей системы.
+        <dl class="slice-project-list">
+          ${parts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}
+        </dl>
+      </div>
+    </div>`;
 }
 
 /* Дружелюбные имена вместо голых ID — из уже загруженного state. */

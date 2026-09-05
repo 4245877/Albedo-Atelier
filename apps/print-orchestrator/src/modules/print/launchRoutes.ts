@@ -18,6 +18,7 @@ import { ValidationError } from "../../core/errors";
  *     operator's confirmations, and the server owns the order.
  *
  * Reads:
+ *   GET  /launch                     launch readiness for every open queue row
  *   GET  /launch/:taskId?printer=…   launch preview (candidates, ranking, checks)
  *
  * Actions (guarded by the shared CSRF/token middleware):
@@ -27,6 +28,18 @@ export function registerLaunchRoutes(
   app: FastifyInstance,
   services: Pick<PrintServices, "launch">
 ): void {
+  // Per-row readiness for the whole open queue, from the SAME preflight the
+  // launch runs. It exists so a queue row can say «Можно запустить на A1» or
+  // «Стол занят» instead of restating that the task is QUEUED — a fact about two
+  // columns that was being rendered as «готово к запуску».
+  app.get<{ Querystring: { limit?: string } }>("/launch", async (request) => {
+    const limit = Number.parseInt(request.query.limit ?? "", 10);
+    return {
+      ok: true,
+      rows: services.launch.queueReadiness(Number.isFinite(limit) ? limit : undefined)
+    };
+  });
+
   app.get<{ Params: { taskId: string }; Querystring: { printer?: string } }>(
     "/launch/:taskId",
     async (request) => ({

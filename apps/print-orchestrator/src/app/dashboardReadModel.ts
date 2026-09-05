@@ -17,7 +17,7 @@ import type {
   Warning
 } from "../domain/dashboard/types";
 import { resolvePrinterSpecs, type ResolvedPrinterSpecs } from "../domain/printers/specs";
-import type { PrinterView } from "../domain/printers/types";
+import type { PrinterBedView, PrinterView } from "../domain/printers/types";
 import type { FarmMetrics, FarmReadiness } from "../domain/farm/types";
 import { env } from "../shared/env";
 import { hhmm, minutesToHhmm, parseLocalTimeWindow } from "../shared/time";
@@ -126,7 +126,14 @@ export class DashboardReadModel {
      * default reports "ok", which keeps existing behaviour for callers that do
      * not wire a database in.
      */
-    private readonly probeDatabase: () => { ok: boolean; error?: string } = () => ({ ok: true })
+    private readonly probeDatabase: () => { ok: boolean; error?: string } = () => ({ ok: true }),
+    /**
+     * The tracked plate state of a printer, and the intervention it is waiting
+     * on. Optional exactly like {@link activeRunId}: the read model must stay
+     * constructible without a store, and a view with no answer says `null`
+     * rather than implying an empty bed.
+     */
+    private readonly bedCycleOf: ((printerId: string) => PrinterBedView | null) | null = null
   ) {}
 
   private view(printer: PrinterConfig): PrinterView {
@@ -138,6 +145,7 @@ export class DashboardReadModel {
       this.specsOf(printer)
     );
     view.activeRunId = this.activeRunId ? this.activeRunId(printer.id) : null;
+    view.bedCycle = this.bedCycleOf ? this.bedCycleOf(printer.id) : null;
     return view;
   }
 

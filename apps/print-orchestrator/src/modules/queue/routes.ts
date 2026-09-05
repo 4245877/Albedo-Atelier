@@ -35,7 +35,7 @@ export interface QueueRoutesOptions {
  *   GET  /night          night-print window + candidates + current pick
  *
  * Actions:
- *   POST   /             add a job          body: { title, printer?, material?, eta?, at?, night? }
+ *   POST   /             add a job (DEPRECATED — no artifact/analysis; upload instead)
  *   POST   /start-next   start the next ready job
  *   POST   /:id/review   park a job in review (stops it blocking start-next)  body: { reason? }
  *   DELETE /:id          remove a job by id
@@ -52,10 +52,27 @@ export async function registerQueueRoutes(
 
   app.get("/night", async () => reads.getNight());
 
-  app.post<{ Body: NewQueueJobInput }>("/", async (request) => ({
-    ok: true,
-    job: commands.addQueueJob(request.body ?? {})
-  }));
+  /**
+   * **Deprecated.** Creates a task from a *typed* file name that is supposed to
+   * already exist on a printer — no artifact, no content hash, no analysis, and
+   * therefore no way for anything downstream to check that what starts is what
+   * was inspected. It is a second job lifecycle running beside the real one
+   * (upload → analyse → slice/enqueue → launch), and the dashboard no longer
+   * offers it: «Добавить задание» goes to the upload section.
+   *
+   * Kept working, not deleted: external callers may still use it, and a good
+   * deal of the test suite builds fixtures through it. The `Deprecation` header
+   * (RFC 8594) is how a client finds out without anything breaking.
+   */
+  app.post<{ Body: NewQueueJobInput }>("/", async (request, reply) => {
+    reply.header("Deprecation", "true");
+    reply.header("Link", '</api/print/artifacts>; rel="successor-version"');
+    reply.header(
+      "Warning",
+      '299 - "POST /api/queue creates a task with no artifact or analysis; upload the file instead"'
+    );
+    return { ok: true, job: commands.addQueueJob(request.body ?? {}) };
+  });
 
   app.post("/start-next", async () => {
     const { job, printer } = await commands.startNext();

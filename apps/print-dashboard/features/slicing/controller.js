@@ -42,6 +42,9 @@ const state = {
   tasks: [],
   /* Open assignments + their device-file state — the «Исполнение» panel. */
   assignments: [],
+  /* Какая модель выбрана в форме запуска: от неё зависит предупреждение о
+     собственных настройках проекта 3MF. Пусто = первая в списке. */
+  sliceFormArtifactId: null,
   loaded: false,
   errors: []
 };
@@ -252,8 +255,18 @@ function wireDelegates() {
   // (принтер или класс) и выключаем скрытый, чтобы он не попадал в отправку.
   document.addEventListener("change", (e) => {
     const radio = e.target.closest("[data-slice-target-type]");
-    if (!radio || !radio.form) return;
-    applyTargetType(radio.form, radio.value);
+    if (radio && radio.form) {
+      applyTargetType(radio.form, radio.value);
+      return;
+    }
+    // Смена модели меняет и то, что стоит сказать о её собственных настройках:
+    // предупреждение «в проекте есть свои параметры» относится к КОНКРЕТНОМУ
+    // файлу, и оставлять на экране чужое — хуже, чем не показывать ничего.
+    const model = e.target.closest('[data-slice-form="slice"] select[name="artifactId"]');
+    if (model) {
+      state.sliceFormArtifactId = model.value;
+      render();
+    }
   });
 
   document.addEventListener("submit", (e) => {

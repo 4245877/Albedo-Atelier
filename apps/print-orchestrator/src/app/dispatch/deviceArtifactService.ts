@@ -605,7 +605,12 @@ export class DeviceArtifactService {
    */
   private async materialize(target: PreparationTarget): Promise<DeliveredBytes> {
     const gcode = await this.readArtifactBytes(target.artifact);
-    if (!wrapsArtifact(target.capabilities)) {
+    if (!wrapsArtifact(target.capabilities) || isAlreadyContainer(target.artifact)) {
+      // An operator-uploaded `.gcode.3mf` IS the plate package this adapter
+      // starts. Wrapping it a second time would hand the printer a 3MF whose
+      // payload is another 3MF — the firmware would find no G-code where it
+      // looks for one, and nothing downstream would notice, because the delivery
+      // verifies size and name, not the archive's contents.
       return { bytes: gcode, sizeBytes: gcode.byteLength };
     }
 
@@ -1110,4 +1115,18 @@ function slotKey(printerId: string, remotePath: string): string {
  */
 function wrapsArtifact(capabilities: PrinterCapabilities): boolean {
   return capabilities.deviceFileExtension.toLowerCase().endsWith(".3mf");
+}
+
+/**
+ * Whether the artifact is *itself* the container the adapter wants — an uploaded
+ * sliced `.gcode.3mf`, as opposed to one of our bare-G-code slices.
+ *
+ * The artifact's own name is the right signal here and the content is not: the
+ * ZIP magic that makes the analyzer say "3mf" is equally true of a plain model
+ * 3MF, which must never be uploaded as if it were a print. Only a name ending in
+ * `.3mf` on an artifact whose analysis called it executable reaches this point at
+ * all (the enqueue admission and the dispatch gate both ran first).
+ */
+function isAlreadyContainer(artifact: Artifact): boolean {
+  return artifact.name.trim().toLowerCase().endsWith(".3mf");
 }

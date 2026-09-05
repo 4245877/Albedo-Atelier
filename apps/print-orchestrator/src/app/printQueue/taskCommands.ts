@@ -10,7 +10,11 @@ import type {
 } from "../../domain/print/types";
 import type { PrintTaskState } from "../../domain/print/types";
 import { evaluateSliceOutput } from "../../domain/slicing/outputGate";
-import { buildDeviceFileName, normalizeStartablePath } from "../../infra/printers/files";
+import {
+  buildDeviceFileName,
+  isGeneratedDeviceFileName,
+  normalizeStartablePath
+} from "../../infra/printers/files";
 import { isTaskTerminal, type PrintQueueContext } from "./context";
 import type { QueueQueries, TaskDetail } from "./queueQueries";
 
@@ -146,10 +150,9 @@ export class TaskCommands {
         priority: normalizePriority(input.priority, 0),
         state: runnable ? "QUEUED" : "NEEDS_REVIEW",
         reason: runnable ? null : "не задан принтер",
-        night: input.night === true,
+        ...timePreference(input.night === true ? "night" : "any"),
         notBefore: null,
         deadline: null,
-        dayNightPreference: input.night === true ? "night" : "any",
         pinnedPrinterId: null,
         unattendedAllowed: false,
         createdAt: iso,
@@ -300,7 +303,12 @@ export class TaskCommands {
         }
       }
 
-      const night = input.night === true;
+      // One field decides "when". `night: true` is still accepted as a legacy
+      // alias for it, but an explicit preference always wins — the two used to be
+      // separate columns the operator had to keep in sync by hand, and nothing in
+      // the scheduler ever read the enum.
+      const preference: DayNightPreference =
+        input.dayNightPreference ?? (input.night === true ? "night" : "any");
       const task: PrintTask = {
         id: newId(ID_PREFIX.printTask),
         artifactId: input.artifactId ?? null,
@@ -313,10 +321,9 @@ export class TaskCommands {
         priority,
         state: "QUEUED",
         reason: null,
-        night,
+        ...timePreference(preference),
         notBefore,
         deadline,
-        dayNightPreference: input.dayNightPreference ?? (night ? "night" : "any"),
         pinnedPrinterId: pinned,
         unattendedAllowed: input.unattendedAllowed === true,
         createdAt: iso,
@@ -575,10 +582,18 @@ export class TaskCommands {
         priority: patch.priority === undefined ? task.priority : normalizePriority(patch.priority, task.priority),
         notBefore,
         deadline,
-        dayNightPreference: patch.dayNightPreference ?? task.dayNightPreference,
+        ...timePreference(
+          patch.dayNightPreference ??
+            (typeof patch.night === "boolean"
+              ? patch.night
+                ? "night"
+                : task.dayNightPreference === "night"
+                  ? "any"
+                  : task.dayNightPreference
+              : task.dayNightPreference)
+        ),
         unattendedAllowed:
           typeof patch.unattendedAllowed === "boolean" ? patch.unattendedAllowed : task.unattendedAllowed,
-        night: typeof patch.night === "boolean" ? patch.night : task.night,
         material: patch.material === undefined ? task.material : patch.material?.trim() || null,
         version: patch.expectedVersion ?? task.version,
         updatedAt: this.ctx.nowIso()
@@ -596,8 +611,76 @@ export class TaskCommands {
           notBefore: saved.notBefore,
           deadline: saved.deadline,
           dayNight: saved.dayNightPreference,
+          night: saved.night,
           unattended: saved.unattendedAllowed
         }
+      });
+      return saved;
+    });
+  }
+
+  /**
+   * Re-derives the on-device file name for the printer a launch is about to use.
+   *
+   * The container is a property of the *target firmware*, not of the artifact:
+   * the same sliced G-code is `x.gcode` on Klipper and an `x.gcode.3mf` plate
+   * package on a Bambu. Promotion resolves that when the slice variant names a
+   * printer — but an uploaded executable is queued before any printer is chosen,
+   * so its name was built from its own extension and would reach a Bambu as
+   * `.gcode` holding 3MF bytes.
+   *
+   * Three guards, each of which makes this safe to call on the launch path:
+   *
+   *  - it only ever rewrites a name **we generated** (`isGeneratedDeviceFileName`),
+   *    so an operator's hand-picked path survives untouched;
+   *  - it is a no-op when the name is already right, so it neither versions the
+   *    row nor writes an audit line on the common path;
+   *  - it refuses while anything has already been delivered to that name, because
+   *    renaming underneath a verified device file would orphan the bytes and
+   *    silently invalidate the delivery record that vouches for them.
+   */
+  retargetDeviceFile(id: string, printerId: string, actor?: string): PrintTask {
+    return this.store.transaction(() => {
+      const repos = this.store.repositories;
+      const task = this.queries.getTask(id);
+      const artifact = task.artifactId ? repos.artifacts.getById(task.artifactId) : null;
+      if (!artifact || !task.onDeviceFile) return task;
+
+      const printer = this.ctx.resolvePrinter(printerId);
+      if (!printer) return task;
+
+      const current = task.onDeviceFile;
+      const identity = { name: artifact.name, sha256: artifact.sha256 };
+      // Not ours to rename.
+      if (!isGeneratedDeviceFileName(current, identity, undefined) &&
+          !isGeneratedDeviceFileName(current, identity, printer)) {
+        return task;
+      }
+
+      const slash = current.replace(/\\/g, "/").lastIndexOf("/");
+      const dir = slash === -1 ? "" : current.slice(0, slash);
+      const name = buildDeviceFileName(identity, printer);
+      const next = normalizeStartablePath(dir ? `${dir}/${name}` : name, printer);
+      if (next === current) return task;
+
+      if (repos.deviceArtifacts.findBySlot(printerId, current)) {
+        throw new JobError(
+          `Файл «${current}» уже подготовлен на «${printer.name}» — переименование сломало бы проверенную доставку`
+        );
+      }
+
+      const saved = repos.tasks.update({
+        ...task,
+        onDeviceFile: next,
+        metadata: { ...task.metadata, file: next },
+        updatedAt: this.ctx.nowIso()
+      });
+      this.ctx.recordAudit({
+        entityType: "print_task",
+        entityId: task.id,
+        action: "device_file_retargeted",
+        actor,
+        detail: { printerId, from: current, to: next, protocol: printer.protocol }
       });
       return saved;
     });
@@ -644,6 +727,33 @@ export class TaskCommands {
       return saved;
     });
   }
+}
+
+/**
+ * **The single source of truth for "when may this run", projected onto both
+ * columns.**
+ *
+ * `PrintTask` carries a `dayNightPreference` enum *and* a `night` boolean, and
+ * the pair was a trap: the enum was written by three code paths and read by
+ * none, while `night` was the one the dispatch gate actually consulted. An
+ * operator who set the preference to «ночью» through the scheduler API got a task
+ * the night gate refused, because the boolean beside it still said false — two
+ * fields describing one fact, kept in step by hand.
+ *
+ * The enum is now the field. `night` is its persisted projection and is only ever
+ * written through here, so the two cannot disagree; every reader may keep using
+ * whichever it already used.
+ *
+ * Deliberately NOT merged with `unattendedAllowed`, which answers a different
+ * question — *whether* a job may run with nobody present, not *when* it may run.
+ * A daytime print left running over lunch is unattended; a 23:00 print with an
+ * operator watching is not.
+ */
+function timePreference(preference: DayNightPreference): {
+  dayNightPreference: DayNightPreference;
+  night: boolean;
+} {
+  return { dayNightPreference: preference, night: preference === "night" };
 }
 
 /**

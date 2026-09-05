@@ -8,14 +8,16 @@
    ═══════════════════════════════════════════════════════════════ */
 
 import { apiDelete, apiGet, apiPost, uploadArtifact } from "../../api.js";
-import { confirmAction } from "../../shared/dialog.js";
+import { confirmAction, createFocusTrap } from "../../shared/dialog.js";
 import { createInflightGuard } from "../../shared/inflight.js";
 import { createPoller } from "../../shared/polling.js";
 import { $, cssEscape, esc, toast } from "../../util.js";
 import { itemHtml, listBarHtml } from "./view.js";
 import { icon } from "../../shared/icons.js";
 
-const ACCEPT = ".stl,.3mf,.gcode";
+/* Ровно то, что принимает сервер (GET /api/print/artifacts/config).
+   `.gcode.3mf` попадает сюда через `.3mf` — отдельного расширения у него нет. */
+const ACCEPT = ".stl,.3mf,.gcode,.gco,.g";
 const MAX_PARALLEL = 3;
 const POLL_MS = 1500;
 /* До скольких карточек список показывается целиком. Дальше он живёт в блоке с
@@ -55,7 +57,7 @@ export function setupUploads() {
         <b>Вверьте мне ваши файлы, Владыка</b>
         <span>перетащите сюда или <button type="button" class="upload-pick" id="upload-pick">выберите на диске</button></span>
       </div>
-      <div class="upload-drop-hint">STL, 3MF, G-code · до нескольких файлов сразу</div>
+      <div class="upload-drop-hint">STL, 3MF, G-code и нарезанный .gcode.3mf · до нескольких файлов сразу</div>
       <input type="file" id="upload-input" accept="${ACCEPT}" multiple hidden />
     </div>
     <div class="upload-listbox" id="upload-listbox" hidden>
@@ -138,6 +140,9 @@ function addFiles(fileList) {
       /* Почему файл нельзя удалить (строка с сервера) или null. Пока файл ещё
          не сохранён, удалять на сервере нечего. */
       deletionBlocker: null,
+      /* Решение сервера о следующем шаге (status.next), подтверждениях масштаба
+         и проверки. Пока файл не сохранён — его нет. */
+      status: null,
       blobExisted: false
     };
     fileStore.set(item.key, file);
@@ -175,6 +180,9 @@ async function doUpload(item) {
     item.artifact = res.artifact;
     item.task = res.task;
     item.analysis = res.analysis;
+    // Ответ загрузки несёт только что созданные строки; решение о следующем шаге
+    // приходит вместе с завершённым анализом (сверка/поллинг).
+    item.status = null;
     item.blobExisted = Boolean(res.blobExisted);
     fileStore.delete(item.key); // отданный файл больше не нужен
     item.key = res.artifact?.id || item.key;
@@ -184,6 +192,10 @@ async function doUpload(item) {
       item.stage = "done";
       render();
       notifyAnalysisCompleted(item);
+      // Дубликат содержимого: анализ уже готов, поллинг не запустится — а
+      // следующий шаг («Поставить в очередь») известен только серверу. Без этой
+      // сверки карточка осталась бы без действия до перезагрузки страницы.
+      void syncExisting();
     } else {
       item.stage = "analyzing";
       render();
@@ -277,6 +289,7 @@ function applyDetail(item, detail) {
   if (!detail) return;
   item.artifact = detail.artifact || item.artifact;
   item.task = detail.task || item.task;
+  item.status = detail.status ?? item.status;
   const latest = (detail.analyses || [])[detail.analyses.length - 1] || item.analysis;
   const wasDone = item.stage === "done";
   item.analysis = latest;
@@ -369,6 +382,7 @@ function applyRow(item, row) {
   item.artifact = fresh.artifact;
   item.analysis = fresh.analysis;
   item.task = fresh.task;
+  item.status = fresh.status;
   item.deletionBlocker = fresh.deletionBlocker;
   item.stage = fresh.stage;
 }
@@ -392,6 +406,7 @@ function toItem(row) {
     artifact: row.artifact,
     analysis,
     task: row.task,
+    status: row.status ?? null,
     deletionBlocker: row.deletionBlocker ?? null,
     blobExisted: false
   };
@@ -502,6 +517,181 @@ function forget(item) {
   fileStore.delete(item.key);
 }
 
+/* ── Следующий шаг: постановка в очередь ────────────────────────
+
+   Единственное действие, которого раньше не существовало вовсе. Уже готовый к
+   печати файл (G-code или нарезанный .gcode.3mf) доходил до зелёного вердикта и
+   останавливался: очередь пополнялась только через слайсинг, а нарезать
+   нарезанное нельзя.
+
+   Кнопку показывает сервер (`status.next.kind === "enqueue"`), он же решает,
+   допустим ли файл. Здесь только отправка намерения и честный показ отказа —
+   в частности отказа «нужно подтвердить проверку», который сервер помечает
+   структурно (`details.needsReview`), чтобы карточка предложила подтверждение,
+   а не тупик. */
+const enqueueGuard = createInflightGuard();
+
+async function enqueueArtifact(artifactId) {
+  const item = items.find((it) => it.artifact && it.artifact.id === artifactId);
+  const taskId = item?.status?.next?.taskId;
+  if (!item || !taskId) return;
+
+  await enqueueGuard.run(`enqueue:${taskId}`, async () => {
+    try {
+      await apiPost(`/api/print/tasks/${encodeURIComponent(taskId)}/enqueue`, {});
+      toast(`«${esc(item.name)}» встал в очередь, Владыка`, "toast-ok");
+      // Очередь и планировщик показывают то же задание — пусть узнают сразу.
+      document.dispatchEvent(new CustomEvent("queue-changed", { detail: { taskId } }));
+    } catch (err) {
+      if (err?.details?.needsReview) {
+        toast("Сначала подтвердите проверку файла — причина указана на карточке", "toast-danger");
+      } else {
+        toast(`Простите, Владыка — в очередь не встало: ${esc(err.message)}`, "toast-danger");
+      }
+    }
+    await syncExisting();
+  });
+}
+
+/* ── Подтверждение проверки ─────────────────────────────────────
+
+   Нарезанный чужим слайсером файл система проверить не может: скорости,
+   температуры и форма стола заданы чужим профилем. Анализ говорит об этом
+   честно (вердикт «на проверку»), и до сих пор это было тупиком — запуск
+   требует «schedulable».
+
+   Подтверждение привязывается к содержимому файла и к конкретному анализу:
+   перезалили файл или переанализировали — подтверждение отпадает само. Поэтому
+   окно называет и файл, и то, что именно принимается. */
+async function confirmReview(artifactId) {
+  const item = items.find((it) => it.artifact && it.artifact.id === artifactId);
+  if (!item) return;
+
+  const findings = (item.analysis?.warnings || []).map((w) => w.message);
+  const ok = await confirmAction({
+    title: "Подтвердить проверку файла",
+    object: item.name,
+    body:
+      "Файл уже нарезан, и его параметры заданы не нами. Система не может их проверить — " +
+      "это может сделать только человек, который знает, для какого принтера файл готовился.",
+    points: [
+      ...findings,
+      "Подтверждение записывается в журнал вместе с вашим именем",
+      "Оно отпадёт само, если файл заменить или переанализировать",
+      "Ночной запуск без присмотра оно НЕ разрешает"
+    ],
+    cta: "Я проверил, подтверждаю",
+    tone: "warn",
+    run: async () => {
+      await apiPost(`/api/print/artifacts/${encodeURIComponent(artifactId)}/review`, {});
+    }
+  });
+  if (!ok) return;
+  toast(`Проверка «${esc(item.name)}» подтверждена`, "toast-ok");
+  await syncExisting();
+}
+
+/* ── Подтверждение единиц модели ────────────────────────────────
+
+   STL не хранит единиц: его габариты — просто числа, которые могут оказаться
+   миллиметрами, сантиметрами или дюймами. Серверная логика масштаба (и отказ
+   ночного запуска без него) существует давно; не было места, где это сказать.
+
+   Показываем рассчитанный габарит прямо в окне: выбор «мм или дюймы» без
+   чисел, к которым он применяется, — это угадывание. */
+function boundingBoxText(item) {
+  const g = item.analysis?.data?.geometry;
+  const raw = g?.sizeRaw || g?.sizeMm || item.analysis?.data?.bbox?.size;
+  if (!Array.isArray(raw)) return null;
+  const [x, y, z] = raw.map((v) => Math.round(v * 100) / 100);
+  return `${x} × ${y} × ${z}`;
+}
+
+async function confirmScale(artifactId) {
+  const item = items.find((it) => it.artifact && it.artifact.id === artifactId);
+  if (!item) return;
+  const box = boundingBoxText(item);
+
+  const units = await pickUnits(item, box);
+  if (!units) return;
+  try {
+    await apiPost(`/api/print/artifacts/${encodeURIComponent(artifactId)}/scale`, { units });
+    toast(`Единицы «${esc(item.name)}» подтверждены`, "toast-ok");
+  } catch (err) {
+    toast(`Простите, Владыка — масштаб не принят: ${esc(err.message)}`, "toast-danger");
+  }
+  await syncExisting();
+}
+
+/* Маленькое окно выбора единиц. Своё, а не confirmAction: здесь не «да/нет», а
+   выбор из четырёх равноправных значений, и подменять его четырьмя окнами
+   подтверждения было бы издевательством. */
+function pickUnits(item, box) {
+  return new Promise((resolve) => {
+    // Те же классы, что у общего окна подтверждения (shared/dialog.js): один
+    // фон, одна геометрия, одна тема. Своя разметка — только внутри.
+    const root = document.createElement("div");
+    root.className = "modal-backdrop confirm-backdrop";
+    root.innerHTML = `
+      <div class="modal modal-confirm tone-warn" role="dialog" aria-modal="true" aria-labelledby="units-title">
+        <div class="confirm-head">
+          <span class="confirm-mark" aria-hidden="true">${icon("warn", { cls: "ico-lg" })}</span>
+          <div>
+            <h2 id="units-title">В каких единицах эта модель?</h2>
+            <p class="confirm-object">${esc(item.name)}</p>
+          </div>
+        </div>
+        <div class="confirm-body">
+          <p>STL не хранит единиц измерения — внутри только числа. Пока никто не скажет,
+             что они значат, размеры модели недоказуемы, и я не приму её к печати без присмотра.</p>
+          ${box ? `<p class="confirm-object">Габариты по файлу: <b>${esc(box)}</b> — в выбранных единицах.</p>` : ""}
+          <div class="units-choice">
+            ${UNIT_CHOICES.map(
+              (u) => `<button type="button" class="btn" data-units="${u.value}">
+                        ${esc(u.label)}${box ? `<span class="units-hint">${esc(previewSize(box, u.factor))}</span>` : ""}
+                      </button>`
+            ).join("")}
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn" data-units-cancel>Отмена</button>
+        </div>
+      </div>`;
+    document.body.appendChild(root);
+
+    let trap = null;
+    const close = (value) => {
+      trap?.release();
+      root.remove();
+      resolve(value);
+    };
+    // Escape и клик по фону — «не выбрал», а не «выбрал миллиметры»: молчание
+    // здесь означает, что вопрос остался открытым, и сервер продолжит отказывать.
+    trap = createFocusTrap(root, { onEscape: () => close(null) });
+    root.addEventListener("click", (e) => {
+      if (e.target === root || e.target.closest("[data-units-cancel]")) return close(null);
+      const pick = e.target.closest("[data-units]");
+      if (pick) close(pick.dataset.units);
+    });
+    trap.focusFirst();
+  });
+}
+
+const UNIT_CHOICES = [
+  { value: "mm", label: "Миллиметры", factor: 1 },
+  { value: "cm", label: "Сантиметры", factor: 10 },
+  { value: "inch", label: "Дюймы", factor: 25.4 },
+  { value: "m", label: "Метры", factor: 1000 }
+];
+
+/* «100 × 50 × 20» + ×25.4 → «2540 × 1270 × 508 мм»: что именно получится, если
+   выбрать эту единицу. Без этого выбор делается вслепую. */
+function previewSize(box, factor) {
+  const parts = box.split("×").map((v) => Number.parseFloat(v.trim()));
+  if (parts.some((v) => !Number.isFinite(v))) return "";
+  return `${parts.map((v) => Math.round(v * factor * 10) / 10).join(" × ")} мм`;
+}
+
 /* ── Отрисовка (разметка — view.js) ─────────────────────────── */
 
 /* Свойства файла раскрыты по умолчанию, пока файлов один-два: обычный сценарий
@@ -551,6 +741,31 @@ document.addEventListener("click", (e) => {
   if (analyze) {
     e.preventDefault();
     void reanalyze(analyze.dataset.reanalyze);
+    return;
+  }
+  const enqueue = e.target.closest("[data-enqueue]");
+  if (enqueue) {
+    e.preventDefault();
+    void enqueueArtifact(enqueue.dataset.enqueue);
+    return;
+  }
+  const review = e.target.closest("[data-confirm-review]");
+  if (review) {
+    e.preventDefault();
+    void confirmReview(review.dataset.confirmReview);
+    return;
+  }
+  const scale = e.target.closest("[data-confirm-scale]");
+  if (scale) {
+    e.preventDefault();
+    void confirmScale(scale.dataset.confirmScale);
+    return;
+  }
+  const toSlicing = e.target.closest("[data-goto-slicing]");
+  if (toSlicing) {
+    e.preventDefault();
+    document.querySelector('[data-goto="slicing"]')?.click();
+    document.getElementById("slicing")?.scrollIntoView({ behavior: "smooth", block: "start" });
     return;
   }
   const remove = e.target.closest("[data-delete-artifact]");

@@ -1,5 +1,5 @@
 /* ── Модальные окна: детали принтера, форма задания, справка ──
-   Один слой поверх доски. Открывается по data-act (open / add-job / …),
+   Один слой поверх доски. Открывается по data-act (open / launch / files / …),
    закрывается по фону, крестику или Esc. Детальное окно принтера живёт вместе
    с доской: syncModals() перерисовывает его при обновлении состояния, не разрывая
    живой поток камеры (реконсиляция плееров как на доске). */
@@ -21,6 +21,7 @@ import { icon } from "../shared/icons.js";
 import { actionBar, materialBlock, telemetryTempRows } from "./printerParts.js";
 import { camBlock } from "./printers.js";
 import { createLaunchController } from "../features/launch/controller.js";
+import { createTaskController } from "../features/task/controller.js";
 import {
   isBusy,
   jobLine,
@@ -63,6 +64,10 @@ function ensureRoot() {
   // Обрабатываются ПЕРВЫМИ и по своему kind, чтобы разметка запуска не пересекалась
   // с обработчиками файлового браузера.
   root.addEventListener("click", (e) => {
+    if (current?.kind === "task") {
+      taskController().handleClick(e);
+      return;
+    }
     if (!current || current.kind !== "launch") return;
     launchController().handleClick(e);
   });
@@ -125,6 +130,7 @@ export function closeModal() {
   // Сессия запуска (и её ключ идемпотентности) живёт ровно столько же, сколько
   // окно: закрыли — следующая попытка начинается заново.
   launchRef?.reset();
+  taskRef?.reset();
   // Снять живой плеер камеры из закрытого окна (крепления больше нет в DOM).
   reconcileCameras();
   // Освобождение возвращает фокус на элемент, которым окно открыли.
@@ -154,6 +160,34 @@ export function openLaunchModal(taskId) {
   current = { kind: "launch", taskId };
   openShell();
   launchController().open(taskId);
+  focusModal();
+}
+
+/* ── Карточка задания ───────────────────────────────────────────
+   Диагностическое окно: вся цепочка artifact → анализ → слайсинг → очередь →
+   назначение → доставка → запуск → прогон, плюс журнал. Отвечает на вопрос
+   «почему именно это задание сейчас не печатается», ответа на который до сих
+   пор не было ни на одном экране целиком. */
+let taskRef = null;
+
+function taskController() {
+  if (!taskRef) {
+    taskRef = createTaskController({
+      mount: (html) => {
+        const box = $("#modal-content");
+        if (box) box.innerHTML = html;
+      },
+      // Запуск живёт в своём окне; отсюда — только переход к нему.
+      onLaunch: (taskId) => openLaunchModal(taskId)
+    });
+  }
+  return taskRef;
+}
+
+export function openTaskModal(taskId) {
+  current = { kind: "task", taskId };
+  openShell();
+  taskController().open(taskId);
   focusModal();
 }
 
@@ -445,121 +479,22 @@ async function startFileFromBrowser(printerId, filePath, btn) {
   }
 }
 
-/* ── Форма нового задания (реальный POST /api/queue) ────────── */
+/* ── Форма нового задания: удалена ─────────────────────────────
 
-export function openJobForm() {
-  const state = deps.getState();
-  const printers = state?.printers || [];
-  const options = printers
-    .map((p) => `<option value="${esc(p.name)}">${esc(p.name)}</option>`)
-    .join("");
+   Здесь жила форма «Новое задание печати»: имя, принтер и ТЕКСТОВОЕ имя файла,
+   уже лежащего на принтере (POST /api/queue). Она создавала второй жизненный
+   цикл задания — в обход загрузки, анализа, слайсинга, контрольной суммы и
+   вообще всякой связи с артефактом. Такое задание нельзя было ни проверить, ни
+   доставить, ни сверить с тем, что реально лежит на устройстве: система знала о
+   нём только строку, которую напечатал человек.
 
-  current = { kind: "job" };
-  openShell();
-  /* Ширина поля — часть его смысла. Поле на 1000 px под «0.4» или «2ч 30м»
-     врёт о том, сколько туда полагается вписать, и заставляет глаз бежать
-     через пустоту от подписи к значению. Классы f-xs/f-s/f-m/f-l задают
-     ширину по РОДУ ДАННЫХ (см. components.css).
+   Единственный путь теперь один: «Добавить задание» → «Загрузить файл». Загрузка
+   создаёт артефакт с хешем, анализ и черновик задания, а дальше — либо слайсинг
+   (модель), либо «Поставить в очередь» (готовый G-code или нарезанный 3MF).
 
-     Пояснения о поведении поля — постоянные подписи (.field-hint), а не
-     placeholder: placeholder исчезает с первой же буквы, и правило «без
-     принтера — уйдёт на проверку» пропадало ровно тогда, когда оператор
-     начинал заполнять форму. В placeholder остаются только ПРИМЕРЫ. */
-  $("#modal-content").innerHTML = `
-    <div class="modal-head"><h2 id="modal-title">Новое задание печати</h2></div>
-    <form class="modal-form" id="job-form" novalidate>
-      <fieldset class="form-group">
-        <legend>Что печатаем</legend>
-        <label class="field">
-          <span class="field-lbl">Название <b class="req" aria-hidden="true">*</b><span class="sr-only">(обязательно)</span></span>
-          <input class="input f-l" name="title" required maxlength="120" placeholder="Кубок Владыки" />
-        </label>
-        <div class="field-row">
-          <label class="field">
-            <span class="field-lbl">Материал</span>
-            <input class="input f-s" name="material" maxlength="60" placeholder="PETG" />
-          </label>
-          <label class="field">
-            <span class="field-lbl">Оценка времени</span>
-            <input class="input f-xs" name="eta" maxlength="40" placeholder="2ч 30м" />
-          </label>
-        </div>
-      </fieldset>
-
-      <fieldset class="form-group">
-        <legend>Где и чем</legend>
-        <label class="field">
-          <span class="field-lbl">Принтер</span>
-          <input class="input f-m" name="printer" list="job-printers" placeholder="Creality K2 Plus" />
-          <datalist id="job-printers">${options}</datalist>
-          <span class="field-hint">Не указан — задание уйдёт на проверку, и принтер выберу я.</span>
-        </label>
-        <label class="field">
-          <span class="field-lbl">Файл на принтере</span>
-          <input class="input f-l" name="file" maxlength="160" placeholder="chalice.gcode" />
-          <span class="field-hint">Имя файла, уже лежащего на принтере. Без него задание нельзя запустить удалённо.</span>
-        </label>
-      </fieldset>
-
-      <label class="field field-check">
-        <input type="checkbox" name="night" />
-        <span>Пригодно для ночной печати<span class="field-hint">Задание сможет идти без присмотра в ночном окне.</span></span>
-      </label>
-
-      <!-- Общий отказ стоит НАД действиями: сообщение под кнопками оператор
-           не видит вовсе. -->
-      ${formErrorHtml("job-error")}
-      <div class="modal-actions">
-        <button type="button" class="btn" data-modal-close>Отмена</button>
-        <button type="submit" class="btn btn-primary">Добавить в очередь</button>
-      </div>
-    </form>`;
-
-  const form = $("#job-form");
-  wireBlurValidation(form, JOB_RULES);
-  form.addEventListener("submit", onJobSubmit);
-  focusModal();
-}
-
-const JOB_RULES = {
-  title: { required: true, message: "Владыка, задание должно носить имя" }
-};
-
-async function onJobSubmit(e) {
-  e.preventDefault();
-  const form = e.currentTarget;
-  const errBox = $("#job-error");
-  showFormError(errBox, "");
-
-  if (validateForm(form, JOB_RULES) > 0) {
-    // Фокус уходит на проблемное поле, а не остаётся на кнопке отправки.
-    focusFirstInvalid(form);
-    showFormError(errBox, "Проверьте отмеченные поля — без них я не приму задание");
-    return;
-  }
-
-  const data = new FormData(form);
-  const body = { title: String(data.get("title") || "").trim() };
-  for (const key of ["printer", "material", "eta", "file"]) {
-    const value = String(data.get(key) || "").trim();
-    if (value) body[key] = value;
-  }
-  if (data.get("night")) body.night = true;
-
-  const submitBtn = form.querySelector('button[type="submit"]');
-  const restore = setBusy(submitBtn, "Добавляю…");
-  try {
-    const res = await apiPost("/api/queue", body);
-    const label = res?.job?.title ? `«${esc(res.job.title)}»` : "Задание";
-    closeModal();
-    toast(`${label} принято в очередь — я прослежу за ним лично, Владыка`, "toast-ok");
-    await deps.refresh();
-  } catch (err) {
-    showFormError(errBox, `Простите, Владыка — задание не принято: ${err.message || "причина неизвестна"}`);
-    restore();
-    errBox.focus?.();
-  }
-}
+   Серверный POST /api/queue не удалён: он помечен deprecated и продолжает
+   работать для внешних клиентов и как фикстура в тестах. Убран именно интерфейс,
+   который приглашал им пользоваться. */
 
 /* ── Справочные окна (честные объяснения там, где backend не даёт действия) ── */
 
@@ -577,15 +512,17 @@ const INFO = {
   "upload-file": {
     title: "Вручение файла печати",
     body: `
-      <p>Удалённая доставка файлов на принтеры пока не подключена, Владыка — панель
-      не хранит слайсы и не передаёт их на устройства. Я не стану обещать то, чего
-      не могу исполнить безупречно.</p>
-      <p>Положите нарезанный файл на принтер привычным путём (веб-интерфейс Moonraker/
-      Bambu, SD-карта или USB), затем создайте задание кнопкой
-      <b>«Добавить задание»</b> и укажите имя этого файла в поле
-      <b>«Файл на принтере»</b> — тогда я смогу запустить его удалённо из очереди.</p>
-      <p>Файлы, уже покоящиеся на Moonraker-принтере (Creality K2), доступны сразу:
-      откройте принтер и найдите <b>«Файлы на принтере»</b> в меню действий.</p>`
+      <p>Перетащите файл в раздел <b>«Загрузка и анализ»</b>, Владыка — я приму STL,
+      3MF, G-code и уже нарезанный <code>.gcode.3mf</code>. Каждый файл получает
+      контрольную сумму, проходит анализ и обзаводится черновиком задания.</p>
+      <p>Дальше карточка файла сама скажет, что делать: модель — <b>«Нарезать»</b>,
+      готовый к печати файл — <b>«Поставить в очередь»</b>. Ни имени файла на
+      принтере, ни ручного копирования от вас больше не требуется: доставку на
+      устройство выполняет сервер в момент запуска, и он же проверяет, что долетело
+      именно то, что проверялось.</p>
+      <p>Принтеры без адаптера загрузки (Creality по WebSocket) честно помечаются
+      как непригодные для удалённого запуска — такой файл запускают с экрана самого
+      принтера.</p>`
   },
   "files-unsupported": {
     title: "Файлы принтера",

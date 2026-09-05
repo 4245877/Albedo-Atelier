@@ -60,6 +60,8 @@ const P = {
   /* ── Оборудование и процессы ── */
   printer: `<path d="M5.2 16.4v-10a2 2 0 0 1 2-2h5.6a2 2 0 0 1 2 2v10"/><path d="M3.4 16.4h13.2"/><path d="M6.6 7.8h6.8"/><rect x="8.3" y="7.8" width="3.4" height="2.6" rx=".6"/><path d="M10 10.4v2.4"/>`,
   queue: `<path d="M4 5.6h12"/><path d="M4 10h8.4"/><path d="M4 14.4h5"/><path d="M15.1 12.2 17.2 14.5 15.1 16.8 13 14.5z"/>`,
+  // Линейка: подтверждение единиц модели (STL их не хранит).
+  ruler: `<rect x="2.5" y="6.5" width="15" height="7" rx="1"/><path d="M6 6.5v3"/><path d="M9 6.5v2"/><path d="M12 6.5v3"/><path d="M15 6.5v2"/>`,
   slice: `<path d="M3 6.6 10 3.1l7 3.5-7 3.5z"/><path d="M3 6.6v6.8l7 3.5 7-3.5V6.6"/><path d="M10 10.1v6.8"/>`,
   calendar: `<rect x="3.4" y="4.6" width="13.2" height="12" rx="1.6"/><path d="M3.4 8.2h13.2"/><path d="M7 3.1v3M13 3.1v3"/><path d="M6.6 11.4h3M6.6 13.9h5"/>`,
   operator: `<circle cx="10" cy="6.2" r="2.6"/><path d="M4.6 16.6c0-3 2.4-5 5.4-5s5.4 2 5.4 5"/>`,

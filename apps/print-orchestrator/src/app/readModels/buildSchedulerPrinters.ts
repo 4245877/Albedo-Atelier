@@ -39,7 +39,14 @@ export function buildSchedulerPrinters(deps: SchedulerPrintersDeps): SchedulerPr
       model: view.model,
       protocol: config?.protocol ?? null,
       printerClass: config?.printerClass ?? null,
-      material: view.liveMaterial ?? view.material,
+      // Live telemetry ONLY. The old `?? view.material` fallback promoted the
+      // config field — a capability list like "PLA / PETG / TPU" — to a statement
+      // about the spool, and `materialsClash` then read its first token as the
+      // loaded filament: every PETG job on that printer was refused with
+      // «заправлен PLA». An unknown material is now an unknown, which the
+      // compatibility rules turn into a confirmable question instead.
+      material: view.liveMaterial,
+      supportedMaterials: parseSupportedMaterials(view.material),
       nozzleMm: view.nozzleDiameter,
       // Resolved build volume (priority): the device's own axis limits on Klipper,
       // the model catalogue on Bambu, else what the operator declared. The
@@ -66,4 +73,17 @@ export function buildSchedulerPrinters(deps: SchedulerPrintersDeps): SchedulerPr
       activeRunState: deps.activeRun(view.id)?.state ?? null
     };
   });
+}
+
+/**
+ * The declared material list of a printer, split out of the free-text config
+ * field operators write as `"PLA / PETG / TPU"`. Context for the operator and
+ * for the confirmation prompt — never evidence about what is loaded.
+ */
+function parseSupportedMaterials(declared: string | null): string[] {
+  if (!declared) return [];
+  return declared
+    .split(/[\/,|+]+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
 }

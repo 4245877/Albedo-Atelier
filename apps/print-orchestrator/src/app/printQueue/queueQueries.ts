@@ -4,16 +4,30 @@ import type {
   ArtifactAnalysis,
   Assignment,
   AuditEvent,
+  DeviceArtifact,
   DispatchAttempt,
   PrintRun,
   PrintTask,
   QueueEntry
 } from "../../domain/print/types";
+import type { ManualOperation } from "../../domain/operations/types";
+import { OPEN_OPERATION_STATES } from "../../domain/operations/types";
+import type { SliceVariant } from "../../domain/slicing/types";
 import type { QueueJob } from "../../domain/dashboard/types";
 import type { PrintQueueContext } from "./context";
 import { toLegacyQueue, type QueueProjectionRow } from "./projection";
 
-/** The full durable chain for one task — what a task-detail API returns. */
+/**
+ * The full durable chain for one task — what a task-detail API returns, and the
+ * one place that answers «почему именно это задание сейчас не печатается».
+ *
+ * Every link is here on purpose: the source file, its analyses, the slice it was
+ * turned into, the queue row, every placement that was tried, what reached the
+ * device, every dispatch attempt, every run, and the audit trail that ties them
+ * together. Diagnosing a stuck job used to mean opening four screens and
+ * correlating ids by eye — which is why nobody did it, and why "задание висит"
+ * was normally investigated by cancelling it.
+ */
 export interface TaskDetail {
   task: PrintTask;
   artifact: Artifact | null;
@@ -23,6 +37,14 @@ export interface TaskDetail {
   dispatchAttempts: DispatchAttempt[];
   printRuns: PrintRun[];
   audit: AuditEvent[];
+  /** The source model, when this task's executable came out of a slice. */
+  sourceArtifact: Artifact | null;
+  /** Slice variants produced for this task (any state — a failed one explains a lot). */
+  sliceVariants: SliceVariant[];
+  /** What was delivered to a device for this task's assignments, and its state. */
+  deviceArtifacts: DeviceArtifact[];
+  /** Open physical interventions on the printers this task is placed on. */
+  manualOperations: ManualOperation[];
 }
 
 /**
@@ -96,17 +118,28 @@ export class QueueQueries {
   getTaskDetail(id: string): TaskDetail {
     const repos = this.ctx.store.repositories;
     const task = this.getTask(id);
+    const assignments = repos.assignments.listByTask(id);
+    // The printers this task has actually been placed on — the only ones whose
+    // pending interventions are part of *its* story.
+    const printerIds = [...new Set(assignments.map((a) => a.printerId))];
     return {
       task,
       artifact: task.artifactId ? repos.artifacts.getById(task.artifactId) : null,
       analyses: task.artifactId ? repos.artifactAnalyses.listByArtifact(task.artifactId) : [],
       queueEntry: repos.queue.findByTaskId(id),
-      assignments: repos.assignments.listByTask(id),
-      dispatchAttempts: repos.assignments
-        .listByTask(id)
-        .flatMap((a) => repos.dispatchAttempts.listByAssignment(a.id)),
+      assignments,
+      dispatchAttempts: assignments.flatMap((a) => repos.dispatchAttempts.listByAssignment(a.id)),
       printRuns: repos.printRuns.listByTask(id),
-      audit: repos.audit.listByEntity("print_task", id)
+      audit: repos.audit.listByEntity("print_task", id),
+      sourceArtifact:
+        task.sourceArtifactId && task.sourceArtifactId !== task.artifactId
+          ? repos.artifacts.getById(task.sourceArtifactId)
+          : null,
+      sliceVariants: repos.sliceVariants.listByTask(id),
+      deviceArtifacts: assignments.flatMap((a) => repos.deviceArtifacts.listByAssignment(a.id)),
+      manualOperations: printerIds.flatMap((printerId) =>
+        repos.manualOperations.listByPrinter(printerId, OPEN_OPERATION_STATES)
+      )
     };
   }
 

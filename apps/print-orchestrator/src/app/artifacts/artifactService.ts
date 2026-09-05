@@ -2,6 +2,7 @@ import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { Artifact, ArtifactAnalysis, Metadata } from "../../domain/print/types";
 import type { ArtifactStorage } from "../../infra/storage/artifactStorage";
 import { AnalysisRunner, type AnalyzeFn } from "./analysisRunner";
+import { AnalysisReviewService } from "./analysisReviewService";
 import { ArtifactContext, type ArtifactServiceOptions } from "./context";
 import { ArtifactIngest, type IngestInput, type IngestResult } from "./ingest";
 import { ModelScaleService } from "./modelScale";
@@ -35,6 +36,7 @@ export class ArtifactService {
   private readonly queries: ArtifactQueries;
   private readonly retention: ArtifactRetention;
   private readonly modelScale: ModelScaleService;
+  private readonly reviews: AnalysisReviewService;
 
   constructor(store: PrintQueueStore, storage: ArtifactStorage, options: ArtifactServiceOptions) {
     const ctx = new ArtifactContext(store, storage, options);
@@ -43,6 +45,7 @@ export class ArtifactService {
     this.queries = new ArtifactQueries(ctx);
     this.retention = new ArtifactRetention(ctx);
     this.modelScale = new ModelScaleService(ctx);
+    this.reviews = new AnalysisReviewService(ctx);
   }
 
   // ── Ingest (ArtifactIngest) ────────────────────────────────────────────────
@@ -100,6 +103,25 @@ export class ArtifactService {
   /** Withdraws a scale confirmation; the size reverts to unproven. */
   clearModelScale(artifactId: string, actor?: string): ReturnType<ModelScaleService["clear"]> {
     return this.modelScale.clear(artifactId, actor);
+  }
+
+  // ── Analysis review (AnalysisReviewService) ────────────────────────────────
+
+  /**
+   * Records the operator having read and accepted a `review` verdict — the only
+   * way an uploaded sliced 3MF (whose parameters are somebody else's) becomes
+   * launchable. Never clears a blocker and never authorises an unattended start.
+   */
+  confirmAnalysisReview(
+    artifactId: string,
+    input: { actor?: string; note?: string | null } = {}
+  ): ReturnType<AnalysisReviewService["confirm"]> {
+    return this.reviews.confirm(artifactId, input);
+  }
+
+  /** Withdraws a review acknowledgement; the verdict reverts to unconfirmed. */
+  clearAnalysisReview(artifactId: string, actor?: string): ReturnType<AnalysisReviewService["clear"]> {
+    return this.reviews.clear(artifactId, actor);
   }
 
   // ── Reads (ArtifactQueries) ────────────────────────────────────────────────

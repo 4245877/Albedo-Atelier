@@ -162,6 +162,7 @@ export function toLegacyQueueJob(row: QueueProjectionRow): QueueJob {
 
   const at = metaString(task, "at") ?? (status === "ready" ? "в очереди" : undefined);
   if (at) job.at = at;
+  // Projected from `dayNightPreference` by the write path — see `timePreference`.
   if (task.night) job.night = true;
   const diagnostic = inconsistencyReason(task, entry, run);
   if (diagnostic) job.reason = diagnostic;

@@ -130,10 +130,13 @@ export class ArtifactIngest {
             // Uploaded work is a DRAFT — deliberately NOT enqueued (no QueueEntry).
             state: "DRAFT",
             reason: null,
+            // "When" has one source of truth — the preference — and `night` is
+            // its projection. An upload states neither, so both are the neutral
+            // default until the operator says otherwise.
+            dayNightPreference: "any",
             night: false,
             notBefore: null,
             deadline: null,
-            dayNightPreference: "any",
             pinnedPrinterId: null,
             unattendedAllowed: false,
             createdAt: iso,
