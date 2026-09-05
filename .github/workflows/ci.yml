@@ -143,6 +143,34 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
 
+  # The deploy script itself, driven end to end against a fake Docker CLI: change
+  # detection, the restart-safety gate, per-service application, the scoped
+  # rollback and every exit code. No daemon, no build, no printer — so it can run
+  # here, which is the point: this is the logic that decides whether it is safe
+  # to recreate the orchestrator while a print is in flight.
+  deploy-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Shell syntax check
+        run: |
+          bash -n scripts/deploy.sh
+          bash -n scripts/tests/deploy.test.sh
+          bash -n scripts/tests/fake-docker
+          bash -n scripts/tests/fake-curl
+
+      - name: ShellCheck (advisory)
+        continue-on-error: true
+        run: shellcheck -S warning scripts/deploy.sh || true
+
+      - name: Deploy/redeploy scenarios
+        run: ./scripts/tests/deploy.test.sh
+
   # The orchestrator container image: build + scan (base image and OS packages).
   orchestrator-image:
     runs-on: ubuntu-latest

@@ -52,9 +52,56 @@ What the script adds over `build && up -d` by hand:
 |---|---|
 | preflight | daemon down, wrong directory, missing `.env` or an unresolvable compose config, missing `print-farm` network, **not enough disk or inodes to build**, prints in flight |
 | build | a build that fills the disk is cancelled by a watchdog *before* it starves the running containers; remote images are pulled here, not mid-swap |
-| up | `--no-build` (the images are already verified); refuses to swap the orchestrator while a print is running unless `--allow-active-prints` |
+| plan | per service: will compose really recreate this container — image content *or* its own configuration hash, asked with `up --dry-run` — and may that service be recreated right now (see [Deploying during a print](#deploying-during-a-print)) |
+| apply | `--no-build` (the images are already verified); a service that must wait is held back **on its own**, everything else ships |
 | health | waits for every container's healthcheck, fails fast on a crash loop, dumps `ps` + logs + the last healthcheck output on failure |
 | HTTP | dashboard `/`, orchestrator `/health` and `/ready` through the published port (read from compose, not hardcoded) |
+| identity | commit → image → container for every service, plus "the held-back ones are provably untouched" |
+
+Terminal states, and the exit code that matches each: `0` DEPLOY SUCCESS,
+`5` DEPLOY PARTIAL (applied and verified, with a deliberate hold-back),
+`4` DEPLOY DEFERRED (built, nothing applied), `3` build cancelled by the disk
+watchdog, `1` DEPLOY FAILED.
+
+### Deploying during a print
+
+A deploy never touches a printer — the printers keep printing across a container
+recreate either way. What a recreate can cost is the *orchestrator's observation*
+of a print, and only the orchestrator: nothing else in the stack watches a
+printer, so **a dashboard or go2rtc change ships during a print, always**.
+
+For the orchestrator itself the question is asked per print, by the process that
+knows the answer — `GET /restart-safety`
+(`apps/print-orchestrator/src/app/restartSafety.ts`). A print dispatched through
+the queue has a canonical `PrintRun` in SQLite, and the poller re-adopts it after
+a restart (`hydrateRunFromCanonical`) with the same run id, start time and AMS
+baseline, so identity, duration and the filament deduction all survive. Those
+prints do **not** hold a deploy back.
+
+These do, and each is named in the output:
+
+| risk | what a restart would cost |
+|---|---|
+| `untracked-print` | started on the printer, not dispatched — no canonical run to re-adopt, so the filament becomes a manual debt |
+| `identity-mismatch` | the device is printing a different file than the run claims |
+| `run-not-attached` | the run is not RUNNING/PAUSED yet, so it cannot be adopted |
+| `no-start-time` | no start time on the run — the duration metric cannot be rebuilt |
+| `no-ams-baseline` | a Bambu run with no persisted AMS baseline — the deduction would under-count |
+| `finishing-soon` | the completion would land inside the restart window and be observed by neither process |
+| `progress-unknown` | neither ETA nor progress is known, so `finishing-soon` cannot be ruled out |
+
+When one of those is in flight the orchestrator is **held back alone**: everything
+else is applied and verified, the run ends `DEPLOY PARTIAL` (exit 5), and the
+orchestrator's newly built image is parked as `<image>:pending` while
+`<image>:latest` keeps naming what is actually running — so a stray
+`docker compose up -d` cannot perform the recreate the gate just refused. Re-run
+when the print finishes; the build is cached, so it costs seconds.
+
+`--allow-active-prints` accepts those losses and swaps now.
+`--strict-active-prints` goes the other way and holds the orchestrator back for
+*any* busy printer, ignoring the per-print verdict. `--restart-window N` sets how
+long the orchestrator is assumed to be blind (default 180 s), which is what
+`finishing-soon` is measured against.
 
 Other subcommands:
 
@@ -79,6 +126,17 @@ and `docker compose down -v` would delete `orchestrator-data`, which holds
 `queue.db` (the print queue, runs, and the printer inventory *including device
 credentials*). Never run them here.
 
+**What counts as "changed".** Two things recreate a container, and the gate has
+to know about both. The obvious one is image content — compared as rootfs
+*layers* against what the container is actually running, so a build that only
+moved an OCI label is recognised as the no-op it is. The other is compose's own
+configuration hash: a new `.env` value, a changed mount, a `stop_grace_period`.
+A config-only recreate of the orchestrator costs a print in flight exactly what
+an image one does, and comparing images alone did not see it at all. So the plan
+stage also asks compose what it would do (`up --dry-run`) and lets that answer
+only ever *widen* the set — a compose too old for the flag simply leaves the
+image comparison standing.
+
 **Why a no-op deploy is really a no-op.** The build runs with
 `--provenance=false`. BuildKit's default provenance attestation makes the
 exported image a manifest *list* whose digest embeds build metadata, so a
@@ -95,8 +153,12 @@ the commit it built from and warns when the working tree is dirty.
 
 **Rollback.** Before building, the script tags the images the running containers
 came from as `<image>:previous`, and — **only after a deploy passes health and
-HTTP verification** — tags that verified build `<image>:last-known-good` and
-records its image ID in `.deploy/state.env`.
+HTTP verification** — tags what the containers are *now running*
+`<image>:last-known-good` and records its image ID in `.deploy/state.env`. Read
+from the running containers rather than from `:latest` on purpose: after a
+partial deploy `:latest` would name an image for the held-back service that was
+never applied and never verified, and recording that as "last known good" would
+make the phrase mean its opposite.
 
 That ordering is the point. `:last-known-good` moves *after* proof, never before
 a build, so:
@@ -107,8 +169,12 @@ a build, so:
 
 `./scripts/deploy.sh rollback` re-points `:latest` at the recorded
 last-known-good, **verifies the recorded image ID still matches the tag** (and
-refuses if something re-tagged it), checks for prints in flight, recreates the
-containers, and then runs the same health + HTTP checks a deploy does. It prints
+refuses if something re-tagged it), asks the same restart-safety question a
+deploy asks — but only when the orchestrator is actually in scope and actually
+changing — recreates the containers, and then runs the same health + HTTP checks
+a deploy does. An automatic rollback (`--rollback-on-failure`) is scoped to the
+services *this run applied*, so a failed dashboard swap cannot drag a held-back
+orchestrator into a recreate the gate had just refused. It prints
 `ROLLBACK VERIFIED` only after those pass and exits non-zero with
 `ROLLBACK FAILED` if they do not.
 

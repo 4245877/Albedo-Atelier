@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Stand-in for curl, for deploy.sh's HTTP verification stage.
+#   $FAKE_DOCKER_STATE/http/<sanitised path>  -> "<code>\n<body>"
+# A path with no file answers 200 with an empty body, so a test only has to
+# describe the endpoints it wants to be interesting.
+set -uo pipefail
+S="${FAKE_DOCKER_STATE:?}"
+out=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -w|-m) shift 2 ;;
+    -s|-sS|-S) shift ;;
+    http*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+path="$(printf '%s' "${url#*://*/}" | tr '/?=&' '____')"
+file="$S/http/$path"
+code=200; body=""
+if [ -f "$file" ]; then
+  code="$(head -1 "$file")"
+  body="$(tail -n +2 "$file")"
+fi
+[ -n "$out" ] && printf '%s' "$body" >"$out"
+printf '%s' "$code"

@@ -204,6 +204,16 @@ services:
       retries: 5
       start_period: 60s
     restart: unless-stopped
+    # Docker's default stop grace period is 10 SECONDS, and this service's own
+    # graceful shutdown is budgeted for more than that: a bounded 15 s drain of
+    # in-flight analysis/slice jobs (SHUTDOWN_DRAIN_TIMEOUT_MS), under a 25 s
+    # hard cap (SHUTDOWN_TIMEOUT_MS). The steps that persist state — flushing
+    # the accrued printing-hours and the event feed, then closing SQLite — run
+    # AFTER that drain, so with the default the container was SIGKILLed part-way
+    # through shutdown on every `up -d` recreate that followed a busy moment,
+    # losing exactly the counters and events a redeploy is supposed to preserve.
+    # Keep this comfortably above SHUTDOWN_TIMEOUT_MS.
+    stop_grace_period: 30s
     logging: *default-logging
 
   print-dashboard:

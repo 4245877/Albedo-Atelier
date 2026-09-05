@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+#
+# A stand-in for the docker CLI, just complete enough to drive scripts/deploy.sh
+# end to end without a daemon, a build or a printer.
+#
+# Everything it knows lives in $FAKE_DOCKER_STATE as small files, so a test
+# expresses a scenario by writing facts ("print-orchestrator is running image
+# sha256:old", "the restart-safety endpoint says one print is at risk") and then
+# reads back what the script DID ("up was invoked with these services").
+#
+#   images/<ref>          -> image id the reference resolves to
+#   layers/<id>           -> the image's rootfs layer string
+#   revs/<id>             -> the OCI revision label
+#   running/<svc>         -> image id the container is on ("" = not running)
+#   state/<svc>           -> "<status> <health> <restarts>"
+#   build/<svc>           -> image id the next `compose build` produces
+#   services              -> compose services, one per line
+#   buildable             -> buildable services, one per line
+#   restart-safety.out    -> what the /restart-safety probe prints
+#   printers.active       -> busy printer count for the legacy probe
+#   runs.active           -> active canonical runs for the legacy probe
+#   up.log                -> one line per `compose up` with its arguments
+#   tag.log               -> one line per `docker tag`
+#   exec.log              -> one line per `docker exec` probe, by kind
+#   up.fail               -> if present, `compose up` exits with its contents
+#   health.after-up/<svc> -> state to move a service to once `up` has run
+set -uo pipefail
+
+S="${FAKE_DOCKER_STATE:?FAKE_DOCKER_STATE is required}"
+read_file() { [ -f "$S/$1" ] && cat "$S/$1" || true; }
+# log <line> <file> — `$*` here would append the FILENAME to every line.
+log() { printf '%s\n' "$1" >>"$S/$2"; }
+
+# `docker image inspect --format '{{.Id}}' <ref>` and friends. Returns 1 for an
+# unknown reference, exactly like the real CLI, because deploy.sh depends on
+# that to tell "no such image" from "empty answer".
+resolve_image() {
+  local ref="$1"
+  if [ -f "$S/images/$(printf '%s' "$ref" | tr '/:' '__')" ]; then
+    cat "$S/images/$(printf '%s' "$ref" | tr '/:' '__')"
+    return 0
+  fi
+  # A bare image id is resolvable too (the containerd image store does this).
+  if [ -f "$S/layers/$ref" ]; then printf '%s' "$ref"; return 0; fi
+  return 1
+}
+set_tag() {
+  mkdir -p "$S/images"
+  printf '%s' "$2" >"$S/images/$(printf '%s' "$1" | tr '/:' '__')"
+}
+del_tag() { rm -f "$S/images/$(printf '%s' "$1" | tr '/:' '__')"; }
+
+container_of() { read_file "running/$1"; }
+svc_of_container() {
+  local cid="$1" svc
+  while read -r svc; do
+    [ -n "$svc" ] || continue
+    [ "cid-$svc" = "$cid" ] && { printf '%s' "$svc"; return; }
+  done < <(read_file services)
+}
+
+# ── docker compose … ────────────────────────────────────────────────────────
+if [ "${1:-}" = "compose" ]; then
+  shift
+  # Strip the flags deploy.sh never passes but a host .env might inject.
+  case "${1:-}" in
+    version)
+      case "${2:-}" in --short) echo "2.40.0" ;; *) echo "Docker Compose version v2.40.0" ;; esac
+      exit 0 ;;
+    config)
+      case "${2:-}" in
+        -q) exit 0 ;;
+        --services) read_file services; exit 0 ;;
+        --format) cat "$S/config.json"; exit 0 ;;
+        *) cat "$S/config.txt"; exit 0 ;;
+      esac ;;
+    ps)
+      if [ "${2:-}" = "-q" ]; then
+        [ -n "$(container_of "${3:-}")" ] && printf 'cid-%s\n' "${3:-}"
+        exit 0
+      fi
+      printf 'SERVICE STATUS PORTS\n'
+      exit 0 ;;
+    pull) exit 0 ;;
+    build)
+      local_rc=0
+      if [ -f "$S/build.fail" ]; then
+        printf 'build failed\n' >&2
+        exit "$(cat "$S/build.fail")"
+      fi
+      while read -r svc; do
+        [ -n "$svc" ] || continue
+        local_new="$(read_file "build/$svc")"
+        [ -n "$local_new" ] || continue
+        set_tag "$(read_file "imagename/$svc"):latest" "$local_new"
+      done < <(read_file buildable)
+      printf 'built\n'
+      exit 0 ;;
+    up)
+      shift
+      case " $* " in
+        *" --help "*)
+          printf 'Usage: docker compose up\n'
+          # deploy.sh feature-detects the flag before trusting it.
+          [ -f "$S/no-dry-run" ] || printf '      --dry-run   Execute command in dry run mode\n'
+          exit 0 ;;
+      esac
+      # `--dry-run` asks what would happen and must change nothing — including
+      # up.log, which is how the tests assert what was really applied.
+      case " $* " in
+        *" --dry-run "*)
+          while read -r svc; do
+            [ -n "$svc" ] || continue
+            want="$(resolve_image "$(read_file "imagename/$svc"):latest" || true)"
+            name="atelier-$svc"
+            if [ -z "$(container_of "$svc")" ]; then
+              printf ' Container %s Create \n' "$name"
+            elif [ -n "$want" ] && [ "$want" != "$(container_of "$svc")" ]; then
+              printf ' Container %s Recreate \n' "$name"
+            elif [ -f "$S/config-changed/$svc" ]; then
+              # Compose recreates on its own config hash too, with no image move.
+              printf ' Container %s Recreate \n' "$name"
+            else
+              printf ' Container %s Running \n' "$name"
+            fi
+            printf ' Container %s Recreated \n' "$name"
+          done < <(read_file services)
+          exit 0 ;;
+      esac
+      log "$*" up.log
+      if [ -f "$S/up.fail" ]; then exit "$(cat "$S/up.fail")"; fi
+      # Recreate every named service (or all of them) whose :latest differs from
+      # what it is running — compose's own rule, which is the one deploy.sh is
+      # written against.
+      named=()
+      for a in "$@"; do
+        case "$a" in -*) ;; *) named+=("$a") ;; esac
+      done
+      if [ "${#named[@]}" -eq 0 ]; then mapfile -t named < <(read_file services); fi
+      for svc in "${named[@]}"; do
+        want="$(resolve_image "$(read_file "imagename/$svc"):latest" || true)"
+        [ -n "$want" ] || continue
+        if [ "$want" != "$(container_of "$svc")" ]; then
+          printf '%s' "$want" >"$S/running/$svc"
+        fi
+        if [ -f "$S/health.after-up/$svc" ]; then
+          cp "$S/health.after-up/$svc" "$S/state/$svc"
+        fi
+      done
+      exit 0 ;;
+    port)
+      read_file port
+      exit 0 ;;
+    logs) printf 'fake log line\n'; exit 0 ;;
+    *) exit 0 ;;
+  esac
+fi
+
+# ── docker … ────────────────────────────────────────────────────────────────
+case "${1:-}" in
+  --version) echo "Docker version 29.7.2, build fake" ; exit 0 ;;
+  info)
+    if [ "${2:-}" = "--format" ]; then printf '%s\n' "${FAKE_DOCKER_ROOT:-$S/root}"; fi
+    exit 0 ;;
+  network) exit 0 ;;
+  volume)
+    case "${2:-}" in
+      inspect) [ -f "$S/volume-missing" ] && exit 1 || exit 0 ;;
+      ls)      printf 'atelier_orchestrator-data\n'; exit 0 ;;
+    esac
+    exit 0 ;;
+  system)
+    printf 'TYPE TOTAL ACTIVE SIZE RECLAIMABLE\nImages 3 3 1.2GB 0B\nBuild Cache 10 0 900MB 900MB\n'
+    exit 0 ;;
+  builder) printf 'Total reclaimed space: 0B\n'; exit 0 ;;
+  tag)
+    log "$2 -> $3" tag.log
+    id="$(resolve_image "$2" || true)"
+    [ -n "$id" ] || exit 1
+    set_tag "$3" "$id"
+    exit 0 ;;
+  image)
+    case "${2:-}" in
+      inspect)
+        shift 2
+        fmt=""; ref=""
+        while [ $# -gt 0 ]; do
+          case "$1" in --format) fmt="$2"; shift 2 ;; *) ref="$1"; shift ;;
+          esac
+        done
+        id="$(resolve_image "$ref" || true)"
+        [ -n "$id" ] || { printf 'Error: No such image: %s\n' "$ref" >&2; exit 1; }
+        case "$fmt" in
+          *".Id"*)            printf '%s\n' "$id" ;;
+          *"RootFS.Layers"*)  printf '%s\n' "$(read_file "layers/$id")" ;;
+          *"image.revision"*) r="$(read_file "revs/$id")"; printf '%s\n' "${r:-<no value>}" ;;
+          "")                 printf '[{"Id":"%s"}]\n' "$id" ;;
+          *)                  printf '\n' ;;
+        esac
+        exit 0 ;;
+      prune) printf 'Total reclaimed space: 0B\n'; exit 0 ;;
+      rm) del_tag "${3:-}"; exit 0 ;;
+    esac
+    exit 0 ;;
+  inspect)
+    shift
+    fmt=""; ref=""
+    while [ $# -gt 0 ]; do
+      case "$1" in --format) fmt="$2"; shift 2 ;; *) ref="$1"; shift ;; esac
+    done
+    case "$ref" in
+      cid-*)
+        svc="${ref#cid-}"
+        case "$fmt" in
+          *"State.Status"*) printf '%s\n' "$(read_file "state/$svc")" ;;
+          *".Image"*)       printf '%s\n' "$(container_of "$svc")" ;;
+          *"Mounts"*)       printf 'atelier_orchestrator-data \n' ;;
+          *".Name"*)        printf '/atelier-%s\n' "$svc" ;;
+          *"Health.Log"*)   printf '1: healthcheck output\n' ;;
+          *)                printf '\n' ;;
+        esac
+        exit 0 ;;
+      *)
+        # An image id/ref: `running_revision` inspects one.
+        id="$(resolve_image "$ref" || true)"
+        [ -n "$id" ] || exit 1
+        case "$fmt" in
+          *"image.revision"*) r="$(read_file "revs/$id")"; printf '%s\n' "${r:-<no value>}" ;;
+          *) printf '\n' ;;
+        esac
+        exit 0 ;;
+    esac ;;
+  cp)
+    dest="${3:-}"
+    [ -n "$dest" ] && : >"$dest"
+    exit 0 ;;
+  exec)
+    shift
+    # Skip the flags, then the container id; the rest is the probe.
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -i|-t|-it) shift ;;
+        -e) shift 2 ;;
+        *) break ;;
+      esac
+    done
+    shift || true   # container id
+    payload="$*"
+    case "$payload" in
+      *restart-safety*)
+        # A second answer file, when present, is used from the SECOND read on.
+        # deploy.sh reads this endpoint twice — once in preflight, once
+        # immediately before the swap — and the whole point of the second read
+        # is that the farm may have changed in between. Modelling that with a
+        # file rather than a sleep keeps the test deterministic.
+        n=$(( $(grep -c '^restart-safety$' "$S/exec.log" 2>/dev/null || echo 0) ))
+        log restart-safety exec.log
+        if [ "$n" -ge 1 ] && [ -f "$S/restart-safety.out.later" ]; then
+          read_file restart-safety.out.later
+        else
+          read_file restart-safety.out
+        fi
+        exit 0 ;;
+      *"busy.length"*)
+        log printers-count exec.log
+        n="$(read_file printers.active)"
+        [ -n "$n" ] && printf 'ACTIVE=%s' "$n" || printf 'ERROR=unreachable'
+        exit 0 ;;
+      *"p.name || p.id"*)
+        log printers-describe exec.log
+        printf 'A1: printing 40%% — vase.gcode.3mf\n'
+        exit 0 ;;
+      *queue_entries*)
+        # Checked before print_runs: the deployed-identity probe names both
+        # tables, and matching the other way round answered it with a run count.
+        log queue-counts exec.log
+        printf 'OK queue=3 runs=1 printers=2'
+        exit 0 ;;
+      *print_runs*)
+        log runs-count exec.log
+        n="$(read_file runs.active)"
+        [ -n "$n" ] && printf 'RUNS=%s' "$n" || printf 'ERROR=no db'
+        exit 0 ;;
+      *"rm -f"*) exit 0 ;;
+      *) # the VACUUM snapshot arrives on stdin
+        cat >/dev/null
+        exit 0 ;;
+    esac ;;
+esac
+exit 0

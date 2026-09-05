@@ -50,6 +50,12 @@ import {
   type ResolvedPrinterSpecs
 } from "../domain/printers/specs";
 import { PrinterPoller } from "../app/printerPoller";
+import {
+  assessRestartSafety,
+  type CanonicalRunFacts,
+  type RestartSafetyAssessment,
+  type RestartSafetyInput
+} from "../app/restartSafety";
 import { PrintQueueService } from "../app/printQueue/printQueueService";
 import { buildNightGateInfo, type NightGateDeps } from "../app/readModels/buildNightGateInfo";
 import { buildSchedulerPrinters } from "../app/readModels/buildSchedulerPrinters";
@@ -641,6 +647,49 @@ export class FarmRuntime implements PrintServices {
   activeRunForPrinter(printerId: string): PrintRun | null {
     if (!this.printQueueStoreRef) return null;
     return this.runLifecycleRef?.activeRun(printerId) ?? null;
+  }
+
+  /**
+   * May this process be restarted right now without losing print accounting?
+   *
+   * Gathers the three facts the decision needs — what each printer is, what it
+   * reports, and what the canonical run says — and hands them to the pure rules
+   * in {@link file://../app/restartSafety.ts restartSafety}. Exposed over HTTP
+   * at `GET /restart-safety` so `scripts/deploy.sh` can ask the running process
+   * instead of re-deriving the same rules from telemetry and raw SQLite, which
+   * is how the two views drift apart.
+   *
+   * Never opens the database: this is a read on the operational path, and the
+   * closed-store case is reported honestly as `runs-unavailable` (which fails
+   * closed for any busy printer) rather than as "no run exists".
+   */
+  assessRestartSafety(options: { restartWindowSeconds?: number } = {}): RestartSafetyAssessment {
+    const runsAvailable = this.printQueueStoreRef !== null && this.runLifecycleRef !== null;
+    const inputs: RestartSafetyInput[] = this.enabledConfigs().map((printer) => {
+      let run: CanonicalRunFacts | null | undefined;
+      if (!runsAvailable) {
+        run = undefined;
+      } else {
+        const active = this.activeRunForPrinter(printer.id);
+        run = active
+          ? {
+              id: active.id,
+              state: active.state,
+              file: active.file,
+              startedAt: active.startedAt,
+              hasAmsBaseline: readAmsBaseline(active.metadata) !== null
+            }
+          : null;
+      }
+      return {
+        id: printer.id,
+        name: printer.name,
+        protocol: printer.protocol,
+        status: this.poller.getStatus(printer.id),
+        run
+      };
+    });
+    return assessRestartSafety(inputs, options);
   }
 
   /**

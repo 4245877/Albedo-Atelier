@@ -3,6 +3,7 @@ import type { QueueJob, NightCandidate } from "../domain/dashboard/types";
 import type { StoreLogger } from "../shared/logger";
 import { FarmCommands, type NewQueueJobInput } from "./FarmCommands";
 import { FarmLifecycle } from "./FarmLifecycle";
+import type { RestartSafetyAssessment } from "./restartSafety";
 
 export type { NewQueueJobInput } from "./FarmCommands";
 export type { PrintServices } from "../bootstrap/createRuntime";
@@ -77,6 +78,15 @@ export class FarmStore implements PrintServices {
   /** The single physical-start service; null before the queue store is opened. */
   get dispatchService() {
     return this.runtime.dispatchService;
+  }
+
+  /**
+   * Whether this process can be recreated right now without losing print
+   * accounting. A pure read of live telemetry + the canonical runs; served at
+   * `GET /restart-safety` for `scripts/deploy.sh`.
+   */
+  assessRestartSafety(options: { restartWindowSeconds?: number } = {}): RestartSafetyAssessment {
+    return this.runtime.assessRestartSafety(options);
   }
 
   // ── Lifecycle (delegated to FarmLifecycle) ─────────────────────────────────

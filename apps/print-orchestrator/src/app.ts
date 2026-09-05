@@ -9,6 +9,7 @@ import { registerSecurity } from "./http/security";
 import { getHealth } from "./infra/observability/health";
 import { collectMetrics, METRICS_CONTENT_TYPE } from "./infra/observability/metrics";
 import { getReadiness } from "./infra/observability/ready";
+import { getRestartSafety } from "./infra/observability/restartSafety";
 import { getVersion } from "./infra/observability/version";
 import { farmStore } from "./app/farmStore";
 import { registerAutomationRoutes } from "./modules/automation/routes";
@@ -110,6 +111,21 @@ export function buildApp(options: FastifyServerOptions = {}): FastifyInstance {
     reply.code(readiness.ready ? 200 : 503);
     return readiness;
   });
+
+  // "Can you be restarted right now without losing anything?" — the question a
+  // redeploy actually needs answered, answered by the process that knows.
+  //
+  // deploy.sh used to approximate it by counting busy printers, which blocks a
+  // deploy for every print in flight even though a print dispatched through the
+  // queue is fully re-adopted from SQLite on restart. The rules live in
+  // app/restartSafety.ts so there is exactly one of them; this endpoint only
+  // publishes the verdict. Unauthenticated and read-only, like /ready: it is
+  // reachable on the compose network and through the dashboard proxy, and it
+  // exposes nothing a printer card does not already show.
+  //
+  // `?window=<seconds>` states how long the caller expects the process to be
+  // blind, so a deploy on a slow host can ask a stricter question.
+  app.get("/restart-safety", async (request) => getRestartSafety(farmStore, request.query));
 
   // Prometheus metrics drawn from the live farm state.
   app.get("/metrics", async (_request, reply) => {
