@@ -1,0 +1,10 @@
+{
+  "bundleName": "operator-corrections",
+  "orcaVersion": "02.03.02.74",
+  "machine": [
+    "Bambu Lab A1 0.4 PETG",
+    "Creality K2 PETG 0.4"
+  ],
+  "process": [],
+  "filament": []
+}

@@ -1,0 +1,60 @@
+{
+	"enable_pressure_advance": [
+		"1"
+	],
+	"fan_max_speed": [
+		"45"
+	],
+	"fan_min_speed": [
+		"20"
+	],
+	"filament_extruder_variant": [
+		"Direct Drive Standard"
+	],
+	"filament_flow_ratio": [
+		"0.97"
+	],
+	"filament_max_volumetric_speed": [
+		"12"
+	],
+	"filament_settings_id": [
+		"PETG Ender-3V3 0.4"
+	],
+	"from": "User",
+	"full_fan_speed_layer": [
+		"5"
+	],
+	"hot_plate_temp": [
+		"80"
+	],
+	"hot_plate_temp_initial_layer": [
+		"80"
+	],
+	"inherits": "Creality Generic PETG @Ender-3V3-all",
+	"internal_bridge_fan_speed": [
+		"80"
+	],
+	"name": "PETG Ender-3V3 0.4",
+	"nozzle_temperature": [
+		"240"
+	],
+	"nozzle_temperature_initial_layer": [
+		"242"
+	],
+	"overhang_fan_speed": [
+		"80"
+	],
+	"pressure_advance": [
+		"0.04"
+	],
+	"slow_down_layer_time": [
+		"8"
+	],
+	"slow_down_min_speed": [
+		"15"
+	],
+	"support_material_interface_fan_speed": [
+		"45"
+	],
+	"version": "2.3.2.75"
+}

@@ -1,0 +1,49 @@
+{
+ "deretraction_speed": [
+  "27"
+ ],
+ "from": "User",
+ "host_type": "octoprint",
+ "inherits": "Creality K2 0.4 nozzle",
+ "max_layer_height": [
+  "0.3"
+ ],
+ "min_layer_height": [
+  "0.08"
+ ],
+ "name": "Creality K2 PETG 0.4",
+ "nozzle_diameter": [
+  "0.4"
+ ],
+ "print_host": "http://192.168.0.132:4408",
+ "print_host_webui": "192.168.0.132:4408",
+ "printer_extruder_id": [
+  "1"
+ ],
+ "printer_extruder_variant": [
+  "Direct Drive Standard"
+ ],
+ "printer_settings_id": "Creality K2 PETG 0.4",
+ "retract_length_toolchange": [
+  "2"
+ ],
+ "retract_lift_enforce": [
+  "Top Only"
+ ],
+ "retraction_length": [
+  "0.7"
+ ],
+ "retraction_minimum_travel": [
+  "3"
+ ],
+ "retraction_speed": [
+  "35"
+ ],
+ "version": "2.3.2.74",
+ "z_hop": [
+  "0.2"
+ ],
+ "z_hop_types": [
+  "Spiral Lift"
+ ]
+}

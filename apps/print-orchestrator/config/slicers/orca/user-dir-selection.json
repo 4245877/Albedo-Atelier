@@ -1,0 +1,25 @@
+{
+  "bundleName": "orca-user-574cb639",
+  "orcaVersion": "02.03.02.74",
+  "machine": [
+    "Bambu Lab A1 0.4 PETG Quality",
+    "Bambu Lab A1 0.4 PLA",
+    "Creality Ender-3 V3 KE 0.4 Balance"
+  ],
+  "process": [
+    "@BBL A1 0.4 PLA",
+    "PETG 0.4mm @BBL A1",
+    "PETG 0.4mm Quality @BBL A1",
+    "Creality Ender3V3KE Balance",
+    "K2 PETG 0.4",
+    "K2 PETG 0.4 mm"
+  ],
+  "filament": [
+    "A1 PETG 0.4",
+    "A1 PETG 0.4 Flow Rate Calibrated",
+    "VVM PETG 0.4@BBL A1",
+    "PETG Ender-3V3 0.4",
+    "PETG @K2",
+    "PETG @K2 Balance"
+  ]
+}

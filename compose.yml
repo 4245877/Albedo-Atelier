@@ -1,3 +1,13 @@
+# Container log rotation. Docker's json-file driver is UNBOUNDED by default and
+# this host has no /etc/docker/daemon.json, so a chatty container could fill the
+# disk with a single log file. 10 MB x 3 files caps each container at 30 MB.
+# Applied per service via `logging: *default-logging`.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   go2rtc:
     # Pinned by digest for reproducible pulls (tag kept for humans). Update both
@@ -5,6 +15,7 @@ services:
     image: alexxit/go2rtc:1.9.14@sha256:675c318b23c06fd862a61d262240c9a63436b4050d177ffc68a32710d9e05bae
     container_name: atelier-go2rtc
     restart: unless-stopped
+    logging: *default-logging
     environment:
       # Both values are deployment-specific (printer IP, host LAN IP) and live
       # in .env — never hardcoded here. Compose fails fast with the message
@@ -193,6 +204,7 @@ services:
       retries: 5
       start_period: 60s
     restart: unless-stopped
+    logging: *default-logging
 
   print-dashboard:
     build:
@@ -232,6 +244,7 @@ services:
       retries: 5
       start_period: 5s
     restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   # Durable orchestrator state: queue.db (print queue, runs, slicing AND the

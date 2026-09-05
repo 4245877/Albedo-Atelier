@@ -16,6 +16,7 @@ config/slicers/orca/
 │   ├── process/        print/quality profiles
 │   └── filament/       filament profiles
 ├── profile-sets/       human-authored profile-set candidates (see its README)
+├── corrections/        operator-authored fixes to defective exports (see its README)
 └── vendor/             OrcaSlicer *system* profiles — the inheritance parents (see its README)
 ```
 
@@ -46,6 +47,39 @@ python3 scripts/stage-orca-presets.py --src ~/Presets --out config/slicers/orca
 Re-running with the same inputs yields the same bytes. Add new bundles by dropping
 them in the source directory and re-running, then re-import from the dashboard /
 `POST /api/print/slicing/presets/import`.
+
+### Staging from an Orca Cloud sync folder
+
+The stager reads **bundles** (zip archives). An Orca Cloud sync folder is not one —
+it is the live `user/<uuid>/` tree (`machine/`, `process/`, `filament/`, plus
+`.info` sync sidecars). `scripts/bundle-orca-user-dir.py` is the adapter: it packs
+a named selection of those presets into one deterministic `.orca_printer`, which
+then stages like any other bundle. It rewrites nothing — profile bytes are copied
+verbatim; it only maps `machine/` to the `printer/` folder a bundle uses (the
+stager classifies by that folder, and a *sparse* user preset carries none of the
+`printer_model` / `printable_area` keys its payload sniffing falls back to) and
+drops the `.info` sidecars.
+
+```
+# 1. what to take — preset names, not filenames (see user-dir-selection.json)
+# 2. pack, stage, import:
+python3 scripts/bundle-orca-user-dir.py \
+  --src ~/apps/<uuid> --select config/slicers/orca/user-dir-selection.json \
+  --out /tmp/staging/orca-user-<uuid>.orca_printer
+python3 scripts/bundle-orca-user-dir.py \
+  --src config/slicers/orca/corrections --select config/slicers/orca/corrections/selection.json \
+  --out /tmp/staging/operator-corrections.orca_printer
+python3 scripts/stage-orca-presets.py --src /tmp/staging --out config/slicers/orca
+```
+
+The selection is explicit on purpose. A sync folder accumulates abandoned
+experiments, renamed copies and presets for nozzles the farm does not have;
+importing it wholesale is what multiplies same-named revisions and defective
+chains. Pick the presets that belong to a real printer in `config/printers.json`
+and leave the rest out — they stay in the sync folder, losing nothing.
+
+A preset that is genuinely defective and fixable only by re-parenting goes through
+`corrections/`, never by editing a file under `profiles/`.
 
 ## Import & quarantine policy
 

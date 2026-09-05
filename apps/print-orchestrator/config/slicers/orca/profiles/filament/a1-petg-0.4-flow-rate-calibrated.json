@@ -1,27 +1,18 @@
 {
-	"additional_cooling_fan_speed": [
-		"0"
-	],
 	"close_fan_the_first_x_layers": [
 		"3"
 	],
-	"complete_print_exhaust_fan_speed": [
-		"70"
-	],
 	"cool_plate_temp": [
-		"80"
+		"82"
 	],
 	"cool_plate_temp_initial_layer": [
 		"80"
 	],
 	"during_print_exhaust_fan_speed": [
-		"10"
-	],
-	"enable_pressure_advance": [
-		"1"
+		"30"
 	],
 	"eng_plate_temp": [
-		"80"
+		"82"
 	],
 	"eng_plate_temp_initial_layer": [
 		"80"
@@ -33,7 +24,7 @@
 		"40"
 	],
 	"fan_min_speed": [
-		"30"
+		"7"
 	],
 	"filament_density": [
 		"1.25"
@@ -42,52 +33,40 @@
 		"Direct Drive Standard"
 	],
 	"filament_flow_ratio": [
-		"0.94"
+		"0.697"
 	],
 	"filament_max_volumetric_speed": [
-		"12"
-	],
-	"filament_retraction_minimum_travel": [
-		"3"
+		"14"
 	],
 	"filament_settings_id": [
-		"PETG @K2 FAST1"
+		"A1 PETG 0.4 Flow Rate Calibrated"
 	],
 	"filament_type": [
 		"PETG"
 	],
 	"filament_vendor": [
-		"Generic PETG"
-	],
-	"filament_wipe": [
-		"1"
-	],
-	"filament_wipe_distance": [
-		"0.3"
-	],
-	"filament_z_hop_types": [
-		"Normal Lift"
+		"Creality Hyper"
 	],
 	"from": "User",
 	"full_fan_speed_layer": [
-		"6"
+		"4"
 	],
 	"hot_plate_temp": [
-		"80"
+		"82"
 	],
 	"hot_plate_temp_initial_layer": [
 		"80"
 	],
-	"inherits": "Creality Generic PLA @K2-all",
+	"inherits": "Bambu PLA Basic @BBL A1",
 	"internal_bridge_fan_speed": [
-		"60"
+		"50"
 	],
-	"name": "PETG @K2 FAST1",
+	"name": "A1 PETG 0.4 Flow Rate Calibrated",
 	"nozzle_temperature": [
 		"240"
 	],
 	"nozzle_temperature_initial_layer": [
-		"245"
+		"240"
 	],
 	"nozzle_temperature_range_high": [
 		"250"
@@ -95,41 +74,32 @@
 	"nozzle_temperature_range_low": [
 		"230"
 	],
-	"overhang_fan_speed": [
-		"65"
-	],
-	"pressure_advance": [
-		"0.05"
-	],
 	"slow_down_layer_time": [
 		"9"
 	],
-	"slow_down_min_speed": [
-		"23"
-	],
 	"supertack_plate_temp": [
-		"80"
+		"82"
 	],
 	"supertack_plate_temp_initial_layer": [
 		"80"
 	],
 	"support_material_interface_fan_speed": [
-		"60"
+		"40"
 	],
 	"temperature_vitrification": [
 		"76"
 	],
 	"textured_cool_plate_temp": [
-		"80"
+		"82"
 	],
 	"textured_cool_plate_temp_initial_layer": [
 		"80"
 	],
 	"textured_plate_temp": [
-		"80"
+		"82"
 	],
 	"textured_plate_temp_initial_layer": [
 		"80"
 	],
-	"version": "2.3.0.3"
+	"version": "1.10.0.35"
 }

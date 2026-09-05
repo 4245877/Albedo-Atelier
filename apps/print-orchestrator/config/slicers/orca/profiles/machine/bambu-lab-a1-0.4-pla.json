@@ -1,0 +1,14 @@
+{
+    "from": "User",
+    "inherits": "Bambu Lab A1 0.4 nozzle",
+    "is_custom_defined": "0",
+    "name": "Bambu Lab A1 0.4 PLA",
+    "printer_settings_id": "Bambu Lab A1 0.4 PLA",
+    "retraction_minimum_travel": [
+        "2"
+    ],
+    "version": "1.10.0.35",
+    "z_hop": [
+        "0.2"
+    ]
+}

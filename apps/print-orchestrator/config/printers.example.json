@@ -8,6 +8,7 @@
     "host": "192.168.1.50",
     "port": 4408,
     "material": "PETG",
+    "nozzleDiameterMm": 0.4,
     "swatch": "#4c4f55",
     "snapshotUrl": "http://go2rtc:1984/api/frame.jpeg?src=k2",
     "streamUrl": "http://go2rtc:1984/api/stream.mp4?src=k2",
@@ -16,7 +17,9 @@
     "apiKey": "",
     "serial": "",
     "accessCode": "",
-    "light": { "pin": "LED" }
+    "light": {
+      "pin": "LED"
+    }
   },
   {
     "id": "example-creality-ws",
@@ -27,6 +30,7 @@
     "host": "192.168.1.51",
     "port": 9999,
     "material": "PLA / PETG / TPU",
+    "nozzleDiameterMm": 0.4,
     "swatch": "#7fb3d8",
     "snapshotUrl": "",
     "streamUrl": "",
@@ -34,7 +38,9 @@
     "apiKey": "",
     "serial": "",
     "accessCode": "",
-    "light": { "enabled": false }
+    "light": {
+      "enabled": false
+    }
   },
   {
     "id": "example-bambu",
@@ -45,6 +51,7 @@
     "host": "192.168.1.52",
     "port": 8883,
     "material": "PLA / PETG / TPU",
+    "nozzleDiameterMm": 0.4,
     "swatch": "#efe8d8",
     "snapshotUrl": "",
     "streamUrl": "",
@@ -52,6 +59,8 @@
     "apiKey": "",
     "serial": "0123456789ABCDE",
     "accessCode": "00000000",
-    "light": { "bambuNode": "chamber_light" }
+    "light": {
+      "bambuNode": "chamber_light"
+    }
   }
 ]

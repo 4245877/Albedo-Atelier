@@ -14,45 +14,44 @@ const REAL_CATALOG = path.resolve(__dirname, "../../../config/slicers/orca");
 
 // ── Against the real vendored catalog (config/slicers/orca) ───────────────────
 
-test("imports the real catalog: the installed vendor closure resolves 20 of 21 profiles", async () => {
+test("imports the real catalog: the installed vendor closure resolves all 17 profiles", async () => {
   const store = openPrintQueueStore(":memory:");
   try {
     const service = new PresetImportService(store, new OrcaCatalogSource(REAL_CATALOG));
     const result = await service.import();
 
-    assert.equal(result.totalProfiles, 21);
+    assert.equal(result.totalProfiles, 17);
     assert.equal(result.counts.invalid, 0);
-    assert.equal(result.counts.active, 20);
-    assert.equal(result.counts.quarantined, 1);
-    assert.equal(result.inserted, 21);
+    assert.equal(result.counts.active, 17);
+    assert.equal(result.counts.quarantined, 0);
+    assert.equal(result.inserted, 17);
 
     // Source archives hash to what the catalog recorded (immutability).
     assert.equal(result.sourceIntegrity.ok, true);
 
-    // Everything Bambu A1 (machine + processes + filaments) and every Creality
-    // filament resolves through the vendor/ system parents.
+    // The catalog is curated: presets for a nozzle the farm does not have, renamed
+    // copies of the wrong-nozzle parent, and K2 *Plus* processes are deliberately
+    // not staged (see the catalog README). What remains is one coherent chain per
+    // printer in config/printers.json, all of it resolving through vendor/.
     const active = result.profiles.filter((p) => p.status === "active").map((p) => p.name).sort();
     assert.deepEqual(active, [
-      "0.08mm SuperDetail @Creality K2 0.2 nozzle - Copy",
       "@BBL A1 0.4 PLA",
+      "A1 PETG 0.4",
+      "A1 PETG 0.4 Flow Rate Calibrated",
       "Bambu Lab A1 0.4 PETG",
-      "Creality",
-      "Creality K2 0.4",
-      "Creality K2 0.4 Balance",
-      "Creality K2 0.4 FAST",
-      "Creality K2 0.4 FAST1",
-      "Creality PLA",
-      "ENYONE PLA",
+      "Bambu Lab A1 0.4 PETG Quality",
+      "Bambu Lab A1 0.4 PLA",
+      "Creality Ender-3 V3 KE 0.4 Balance",
+      "Creality Ender3V3KE Balance",
+      "Creality K2 PETG 0.4",
+      "K2 PETG 0.4",
+      "K2 PETG 0.4 mm",
       "PETG 0.4mm @BBL A1",
       "PETG 0.4mm Quality @BBL A1",
-      "PETG 0.6mm @BBL A1",
-      "PETG 0.8mm @BBL A1",
       "PETG @K2",
       "PETG @K2 Balance",
-      "PETG @K2 FAST1",
-      "VVM PETG 0.4@BBL A1",
-      "VVM PETG 0.6@BBL A1",
-      "VVM PETG 0.8@BBL A1"
+      "PETG Ender-3V3 0.4",
+      "VVM PETG 0.4@BBL A1"
     ]);
 
     // Every parent resolves. The plain `Creality K2` family (never shipped by 2.3.0,
@@ -61,17 +60,22 @@ test("imports the real catalog: the installed vendor closure resolves 20 of 21 p
     // installed under vendor/Creality, so nothing is left dangling.
     assert.deepEqual(result.missingParents, []);
 
-    // The replacement bundle is imported byte-for-byte. Its parent now resolves, but
-    // the profile keeps the contradiction the operator exported into it — 0.4 mm of
-    // declared nozzle against a "0.2" printer_variant — so it stays quarantined on
-    // that alone. Installing a parent must never paper over a self-contradiction.
-    const k2 = result.profiles.find((p) => p.name === "Creality K2 PETG 0.4 FAST");
+    // The K2 printer profile is the operator's, re-parented onto the 0.4-nozzle
+    // system profile (config/slicers/orca/corrections). The nozzle it declares and
+    // the variant it inherits finally agree, so nothing is quarantined — and the
+    // agreement is the point: silencing the check instead would have kept every
+    // 0.2-nozzle extrusion width. The contradiction itself is still caught, on a
+    // synthetic profile, further down this file.
+    const k2 = result.profiles.find((p) => p.name === "Creality K2 PETG 0.4");
     assert.ok(k2);
-    assert.equal(k2.status, "quarantined");
-    const codes = k2.blockers.map((b) => b.code);
-    assert.ok(!codes.includes("missing_parent"));
-    assert.deepEqual(codes, ["nozzle_variant_mismatch"]);
-    assert.ok(!codes.includes("nozzle_parent_mismatch"));
+    assert.equal(k2.status, "active");
+    assert.deepEqual(k2.blockers, []);
+    const k2rev = store.repositories.profileRevisions.list("machine").find((r) => r.name === "Creality K2 PETG 0.4");
+    assert.equal(k2rev?.inherits, "Creality K2 0.4 nozzle");
+    const k2resolved = JSON.parse(k2rev?.resolvedJson ?? "{}");
+    assert.deepEqual(k2resolved.nozzle_diameter, ["0.4"]);
+    assert.equal(k2resolved.printer_variant, "0.4");
+    assert.equal(k2resolved.printer_model, "Creality K2");
   } finally {
     store.close();
   }
@@ -159,31 +163,36 @@ test("A1 PETG filament and both A1 process families resolve through their BBL pa
   }
 });
 
-test("the Creality K2 processes resolve through the installed v2.3.2 0.2-nozzle parent", async () => {
+test("the Creality K2 process resolves through the v2.3.2 **0.4**-nozzle parent", async () => {
   const store = openPrintQueueStore(":memory:");
   try {
     const result = await new PresetImportService(store, new OrcaCatalogSource(REAL_CATALOG)).import();
-    const quarantined = result.profiles.filter((p) => p.status === "quarantined").map((p) => p.name).sort();
-    // Only the self-contradicting machine profile is left; every process resolved.
-    assert.deepEqual(quarantined, ["Creality K2 PETG 0.4 FAST"]);
+    assert.deepEqual(result.profiles.filter((p) => p.status === "quarantined").map((p) => p.name), []);
 
-    const k2 = result.profiles.find((p) => p.name === "Creality K2 0.4");
+    const k2 = result.profiles.find((p) => p.name === "K2 PETG 0.4");
     assert.equal(k2?.status, "active");
     assert.deepEqual(k2?.blockers, []);
 
-    // It must resolve through the *Creality* chain — a same-named parent from
-    // another vendor would silently merge the wrong base settings.
-    const rev = store.repositories.profileRevisions
-      .list("process")
-      .find((r) => r.name === "Creality K2 0.4");
+    const rev = store.repositories.profileRevisions.list("process").find((r) => r.name === "K2 PETG 0.4");
+    // The nozzle in the parent's name is load-bearing, not decoration: the 0.2 and
+    // 0.4 K2 process profiles differ in the extrusion widths the slicer emits
+    // (`line_width` 0.22 vs 0.42, `initial_layer_line_width` 0.25 vs 0.5). A "0.4"
+    // preset inheriting the 0.2 parent under-extrudes on real hardware, which is why
+    // the operator's `Creality K2 0.4*` copies of it are not in the catalog at all.
     assert.equal(rev?.metadata.vendor, "Creality");
     assert.deepEqual(rev?.metadata.inheritanceChain, [
       "fdm_process_common",
       "fdm_process_creality_common",
       "fdm_process_common_klipper",
-      "0.08mm SuperDetail @Creality K2 0.2 nozzle",
-      "Creality K2 0.4"
+      "0.08mm SuperDetail @Creality K2 0.4 nozzle",
+      "K2 PETG 0.4"
     ]);
+    const resolved = JSON.parse(rev?.resolvedJson ?? "{}");
+    assert.equal(resolved.line_width, "0.42");
+    assert.equal(resolved.initial_layer_line_width, "0.5");
+    // …and it declares itself compatible with the very machine profile the K2 set
+    // uses, which is what `declared_incompatible_printer` checks at set level.
+    assert.deepEqual(resolved.compatible_printers, ["Creality K2 0.4 nozzle"]);
   } finally {
     store.close();
   }
@@ -198,7 +207,7 @@ test("the shipped vendor/ closure alone resolves the catalog — no slicer runti
   try {
     fs.cpSync(REAL_CATALOG, tmp, { recursive: true });
     const result = await new PresetImportService(store, new OrcaCatalogSource(tmp, [])).import();
-    assert.equal(result.counts.active, 20);
+    assert.equal(result.counts.active, 17);
     assert.deepEqual(result.missingParents, []);
   } finally {
     store.close();
@@ -216,9 +225,9 @@ test("re-importing the real catalog is idempotent (no new revisions, nothing cha
     const second = await service.import();
     assert.equal(second.inserted, 0);
     assert.equal(second.updated, 0);
-    assert.equal(second.unchanged, 21);
-    // Still exactly 21 revisions in the table.
-    assert.equal(store.repositories.profileRevisions.list().length, 21);
+    assert.equal(second.unchanged, 17);
+    // Still exactly 17 revisions in the table.
+    assert.equal(store.repositories.profileRevisions.list().length, 17);
   } finally {
     store.close();
   }

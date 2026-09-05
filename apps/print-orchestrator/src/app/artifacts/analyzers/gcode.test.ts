@@ -518,3 +518,61 @@ test("a 50 MB G-code is analysed well inside the analysis budget", async (t) => 
     `analysing ${sizeMb.toFixed(1)} MB took ${elapsed} ms — the 30 s analysis budget is at risk`
   );
 });
+
+test("Klipper EXCLUDE_OBJECT brackets bound the model, not the K2's on-bed purge", async () => {
+  // A Creality K2 slice: klipper flavour, so OrcaSlicer states the object bracket
+  // as a COMMAND (`EXCLUDE_OBJECT_START`), not as the `; start printing object`
+  // comment the Bambu/Prusa path emits. The K2's start G-code lays its purge line
+  // down the bed edge — X0 Y0 → X0 Y130, which is *on* the bed, so the off-bed
+  // rule does not exclude it either. Read only as extrusion, a 20 mm cube at
+  // X120..140 measures 140 mm wide and gets rejected as a 7× scale mismatch.
+  const r = await run(
+    "k2.gcode",
+    makeGcode({
+      moves: [
+        "G21",
+        "G90",
+        "M83",
+        "EXCLUDE_OBJECT_DEFINE NAME=cube_id_0_copy_0 CENTER=130,130",
+        "G1 X0 Y0 Z0.2 F6000",
+        "G1 X0 Y130 E9 F2000 ; prime line down the bed edge",
+        "G1 X120 Y120 F12000",
+        "EXCLUDE_OBJECT_START NAME=cube_id_0_copy_0",
+        "G1 X140 Y120 E1.2",
+        "G1 X140 Y140 E1.2",
+        "G1 X120 Y140 E1.2",
+        "G1 X120 Y120 E1.2",
+        "EXCLUDE_OBJECT_END NAME=cube_id_0_copy_0"
+      ]
+    })
+  );
+  assert.equal(r.data.bboxBasis, "object");
+  const bbox = r.data.bbox as { min: number[]; max: number[]; size: number[] };
+  assert.deepEqual(bbox.min, [120, 120, 0.2]);
+  assert.deepEqual(bbox.max, [140, 140, 0.2]);
+  assert.deepEqual(bbox.size, [20, 20, 0]);
+
+  // The purge is not hidden — it still bounds the raw toolpath.
+  const toolpath = r.data.toolpathBbox as { min: number[] };
+  assert.deepEqual(toolpath.min, [0, 0, 0.2]);
+});
+
+test("EXCLUDE_OBJECT_DEFINE alone does not open an object region", async () => {
+  // The DEFINE lines are a manifest at the top of the file; treating one as an
+  // opening bracket would put the whole start G-code inside the "object".
+  const r = await run(
+    "k2-define-only.gcode",
+    makeGcode({
+      moves: [
+        "G21",
+        "G90",
+        "M83",
+        "EXCLUDE_OBJECT_DEFINE NAME=cube_id_0_copy_0 CENTER=130,130",
+        "G1 X0 Y0 Z0.2 F6000",
+        "G1 X0 Y130 E9 F2000",
+        "G1 X120 Y120 E1.2"
+      ]
+    })
+  );
+  assert.equal(r.data.bboxBasis, "extrusion");
+});

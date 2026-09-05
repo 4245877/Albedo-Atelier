@@ -24,9 +24,9 @@
 #
 # Usage:
 #   ./scripts/deploy.sh                 # preflight -> build -> up -> health -> HTTP
-#   ./scripts/deploy.sh --cleanup       # ... then reclaim build cache (volumes untouched)
+#   ./scripts/deploy.sh --no-cleanup    # skip the post-deploy reclaim (default: ON)
 #   ./scripts/deploy.sh preflight       # checks only, changes nothing
-#   ./scripts/deploy.sh reclaim         # free disk safely (untagged images; cache kept)
+#   ./scripts/deploy.sh reclaim         # free disk safely (untagged images; cache capped)
 #   ./scripts/deploy.sh reclaim --cache # ALSO drop the build cache (next build is COLD)
 #   ./scripts/deploy.sh rollback        # re-point compose at the last-known-good images
 #   ./scripts/deploy.sh status          # what is running right now
@@ -51,6 +51,12 @@ set -Eeuo pipefail
 # "same number for either target" override, with per-target vars beside it.
 MIN_FREE_MB_ORCA="${DEPLOY_MIN_FREE_MB_ORCA:-${DEPLOY_MIN_FREE_MB:-4096}}"
 MIN_FREE_MB_LEAN="${DEPLOY_MIN_FREE_MB_LEAN:-${DEPLOY_MIN_FREE_MB:-2048}}"
+# Ceiling for BuildKit's cache. The cache is not garbage-collected on its own:
+# every build ADDS records and none are ever dropped, so an unattended host
+# grows by roughly one full image worth of layers per deploy until the disk is
+# full. 5 GB comfortably holds the warm layers of both targets while bounding
+# the worst case. Enforced after each successful deploy (see do_reclaim).
+BUILD_CACHE_MAX_GB="${DEPLOY_BUILD_CACHE_MAX_GB:-5}"
 # Hard floor the build watchdog enforces WHILE building. Preflight only proves
 # the disk was fine a minute ago; this is what actually protects the running
 # containers (their writable layers and logs share the filesystem) from a build
@@ -234,7 +240,8 @@ usage() {
   cat <<'USAGE'
 
 Flags (deploy):
-  --cleanup               reclaim build cache + dangling images after a successful deploy
+  --cleanup               post-deploy reclaim: untagged images + build-cache ceiling (DEFAULT)
+  --no-cleanup            skip that reclaim; images and cache then accumulate every deploy
   --min-free-mb N         override the pre-build free-space requirement
   --health-timeout N      seconds to wait for containers to become healthy (default 180)
   --allow-active-prints   recreate the orchestrator even though printers are mid-print.
@@ -249,7 +256,7 @@ Flags (deploy):
   --no-http-check         skip stage 6 (for hosts where the dashboard port is firewalled)
 
 Flags (reclaim):
-  --safe                  untagged images only, build cache kept (default)
+  --safe                  untagged images + build cache trimmed to the ceiling (default)
   --cache                 also drop the build cache — the NEXT BUILD BECOMES COLD
   -y, --yes               non-interactive: same as --allow-active-prints
   -h, --help              this help
@@ -1777,15 +1784,19 @@ do_reclaim() {
     warn "a cold production-orca build needs ~${MIN_FREE_MB_ORCA} MB free; make sure that is achievable"
     docker builder prune -a -f | sed 's/^/        /'
   else
-    info "safe reclaim: untagged images only (build cache kept — the next build needs it)"
+    info "safe reclaim: untagged images + build cache trimmed to ${BUILD_CACHE_MAX_GB} GB (the warm top is kept)"
+    # Evicts least-recently-used cache records until the total fits the ceiling,
+    # so the layers the NEXT build needs survive while the cache stops growing
+    # without bound. Unlike `-a` this never forces a cold build.
+    docker builder prune -f --max-used-space "${BUILD_CACHE_MAX_GB}GB" | tail -1 | sed 's/^/        /'
   fi
   docker image prune -f | sed 's/^/        /'
 
   after="$(free_mb "$fs")"
   ok "free space on ${fs}: ${before} MB → ${after} MB (+$((after - before)) MB)"
   if [ "$mode" != "cache" ]; then
-    detail "build cache left intact; to drop it too: ./scripts/deploy.sh reclaim --cache"
-    docker system df | awk '/Build Cache/ {print "        build cache still held: " $3}'
+    detail "build cache trimmed to the ${BUILD_CACHE_MAX_GB} GB ceiling; to drop it entirely: ./scripts/deploy.sh reclaim --cache"
+    docker system df | awk '/Build Cache/ {print "        build cache still held: " $5}'
   fi
   detail "orchestrator-data and every other volume were left untouched:"
   docker volume ls --format '        {{.Name}}' | grep orchestrator-data || true
@@ -1853,7 +1864,10 @@ assert_positive_int() {
 }
 
 COMMAND="deploy"
-CLEANUP=0
+# ON by default. Leaving it off is what let 6.99 GB of build cache and 2.9 GB of
+# untagged images accumulate: every deploy orphans the images it replaces and
+# appends to a cache nothing ever trims. --no-cleanup restores the old behaviour.
+CLEANUP=1
 RECLAIM_MODE="safe"
 ALLOW_ACTIVE_PRINTS=0
 ROLLBACK_ON_FAILURE=0
@@ -1867,6 +1881,7 @@ while [ $# -gt 0 ]; do
     --safe)                 RECLAIM_MODE="safe" ;;
     --cache)                RECLAIM_MODE="cache" ;;
     --cleanup)              CLEANUP=1 ;;
+    --no-cleanup)           CLEANUP=0 ;;
     --min-free-mb)          assert_positive_int "${2:-}" --min-free-mb;    MIN_FREE_MB_OVERRIDE="$2"; shift ;;
     --health-timeout)       assert_positive_int "${2:-}" --health-timeout; HEALTH_TIMEOUT="$2";        shift ;;
     --allow-active-prints)  ALLOW_ACTIVE_PRINTS=1 ;;

@@ -208,6 +208,16 @@ async function scanGcode(path: string): Promise<Scan> {
 
     scan.policy.observe(word, lineNo);
 
+    // Klipper states the same "this is the model" bracket as a command rather
+    // than a comment, so it cannot be read in the comment branch above.
+    // `EXCLUDE_OBJECT_DEFINE` only declares the objects up front and brackets
+    // nothing, so it must NOT open a region.
+    if (word === "EXCLUDE_OBJECT_START" || word === "EXCLUDE_OBJECT_END") {
+      insideObject = word === "EXCLUDE_OBJECT_START";
+      scan.sawObjectMarkers = true;
+      return;
+    }
+
     if (word === "G0" || word === "G1" || word === "G2" || word === "G3") {
       scan.motionCommands++;
       if (!absolutePos) scan.hasRelativeMoves = true;
@@ -730,6 +740,14 @@ function readHomedAxes(code: string, out: AxisWords): void {
  * which is the authoritative statement of where the model ends and the machine's
  * own routines begin. Returns true/false to open/close the region, null when the
  * comment says nothing about it.
+ *
+ * This reader covers only the *comment* spelling. Klipper-flavour output states
+ * the same bracket as a command (`EXCLUDE_OBJECT_START NAME=…` /
+ * `EXCLUDE_OBJECT_END`), which is handled in the command branch of the scanner —
+ * see there. Missing it is not cosmetic: without object markers the model box
+ * falls back to all deposited extrusion, which on a Klipper machine includes the
+ * start G-code's purge line at the bed edge. A 20 mm cube then measures ~140 mm
+ * wide and the slice is rejected as a scale mismatch.
  */
 function readObjectMarker(low: string): boolean | null {
   if (!low.includes("printing object")) return null;
