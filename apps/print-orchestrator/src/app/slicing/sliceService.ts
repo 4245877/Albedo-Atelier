@@ -23,6 +23,7 @@ import { SliceRuntimeUnavailableError, type SliceRunner } from "../../infra/slic
 import type { StoreLogger } from "../../shared/logger";
 import type { ArtifactService } from "../artifacts/artifactService";
 import { normalizeClass, setMembersOf, targetOf, type SlicerPrinterRef } from "./profileService";
+import { plateSizeRaw, resolvePlateForSlice, selectedPlateFor } from "./slicePlate";
 import { BoundedWorkerPool } from "../../shared/boundedWorkerPool";
 
 export interface CreateSliceInput {
@@ -132,7 +133,12 @@ export class SliceService {
       const probed = await this.runner.probe();
       orcaVersion = probed.detectedVersion ?? machine.orcaVersion ?? "unknown";
     }
+    // The chosen plate is part of what determines the output: two plates of one
+    // project are two different prints from the same bytes, and without this the
+    // second slice would be served the first plate's cached G-code.
+    const plate = selectedPlateFor(artifact, analysis);
     const cacheKey = computeCacheKey({
+      plateIndex: plate?.index ?? null,
       sourceSha256: artifact.sha256 ?? artifact.id,
       machineResolvedSha256: machine.resolvedSha256 ?? machine.rawSha256,
       processResolvedSha256: process.resolvedSha256 ?? process.rawSha256,
@@ -483,24 +489,23 @@ export class SliceService {
     // invisible until the finished part comes off the bed.
     const sourceGeometry = readSourceGeometry(sourceAnalysis);
 
-    // A project holding several plates is several prints. `--slice 0` slices ALL
-    // of them, and the runner then had to choose one of the outputs by file
-    // mtime — an arbitrary plate, shipped as if it were the model the operator
-    // prepared, with the rest silently dropped. The scheduler already refuses to
-    // *size* such a package (a box spanning several plates is the size of
-    // nothing that will ever be printed); this refuses to *make* one, and says
-    // which action resolves it.
-    if (sourceGeometry.plateCount > 1) {
-      this.block(
-        variant.id,
-        "multi_plate_project",
-        `В файле ${sourceGeometry.plateCount} пластин — это несколько разных печатей. ` +
-          "Экспортируйте нужную пластину отдельным файлом и нарежьте её."
-      );
+    // A project holding several plates is several prints, and `--slice 0` slices
+    // ALL of them — leaving the runner to pick an output by file mtime, i.e. an
+    // arbitrary plate shipped as the operator's model with the rest dropped. So
+    // the plate is not guessed: it is the one an operator chose, and without a
+    // valid choice this refuses to slice and says which action resolves it.
+    // That refusal is a missing *decision*, not an unsupported file.
+    const plateGate = resolvePlateForSlice(artifact, sourceAnalysis, sourceGeometry.plateCount);
+    if ("blocked" in plateGate) {
+      this.block(variant.id, plateGate.blocked.code, plateGate.blocked.message);
       return;
     }
+    const plate = plateGate.plate;
 
     const scale = resolveSliceScale(sourceGeometry.fileDeclaresUnit, readModelScale(artifact));
+    // What the size checks were run against, and therefore what the produced
+    // slice is verified against: the chosen plate's box, not the package's.
+    const sourceSize = plate ? plateSizeRaw(plate, sourceGeometry.fileDeclaresUnit) : sourceGeometry.sizeRaw;
 
     // Creating the isolated work dir can itself fail (tmpRoot removed/unwritable);
     // that error propagates to runSlice so the variant never gets stuck `running`.
@@ -528,7 +533,9 @@ export class SliceService {
           filamentJsonPath,
           outputPath,
           workDir,
-          scaleFactor: scale.factor
+          scaleFactor: scale.factor,
+          // Omitted for an ordinary single-plate model, so its argv is unchanged.
+          ...(plate ? { plateIndex: plate.sliceIndex } : {})
         },
         { timeoutMs: this.options.timeoutMs, probed: runtime }
       );
@@ -549,7 +556,7 @@ export class SliceService {
       // The output analysis — not merely the fact a file appeared — decides the
       // variant's terminal state.
       const current = repos.sliceVariants.getById(variant.id) ?? variant;
-      const expectedMm = scaleDimensions(sourceGeometry.sizeRaw, scale.factor);
+      const expectedMm = scaleDimensions(sourceSize, scale.factor);
       this.store.transaction(() =>
         this.finalizeOutput(current, outArtifact.id, analysis, expectedMm)
       );

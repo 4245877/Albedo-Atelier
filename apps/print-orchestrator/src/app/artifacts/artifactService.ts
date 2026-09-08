@@ -6,6 +6,8 @@ import { AnalysisReviewService } from "./analysisReviewService";
 import { ArtifactContext, type ArtifactServiceOptions } from "./context";
 import { ArtifactIngest, type IngestInput, type IngestResult } from "./ingest";
 import { ModelScaleService } from "./modelScale";
+import { PlatePreviewService, type PlatePreviewImage } from "./platePreview";
+import { PlateSelectionService } from "./plateSelection";
 import { ArtifactQueries, type ArtifactDetail, type ArtifactSummary } from "./queries";
 import { ArtifactRetention, type ArtifactDeletion, type DeletionHold } from "./retention";
 
@@ -14,6 +16,7 @@ export type { ArtifactServiceOptions } from "./context";
 export type { IngestInput, IngestResult } from "./ingest";
 export type { ArtifactDetail, ArtifactSummary } from "./queries";
 export type { ArtifactDeletion, DeletionHold, HeldTask } from "./retention";
+export type { PlatePreviewImage } from "./platePreview";
 
 /**
  * The application service for uploaded artifacts and their analysis. A facade
@@ -37,6 +40,8 @@ export class ArtifactService {
   private readonly retention: ArtifactRetention;
   private readonly modelScale: ModelScaleService;
   private readonly reviews: AnalysisReviewService;
+  private readonly plateSelection: PlateSelectionService;
+  private readonly platePreviews: PlatePreviewService;
 
   constructor(store: PrintQueueStore, storage: ArtifactStorage, options: ArtifactServiceOptions) {
     const ctx = new ArtifactContext(store, storage, options);
@@ -46,6 +51,8 @@ export class ArtifactService {
     this.retention = new ArtifactRetention(ctx);
     this.modelScale = new ModelScaleService(ctx);
     this.reviews = new AnalysisReviewService(ctx);
+    this.plateSelection = new PlateSelectionService(ctx);
+    this.platePreviews = new PlatePreviewService(ctx);
   }
 
   // ── Ingest (ArtifactIngest) ────────────────────────────────────────────────
@@ -103,6 +110,32 @@ export class ArtifactService {
   /** Withdraws a scale confirmation; the size reverts to unproven. */
   clearModelScale(artifactId: string, actor?: string): ReturnType<ModelScaleService["clear"]> {
     return this.modelScale.clear(artifactId, actor);
+  }
+
+  // ── Plate selection (PlateSelectionService) ───────────────────────────────
+
+  /**
+   * Records which build plate of a multi-plate 3MF is to be printed. Until this
+   * exists such a package has no printable size and no slice may start.
+   */
+  selectPlate(
+    artifactId: string,
+    input: { plateIndex: unknown; actor?: string }
+  ): ReturnType<PlateSelectionService["select"]> {
+    return this.plateSelection.select(artifactId, input);
+  }
+
+  /** Withdraws the plate choice; the package reverts to "no plate chosen". */
+  clearPlateSelection(artifactId: string, actor?: string): ReturnType<PlateSelectionService["clear"]> {
+    return this.plateSelection.clear(artifactId, actor);
+  }
+
+  /**
+   * One plate's thumbnail, re-read from the source archive. The caller names a
+   * plate, never an archive path — see {@link PlatePreviewService}.
+   */
+  readPlatePreview(artifactId: string, plateIndex: number): Promise<PlatePreviewImage> {
+    return this.platePreviews.read(artifactId, plateIndex);
   }
 
   // ── Analysis review (AnalysisReviewService) ────────────────────────────────

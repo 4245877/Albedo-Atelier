@@ -2,11 +2,24 @@ import type { FileHandle } from "node:fs/promises";
 
 import type { AnalysisFinding } from "../../../domain/print/types";
 import { normalizeGeometry, type NormalizedGeometry } from "./geometry";
-import { countPlateEntries, readPlateAssignment, resolvePlates } from "./threemfPlates";
+import {
+  applySliceInfo,
+  attachPlatePreviews,
+  readSliceInfo,
+  type SliceInfo
+} from "./threemfPlateAssets";
+import {
+  plateEntryIndices,
+  readPlateConfig,
+  resolvePlates,
+  type PlateRecord
+} from "./threemfPlates";
+import { describeProjectSettings, readProjectSettings } from "./threemfProjectSettings";
+import { suspectPrusaMultiBed } from "./threemfPrusaBeds";
 import { buildScene } from "./threemfScene";
 import { ANALYZER_VERSION, finding, worstVerdict, type AnalyzerResult, type AnalyzerLimits } from "./types";
 import { fileHandleSource, SafeZip, ZipSafetyError } from "./zip";
-import { asArray, parseSafeXml, XmlSafetyError } from "./xml";
+import { parseSafeXml, XmlSafetyError } from "./xml";
 
 /**
  * 3MF analysis: a `.3mf` is treated as an untrusted OPC (ZIP) container. The
@@ -115,14 +128,11 @@ export async function analyze3mf(
   }
 
   const entryNames = zip.entries.map((e) => e.name);
-  // Plate → object assignment, when the package records one (OrcaSlicer /
-  // BambuStudio projects). Best-effort: an unreadable or unmappable file leaves
-  // the plates unattributed, which is reported rather than guessed around.
-  const plateAssignment = await readPlateAssignment(zip, entryNames, limits.xmlMaxBytes);
   const scene = await buildScene(zip, modelName, model, limits);
   warnings.push(...scene.warnings);
 
-  const plates = resolvePlates(scene.placed, plateAssignment, countPlateEntries(entryNames));
+  const { plates, sliceInfo } = await describePlates(zip, entryNames, scene, limits, warnings);
+
   const normalized = normalizeGeometry({
     prefix: "threemf",
     bounds: scene.scene,
@@ -138,8 +148,27 @@ export async function analyze3mf(
 
   const payload = classifyEntries(entryNames);
   const producer = detectProducer(scene.slicer, entryNames);
+  // PrusaSlicer's multi-bed projects declare no plates at all — the beds are
+  // just objects moved far apart in X. Detected, never acted on: see
+  // {@link file://./threemfPrusaBeds.ts}.
+  if (plates.count <= 1 && producer !== "orcaslicer" && producer !== "bambustudio") {
+    const suspicion = suspectPrusaMultiBed(scene.placed, scene.units.mmPerUnit);
+    if (suspicion) warnings.push(suspicion);
+  }
+
   const data = describe(payload, producer, scene, normalized.geometry, zip.entries.length);
-  const outcome = await decide(payload.threeMfClass, producer, zip, entryNames, limits, warnings);
+  data.plates = plates.records;
+  data.platesTruncated = plates.truncated;
+  const outcome = await decide({
+    threeMfClass: payload.threeMfClass,
+    producer,
+    zip,
+    entryNames,
+    limits,
+    sliceInfo,
+    plateCount: plates.count,
+    warnings
+  });
   Object.assign(data, outcome.data);
 
   return {
@@ -152,6 +181,41 @@ export async function analyze3mf(
     analyzerVersion: ANALYZER_VERSION,
     material: outcome.material
   };
+}
+
+/**
+ * The package's build plates, described well enough to be chosen between.
+ *
+ * Three readings, each independently best-effort: the plate → object assignment
+ * the slicer recorded, the thumbnail each plate points at, and the estimate an
+ * already-sliced plate reports. Only the first affects geometry; the other two
+ * are convenience, and neither may cost the analysis (see
+ * {@link file://./threemfPlateAssets.ts}).
+ */
+async function describePlates(
+  zip: SafeZip,
+  entryNames: string[],
+  scene: Awaited<ReturnType<typeof buildScene>>,
+  limits: AnalyzerLimits,
+  warnings: AnalysisFinding[]
+): Promise<{ plates: ReturnType<typeof resolvePlates>; sliceInfo: SliceInfo | null }> {
+  // Best-effort: an unreadable or unmappable config leaves the plates
+  // unattributed, which is reported rather than guessed around.
+  const config = await readPlateConfig(zip, entryNames, limits.xmlMaxBytes);
+  const plates = resolvePlates({
+    placed: scene.placed,
+    config,
+    entryIndices: plateEntryIndices(entryNames),
+    entryNames,
+    mmPerUnit: scene.units.mmPerUnit
+  });
+
+  const previews = await attachPlatePreviews(zip, plates.records);
+  const sliceInfo = await readSliceInfo(zip, entryNames, limits.xmlMaxBytes);
+  applySliceInfo(plates.records, sliceInfo);
+  warnings.push(...platePayloadWarnings(plates, previews.unreadable));
+
+  return { plates, sliceInfo };
 }
 
 /** The structured payload the dashboard and the scheduler read off an analysis. */
@@ -198,18 +262,21 @@ function describe(
  * the G-code rules (and is never auto-safe as a foreign slice), anything else is
  * a source model that still needs a profile and a slicing run.
  */
-async function decide(
-  threeMfClass: EntryClassification["threeMfClass"],
-  producer: ThreeMfProducer | null,
-  zip: SafeZip,
-  entryNames: string[],
-  limits: AnalyzerLimits,
-  warnings: AnalysisFinding[]
-): Promise<{
+async function decide(input: {
+  threeMfClass: EntryClassification["threeMfClass"];
+  producer: ThreeMfProducer | null;
+  zip: SafeZip;
+  entryNames: string[];
+  limits: AnalyzerLimits;
+  sliceInfo: SliceInfo | null;
+  plateCount: number;
+  warnings: AnalysisFinding[];
+}): Promise<{
   verdict: AnalyzerResult["verdict"];
   material: string | null;
   data: Record<string, unknown>;
 }> {
+  const { threeMfClass, producer, zip, entryNames, limits, warnings } = input;
   if (threeMfClass !== "sliced") {
     if (threeMfClass === "slicer_project") {
       // A project 3MF carries its own print settings, and this farm slices it
@@ -245,9 +312,12 @@ async function decide(
     return { verdict: "needs_preparation", material: null, data: {} };
   }
 
-  const sliceInfo = await readSliceInfo(zip, entryNames, limits.xmlMaxBytes);
+  // The first plate block is the legacy single-plate answer: what the file was
+  // sliced for. For a multi-plate package it describes only the FIRST plate,
+  // which is precisely why such a package is not deliverable as-is (below).
+  const first = input.sliceInfo?.plates[0] ?? null;
   const verdicts: AnalyzerResult["verdict"][] = ["schedulable"];
-  if (!sliceInfo.material) verdicts.push("needs_input");
+  if (!first?.material) verdicts.push("needs_input");
   // A sliced payload was produced against *someone else's* machine profile; its
   // speeds, temperatures and bed shape are not ours to trust. So the verdict is
   // `review` unconditionally — including when the file names a target printer,
@@ -257,20 +327,71 @@ async function decide(
   warnings.push(
     finding(
       "threemf_sliced_payload",
-      sliceInfo.printer
-        ? `Файл уже нарезан для «${sliceInfo.printer}» — параметры чужие и требуют подтверждения`
+      first?.printer
+        ? `Файл уже нарезан для «${first.printer}» — параметры чужие и требуют подтверждения`
         : "Файл уже нарезан, но целевой принтер в нём не указан",
       "Проверьте, что материал и принтер совпадают с вашими, и подтвердите задание вручную."
     )
   );
-  if (!sliceInfo.printer) {
+  if (!first?.printer) {
     warnings.push(finding("threemf_unknown_target", "Целевой принтер не подтверждён в sliced 3MF"));
+  }
+  // An already-sliced package holding several plates is several finished prints
+  // in one container. Choosing one is a *delivery* problem — which plate's G-code
+  // is unpacked and sent to the machine — not a slicing one, and this farm has no
+  // safe implementation of it. Refused outright rather than shipped as whichever
+  // plate happens to come first: see `evaluateExecutableArtifact`.
+  if (input.plateCount > 1) {
+    warnings.push(
+      finding(
+        "threemf_sliced_multi_plate",
+        `Нарезанный файл содержит ${input.plateCount} пластин — отправить такой на принтер целиком нельзя`,
+        "Экспортируйте из слайсера нужную пластину отдельным файлом, либо загрузите проект (не G-code) и нарежьте пластину здесь."
+      )
+    );
   }
   return {
     verdict: worstVerdict(verdicts),
-    material: sliceInfo.material,
-    data: { targetPrinter: sliceInfo.printer, sliceInfo: sliceInfo.raw }
+    material: first?.material ?? null,
+    data: {
+      targetPrinter: first?.printer ?? null,
+      sliceInfo: input.sliceInfo ? { source: input.sliceInfo.entry } : null
+    }
   };
+}
+
+/**
+ * What the plate pass could not do, said once rather than per plate.
+ *
+ * Truncation is reported because the alternative — a `plates` list quietly
+ * shorter than `plateCount` — reads as "these are all the plates" and is not.
+ * An unusable *declared* thumbnail is reported because the file said there was
+ * a picture and there is not; a missed conventional guess is not reported,
+ * because a guess missing is not a defect.
+ */
+function platePayloadWarnings(
+  plates: { count: number; records: PlateRecord[]; truncated: boolean },
+  unreadablePreviews: number
+): AnalysisFinding[] {
+  const out: AnalysisFinding[] = [];
+  if (plates.truncated) {
+    out.push(
+      finding(
+        "threemf_plates_truncated",
+        `Пластин в файле ${plates.count} — подробно показаны первые ${plates.records.length}`,
+        "Выбор возможен только среди показанных пластин. Разделите проект на несколько файлов."
+      )
+    );
+  }
+  if (unreadablePreviews > 0) {
+    out.push(
+      finding(
+        "threemf_plate_preview_unreadable",
+        `Превью пластин не читаются: ${unreadablePreviews} — изображение отсутствует, слишком велико или не является PNG/JPEG`
+      )
+    );
+  }
+  return out;
 }
 
 /**
@@ -382,150 +503,4 @@ function unknown3mf(entryNames: string[], hasContentTypes: boolean): AnalyzerRes
     analyzer: "3mf",
     analyzerVersion: ANALYZER_VERSION
   };
-}
-
-/**
- * The print settings a *project* 3MF carries, read for display only.
- *
- * Two on-disk shapes cover every slicer this farm sees: Orca/Bambu write JSON in
- * `Metadata/project_settings.config`, PrusaSlicer writes `key = value` lines in
- * `Metadata/Slic3r_PE.config`. Both are read under the same byte bound as every
- * other entry, and both are treated as *untrusted description*: nothing here can
- * change a verdict, select a profile, or reach the slicer. It exists so the
- * operator can be told what they are overriding.
- */
-interface ProjectSettings {
-  any: boolean;
-  values: {
-    printer: string | null;
-    material: string | null;
-    nozzleMm: number | null;
-    layerHeightMm: number | null;
-  };
-}
-
-const PROJECT_SETTINGS_ENTRY = /Metadata\/(project_settings|Slic3r_PE)\.config$/i;
-
-async function readProjectSettings(
-  zip: SafeZip,
-  entryNames: string[],
-  maxBytes: number
-): Promise<ProjectSettings> {
-  const empty: ProjectSettings = {
-    any: false,
-    values: { printer: null, material: null, nozzleMm: null, layerHeightMm: null }
-  };
-  const name = entryNames.find((n) => PROJECT_SETTINGS_ENTRY.test(n));
-  if (!name) return empty;
-
-  let text: string;
-  try {
-    text = (await zip.read(name, maxBytes)).toString("utf8");
-  } catch {
-    // A config we cannot read is simply one we cannot describe. It never blocks:
-    // the system profile is the source of truth either way.
-    return empty;
-  }
-
-  const flat = /\.json$|^\s*\{/.test(text) ? readJsonConfig(text) : readIniConfig(text);
-  const values = {
-    printer: firstString(flat, ["printer_settings_id", "printer_model", "printer_variant"]),
-    material: firstString(flat, ["filament_settings_id", "filament_type", "filament_type_0"]),
-    nozzleMm: firstNumber(flat, ["nozzle_diameter", "nozzle_diameter_0"]),
-    layerHeightMm: firstNumber(flat, ["layer_height"])
-  };
-  return {
-    any: Object.values(values).some((v) => v !== null),
-    values
-  };
-}
-
-/** Orca/Bambu JSON: values are strings or single-element arrays of strings. */
-function readJsonConfig(text: string): Map<string, string> {
-  const out = new Map<string, string>();
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return out;
-  }
-  for (const [key, value] of Object.entries(asRecord(parsed))) {
-    if (typeof value === "string") out.set(key.toLowerCase(), value);
-    else if (Array.isArray(value) && typeof value[0] === "string") out.set(key.toLowerCase(), value[0]);
-  }
-  return out;
-}
-
-/** PrusaSlicer `key = value`, one per line, `;` comments. */
-function readIniConfig(text: string): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const line of text.split(/\r?\n/)) {
-    if (!line || line.startsWith(";") || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq === -1) continue;
-    out.set(line.slice(0, eq).trim().toLowerCase(), line.slice(eq + 1).trim());
-  }
-  return out;
-}
-
-function firstString(flat: Map<string, string>, keys: readonly string[]): string | null {
-  for (const key of keys) {
-    const value = flat.get(key)?.trim();
-    if (value) return value.slice(0, 120);
-  }
-  return null;
-}
-
-function firstNumber(flat: Map<string, string>, keys: readonly string[]): number | null {
-  for (const key of keys) {
-    const raw = flat.get(key);
-    if (!raw) continue;
-    const n = Number.parseFloat(raw.split(",")[0]);
-    if (Number.isFinite(n) && n > 0) return Math.round(n * 1000) / 1000;
-  }
-  return null;
-}
-
-/** «Bambu Lab A1, PETG, сопло 0.4 мм, слой 0.2 мм» — only what was actually found. */
-function describeProjectSettings(project: ProjectSettings): string {
-  const v = project.values;
-  const parts: string[] = [];
-  if (v.printer) parts.push(v.printer);
-  if (v.material) parts.push(v.material);
-  if (v.nozzleMm !== null) parts.push(`сопло ${v.nozzleMm} мм`);
-  if (v.layerHeightMm !== null) parts.push(`слой ${v.layerHeightMm} мм`);
-  return parts.join(", ") || "параметры не распознаны";
-}
-
-async function readSliceInfo(
-  zip: SafeZip,
-  entryNames: string[],
-  maxBytes: number
-): Promise<{ material: string | null; printer: string | null; raw: Record<string, unknown> | null }> {
-  const infoName = entryNames.find((n) => /Metadata\/slice_info\.config$/i.test(n));
-  if (!infoName) return { material: null, printer: null, raw: null };
-  try {
-    const xml = (await zip.read(infoName, maxBytes)).toString("utf8");
-    const parsed = parseSafeXml(xml, maxBytes);
-    const config = asRecord(asRecord(parsed).config);
-    const plate = asArray(config.plate as unknown)[0];
-    const metadata = asArray(asRecord(plate).metadata as unknown);
-    let material: string | null = null;
-    let printer: string | null = null;
-    for (const m of metadata) {
-      const rec = asRecord(m);
-      const key = String(rec["@_key"] ?? "").toLowerCase();
-      const value = rec["@_value"];
-      if (typeof value !== "string") continue;
-      if (key.includes("filament") && key.includes("type") && !material) material = value;
-      if (key.includes("printer") && !printer) printer = value;
-    }
-    return { material, printer, raw: { source: infoName } };
-  } catch {
-    return { material: null, printer: null, raw: null };
-  }
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }

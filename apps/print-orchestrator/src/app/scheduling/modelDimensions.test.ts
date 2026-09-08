@@ -382,6 +382,138 @@ test("a multi-plate package reports no size at all", () => {
   assert.ok(codes.includes("dimensions_unknown"));
 });
 
+// ── Multi-plate: the chosen plate IS the print ───────────────────────────────
+
+/** The `data.plates` entry the 3MF analyzer publishes for one plate. */
+function plate(index: number, sizeMm: number[] | null, over: Record<string, unknown> = {}): Metadata {
+  return {
+    index,
+    sliceIndex: index,
+    name: `Пластина ${index}`,
+    locked: false,
+    source: "model_settings",
+    objects: [{ objectId: String(index), instanceId: "0", name: null, footprintMm: null }],
+    objectsTruncated: false,
+    geometry: { index, objectCount: 1, sizeRaw: sizeMm, minMm: null, maxMm: null, sizeMm },
+    sliced: false,
+    gcodeEntry: null,
+    preview: null,
+    estimate: null,
+    settings: {},
+    ...over
+  };
+}
+
+/** The stored plate choice, bound to the artifact identity `seedModelTask` uses. */
+function plateSelection(plateIndex: number, plateCount: number, over: Metadata = {}): Metadata {
+  return {
+    plateSelection: {
+      plateIndex,
+      plateCount,
+      sha256: "a".repeat(64),
+      sizeBytes: 1024,
+      confirmedBy: "albedo",
+      confirmedAt: ISO,
+      ...over
+    }
+  };
+}
+
+test("a chosen plate's own box becomes the size every check uses", () => {
+  const db = openPrintQueueStore(":memory:");
+  const { task } = seedModelTask(db, {
+    detectedFormat: "3mf",
+    sha256: "a".repeat(64),
+    sizeBytes: 1024,
+    artifactMetadata: plateSelection(2, 3),
+    data: {
+      ...geometry({
+        sourceUnits: "millimeter",
+        mmPerUnit: 1,
+        scaleKnown: true,
+        sizeMm: null,
+        multiPlate: true,
+        plateCount: 3,
+        sceneSizeMm: [900, 200, 30]
+      }),
+      plates: [plate(1, [10, 10, 10]), plate(2, [120, 90, 40]), plate(3, [50, 50, 50])]
+    }
+  });
+
+  const { dimensions, scaleKnown, codes } = evaluate(db, task);
+  assert.deepEqual(dimensions, { x: 120, y: 90, z: 40 }, "plate 2's box, not the union of all three");
+  assert.equal(scaleKnown, true);
+  assert.ok(!codes.includes("dimensions_unknown"));
+});
+
+test("a lapsed plate choice takes the size away again — the union never returns", () => {
+  const db = openPrintQueueStore(":memory:");
+  const { task } = seedModelTask(db, {
+    detectedFormat: "3mf",
+    sha256: "b".repeat(64), // the artifact's bytes no longer match the choice
+    sizeBytes: 2048,
+    artifactMetadata: plateSelection(2, 3),
+    data: {
+      ...geometry({
+        sourceUnits: "millimeter",
+        mmPerUnit: 1,
+        scaleKnown: true,
+        sizeMm: null,
+        multiPlate: true,
+        plateCount: 3,
+        sceneSizeMm: [900, 200, 30]
+      }),
+      plates: [plate(1, [10, 10, 10]), plate(2, [120, 90, 40]), plate(3, [50, 50, 50])]
+    }
+  });
+
+  const { dimensions, codes } = evaluate(db, task);
+  assert.equal(dimensions, null);
+  assert.ok(codes.includes("dimensions_unknown"));
+});
+
+test("a chosen plate of a unit-less file still needs the operator's scale", () => {
+  // Choosing a plate answers "which print", not "what do these numbers mean".
+  // Both questions have to be answered before a size is a measurement.
+  const data = {
+    ...geometry({ multiPlate: true, plateCount: 2, sizeMm: null }),
+    plates: [plate(1, null, { geometry: { index: 1, objectCount: 1, sizeRaw: [4, 4, 4], minMm: null, maxMm: null, sizeMm: null } })]
+  };
+  const db = openPrintQueueStore(":memory:");
+  const { task } = seedModelTask(db, {
+    detectedFormat: "3mf",
+    sha256: "a".repeat(64),
+    sizeBytes: 1024,
+    artifactMetadata: plateSelection(1, 2),
+    data
+  });
+  const unconfirmed = evaluate(db, task);
+  assert.deepEqual(unconfirmed.dimensions, { x: 4, y: 4, z: 4 });
+  assert.equal(unconfirmed.scaleKnown, false, "raw numbers, honestly labelled as unproven");
+
+  const db2 = openPrintQueueStore(":memory:");
+  const { task: confirmed } = seedModelTask(db2, {
+    detectedFormat: "3mf",
+    sha256: "a".repeat(64),
+    sizeBytes: 1024,
+    artifactMetadata: {
+      ...plateSelection(1, 2),
+      [MODEL_SCALE_KEY]: {
+        units: "centimeter",
+        scaleFactor: 1,
+        sha256: "a".repeat(64),
+        sizeBytes: 1024,
+        confirmedBy: "albedo",
+        confirmedAt: ISO
+      }
+    },
+    data
+  });
+  const withScale = evaluate(db2, confirmed);
+  assert.deepEqual(withScale.dimensions, { x: 40, y: 40, z: 40 });
+  assert.equal(withScale.scaleKnown, true);
+});
+
 test("a degenerate box is treated as no size, not as a zero-height model", () => {
   const db = openPrintQueueStore(":memory:");
   const { task } = seedModelTask(db, {

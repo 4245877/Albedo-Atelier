@@ -19,6 +19,7 @@ import { OPERATION_LABELS } from "../../domain/operations/states";
 import { OPEN_OPERATION_STATES } from "../../domain/operations/types";
 import { executableKindOf } from "../../domain/print/executable";
 import { readModelScale, type ResolvedModelScale } from "../../domain/print/modelScale";
+import { selectedPlate, type PlateView } from "../../domain/print/plateSelection";
 import { resolveUnits } from "../../domain/shared/units";
 import { readFilament, readMachine } from "../../domain/slicing/orcaProfile";
 import type { ProfileSet, SliceVariant } from "../../domain/slicing/types";
@@ -146,9 +147,14 @@ export class EvidenceResolver {
     // which case an operator's scale confirmation for THESE bytes is what makes
     // the numbers millimetres (and nothing else may).
     const modelScale = artifact ? readModelScale(artifact) : null;
+    // A multi-plate package has no size of its own — the union spans prints that
+    // will never share a bed. Once an operator has chosen a plate, THAT plate's
+    // box is the size every check downstream uses; before then there is none, and
+    // the union is never resurrected as a stand-in.
+    const plate = artifact ? selectedPlate(artifact, analysis) : null;
     const readDimensions =
       readSliceDims(variant?.dimensions ?? null) ??
-      readAnalysisDims(analysis?.data ?? null, modelScale);
+      readAnalysisDims(analysis?.data ?? null, modelScale, plate);
     const dimensions = readDimensions?.dimensions ?? null;
     const requiredNozzleMm =
       machineFields?.nozzleDiameterMm ?? analysis?.nozzleDiameterMm ?? null;
@@ -470,13 +476,14 @@ function readSliceDims(meta: Metadata | null): ReadDimensions | null {
  */
 function readAnalysisDims(
   meta: Metadata | null,
-  scale: ResolvedModelScale | null
+  scale: ResolvedModelScale | null,
+  plate: PlateView | null
 ): ReadDimensions | null {
   if (!meta) return null;
   const record = meta as Record<string, unknown>;
   const geometry = record.geometry;
   if (geometry && typeof geometry === "object" && !Array.isArray(geometry)) {
-    return fromGeometry(geometry as Record<string, unknown>, scale);
+    return fromGeometry(geometry as Record<string, unknown>, scale, plate);
   }
   return fromLegacy(record, scale);
 }
@@ -484,11 +491,23 @@ function readAnalysisDims(
 /** The normalized `geometry` payload (analyzer ≥ 1.1.0) — the authoritative shape. */
 function fromGeometry(
   geometry: Record<string, unknown>,
-  scale: ResolvedModelScale | null
+  scale: ResolvedModelScale | null,
+  plate: PlateView | null
 ): ReadDimensions | null {
   // A package holding several plates describes several prints; a box spanning
-  // them is the size of nothing that will ever be printed.
-  if (geometry.multiPlate === true) return null;
+  // them is the size of nothing that will ever be printed. A *chosen* plate is
+  // the exception and the whole point of choosing: its own box is a real print's
+  // size, read the same way — proven millimetres, or raw numbers an operator's
+  // scale confirmation makes millimetres.
+  if (geometry.multiPlate === true) {
+    if (!plate) return null;
+    if (geometry.scaleKnown === true) {
+      const mm = positiveTriple(plate.sizeMm);
+      return mm ? { dimensions: mm, scaleKnown: true } : null;
+    }
+    const raw = positiveTriple(plate.sizeRaw);
+    return raw ? applyConfirmedScale(raw, scale) : null;
+  }
 
   if (geometry.scaleKnown === true) {
     // The analyzer proved the unit, so its millimetre box is the only answer

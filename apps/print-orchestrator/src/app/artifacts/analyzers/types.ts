@@ -16,8 +16,18 @@ import type { AnalysisFinding, AnalysisVerdict, DetectedFormat } from "../../../
  * is now the printed model's box rather than every motion the head makes (see
  * {@link file://./gcode.ts}), and command safety is judged in the context of the
  * target machine rather than by opcode alone (see {@link file://./gcodePolicy.ts}).
+ *
+ * `1.3.0` describes a 3MF's build plates instead of merely counting them:
+ * `data.plates` now carries each plate's name, contents, own box, thumbnail
+ * reference and reported estimate (see {@link file://./threemfPlates.ts}). The
+ * count itself also changed — plate signals are now *unioned* rather than
+ * maximised, so a package that declares plate 1 and also carries `plate_2.png`
+ * reports two plates where it used to report one. That count gates the merged
+ * bounding box and, through {@link file://../../../domain/print/plateSelection.ts},
+ * which plate is sliced; a `1.2.0` row simply has no plate list, so a stored
+ * plate choice cannot be validated against it. Re-analysis is the upgrade path.
  */
-export const ANALYZER_VERSION = "1.2.0";
+export const ANALYZER_VERSION = "1.3.0";
 
 /**
  * The pure output of analysing one file's bytes — no persistence, no ids. The

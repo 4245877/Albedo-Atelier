@@ -110,6 +110,18 @@ export interface SliceRequest {
    * {@link file://../../domain/print/modelScale.ts resolveSliceScale}.
    */
   scaleFactor?: number;
+  /**
+   * Which build plate to slice, 1-based — the number OrcaSlicer's `--slice i`
+   * takes (its own help says so: *"Slice the plates: 0-all plates, i-plate i"*).
+   *
+   * Omitted for an ordinary file, and then the runner keeps its long-standing
+   * `--slice 0` = *every plate*, which for a single-plate model means the one
+   * plate there is. Supplied only for a multi-plate project whose plate an
+   * operator has explicitly chosen: `--slice 0` there produces one output per
+   * plate and no principled way to tell them apart, which is exactly the
+   * ambiguity {@link OrcaCliRunner} refuses rather than resolves by mtime.
+   */
+  plateIndex?: number;
 }
 
 export interface SliceRunOutput {

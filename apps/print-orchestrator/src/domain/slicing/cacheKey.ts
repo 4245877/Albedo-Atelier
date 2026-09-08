@@ -10,6 +10,14 @@ import { createHash } from "node:crypto";
  */
 export interface CacheKeyParts {
   sourceSha256: string;
+  /**
+   * The chosen build plate of a multi-plate project, or null for a file with one
+   * plate. Two plates of one project are two different prints from *identical*
+   * bytes, so without this the second slice would be handed the first plate's
+   * cached G-code. Omitted from the key when null, so every single-plate key —
+   * and therefore every cache entry written before plates existed — is unchanged.
+   */
+  plateIndex?: number | null;
   machineResolvedSha256: string;
   processResolvedSha256: string;
   filamentResolvedSha256: string;
@@ -21,6 +29,9 @@ export interface CacheKeyParts {
 export function computeCacheKey(parts: CacheKeyParts): string {
   const material = [
     `source:${parts.sourceSha256}`,
+    ...(parts.plateIndex === undefined || parts.plateIndex === null
+      ? []
+      : [`plate:${parts.plateIndex}`]),
     `machine:${parts.machineResolvedSha256}`,
     `process:${parts.processResolvedSha256}`,
     `filament:${parts.filamentResolvedSha256}`,

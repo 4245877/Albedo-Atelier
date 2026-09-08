@@ -20,7 +20,9 @@ import {
   boxVertices,
   make3mfModel,
   make3mfPackage,
-  makeModelSettingsConfig
+  makeGcode,
+  makeModelSettingsConfig,
+  makePng
 } from "../artifacts/testkit/fixtures";
 
 const LIMITS = {
@@ -890,43 +892,193 @@ test("a stale confirmation does not scale the slice — it reverts to raw, like 
 // shipped as the operator's model, with the other silently dropped. mtime can
 // also tie on a coarse filesystem, so the same slice could resolve differently
 // between runs.
+//
+// The answer is not to refuse such files but to make the plate a *decision*:
+// an operator chooses one, and that plate — and only that plate — is sliced.
 
-/** A 3MF holding two plates, each with its own object. */
-function multiPlate3mf(): Buffer {
+/** A 3MF holding `plates` plates, each with its own distinctly-sized object. */
+function multiPlate3mf(plates = 2, options: { emptyLast?: boolean } = {}): Buffer {
   const xml = make3mfModel({
     unit: "millimeter",
-    objects: [
-      { id: "1", vertices: boxVertices(10) },
-      { id: "2", vertices: boxVertices(30, 30, 30, [500, 0, 0]) }
-    ],
-    items: [{ objectid: "1" }, { objectid: "2" }]
+    objects: Array.from({ length: plates }, (_, i) => ({
+      id: String(i + 1),
+      vertices: boxVertices(10 * (i + 1), 10 * (i + 1), 10 * (i + 1), [500 * i, 0, 0])
+    })),
+    items: Array.from({ length: plates }, (_, i) => ({ objectid: String(i + 1) }))
   });
   return make3mfPackage(xml, [
     {
       name: "Metadata/model_settings.config",
-      data: makeModelSettingsConfig([
-        { index: 1, objectIds: ["1"] },
-        { index: 2, objectIds: ["2"] }
-      ])
+      data: makeModelSettingsConfig(
+        Array.from({ length: plates }, (_, i) => ({
+          index: i + 1,
+          objectIds: options.emptyLast && i === plates - 1 ? [] : [String(i + 1)]
+        }))
+      )
     }
   ]);
 }
 
-test("a multi-plate project is refused with an action, never sliced into one arbitrary plate", async () => {
-  const res = await artifacts.ingest({ source: Readable.from(multiPlate3mf()), fileName: "project.3mf" });
+/** Uploads a package and returns its analysed artifact id. */
+async function ingested(name: string, data: Buffer): Promise<string> {
+  const res = await artifacts.ingest({ source: Readable.from(data), fileName: name });
   await artifacts.whenIdle();
-  const analysis = store.repositories.artifactAnalyses.latestForArtifact(res.artifact.id);
+  return res.artifact.id;
+}
+
+test("a multi-plate project without a chosen plate is refused with the action that fixes it", async () => {
+  const artifactId = await ingested("project.3mf", multiPlate3mf());
+  const analysis = store.repositories.artifactAnalyses.latestForArtifact(artifactId);
   assert.equal((analysis?.data.geometry as { multiPlate: boolean }).multiPlate, true);
 
   const setId = await approvedSet();
-  const variant = await slice.createSlice({ artifactId: res.artifact.id, profileSetId: setId });
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
   await slice.whenIdle();
 
   const done = slice.getVariant(variant.id);
   assert.equal(done.state, "blocked");
   assert.match(done.error ?? "", /2 пластин/);
-  assert.match(done.error ?? "", /Экспортируйте нужную пластину/);
+  assert.match(done.error ?? "", /Выберите на карточке файла пластину/);
   assert.equal(runner.sliceCount, 0, "the slicer is never even asked");
+});
+
+test("a chosen plate reaches the CLI as its own plate number, and only that plate", async () => {
+  const artifactId = await ingested("project.3mf", multiPlate3mf(3));
+  artifacts.selectPlate(artifactId, { plateIndex: 2 });
+
+  const setId = await approvedSet();
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  assert.equal(slice.getVariant(variant.id).state, "ready");
+  assert.equal(runner.sliceCount, 1);
+  // OrcaSlicer's own help: "--slice option  Slice the plates: 0-all plates,
+  // i-plate i". Plate 2 is `--slice 2`, not 1 and not 3.
+  assert.equal(runner.lastRequest?.plateIndex, 2);
+});
+
+test("a single-plate model still slices with no plate argument at all", async () => {
+  const xml = make3mfModel({
+    unit: "millimeter",
+    objects: [{ id: "1", vertices: boxVertices(20) }],
+    items: [{ objectid: "1" }]
+  });
+  const artifactId = await ingested("single.3mf", make3mfPackage(xml, []));
+  const setId = await approvedSet();
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  assert.equal(slice.getVariant(variant.id).state, "ready");
+  assert.equal(runner.lastRequest?.plateIndex, undefined, "the common path's argv is untouched");
+});
+
+test("a stale plate choice does not slice — it asks for the choice again", async () => {
+  const artifactId = await ingested("stale.3mf", multiPlate3mf(2));
+  artifacts.selectPlate(artifactId, { plateIndex: 2 });
+
+  // The same bytes re-read as a different number of plates: "plate 2" no longer
+  // names the print the operator looked at.
+  const analysis = store.repositories.artifactAnalyses.latestForArtifact(artifactId);
+  assert.ok(analysis);
+  const geometry = { ...(analysis.data.geometry as Record<string, unknown>), plateCount: 4 };
+  store.repositories.artifactAnalyses.update({ ...analysis, data: { ...analysis.data, geometry } });
+
+  const setId = await approvedSet();
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  const done = slice.getVariant(variant.id);
+  assert.equal(done.state, "blocked");
+  assert.match(done.error ?? "", /Выбор пластины устарел/);
+  assert.equal(runner.sliceCount, 0);
+});
+
+test("an empty plate is never sliced, even when it was somehow chosen", async () => {
+  const artifactId = await ingested("empty.3mf", multiPlate3mf(2, { emptyLast: true }));
+  // The service refuses it up front…
+  assert.throws(() => artifacts.selectPlate(artifactId, { plateIndex: 2 }), /нет ни одной модели/);
+
+  // …and the slice path refuses it again, so a choice written by any other route
+  // (an older build, a hand-edited row) cannot spend a machine hour on nothing.
+  const artifact = store.repositories.artifacts.getById(artifactId);
+  assert.ok(artifact);
+  store.repositories.artifacts.update({
+    ...artifact,
+    metadata: {
+      plateSelection: {
+        plateIndex: 2,
+        plateCount: 2,
+        sha256: artifact.sha256,
+        sizeBytes: artifact.sizeBytes,
+        confirmedBy: "operator",
+        confirmedAt: "2026-01-01T00:00:00.000Z"
+      }
+    }
+  });
+
+  const setId = await approvedSet();
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  const done = slice.getVariant(variant.id);
+  assert.equal(done.state, "blocked");
+  assert.match(done.error ?? "", /печатать нечего/);
+  assert.equal(runner.sliceCount, 0);
+});
+
+test("two plates of one project are two cache entries, not one", async () => {
+  // Identical source bytes and identical profiles: without the plate in the key
+  // the second slice would be served the first plate's G-code.
+  const artifactId = await ingested("cache.3mf", multiPlate3mf(2));
+  const setId = await approvedSet();
+
+  artifacts.selectPlate(artifactId, { plateIndex: 1 });
+  const first = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  artifacts.selectPlate(artifactId, { plateIndex: 2 });
+  const second = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  assert.notEqual(first.cacheKey, second.cacheKey);
+  assert.equal(runner.sliceCount, 2, "the second plate is really sliced, not served from cache");
+  assert.equal(runner.lastRequest?.plateIndex, 2);
+});
+
+test("an already-sliced multi-plate package stays blocked — that is a delivery problem", async () => {
+  // Several finished plate G-codes in one container. Choosing one here would
+  // mean unpacking and re-wrapping it for the machine, which nothing does yet,
+  // so the file is refused rather than shipped as whichever plate comes first.
+  const { evaluateExecutableArtifact } = await import("../../domain/print/executable");
+  const sliced = make3mfPackage(
+    make3mfModel({
+      unit: "millimeter",
+      objects: [{ id: "1", vertices: boxVertices(10) }],
+      items: [{ objectid: "1" }]
+    }),
+    [
+      { name: "Metadata/plate_1.gcode", data: makeGcode() },
+      { name: "Metadata/plate_2.gcode", data: makeGcode() },
+      { name: "Metadata/plate_1.png", data: makePng() },
+      { name: "Metadata/plate_2.png", data: makePng() }
+    ]
+  );
+  const artifactId = await ingested("both.gcode.3mf", sliced);
+  const artifact = store.repositories.artifacts.getById(artifactId);
+  const analysis = store.repositories.artifactAnalyses.latestForArtifact(artifactId);
+  assert.ok(artifact && analysis);
+
+  assert.equal(analysis.data.threeMfClass, "sliced");
+  assert.ok(analysis.warnings.some((w) => w.code === "threemf_sliced_multi_plate"));
+
+  const admission = evaluateExecutableArtifact(artifact, analysis);
+  assert.equal(admission.ok, false);
+  assert.equal(admission.ok === false && admission.code, "multi_plate_payload");
+  assert.equal(
+    admission.ok === false && admission.needsReview,
+    false,
+    "no acknowledgement makes this shippable"
+  );
 });
 
 test("a single-plate 3MF is sliced normally — the refusal is scoped to real projects", async () => {

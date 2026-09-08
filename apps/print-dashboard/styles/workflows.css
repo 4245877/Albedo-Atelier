@@ -367,9 +367,109 @@
   color: var(--ink-faint);
 }
 
+/* ── Пластины 3MF ────────────────────────────────────────────────
+   Проект слайсера может держать несколько печатных столов — несколько разных
+   печатей в одном файле. Плитки показывают, что на каждом; выбор («работаем с
+   этой») — отдельное действие ниже, и он один помечается галочкой. */
+.plates {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius-sm);
+  background: var(--card-inner);
+}
+.plates-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.plate-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.plate-tiles {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+}
+.plate-tile-btn {
+  position: relative;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius-sm);
+  background: var(--card-bg);
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+.plate-tile.is-open .plate-tile-btn { border-color: var(--accent-line, var(--ok-line)); }
+.plate-tile.is-chosen .plate-tile-btn {
+  border-color: var(--ok-line);
+  background: var(--ok-soft);
+}
+.plate-thumb {
+  display: block;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--card-inner);
+  display: grid;
+  place-items: center;
+}
+.plate-thumb img,
+.plate-thumb svg { width: 100%; height: 100%; object-fit: contain; }
+.plate-thumb-none { color: var(--ink-faint); }
+/* Схема расположения: рамка = габарит пластины, заливки = footprint объектов. */
+.plate-layout-bed {
+  fill: none;
+  stroke: var(--card-edge);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.plate-layout-parts rect {
+  fill: var(--ok-soft);
+  stroke: var(--ok-line);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.plate-tile-label { font-size: 12.5px; font-weight: 600; }
+.plate-tile-sub { font-size: 11.5px; color: var(--ink-soft); }
+.plate-tile-flag {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  color: var(--ok-ink);
+}
+.plate-detail { margin-top: 10px; }
+.plate-detail-head { font-size: 13px; margin-bottom: 4px; }
+.plate-objects {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.plate-actions {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 @media (max-width: 560px) {
   .upload-meta { grid-template-columns: 1fr; gap: 1px 0; }
   .upload-meta dt { margin-top: 6px; }
+  .plate-tiles { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
 }
 
 /* ══ Раздел «Слайсинг и профили» ═════════════════════════════════

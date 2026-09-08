@@ -521,8 +521,11 @@ export class OrcaCliRunner implements SliceRunner {
       ...(typeof scale === "number" && Number.isFinite(scale) && scale > 0 && scale !== 1
         ? ["--scale", String(scale)]
         : []),
+      // `--slice 0` = every plate; `--slice i` = plate i, 1-based. An ordinary
+      // model has one plate, so 0 has always meant "the one plate" and stays the
+      // default; a chosen plate of a multi-plate project names itself here.
       "--slice",
-      "0",
+      String(plateArg(req.plateIndex)),
       "--outputdir",
       req.workDir,
       ...(this.config.extraArgs ?? []),
@@ -667,6 +670,18 @@ export class OrcaCliRunner implements SliceRunner {
 }
 
 /** Detected version satisfies the pin when they are equal or the pin is a prefix. */
+/**
+ * Validates the requested plate down to something the CLI accepts. A non-integer
+ * or out-of-range value becomes 0 (all plates) rather than being passed through:
+ * `--slice` rejects anything else outright ("others-invalid"), and the caller
+ * already refuses to slice a multi-plate project without a validated choice, so
+ * reaching here with nonsense means a single-plate file — where 0 is correct.
+ */
+function plateArg(plateIndex: number | undefined): number {
+  if (plateIndex === undefined) return 0;
+  return Number.isInteger(plateIndex) && plateIndex >= 1 && plateIndex <= 100_000 ? plateIndex : 0;
+}
+
 function matchesPinned(detected: string, pinned: string): boolean {
   const d = normalizeVersion(detected);
   const p = normalizeVersion(pinned);

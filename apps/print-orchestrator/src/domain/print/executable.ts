@@ -1,4 +1,5 @@
 import { analysisReviewAccepted, readAnalysisReview } from "./analysisReview";
+import { readPlateCount } from "./plateSelection";
 import type { Artifact, ArtifactAnalysis } from "./types";
 
 /**
@@ -43,6 +44,7 @@ export type ExecutableAdmission =
         | "analysis_failed"
         | "analysis_blocked"
         | "not_executable"
+        | "multi_plate_payload"
         | "needs_review";
       reason: string;
       /**
@@ -102,6 +104,24 @@ export function evaluateExecutableArtifact(
         analysis.detectedFormat === "stl" || analysis.detectedFormat === "3mf"
           ? "это модель, а не готовый к печати файл — сначала нарежьте её в разделе «Слайсинг»"
           : `формат «${analysis.detectedFormat ?? "неизвестно"}» нельзя отправить на принтер как есть`,
+      needsReview: false
+    };
+  }
+
+  // An already-sliced package holding several plates is several finished prints
+  // in one container, and picking one is a *delivery* problem: the chosen plate's
+  // G-code would have to be unpacked and re-wrapped for the machine, and nothing
+  // here does that. Refused before any acknowledgement can apply — a human ticking
+  // "I have read the review" is not consent to ship an arbitrary plate — and
+  // deliberately separate from the project flow next door, where choosing a plate
+  // means *slicing* that plate and is fully supported.
+  if (kind === "sliced_3mf" && readPlateCount(analysis) > 1) {
+    return {
+      ok: false,
+      code: "multi_plate_payload",
+      reason:
+        `нарезанный файл содержит ${readPlateCount(analysis)} пластин — отправить такой на принтер целиком нельзя; ` +
+        "экспортируйте нужную пластину отдельным файлом или загрузите проект и нарежьте пластину здесь",
       needsReview: false
     };
   }

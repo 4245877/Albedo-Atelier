@@ -7,6 +7,7 @@ import { esc } from "../../util.js";
 import { chip } from "../../shared/chips.js";
 import { fmtBytes, fmtDuration } from "../../shared/format.js";
 import { icon } from "../../shared/icons.js";
+import { platesHtml } from "./plates.js";
 
 const VERDICT = {
   schedulable: { label: "готово к планированию", cls: "ok" },
@@ -27,7 +28,7 @@ const STATE_LABEL = {
    этого файла: при десятках моделей развёрнутые свойства у каждой растягивали
    раздел на тысячи пикселей, поэтому по умолчанию они свёрнуты (см. controller),
    а имя, статус, вердикт, находки и действия остаются на виду всегда. */
-export function itemHtml(item, { detailsOpen = false } = {}) {
+export function itemHtml(item, { detailsOpen = false, plateView = null } = {}) {
   const a = item.analysis;
   const format = a?.detectedFormat || guessFormat(item.name);
   const badge = statusBadge(item);
@@ -39,7 +40,10 @@ export function itemHtml(item, { detailsOpen = false } = {}) {
          <div class="upload-pct">${Math.round(item.progress * 100)}%</div>`
       : "";
 
-  const analysisBlock = a && (a.state === "ready" || a.state === "failed") ? analysisHtml(item, a, detailsOpen) : "";
+  const analysisBlock =
+    a && (a.state === "ready" || a.state === "failed")
+      ? analysisHtml(item, a, detailsOpen, plateView)
+      : "";
   const errorBlock =
     item.stage === "error"
       ? `<div class="upload-error">${esc(item.error || "ошибка загрузки")}</div>`
@@ -129,7 +133,7 @@ function statusBadge(item) {
   return chip(esc(v.label), v.cls);
 }
 
-function analysisHtml(item, a, detailsOpen) {
+function analysisHtml(item, a, detailsOpen, plateView) {
   if (a.state === "failed") {
     return `
       <div class="upload-analysis">
@@ -140,7 +144,7 @@ function analysisHtml(item, a, detailsOpen) {
       </div>`;
   }
 
-  const rows = metaRows(a);
+  const rows = metaRows(a, item);
   const warns = (a.warnings || []).map((w) => findingHtml(w, "upload-warn", "warn")).join("");
   const blocks = (a.blockers || []).map((b) => findingHtml(b, "upload-block", "blocked")).join("");
 
@@ -155,6 +159,7 @@ function analysisHtml(item, a, detailsOpen) {
       ${reviewHtml(item)}
       ${nextActionHtml(item)}
       ${scaleHtml(item)}
+      ${platesHtml(item, { viewIndex: plateView })}
       ${
         rows
           ? `<details class="upload-details" data-upload-details${detailsOpen ? " open" : ""}>
@@ -207,6 +212,9 @@ function nextActionHtml(item) {
    кнопки «Повторить анализ». */
 const ACTION_BUTTON = {
   enqueue: { attr: "data-enqueue", cls: "btn-primary", icon: "queue" },
+  // «Выбрать пластину» не получает собственной кнопки: сам выбор делается на
+  // плитках пластин ниже, а дублирующая кнопка вела бы туда же. Остаётся текст
+  // шага — он объясняет, что и зачем выбирать.
   confirm_review: { attr: "data-confirm-review", cls: "btn-primary", icon: "check" },
   confirm_scale: { attr: "data-confirm-scale", cls: "btn-primary", icon: "ruler" },
   slice: { attr: "data-goto-slicing", cls: "", icon: "play" }
@@ -339,7 +347,7 @@ const TASK_STATE = {
   FAILED: "сбой"
 };
 
-function metaRows(a) {
+function metaRows(a, item) {
   const d = a.data || {};
   const parts = [];
   const add = (k, v) => {
@@ -371,6 +379,7 @@ function metaRows(a) {
     // >1 — модель разложена по нескольким частям (production extension 3MF).
     if (d.modelPartCount > 1) add("Частей модели", d.modelPartCount);
     add("Пластин", d.plateCount);
+    add("Выбрана пластина", plateChoiceLabel(item, d));
     add("Материал", a.material);
     add("G-code внутри", fmtGcodePayload(d));
     add("Габариты", fmtGeometry(d));
@@ -453,6 +462,15 @@ function fmtGeometry(d) {
   }
   if (g.sizeRaw) return fmtTriple(g.sizeRaw, false);
   return null;
+}
+
+/* «Выбрана пластина» — состояние с сервера, а не вывод браузера. Пустая строка
+   там, где выбора нет: свойство «не выбрана» уже сказано следующим шагом. */
+function plateChoiceLabel(item, d) {
+  const state = item.status?.plates;
+  if (!state || !(d.plateCount > 1)) return null;
+  if (state.selectedIndex === null || state.selectedIndex === undefined) return null;
+  return `№${state.selectedIndex}${state.confirmedBy ? ` (${state.confirmedBy})` : ""}`;
 }
 
 function fmtPlates(g) {

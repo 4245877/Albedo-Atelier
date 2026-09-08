@@ -352,25 +352,152 @@ export function boxVertices(sx: number, sy = sx, sz = sx, origin: Vertex = [0, 0
 }
 
 /**
- * An OrcaSlicer-style `Metadata/model_settings.config` mapping plates to the
- * build items they hold — what makes a multi-plate project's plates attributable.
+ * An OrcaSlicer / Bambu Studio `Metadata/model_settings.config`.
+ *
+ * Modelled on what those tools really write, not on the minimum this analyzer
+ * happens to read: `<object>` blocks naming the source meshes, `<plate>` blocks
+ * carrying `plater_id`, `plater_name`, `locked`, the declared asset paths
+ * (`thumbnail_file`, `top_file`, `pick_file`, `gcode_file`) and free-form plate
+ * settings, and `<model_instance>` blocks with both `object_id` and
+ * `instance_id`. Every field is optional here for the same reason it is optional
+ * there — versions differ, and a fixture that can only produce the happy shape
+ * cannot exercise the tolerance the parser is supposed to have.
  */
-export function makeModelSettingsConfig(plates: { index: number; objectIds: string[] }[]): string {
+export interface PlateFixture {
+  /** `plater_id`. Omit to leave the plate un-numbered (some writers do). */
+  index?: number;
+  name?: string;
+  locked?: boolean;
+  /** Object ids standing on this plate; each becomes a `<model_instance>`. */
+  objectIds?: string[];
+  /** Per-instance ids, positionally matched to `objectIds` (default "0"). */
+  instanceIds?: string[];
+  /** Declared asset paths, exactly as the config spells them. */
+  thumbnailFile?: string;
+  topFile?: string;
+  pickFile?: string;
+  gcodeFile?: string;
+  /** Any further plate-level `<metadata key=… value=…/>` pairs. */
+  settings?: Record<string, string>;
+}
+
+export function makeModelSettingsConfig(
+  plates: PlateFixture[],
+  options: { objectNames?: Record<string, string> } = {}
+): string {
+  const objects = Object.entries(options.objectNames ?? {})
+    .map(([id, name]) => `<object id="${id}"><metadata key="name" value="${name}"/></object>`)
+    .join("");
+
   const body = plates
-    .map(
-      (p) =>
-        `<plate><metadata key="plater_id" value="${p.index}"/>` +
-        p.objectIds
-          .map(
-            (id) =>
-              `<model_instance><metadata key="object_id" value="${id}"/>` +
-              '<metadata key="instance_id" value="0"/></model_instance>'
-          )
-          .join("") +
-        "</plate>"
-    )
+    .map((p) => {
+      const meta: [string, string | undefined][] = [
+        ["plater_id", p.index === undefined ? undefined : String(p.index)],
+        ["plater_name", p.name],
+        ["locked", p.locked === undefined ? undefined : String(p.locked)],
+        ["thumbnail_file", p.thumbnailFile],
+        ["top_file", p.topFile],
+        ["pick_file", p.pickFile],
+        ["gcode_file", p.gcodeFile],
+        ...Object.entries(p.settings ?? {})
+      ];
+      const metadata = meta
+        .filter((pair): pair is [string, string] => pair[1] !== undefined)
+        .map(([key, value]) => `<metadata key="${key}" value="${value}"/>`)
+        .join("");
+      const instances = (p.objectIds ?? [])
+        .map(
+          (id, i) =>
+            `<model_instance><metadata key="object_id" value="${id}"/>` +
+            `<metadata key="instance_id" value="${p.instanceIds?.[i] ?? "0"}"/></model_instance>`
+        )
+        .join("");
+      return `<plate>${metadata}${instances}</plate>`;
+    })
+    .join("");
+  return `<?xml version="1.0"?><config>${objects}${body}</config>`;
+}
+
+/**
+ * A `Metadata/slice_info.config` in the shape Bambu/Orca exports carry: one
+ * `<plate>` per sliced plate, its `index`/`prediction`/`weight`/`support_used`
+ * metadata, and a `<filament>` element per material.
+ *
+ * **The schema is unverified.** There is no published specification for this
+ * file and no real export in this repository to check against, so the shape
+ * below is an observation, not a contract — which is exactly why the parser
+ * treats every field as optional and this builder can omit any of them.
+ */
+export interface SliceInfoPlateFixture {
+  index?: number;
+  predictionS?: number;
+  weightG?: number;
+  supportUsed?: boolean;
+  printer?: string;
+  filaments?: { id: number; type?: string; color?: string; usedG?: number }[];
+  /** Extra metadata pairs — including keys this analyzer knows nothing about. */
+  settings?: Record<string, string>;
+}
+
+export function makeSliceInfoConfig(plates: SliceInfoPlateFixture[]): string {
+  const body = plates
+    .map((p) => {
+      const meta: [string, string | undefined][] = [
+        ["index", p.index === undefined ? undefined : String(p.index)],
+        ["prediction", p.predictionS === undefined ? undefined : String(p.predictionS)],
+        ["weight", p.weightG === undefined ? undefined : String(p.weightG)],
+        ["support_used", p.supportUsed === undefined ? undefined : String(p.supportUsed)],
+        ["printer_model_id", p.printer],
+        ...Object.entries(p.settings ?? {})
+      ];
+      const metadata = meta
+        .filter((pair): pair is [string, string] => pair[1] !== undefined)
+        .map(([key, value]) => `<metadata key="${key}" value="${value}"/>`)
+        .join("");
+      const filaments = (p.filaments ?? [])
+        .map(
+          (f) =>
+            `<filament id="${f.id}"${f.type === undefined ? "" : ` type="${f.type}"`}` +
+            `${f.color === undefined ? "" : ` color="${f.color}"`}` +
+            `${f.usedG === undefined ? "" : ` used_g="${f.usedG}"`}/>`
+        )
+        .join("");
+      return `<plate>${metadata}${filaments}</plate>`;
+    })
     .join("");
   return `<?xml version="1.0"?><config>${body}</config>`;
+}
+
+/**
+ * A real, minimal PNG: 8-byte signature + an `IHDR` declaring `width × height`.
+ * Enough for the analyzer's header read and for the preview endpoint's signature
+ * check, without carrying an actual compressed image around in a test fixture.
+ */
+export function makePng(width = 512, height = 384): Buffer {
+  const ihdr = Buffer.alloc(25);
+  ihdr.writeUInt32BE(13, 0); // chunk length
+  ihdr.write("IHDR", 4, "latin1");
+  ihdr.writeUInt32BE(width, 8);
+  ihdr.writeUInt32BE(height, 12);
+  ihdr[16] = 8; // bit depth
+  ihdr[17] = 6; // colour type RGBA
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    ihdr,
+    Buffer.from("IEND", "latin1")
+  ]);
+}
+
+/** A real, minimal JPEG: SOI + an `SOF0` frame header declaring the size. */
+export function makeJpeg(width = 320, height = 240): Buffer {
+  const sof = Buffer.alloc(11);
+  sof.writeUInt16BE(0xffc0, 0); // SOF0
+  sof.writeUInt16BE(11, 2); // segment length: 8 + 3 bytes per component (one here)
+  sof[4] = 8; // sample precision
+  sof.writeUInt16BE(height, 5);
+  sof.writeUInt16BE(width, 7);
+  sof[9] = 1; // one component
+  return Buffer.concat([Buffer.from([0xff, 0xd8]), sof, Buffer.from([0xff, 0xd9])]);
 }
 
 /** A 3MF package from a model XML plus any extra entries (configs, plate assets). */
@@ -431,25 +558,31 @@ export function makeProject3mf(
       : [
           { name: "Metadata/project_settings.config", data: '{"layer_height":"0.2"}' },
           { name: "Metadata/model_settings.config", data: "<config/>" },
-          { name: "Metadata/plate_1.png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47]) }
+          { name: "Metadata/plate_1.png", data: makePng(256, 256) }
         ];
   return make3mfPackage(modelXml, extra, options);
 }
 
 /** A "sliced" 3MF: generic package plus an OrcaSlicer-style G-code + config payload. */
-export function makeSliced3mf(): Buffer {
-  const sliceInfo =
-    '<?xml version="1.0"?><config><plate>' +
-    '<metadata key="printer_model_id" value="Bambu Lab X1"/>' +
-    '<metadata key="filament_type" value="PLA"/>' +
-    "</plate></config>";
+export function makeSliced3mf(extra: ZipInput[] = []): Buffer {
+  const sliceInfo = makeSliceInfoConfig([
+    {
+      index: 1,
+      printer: "Bambu Lab X1",
+      predictionS: 4500,
+      weightG: 12.5,
+      supportUsed: false,
+      filaments: [{ id: 1, type: "PLA", color: "#00FF00", usedG: 12.5 }]
+    }
+  ]);
   return makeZip([
     { name: "[Content_Types].xml", data: CONTENT_TYPES_XML },
     { name: "_rels/.rels", data: RELS_XML },
     { name: "3D/3dmodel.model", data: make3mfModelXml() },
     { name: "Metadata/slice_info.config", data: sliceInfo },
     { name: "Metadata/plate_1.gcode", data: makeGcode() },
-    { name: "Metadata/plate_1.png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47]) }
+    { name: "Metadata/plate_1.png", data: makePng() },
+    ...extra
   ]);
 }
 

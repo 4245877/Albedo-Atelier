@@ -1,6 +1,13 @@
 import { readAnalysisReview } from "../../domain/print/analysisReview";
 import { evaluateExecutableArtifact, executableKindOf } from "../../domain/print/executable";
 import { readModelScale } from "../../domain/print/modelScale";
+import {
+  plateListUnavailable,
+  plateSelectionRequired,
+  readPlateCount,
+  readPlateSelection,
+  type ResolvedPlateSelection
+} from "../../domain/print/plateSelection";
 import type { Artifact, ArtifactAnalysis, PrintTask } from "../../domain/print/types";
 
 /**
@@ -26,6 +33,8 @@ export type ArtifactActionKind =
   | "reanalyze"
   /** An STL whose units nobody has stated yet. */
   | "confirm_scale"
+  /** A project holding several build plates, none of them chosen yet. */
+  | "select_plate"
   /** A `review` verdict a named operator must read and accept. */
   | "confirm_review"
   /** Executable and admitted: put it in the queue. */
@@ -65,6 +74,20 @@ export interface ArtifactStatusView {
     confirmedAt: string | null;
     stale: boolean;
   };
+  /**
+   * Build-plate state, for the plate picker. `required` is the *server's* answer
+   * to "must someone choose before this file can move" — the card renders it and
+   * never re-derives it from `plateCount`.
+   */
+  plates: {
+    count: number;
+    required: boolean;
+    selectedIndex: number | null;
+    confirmedBy: string | null;
+    confirmedAt: string | null;
+    stale: boolean;
+    staleReason: string | null;
+  };
   /** Review acknowledgement state, for the "прочитал и принимаю" control. */
   review: {
     required: boolean;
@@ -96,6 +119,22 @@ export function resolveArtifactStatus(
   const scale = readModelScale(artifact);
   const review = readAnalysisReview(artifact, analysis);
   const executable = analysis !== null && executableKindOf(analysis) !== null;
+  const plateSelection = readPlateSelection(artifact, analysis);
+
+  // A project holding several plates holds several separate prints, and nothing
+  // in the file says which one was meant. Until an operator does, the package has
+  // no printable size and no slice may start. Not asked of an already-sliced
+  // package: choosing a plate there is a delivery problem this farm does not yet
+  // solve, so it is refused outright rather than offered as a step.
+  const plateRequired =
+    !executable &&
+    plateSelectionRequired(analysis) &&
+    // A file nothing can print does not need a plate chosen for it; asking would
+    // offer a step that leads nowhere on top of a refusal that already stands.
+    analysis !== null &&
+    analysis.verdict !== "blocked" &&
+    analysis.blockers.length === 0 &&
+    (plateSelection === null || plateSelection.stale);
 
   // An STL states no unit, so its bounding box is numbers without a scale. This
   // is not a nicety: a 25.4×-wrong model passes every fit check, and the
@@ -113,7 +152,15 @@ export function resolveArtifactStatus(
     (review === null || review.stale);
 
   return {
-    next: resolveNextAction({ artifact, analysis, task, executable, scaleRequired, reviewRequired }),
+    next: resolveNextAction({
+      artifact,
+      analysis,
+      task,
+      executable,
+      scaleRequired,
+      reviewRequired,
+      plateRequired
+    }),
     executable,
     scale: {
       required: scaleRequired === true,
@@ -123,6 +170,7 @@ export function resolveArtifactStatus(
       confirmedAt: scale?.confirmation.confirmedAt ?? null,
       stale: scale?.stale ?? false
     },
+    plates: plateStatus(analysis, plateSelection, plateRequired),
     review: {
       required: reviewRequired === true,
       codes: [...analysis?.warnings ?? []].map((w) => w.code),
@@ -135,6 +183,24 @@ export function resolveArtifactStatus(
   };
 }
 
+function plateStatus(
+  analysis: ArtifactAnalysis | null,
+  selection: ResolvedPlateSelection | null,
+  required: boolean
+): ArtifactStatusView["plates"] {
+  return {
+    count: readPlateCount(analysis),
+    required,
+    // A lapsed choice names no plate: acting on it is exactly what staleness
+    // forbids, and showing it as current would hide that it must be redone.
+    selectedIndex: selection && !selection.stale ? selection.confirmation.plateIndex : null,
+    confirmedBy: selection?.confirmation.confirmedBy ?? null,
+    confirmedAt: selection?.confirmation.confirmedAt ?? null,
+    stale: selection?.stale ?? false,
+    staleReason: selection?.staleReason ?? null
+  };
+}
+
 function resolveNextAction(input: {
   artifact: Artifact;
   analysis: ArtifactAnalysis | null;
@@ -142,6 +208,7 @@ function resolveNextAction(input: {
   executable: boolean;
   scaleRequired: boolean | undefined;
   reviewRequired: boolean | undefined;
+  plateRequired: boolean;
 }): ArtifactNextAction {
   const { artifact, analysis, task, executable } = input;
   const taskId = task?.id ?? null;
@@ -206,6 +273,36 @@ function resolveNextAction(input: {
         explanation:
           "STL не хранит единицы измерения, поэтому габариты пока недоказуемы. " +
           "Укажите, в чём заданы координаты, — иначе модель нельзя проверить на размер и нельзя печатать без присмотра.",
+        actionable: true,
+        taskId
+      };
+    }
+    // A multi-plate package whose analysis predates the plate list: there is
+    // nothing to choose from, and offering a picker with no plates in it would
+    // be a step that cannot be taken. The analysis is what is out of date, so
+    // that is what the operator is asked to redo.
+    if (!executable && plateListUnavailable(analysis)) {
+      return {
+        kind: "reanalyze",
+        label: "Повторить анализ",
+        explanation:
+          "В файле несколько пластин, но их состав разобран старой версией анализатора — выбрать пластину пока не из чего. " +
+          "Перезапустите анализ, и пластины появятся.",
+        actionable: true,
+        taskId
+      };
+    }
+    if (input.plateRequired) {
+      const stale = input.analysis
+        ? readPlateSelection(input.artifact, input.analysis)?.staleReason ?? null
+        : null;
+      return {
+        kind: "select_plate",
+        label: "Выбрать пластину",
+        explanation: stale
+          ? `Выбранная ранее пластина больше не подходит (${stale}). Выберите пластину заново — до этого нарезать нечего.`
+          : `В файле ${readPlateCount(input.analysis)} пластин — это столько же отдельных печатей. ` +
+            "Выберите ту, с которой работаем: её размеры пойдут в проверки, её и нарежет слайсер.",
         actionable: true,
         taskId
       };

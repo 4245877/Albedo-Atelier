@@ -13,6 +13,7 @@ import { createInflightGuard } from "../../shared/inflight.js";
 import { createPoller } from "../../shared/polling.js";
 import { $, cssEscape, esc, toast } from "../../util.js";
 import { itemHtml, listBarHtml } from "./view.js";
+import { plateTitle, readPlates } from "./plates.js";
 import { icon } from "../../shared/icons.js";
 
 /* Ровно то, что принимает сервер (GET /api/print/artifacts/config).
@@ -43,6 +44,13 @@ const deleteGuard = createInflightGuard();
    раскрытые свойства схлопывались бы, как только у соседнего файла сменился
    статус. Пусто = поведение по умолчанию (см. detailsOpenFor). */
 const detailPrefs = new Map();
+/* Какая пластина сейчас ОТКРЫТА для просмотра, по ключу элемента. Именно
+   просмотр: переключение плиток ничего не сохраняет на сервере и не является
+   выбором. Живёт здесь по той же причине, что и detailPrefs, — список
+   перерисовывается на каждом тике опроса. */
+const plateViewPrefs = new Map();
+/* Защита от двойного нажатия «работать с этой пластиной». */
+const plateGuard = createInflightGuard();
 /* Свёрнут ли список целиком (кнопка в шапке блока). */
 let listCollapsed = false;
 
@@ -640,6 +648,42 @@ async function confirmReview(artifactId) {
   await syncExisting();
 }
 
+/* ── Выбор пластины ─────────────────────────────────────────────
+
+   Просмотр и выбор — разные действия, и только второе доходит до сервера.
+   Проект с несколькими столами — это несколько разных печатей в одном файле;
+   пока не сказано, с какой из них работаем, у файла нет ни размера, ни того,
+   что можно нарезать. Решение принимает человек, запись привязана к
+   содержимому файла и к числу пластин и отпадает сама, если что-то из этого
+   изменилось (это сервер и сообщает через `status.plates.stale`). */
+async function selectPlate(artifactId, plateIndex) {
+  const item = items.find((it) => it.artifact && it.artifact.id === artifactId);
+  if (!item || !Number.isInteger(plateIndex)) return;
+  const plate = readPlates(item).find((p) => p.index === plateIndex);
+
+  await plateGuard.run(`plate:${artifactId}`, async () => {
+    try {
+      await apiPost(`/api/print/artifacts/${encodeURIComponent(artifactId)}/plate`, { plateIndex });
+      toast(`Работаем с «${esc(plate ? plateTitle(plate) : `пластиной ${plateIndex}`)}»`, "toast-ok");
+    } catch (err) {
+      toast(`Простите, Владыка — пластина не принята: ${esc(err.message)}`, "toast-danger");
+    }
+    await syncExisting();
+  });
+}
+
+async function clearPlate(artifactId) {
+  await plateGuard.run(`plate:${artifactId}`, async () => {
+    try {
+      await apiDelete(`/api/print/artifacts/${encodeURIComponent(artifactId)}/plate`);
+      toast("Выбор пластины снят", "toast-ok");
+    } catch (err) {
+      toast(`Простите, Владыка — выбор не снят: ${esc(err.message)}`, "toast-danger");
+    }
+    await syncExisting();
+  });
+}
+
 /* ── Подтверждение единиц модели ────────────────────────────────
 
    STL не хранит единиц: его габариты — просто числа, которые могут оказаться
@@ -775,12 +819,19 @@ function render() {
   // не растёт, и кнопки соседних разделов остаются в пределах экрана.
   box.classList.toggle("is-scrollable", items.length > INLINE_ITEMS);
 
-  list.innerHTML = items.map((it) => itemHtml(it, { detailsOpen: detailsOpenFor(it) })).join("");
+  list.innerHTML = items
+    .map((it) => itemHtml(it, { detailsOpen: detailsOpenFor(it), plateView: plateViewPrefs.get(it.key) ?? null }))
+    .join("");
 }
 
 function renderItem(item) {
   const el = document.querySelector(`[data-upload="${cssEscape(item.key)}"]`);
-  if (el) el.outerHTML = itemHtml(item, { detailsOpen: detailsOpenFor(item) });
+  if (el) {
+    el.outerHTML = itemHtml(item, {
+      detailsOpen: detailsOpenFor(item),
+      plateView: plateViewPrefs.get(item.key) ?? null
+    });
+  }
 }
 
 /* ── Делегированные клики (повторный анализ) ────────────────── */
@@ -808,6 +859,28 @@ document.addEventListener("click", (e) => {
   if (scale) {
     e.preventDefault();
     void confirmScale(scale.dataset.confirmScale);
+    return;
+  }
+  // Просмотр пластины — чисто локальное состояние: ни запроса, ни записи.
+  const plateView = e.target.closest("[data-plate-view]");
+  if (plateView) {
+    e.preventDefault();
+    const key = plateView.dataset.plateView;
+    plateViewPrefs.set(key, Number.parseInt(plateView.dataset.plateIndex, 10));
+    const item = items.find((it) => it.key === key);
+    if (item) renderItem(item);
+    return;
+  }
+  const plateSelect = e.target.closest("[data-select-plate]");
+  if (plateSelect) {
+    e.preventDefault();
+    void selectPlate(plateSelect.dataset.selectPlate, Number.parseInt(plateSelect.dataset.plateIndex, 10));
+    return;
+  }
+  const plateClear = e.target.closest("[data-clear-plate]");
+  if (plateClear) {
+    e.preventDefault();
+    void clearPlate(plateClear.dataset.clearPlate);
     return;
   }
   const toSlicing = e.target.closest("[data-goto-slicing]");

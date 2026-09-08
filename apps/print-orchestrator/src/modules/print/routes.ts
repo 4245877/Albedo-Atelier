@@ -53,6 +53,9 @@ export interface PrintRoutesOptions {
  *   POST /artifacts              multipart upload of one file → Artifact + DRAFT task + pending analysis
  *   POST /artifacts/:id/analyze  re-run analysis (after a failed attempt)
  *   POST /artifacts/:id/scale    state what an STL's units are  body: { units, scaleFactor? }
+ *   POST /artifacts/:id/plate    choose a build plate of a multi-plate 3MF  body: { plateIndex }
+ *   DELETE /artifacts/:id/plate  withdraw that choice
+ *   GET  /artifacts/:id/plates/:plateIndex/preview   that plate's thumbnail (image bytes)
  *   POST /artifacts/:id/review   accept a `review` verdict      body: { note?, operator? }
  *   DELETE /artifacts/:id        delete one stored file (409 while it is in use)
  *                                `?cascade=true` also cancels the scheduler
@@ -274,6 +277,62 @@ function registerArtifactRoutes(
     ok: true,
     ...services.artifacts.clearModelScale(request.params.id)
   }));
+
+  // A 3MF project can hold several build plates — several separate prints — and
+  // nothing in the file says which one was meant. This is the operator saying so.
+  // Bound to the artifact's content hash AND to the plate count the analysis saw,
+  // so replacing the file or re-analysing it into a different number of plates
+  // lapses the choice instead of silently re-pointing it at another plate.
+  app.post<{ Params: { id: string }; Body: { plateIndex?: unknown } }>(
+    "/artifacts/:id/plate",
+    async (request) => {
+      const body = request.body ?? {};
+      return { ok: true, ...services.artifacts.selectPlate(request.params.id, { plateIndex: body.plateIndex }) };
+    }
+  );
+
+  app.delete<{ Params: { id: string } }>("/artifacts/:id/plate", async (request) => ({
+    ok: true,
+    ...services.artifacts.clearPlateSelection(request.params.id)
+  }));
+
+  /**
+   * One plate's thumbnail, straight out of the uploaded package.
+   *
+   * The client names a **plate**, never an archive path: the entry is taken from
+   * the stored analysis, which the analyzer resolved against the package's own
+   * metadata and verified to be a real PNG/JPEG. There is therefore no request
+   * shape that can read an arbitrary ZIP entry — see {@link PlatePreviewService}
+   * for the rest of the guarantees (SafeZip limits unchanged, size ceiling,
+   * content type re-derived from the signature on the way out).
+   *
+   * A missing plate, a plate with no picture, and a picture that will not
+   * validate all answer 404: from outside they are the same fact — there is no
+   * preview to show — and distinguishing them would only describe the archive's
+   * insides to a caller who cannot name them anyway.
+   */
+  app.get<{ Params: { id: string; plateIndex: string } }>(
+    "/artifacts/:id/plates/:plateIndex/preview",
+    async (request, reply) => {
+      const plateIndex = Number.parseInt(request.params.plateIndex, 10);
+      if (!Number.isInteger(plateIndex)) {
+        throw new ValidationError("Номер пластины должен быть целым числом");
+      }
+      const image = await services.artifacts.readPlatePreview(request.params.id, plateIndex);
+      return reply
+        // The security hook already sends `nosniff` on every response; repeated
+        // here because THIS response is the one where a browser guessing the
+        // type would matter, and that must not depend on a hook elsewhere.
+        .header("X-Content-Type-Options", "nosniff")
+        // The blob is content-addressed and the plate index is part of the tag,
+        // so the bytes behind a given ETag never change; a replaced upload gets a
+        // new hash and therefore a new tag.
+        .header("Cache-Control", "private, max-age=300")
+        .header("ETag", image.etag)
+        .type(image.contentType)
+        .send(image.data);
+    }
+  );
 
   // A `review` verdict is the analyzer being honest about parameters it cannot
   // vouch for — a sliced 3MF carries someone else's machine profile. This is a

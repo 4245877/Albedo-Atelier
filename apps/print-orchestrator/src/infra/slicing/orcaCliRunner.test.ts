@@ -425,6 +425,31 @@ test("slice() builds the exact CLI command OrcaSlicer expects", async () => {
   assert.ok(!argv.includes("--export-gcode"));
 });
 
+test("a chosen build plate is passed as --slice N, and only then", async () => {
+  // The CLI's own help — reproduced verbatim in HELP_BANNER above — reads
+  // "--slice option  Slice the plates: 0-all plates, i-plate i". So 0 stays the
+  // default (one plate, slice it), and a chosen plate names itself; nothing here
+  // adds or subtracts 1 from what the caller resolved.
+  const sliceArg = async (dir: string, plateIndex?: number): Promise<string> => {
+    fs.rmSync(`${scripts.record}.argv`, { force: true });
+    const request = { ...req(path.join(TMP, dir)), ...(plateIndex === undefined ? {} : { plateIndex }) };
+    await runner(scripts.record).slice(request, { timeoutMs: 20000 });
+    const argv: string[] = JSON.parse(
+      fs.readFileSync(`${scripts.record}.argv`, "utf8").trim().split("\n").pop() as string
+    );
+    return argv[argv.indexOf("--slice") + 1];
+  };
+
+  assert.equal(await sliceArg("job-plate-none"), "0", "no plate named → every plate, as before");
+  assert.equal(await sliceArg("job-plate-2", 2), "2");
+  assert.equal(await sliceArg("job-plate-7", 7), "7");
+  // Values the CLI would reject outright ("others-invalid") fall back to 0
+  // rather than failing a slice the caller already validated.
+  assert.equal(await sliceArg("job-plate-zero", 0), "0");
+  assert.equal(await sliceArg("job-plate-neg", -3), "0");
+  assert.equal(await sliceArg("job-plate-frac", 1.5), "0");
+});
+
 test("slice() reports a non-zero exit as a slice failure carrying the CLI's own words", async () => {
   fs.rmSync(`${scripts.flaky}.failed`, { force: true });
   const request = req(path.join(TMP, "job-flaky-1"));
