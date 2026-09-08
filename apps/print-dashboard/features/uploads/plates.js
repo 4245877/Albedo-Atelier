@@ -92,7 +92,7 @@ export function plateTitle(plate) {
 
 function objectSummary(plate) {
   if (!plate.objectsKnown) return "состав неизвестен";
-  const n = plate.objects.length;
+  const n = plate.objectCount ?? plate.objects.length;
   if (n === 0) return "пусто";
   return `${n} ${plural(n, "модель", "модели", "моделей")}`;
 }
@@ -165,7 +165,7 @@ function detailHtml(item, plate, state) {
   };
 
   add("Размеры", fmtSize(plate));
-  add("Объектов", plate.objectsKnown ? plate.objects.length : null);
+  add("Объектов", plate.objectsKnown ? (plate.objectCount ?? plate.objects.length) : null);
   const est = plate.estimate;
   add("Время печати", est ? fmtDuration(est.durationS) : null);
   add("Вес", est && est.weightG !== null ? `${est.weightG} г` : null);
@@ -206,15 +206,14 @@ function actionHtml(item, plate, state) {
         </button>
       </div>`;
   }
-  const empty = plate.objectsKnown && plate.objects.length === 0;
-  if (empty) {
+  const blocked = unselectableReason(plate);
+  if (blocked) {
     return `
       <div class="plate-actions">
-        <button type="button" class="btn btn-sm" disabled
-          title="На этой пластине нет ни одной модели — печатать нечего">
+        <button type="button" class="btn btn-sm" disabled title="${esc(blocked)}">
           ${icon("check")}<span>Работать с этой пластиной</span>
         </button>
-        <span class="plate-note">На этой пластине нет моделей — выбрать её нельзя.</span>
+        <span class="plate-note">${esc(blocked)}</span>
       </div>`;
   }
   return `
@@ -224,6 +223,19 @@ function actionHtml(item, plate, state) {
         ${icon("check")}<span>Работать с этой пластиной</span>
       </button>
     </div>`;
+}
+
+/* Почему пластину нельзя выбрать — те же два случая и те же формулировки, что и
+   на сервере (plateUnselectableReason). Кнопка гасится только вместе с причиной:
+   отключённый контрол без объяснения — это тупик, а не отказ. */
+function unselectableReason(plate) {
+  if (plate.objectsKnown && (plate.objectCount ?? plate.objects.length) === 0) {
+    return "На этой пластине нет ни одной модели — печатать нечего.";
+  }
+  if (!plate.objectsKnown) {
+    return "Состав пластины не разобран — файл не описывает, что на ней стоит.";
+  }
+  return null;
 }
 
 function chosenNote(state) {

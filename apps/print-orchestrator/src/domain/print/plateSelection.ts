@@ -14,10 +14,13 @@ import type { Artifact, ArtifactAnalysis } from "./types";
  * the review acknowledgement next door ({@link file://./modelScale.ts},
  * {@link file://./analysisReview.ts}) — same storage (`artifact.metadata`, a
  * column that already exists), same binding to the bytes, same audited service
- * around it. It adds one binding those two do not need: the **plate count**. A
- * newer analyzer reading the *same bytes* can legitimately find a different
- * number of plates, and "plate 2" then means something else than it did; so a
- * choice made against a different count is stale, not silently re-pointed.
+ * around it. It adds two bindings those two do not need, because a plate choice
+ * is the only one of the three that is *executed* rather than merely believed:
+ * the **plate count** and the chosen plate's **position**. A newer analyzer
+ * reading the *same bytes* can legitimately find a different number of plates,
+ * or order the same plates differently — and "plate 2" then means something else
+ * than it did. Either way the choice lapses rather than being silently
+ * re-pointed at whatever now answers to that number.
  *
  * What it does not do: authorise anything. It answers "which plate", and every
  * other gate — scale, review, compatibility, dispatch — still runs.
@@ -29,6 +32,20 @@ export const PLATE_SELECTION_KEY = "plateSelection";
 export interface PlateSelectionConfirmation {
   /** The plate's own number, as the package labels it (`PlateView.index`). */
   plateIndex: number;
+  /**
+   * The plate's **position** at confirmation time — the `--slice i` the operator's
+   * choice actually resolved to.
+   *
+   * Stored because the identity alone does not determine the outcome. The number
+   * an operator picks is a label; what reaches the slicer is a position, and the
+   * two are computed from the file by an analyzer that can change. Same bytes,
+   * same plate count, a newer analyzer that orders or attributes the plates
+   * differently — "plate 2" survives every other check here and quietly means a
+   * different print. Recording the position closes that: the choice lapses when
+   * the thing it will be executed as has moved. Null only for a record written
+   * before this field existed.
+   */
+  sliceIndex: number | null;
   /** How many plates the analysis saw when this was chosen. */
   plateCount: number;
   /** Artifact content hash at confirmation time; null for a hash-less legacy row. */
@@ -125,14 +142,28 @@ export function plateListUnavailable(analysis: ArtifactAnalysis | null): boolean
 /**
  * A plate that cannot be printed, and why — or null when it can be chosen.
  *
- * "Empty" is only ever said about a plate the package *described*: a plate known
- * only from a `plate_N.*` entry has unattributed contents, which is ignorance,
- * not emptiness, and refusing it would put a file back in the dead end this
- * whole feature exists to remove.
+ * Two refusals, and the distinction between them is the point. "Empty" is only
+ * ever said about a plate the package *described* and described as holding
+ * nothing; a plate known only from a `plate_N.*` entry is not empty, it is
+ * *unknown*, and it is refused for the opposite reason — not because there is
+ * demonstrably nothing to print, but because there is nothing to decide on.
+ * Both are shown in the picker with their reason, so the operator sees what the
+ * file is missing rather than a greyed-out control.
  */
 export function plateUnselectableReason(plate: PlateView): string | null {
   if (plate.objectsKnown && plate.objectCount === 0) {
     return "на этой пластине нет ни одной модели — печатать нечего";
+  }
+  // A plate the package never described: known to exist only because some
+  // `plate_N` entry mentions it. Nothing is known about it — not its contents,
+  // not its size, and not reliably its position — so choosing it would authorise
+  // a slice with every check downstream reduced to nothing: no size to compare
+  // against the bed, no expected box to verify the output against, and a
+  // `--slice` number inferred rather than read. Shown, so the operator can see
+  // the package is inconsistent; not selectable, because there is nothing here
+  // to make a decision *about*. @see file://../../app/artifacts/analyzers/threemfPlates.ts
+  if (!plate.objectsKnown) {
+    return "состав пластины не разобран — файл не описывает, что на ней стоит";
   }
   return null;
 }
@@ -169,6 +200,7 @@ export function makePlateSelectionConfirmation(input: {
     plate,
     confirmation: {
       plateIndex: plate.index,
+      sliceIndex: plate.sliceIndex,
       plateCount: input.plateCount,
       sha256: input.artifact.sha256,
       sizeBytes: input.artifact.sizeBytes,
@@ -197,6 +229,10 @@ export function readPlateSelection(
 
   const confirmation: PlateSelectionConfirmation = {
     plateIndex,
+    sliceIndex:
+      typeof rec.sliceIndex === "number" && Number.isInteger(rec.sliceIndex) && rec.sliceIndex >= 1
+        ? rec.sliceIndex
+        : null,
     plateCount: typeof rec.plateCount === "number" ? rec.plateCount : 0,
     sha256: typeof rec.sha256 === "string" ? rec.sha256 : null,
     sizeBytes: typeof rec.sizeBytes === "number" ? rec.sizeBytes : null,
@@ -237,6 +273,12 @@ function staleness(
     return `файл переанализирован: пластин теперь ${count}, а не ${confirmation.plateCount}`;
   }
   if (!plate) return `пластины №${confirmation.plateIndex} больше нет в файле`;
+  // The identity survived; the position it resolves to did not. Same bytes and
+  // the same number of plates, so nothing above caught it — but the slice this
+  // choice authorises is now a different print. @see PlateSelectionConfirmation
+  if (confirmation.sliceIndex !== null && confirmation.sliceIndex !== plate.sliceIndex) {
+    return `файл переанализирован: пластина №${confirmation.plateIndex} теперь стоит на другом месте в проекте`;
+  }
   const unprintable = plateUnselectableReason(plate);
   if (unprintable) return `пластина №${confirmation.plateIndex} больше не пригодна: ${unprintable}`;
   return null;
@@ -260,12 +302,12 @@ function toPlateView(raw: unknown): PlateView | null {
   if (typeof index !== "number" || !Number.isInteger(index)) return null;
 
   const source = rec.source;
-  const objects = Array.isArray(rec.objects) ? rec.objects : [];
   const geometry =
     rec.geometry && typeof rec.geometry === "object" && !Array.isArray(rec.geometry)
       ? (rec.geometry as Record<string, unknown>)
       : {};
 
+  const objects = Array.isArray(rec.objects) ? rec.objects : [];
   return {
     index,
     sliceIndex:
@@ -276,7 +318,12 @@ function toPlateView(raw: unknown): PlateView | null {
           : 1,
     name: typeof rec.name === "string" && rec.name.trim() ? rec.name.trim() : null,
     source: source === "model_settings" || source === "entries" || source === "implicit" ? source : "entries",
-    objectCount: objects.length,
+    // The analyzer's own count, which its display caps may leave above the length
+    // of the listed detail. A plate cut short by a cap is not an empty plate.
+    objectCount:
+      typeof rec.objectCount === "number" && Number.isInteger(rec.objectCount) && rec.objectCount >= 0
+        ? rec.objectCount
+        : objects.length,
     objectsKnown: source === "model_settings" || source === "implicit",
     sizeRaw: triple(geometry.sizeRaw),
     sizeMm: triple(geometry.sizeMm),

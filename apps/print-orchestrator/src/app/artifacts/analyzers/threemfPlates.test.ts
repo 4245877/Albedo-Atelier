@@ -211,18 +211,133 @@ test("a plate known only from plate_N entries is reported, with its contents unk
   assert.deepEqual(plates.map((p) => p.objects.length), [0, 0]);
 });
 
-test("a plate the config declares and an extra plate_N entry are both counted", async () => {
-  // Taking the LARGEST signal instead of their union reported one plate here,
-  // and one plate means a merged bounding box gets published for two prints.
+// ── Which signal is believed ─────────────────────────────────────────────────
+//
+// Three things say "there is a plate here" and they are not equally credible.
+// Unioning them all — every `plate_N` number found anywhere — let a *picture*
+// invent a plate, and an invented plate is worse than a missed one: it can be
+// chosen, it has no contents to check, and the `--slice` number taken from it
+// addresses a plate the slicer does not have. @see resolvePlates
+
+test("a thumbnail the config does not account for is not a plate", async () => {
+  // A leftover from an earlier save, or an operator's attachment. The config
+  // enumerated its plates; a stray picture does not add one to that list.
   const r = await run(
-    "union.3mf",
+    "stray-thumb.3mf",
     project([{ index: 1, objectIds: ["1"] }], { extra: [{ name: "Metadata/plate_2.png", data: makePng() }] })
   );
-  assert.equal((r.data.geometry as { plateCount: number }).plateCount, 2);
-  assert.deepEqual(
-    platesOf(r).map((p) => p.index),
-    [1, 2]
+  assert.equal((r.data.geometry as { plateCount: number }).plateCount, 1);
+  assert.deepEqual(platesOf(r).map((p) => p.index), [1]);
+  // Not believed, but not swallowed either: the file is inconsistent and a human
+  // is told so.
+  assert.ok(
+    r.warnings.some((w) => w.code === "threemf_plate_entries_undeclared"),
+    "the disagreement between config and archive is reported"
   );
+});
+
+test("a G-code payload the config does not account for IS a plate", async () => {
+  // The one entry strong enough to outvote the config: a sliced package carries
+  // one G-code per plate, and missing one would let a two-plate payload through
+  // `evaluateExecutableArtifact` as a single print.
+  const r = await run(
+    "stray-gcode.3mf",
+    project([{ index: 1, objectIds: ["1"] }], {
+      extra: [{ name: "Metadata/plate_2.gcode", data: "G1 X1 Y1\n" }]
+    })
+  );
+  assert.equal((r.data.geometry as { plateCount: number }).plateCount, 2);
+  assert.deepEqual(platesOf(r).map((p) => p.index), [1, 2]);
+});
+
+test("a file an operator attached to the project never becomes a plate", async () => {
+  // Bambu Studio stores arbitrary attachments under `Auxiliaries/`. A file the
+  // operator happened to call `plate_7.png` used to add a seventh plate to a
+  // two-plate project — selectable, empty, and `--slice 7` into a project that
+  // has two plates.
+  const r = await run(
+    "aux.3mf",
+    project([{ index: 1, objectIds: ["1"] }, { index: 2, objectIds: ["2"] }], {
+      extra: [{ name: "Auxiliaries/Others/plate_7.png", data: makePng() }]
+    })
+  );
+  assert.equal((r.data.geometry as { plateCount: number }).plateCount, 2);
+  assert.deepEqual(platesOf(r).map((p) => p.index), [1, 2]);
+  assert.deepEqual(platesOf(r).map((p) => p.sliceIndex), [1, 2]);
+});
+
+test("preview variants of one plate are one plate, not three", async () => {
+  const r = await run(
+    "variants.3mf",
+    project([{ index: 1, objectIds: ["1"] }], {
+      extra: [
+        { name: "Metadata/plate_1.png", data: makePng() },
+        { name: "Metadata/plate_1_small.png", data: makePng() },
+        { name: "Metadata/plate_no_light_1.png", data: makePng() },
+        { name: "Metadata/top_1.png", data: makePng() },
+        { name: "Metadata/pick_1.png", data: makePng() }
+      ]
+    })
+  );
+  assert.equal((r.data.geometry as { plateCount: number }).plateCount, 1);
+});
+
+test("two plates never claim the same --slice position", async () => {
+  // A config that declares a SUBSET of the plates the archive names put a
+  // declared plate (ordinal 1) and an undeclared one (first in the list) on the
+  // same `--slice 1`: choosing one printed the other.
+  const r = await run(
+    "subset.3mf",
+    project([{ index: 2, objectIds: ["2"] }], {
+      extra: [
+        { name: "Metadata/plate_1.gcode", data: "G1 X1\n" },
+        { name: "Metadata/plate_2.gcode", data: "G1 X2\n" }
+      ]
+    })
+  );
+  const positions = platesOf(r).map((p) => p.sliceIndex);
+  assert.equal(new Set(positions).size, positions.length, "positions are unique");
+  assert.ok(
+    positions.every((n) => n >= 1 && n <= platesOf(r).length),
+    "every position is one the CLI can address"
+  );
+});
+
+test("a zero-based config plus 1-based thumbnails is still two plates", async () => {
+  // The numbering the config uses and the numbering the file names use are
+  // different namespaces. Merging them reported three plates for a two-plate
+  // project, two of which claimed `--slice 2`.
+  const r = await run(
+    "zero-mixed.3mf",
+    project([{ index: 0, objectIds: ["1"] }, { index: 1, objectIds: ["2"] }], {
+      extra: [
+        { name: "Metadata/plate_1.png", data: makePng() },
+        { name: "Metadata/plate_2.png", data: makePng() }
+      ]
+    })
+  );
+  assert.equal((r.data.geometry as { plateCount: number }).plateCount, 2);
+  assert.deepEqual(platesOf(r).map((p) => p.index), [0, 1]);
+  assert.deepEqual(platesOf(r).map((p) => p.sliceIndex), [1, 2]);
+});
+
+test("with no config at all, plate_N entries are the only plate list there is", async () => {
+  // The fallback still stands: when nothing enumerated the plates, the entries
+  // are all the evidence available and they are believed.
+  const xml = make3mfModel({
+    unit: "millimeter",
+    objects: [{ id: "1", vertices: boxVertices(10) }],
+    items: [{ objectid: "1" }]
+  });
+  const r = await run(
+    "noconfig.3mf",
+    make3mfPackage(xml, [
+      { name: "Metadata/plate_1.png", data: makePng() },
+      { name: "Metadata/plate_2.png", data: makePng() }
+    ])
+  );
+  assert.equal((r.data.geometry as { plateCount: number }).plateCount, 2);
+  assert.deepEqual(platesOf(r).map((p) => p.sliceIndex), [1, 2]);
 });
 
 // ── Contents ─────────────────────────────────────────────────────────────────

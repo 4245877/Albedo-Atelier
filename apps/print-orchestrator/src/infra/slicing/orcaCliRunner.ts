@@ -587,9 +587,12 @@ export class OrcaCliRunner implements SliceRunner {
     // filesystem with coarse timestamps, making the result unstable between runs
     // of the very same slice.
     //
-    // The caller refuses multi-plate projects up front, so reaching here means
-    // the slicer produced something this code does not understand. Naming the
-    // files is more useful than guessing among them.
+    // The caller names the plate it wants (`--slice i`), so one run produces one
+    // output and reaching here means either a `--slice 0` on a project that
+    // turned out to hold several plates, or a slicer doing something this code
+    // does not understand. Both are ambiguity, and ambiguity about *which file
+    // gets printed* is not something to resolve by guessing. Naming the files is
+    // more useful than picking among them.
     throw new SliceProcessError(
       `OrcaSlicer создал несколько выходных файлов (${candidates
         .map((p) => path.basename(p))

@@ -177,6 +177,47 @@ test("a choice pointing at a plate that is no longer there lapses", async () => 
   assert.match(resolved?.staleReason ?? "", /№3 больше нет/);
 });
 
+test("a re-analysis that MOVES the plate lapses the choice too", async () => {
+  // The sharp case, and the one every other check here walks straight past: same
+  // bytes, same hash, same plate count, same plate number still present — but the
+  // analyzer now puts that plate at a different position, and the position is
+  // what `--slice` executes. Without capturing it, "plate 2" silently becomes
+  // whatever now stands second.
+  const id = await ingest("p.3mf", project(3));
+  artifacts.selectPlate(id, { plateIndex: 2 });
+
+  const { artifact, analysis } = current(id);
+  const plates = (analysis.data.plates as { index: number; sliceIndex: number }[]).map((p) =>
+    p.index === 2 ? { ...p, sliceIndex: 3 } : p
+  );
+  const moved = { ...analysis, data: { ...analysis.data, plates } };
+
+  const resolved = readPlateSelection(artifact, moved);
+  assert.equal(resolved?.stale, true);
+  assert.match(resolved?.staleReason ?? "", /на другом месте/);
+  assert.equal(selectedPlate(artifact, moved), null, "and it authorises nothing");
+});
+
+test("a plate whose contents the file never described cannot be chosen", async () => {
+  // Known only because some `plate_N` entry names it: no contents, no size, and
+  // a position that was inferred rather than read. There is nothing here to make
+  // a decision about, and choosing it would slice with every size check reduced
+  // to nothing.
+  const id = await ingest("p.3mf", project(2));
+  const { artifact, analysis } = current(id);
+  const plates = (analysis.data.plates as Record<string, unknown>[]).map((p) =>
+    p.index === 2 ? { ...p, source: "entries", objects: [], objectCount: 0 } : p
+  );
+  store.repositories.artifactAnalyses.update({
+    ...analysis,
+    data: { ...analysis.data, plates }
+  });
+
+  assert.throws(() => artifacts.selectPlate(artifact.id, { plateIndex: 2 }), /состав пластины не разобран/);
+  // …and plate 1, which the file does describe, is still perfectly choosable.
+  assert.equal(artifacts.selectPlate(artifact.id, { plateIndex: 1 }).plate.index, 1);
+});
+
 test("a choice recorded against neither hash nor size is treated as unverifiable", async () => {
   const id = await ingest("p.3mf", project(2));
   artifacts.selectPlate(id, { plateIndex: 1 });

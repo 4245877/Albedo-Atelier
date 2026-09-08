@@ -77,3 +77,33 @@ test("computing a key does not mutate the input parts", () => {
   computeCacheKey(input);
   assert.deepEqual(input, snapshot);
 });
+
+// ── The chosen plate ─────────────────────────────────────────────────────────
+
+test("a file with no plate chosen keys exactly as it did before plates existed", () => {
+  const base = computeCacheKey(parts());
+  assert.equal(computeCacheKey(parts({ plateIndex: null })), base);
+  assert.equal(computeCacheKey(parts({ plateIndex: undefined })), base);
+  assert.equal(
+    computeCacheKey(parts({ plateIndex: null, plateSliceIndex: null })),
+    base,
+    "every single-plate cache entry written before this field survives"
+  );
+});
+
+test("two plates of one project are two different keys", () => {
+  const one = computeCacheKey(parts({ plateIndex: 1, plateSliceIndex: 1 }));
+  const two = computeCacheKey(parts({ plateIndex: 2, plateSliceIndex: 2 }));
+  assert.notEqual(one, two, "identical bytes, different print");
+  assert.notEqual(one, computeCacheKey(parts()), "and neither is the plate-less key");
+});
+
+test("the same plate NUMBER at a different position is a different key", () => {
+  // The number is the plate's identity; the position is what the slicer was
+  // actually told. Keying on identity alone means the same sha256 analysed
+  // either side of an analyzer change hits a cache entry holding another
+  // plate's G-code — which is the wrong print, served as a hit.
+  const before = computeCacheKey(parts({ plateIndex: 2, plateSliceIndex: 2 }));
+  const after = computeCacheKey(parts({ plateIndex: 2, plateSliceIndex: 1 }));
+  assert.notEqual(before, after);
+});

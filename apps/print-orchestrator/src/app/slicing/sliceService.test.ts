@@ -897,7 +897,7 @@ test("a stale confirmation does not scale the slice — it reverts to raw, like 
 // an operator chooses one, and that plate — and only that plate — is sliced.
 
 /** A 3MF holding `plates` plates, each with its own distinctly-sized object. */
-function multiPlate3mf(plates = 2, options: { emptyLast?: boolean } = {}): Buffer {
+function multiPlate3mf(plates = 2, options: { emptyLast?: boolean; emptyFirst?: boolean } = {}): Buffer {
   const xml = make3mfModel({
     unit: "millimeter",
     objects: Array.from({ length: plates }, (_, i) => ({
@@ -912,7 +912,10 @@ function multiPlate3mf(plates = 2, options: { emptyLast?: boolean } = {}): Buffe
       data: makeModelSettingsConfig(
         Array.from({ length: plates }, (_, i) => ({
           index: i + 1,
-          objectIds: options.emptyLast && i === plates - 1 ? [] : [String(i + 1)]
+          objectIds:
+            (options.emptyLast && i === plates - 1) || (options.emptyFirst && i === 0)
+              ? []
+              : [String(i + 1)]
         }))
       )
     }
@@ -955,6 +958,48 @@ test("a chosen plate reaches the CLI as its own plate number, and only that plat
   // OrcaSlicer's own help: "--slice option  Slice the plates: 0-all plates,
   // i-plate i". Plate 2 is `--slice 2`, not 1 and not 3.
   assert.equal(runner.lastRequest?.plateIndex, 2);
+});
+
+test("an empty plate still occupies its position — the one after it is --slice 2", async () => {
+  // The plate an operator cannot choose does not vanish from the file. It is
+  // still the slicer's first plate, so the *second* plate is `--slice 2` — the
+  // moment an unusable plate is quietly dropped from the numbering, choosing
+  // plate 2 prints plate 1.
+  const artifactId = await ingested("empty-first.3mf", multiPlate3mf(2, { emptyFirst: true }));
+  const analysis = store.repositories.artifactAnalyses.latestForArtifact(artifactId);
+  assert.equal((analysis?.data.geometry as { plateCount: number }).plateCount, 2, "it is still counted");
+  assert.throws(() => artifacts.selectPlate(artifactId, { plateIndex: 1 }), /нет ни одной модели/);
+
+  artifacts.selectPlate(artifactId, { plateIndex: 2 });
+  const setId = await approvedSet();
+  const variant = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  assert.equal(slice.getVariant(variant.id).state, "ready");
+  assert.equal(runner.lastRequest?.plateIndex, 2, "position in the file, not position among usable plates");
+});
+
+test("the same project sliced for two plates does not reuse one plate's cache entry", async () => {
+  // Identical bytes, identical profiles: everything in the key except the plate
+  // is the same, so a key that ignored the plate served plate 1's G-code as
+  // plate 2's result.
+  const artifactId = await ingested("cache.3mf", multiPlate3mf(2));
+  const setId = await approvedSet();
+
+  artifacts.selectPlate(artifactId, { plateIndex: 1 });
+  const first = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  artifacts.selectPlate(artifactId, { plateIndex: 2 });
+  const second = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+
+  assert.notEqual(
+    slice.getVariant(first.id).cacheKey,
+    slice.getVariant(second.id).cacheKey,
+    "two plates are two different prints"
+  );
+  assert.equal(runner.sliceCount, 2, "the second plate is actually sliced, not served from cache");
 });
 
 test("a single-plate model still slices with no plate argument at all", async () => {

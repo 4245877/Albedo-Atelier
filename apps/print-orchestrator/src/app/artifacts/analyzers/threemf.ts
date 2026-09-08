@@ -214,6 +214,7 @@ async function describePlates(
   const sliceInfo = await readSliceInfo(zip, entryNames, limits.xmlMaxBytes);
   applySliceInfo(plates.records, sliceInfo);
   warnings.push(...platePayloadWarnings(plates, previews.unreadable));
+  warnings.push(...plateSignalWarnings(plates));
 
   return { plates, sliceInfo };
 }
@@ -392,6 +393,29 @@ function platePayloadWarnings(
     );
   }
   return out;
+}
+
+/**
+ * `plate_N` numbers the archive carries that the config does not declare.
+ *
+ * Reported rather than believed. A stale thumbnail from an earlier save, or a
+ * file an operator attached to the project, is not a build plate — but it is
+ * also not nothing, because the one other thing it could be is a plate the
+ * config failed to declare. Saying so lets a human look; inventing a selectable
+ * plate from it would hand the slicer a `--slice` number for a plate that is not
+ * there. @see {@link file://./threemfPlates.ts resolvePlates}
+ */
+function plateSignalWarnings(plates: { ignoredEntries: number[] }): AnalysisFinding[] {
+  if (plates.ignoredEntries.length === 0) return [];
+  const listed = plates.ignoredEntries.slice(0, 8).join(", ");
+  return [
+    finding(
+      "threemf_plate_entries_undeclared",
+      `В архиве есть файлы пластин, которых нет в списке пластин проекта (${listed}) — они не считаются пластинами`,
+      "Обычно это остатки от прежнего сохранения или вложения, добавленные к проекту. " +
+        "Если пластин действительно больше, пересохраните проект в слайсере."
+    )
+  ];
 }
 
 /**

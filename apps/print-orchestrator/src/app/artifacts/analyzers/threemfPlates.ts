@@ -22,8 +22,21 @@ import type { SafeZip } from "./zip";
  */
 
 const MODEL_SETTINGS_RE = /Metadata\/model_settings\.config$/i;
-/** `Metadata/plate_3.png`, `Metadata/plate_12.gcode` — the conventional naming. */
-const PLATE_ENTRY_RE = /plate_(\d+)/i;
+/**
+ * `Metadata/plate_3.png`, `Metadata/plate_12.gcode` — the conventional naming,
+ * anchored to the folder the slicers actually write it in.
+ *
+ * The anchoring is not cosmetic. This pattern is a *plate signal*: a name that
+ * matches asserts a build plate exists. Matched loosely (anywhere in any entry
+ * name) it also matches whatever an operator dragged into the project — Bambu
+ * Studio stores arbitrary attachments under `Auxiliaries/`, so a file the
+ * operator called `plate_7.png` invented a seventh plate on a two-plate project,
+ * with a `--slice 7` the slicer does not have. Only `Metadata/` and the archive
+ * root are places a *writer* puts these; everything deeper is user content.
+ */
+const PLATE_ENTRY_RE = /^(?:Metadata\/)?plate_(\d+)(?:[._]|$)/i;
+/** The same naming, restricted to a real G-code payload — the strong signal. */
+const PLATE_GCODE_RE = /^(?:Metadata\/)?plate_(\d+)\.gcode$/i;
 
 /**
  * Caps on what one package may publish in detail. A pathological file (thousands
@@ -36,6 +49,17 @@ export const PLATE_LIMITS = {
   maxDetailedPlates: 64,
   /** Model instances listed per plate. */
   maxObjectsPerPlate: 512,
+  /**
+   * Model instances listed across the whole package.
+   *
+   * The per-plate cap alone is not a budget: at 64 plates it still admits 32 768
+   * instances, and each carries an id, a name of up to
+   * {@link maxSettingValueChars} characters and a footprint — some twenty
+   * megabytes of JSON in a `data` column that is read back on every view of the
+   * artifact. This is the ceiling that actually bounds the row; the per-plate cap
+   * keeps one plate from consuming it alone.
+   */
+  maxObjectsTotal: 4096,
   /** Plate-level settings kept per plate. */
   maxSettingsPerPlate: 64,
   /** Bytes a settings value may carry (a config can hold a whole G-code line). */
@@ -111,8 +135,16 @@ export interface PlateRecord {
   name: string | null;
   locked: boolean;
   source: PlateSource;
+  /**
+   * How many model instances stand on this plate — the *true* number, which the
+   * caps below may leave larger than `objects.length`. Read separately from the
+   * list because "how many" and "which ones" are different questions and only
+   * the first decides anything: a plate cut short by a budget must never read as
+   * an empty plate, which is a refusal.
+   */
+  objectCount: number;
   objects: PlateObject[];
-  /** True when {@link PLATE_LIMITS.maxObjectsPerPlate} cut the list. */
+  /** True when a cap cut the list — `objects` is a prefix, not the whole. */
   objectsTruncated: boolean;
   /** This plate's own box — the same shape the merged geometry publishes. */
   geometry: PlateGeometry;
@@ -219,11 +251,22 @@ export function countPlateEntries(entryNames: string[]): number {
   return plateEntryIndices(entryNames).size;
 }
 
-/** The distinct `N`s of every `plate_N.*` entry in the archive. */
-export function plateEntryIndices(entryNames: string[]): Set<number> {
+/** The distinct `N`s of every `plate_N.*` entry a writer placed in the package. */
+export function plateEntryIndices(entryNames: readonly string[]): Set<number> {
+  return matchedIndices(entryNames, PLATE_ENTRY_RE);
+}
+
+/** The distinct `N`s of every `plate_N.gcode` payload entry. */
+export function plateGcodeIndices(entryNames: readonly string[]): Set<number> {
+  return matchedIndices(entryNames, PLATE_GCODE_RE);
+}
+
+function matchedIndices(entryNames: readonly string[], pattern: RegExp): Set<number> {
   const out = new Set<number>();
   for (const name of entryNames) {
-    const m = PLATE_ENTRY_RE.exec(name);
+    // OPC names are `/`-separated; a writer that spelled one with backslashes is
+    // normalised here rather than being silently skipped.
+    const m = pattern.exec(name.replace(/\\/g, "/").replace(/^\/+/, ""));
     if (!m) continue;
     const n = Number.parseInt(m[1], 10);
     if (Number.isInteger(n) && n >= 0 && n <= 100_000) out.add(n);
@@ -244,6 +287,12 @@ export interface PlacedItem {
 export interface ResolvedPlates {
   /** How many plates the package describes — never under-counted, never truncated. */
   count: number;
+  /**
+   * `plate_N` numbers found in the archive that the config does not declare and
+   * that carry no G-code — reported, never turned into plates. See the note on
+   * signal authority in {@link resolvePlates}.
+   */
+  ignoredEntries: number[];
   /** Legacy per-plate boxes, unchanged: `geometry.plates`. */
   scoped: { index: number; objectCount: number; bounds: BoundsAccumulator }[];
   /** The full description of each plate, in index order. */
@@ -255,11 +304,33 @@ export interface ResolvedPlates {
 /**
  * How many plates the package describes, and everything known about each.
  *
- * The count is the union of the independent signals (declared assignment,
- * `plate_N` entries, "there is a build") rather than the largest of them: a
- * package that declares plate 1 and also carries a `plate_2.png` holds two
- * plates, and taking a maximum would have reported one. Under-counting merges
- * separate prints into one box — exactly what must not happen.
+ * ## Which signal is believed, and how far
+ *
+ * Three independent things say "there is a plate here", and they are emphatically
+ * not equal in authority. Treating them as equal — unioning every `plate_N`
+ * number found anywhere into one set — is what let a *thumbnail* invent a plate,
+ * and a plate invented that way is worse than a missing one: it is selectable,
+ * it has no contents to check, and the `--slice` number derived from it points
+ * at a plate the slicer does not have (or, worse, at a different real one).
+ *
+ *   1. **`model_settings.config`** — a writer enumerating its plates. When it
+ *      declares any, that IS the plate list: OrcaSlicer and Bambu Studio write
+ *      one `<plate>` per plate, always, so a `plate_N.*` asset with no matching
+ *      `<plate>` is a leftover or an operator's attachment, not a plate.
+ *   2. **`plate_N.gcode`** — a per-plate G-code payload. Strong enough to count
+ *      on its own even against a config that does not mention it: a sliced
+ *      package carries one per plate, and missing one would let a multi-plate
+ *      payload past {@link file://../../../domain/print/executable.ts} as a
+ *      single print.
+ *   3. **Other `plate_N.*` entries** (thumbnails, `.json`, `.md5`) — assets *of*
+ *      a plate, not evidence of one. Believed only when the config declared
+ *      nothing at all, which is the one case where they are all there is.
+ *
+ * Under-counting merges separate prints into one box, which must not happen; but
+ * over-counting fabricates a print that does not exist, which is worse, because
+ * something can then be *chosen* and sliced. Where the signals disagree the
+ * caller is told (see `plateSignalWarnings`) instead of the disagreement being
+ * resolved by inventing a plate.
  */
 export function resolvePlates(input: {
   placed: readonly PlacedItem[];
@@ -279,7 +350,18 @@ export function resolvePlates(input: {
     const index = entry.declaredIndex ?? entry.ordinal;
     if (!byIndex.has(index)) byIndex.set(index, entry);
   }
-  for (const n of entryIndices) if (!byIndex.has(n)) byIndex.set(n, EMPTY_ENTRY);
+
+  // The entry signal, at the authority its kind earns (see the doc comment): the
+  // whole of it only when the config enumerated nothing, and otherwise just the
+  // G-code payloads, which a config cannot talk a sliced package out of carrying.
+  const gcodeIndices = plateGcodeIndices(input.entryNames);
+  const trustedEntries = declared.length > 0 ? gcodeIndices : entryIndices;
+  const ignoredEntries: number[] = [];
+  for (const n of entryIndices) {
+    if (byIndex.has(n)) continue;
+    if (trustedEntries.has(n)) byIndex.set(n, EMPTY_ENTRY);
+    else ignoredEntries.push(n);
+  }
 
   const implicit = byIndex.size === 0 && placed.length > 0;
   if (implicit) byIndex.set(1, EMPTY_ENTRY);
@@ -293,6 +375,10 @@ export function resolvePlates(input: {
 
   const records: PlateRecord[] = [];
   const scoped: ResolvedPlates["scoped"] = [];
+  // Spent across every plate, so one plate's contents cannot be listed at the
+  // cost of the whole row. Bounds still merge past it: the *box* is cheap and is
+  // what decisions are made on; it is the per-instance detail that is dropped.
+  let objectBudget = PLATE_LIMITS.maxObjectsTotal;
 
   for (const index of detailed) {
     const entry = byIndex.get(index) as PlateConfigEntry;
@@ -301,11 +387,17 @@ export function resolvePlates(input: {
 
     const bounds = newBounds();
     const objects: PlateObject[] = [];
+    let budgetCut = false;
     for (const instance of entry.instances) {
       const item = placed.find(
         (p) => p.objectId === instance.objectId || String(p.position) === instance.objectId
       );
       if (item) mergeBounds(bounds, item.bounds);
+      if (objectBudget <= 0) {
+        budgetCut = true;
+        continue;
+      }
+      objectBudget--;
       objects.push({
         objectId: instance.objectId,
         instanceId: instance.instanceId,
@@ -319,7 +411,7 @@ export function resolvePlates(input: {
     // an ordinary one-plate model from reading as an *empty* plate — which is a
     // refusal, and would be exactly wrong here. Anything else stays unattributed.
     if (implicit) {
-      for (const item of placed.slice(0, PLATE_LIMITS.maxObjectsPerPlate)) {
+      for (const item of placed.slice(0, Math.min(PLATE_LIMITS.maxObjectsPerPlate, objectBudget))) {
         mergeBounds(bounds, item.bounds);
         objects.push({
           objectId: item.objectId,
@@ -328,21 +420,36 @@ export function resolvePlates(input: {
           footprintMm: footprintOf(item.bounds, input.mmPerUnit)
         });
       }
-      for (const item of placed.slice(PLATE_LIMITS.maxObjectsPerPlate)) mergeBounds(bounds, item.bounds);
+      for (const item of placed.slice(objects.length)) mergeBounds(bounds, item.bounds);
+      objectBudget -= objects.length;
     }
 
-    if (attributed) scoped.push({ index, objectCount: objects.length, bounds });
+    // The instances the plate really holds, whatever the caps let us describe.
+    const objectCount = implicit
+      ? placed.length
+      : attributed
+        ? entry.instances.length
+        : objects.length;
+    if (attributed) scoped.push({ index, objectCount, bounds });
 
     records.push({
       index,
-      sliceIndex: attributed ? entry.ordinal : index >= 1 ? index : 1,
+      objectCount,
+      // Provisional: the config's document order is OrcaSlicer's plate order, so
+      // a declared plate's ordinal IS its position. A plate the config never
+      // declared has no ordinal, and its *number* is not a position — so it gets
+      // the only position it can be given, its own place in this list. Both are
+      // re-checked for coherence once the list is complete.
+      sliceIndex: attributed ? entry.ordinal : records.length + 1,
       name: entry.settings.plater_name ?? null,
       locked: entry.settings.locked === "true" || entry.settings.locked === "1",
       source,
       objects,
       objectsTruncated:
-        entry.instancesTruncated || (implicit && placed.length > PLATE_LIMITS.maxObjectsPerPlate),
-      geometry: plateGeometry(index, objects.length, bounds, input.mmPerUnit),
+        entry.instancesTruncated ||
+        budgetCut ||
+        (implicit && placed.length > objects.length),
+      geometry: plateGeometry(index, objectCount, bounds, input.mmPerUnit),
       sliced: false,
       gcodeEntry: gcodeEntryFor(entry, index, input.entryNames),
       preview: null,
@@ -352,15 +459,46 @@ export function resolvePlates(input: {
   }
 
   for (const record of records) record.sliced = record.gcodeEntry !== null;
+  assignSlicePositions(records, count);
 
   return {
     count,
+    ignoredEntries,
     // Legacy shape: only ever populated when the assignment was readable, so a
     // package whose plates cannot be attributed keeps reporting nothing here.
     scoped: config && declared.length > 0 ? scoped : [],
     records,
     truncated: count > records.length || config?.truncated === true
   };
+}
+
+/**
+ * **`--slice i` counts positions, so no two plates may claim the same `i`.**
+ *
+ * The provisional numbers above come from two different namespaces — the
+ * config's document order and a plate's place in this list — and a package that
+ * mixes the two can produce a collision (a declared plate whose ordinal is 1
+ * alongside an undeclared one that is first in the list). A collision is not a
+ * cosmetic defect: two plates addressing one `--slice` means the operator can
+ * choose plate A and have plate B printed.
+ *
+ * So the ordinals are used only when they are, as a set, a valid numbering —
+ * distinct and 1-based. Otherwise every plate falls back to its position in this
+ * list, which is by construction unique and in range. Nothing is guessed: a
+ * coherent config still decides, an incoherent one just stops being believed.
+ */
+function assignSlicePositions(records: PlateRecord[], count: number): void {
+  const ordinals = records.map((r) => r.sliceIndex);
+  // Bounded by the *true* plate count, not by the described list: a package
+  // whose detail was truncated still has the plates its config declared, and
+  // their ordinals legitimately run past the end of what is described.
+  const usable =
+    ordinals.every((n) => Number.isInteger(n) && n >= 1 && n <= Math.max(count, records.length)) &&
+    new Set(ordinals).size === ordinals.length;
+  if (usable) return;
+  records.forEach((record, i) => {
+    record.sliceIndex = i + 1;
+  });
 }
 
 /** A `<plate>` nobody declared — the shared stand-in for an entries-only plate. */

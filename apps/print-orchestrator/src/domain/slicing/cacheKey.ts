@@ -18,6 +18,18 @@ export interface CacheKeyParts {
    * and therefore every cache entry written before plates existed — is unchanged.
    */
   plateIndex?: number | null;
+  /**
+   * The plate's 1-based **position** — the `--slice i` that produced the bytes.
+   *
+   * Both numbers are in the key because they answer different halves of "would
+   * this run produce the same output". The index is the plate's identity, which
+   * is what a cached entry is looked up *for*; the position is what the slicer
+   * was actually told, and it is derived from the file by an analyzer that can
+   * change its mind. Keying on identity alone means the same sha256 read by a
+   * different analyzer version — the same bytes uploaded twice, analysed either
+   * side of a deploy — hits a cache entry whose G-code is a different plate.
+   */
+  plateSliceIndex?: number | null;
   machineResolvedSha256: string;
   processResolvedSha256: string;
   filamentResolvedSha256: string;
@@ -31,7 +43,7 @@ export function computeCacheKey(parts: CacheKeyParts): string {
     `source:${parts.sourceSha256}`,
     ...(parts.plateIndex === undefined || parts.plateIndex === null
       ? []
-      : [`plate:${parts.plateIndex}`]),
+      : [`plate:${parts.plateIndex}@${parts.plateSliceIndex ?? parts.plateIndex}`]),
     `machine:${parts.machineResolvedSha256}`,
     `process:${parts.processResolvedSha256}`,
     `filament:${parts.filamentResolvedSha256}`,

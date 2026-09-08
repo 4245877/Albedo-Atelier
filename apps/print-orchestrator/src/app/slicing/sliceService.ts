@@ -139,6 +139,7 @@ export class SliceService {
     const plate = selectedPlateFor(artifact, analysis);
     const cacheKey = computeCacheKey({
       plateIndex: plate?.index ?? null,
+      plateSliceIndex: plate?.sliceIndex ?? null,
       sourceSha256: artifact.sha256 ?? artifact.id,
       machineResolvedSha256: machine.resolvedSha256 ?? machine.rawSha256,
       processResolvedSha256: process.resolvedSha256 ?? process.rawSha256,
