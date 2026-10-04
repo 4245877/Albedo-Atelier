@@ -153,8 +153,7 @@ export class LightScheduler {
       if (status) {
         this.deps.setStatus(printer.id, {
           ...status,
-          light: on,
-          updatedAt: new Date().toISOString()
+          light: on
         });
       }
     });
@@ -197,11 +196,11 @@ export class LightScheduler {
       try {
         await this.sendLight(printer, true);
         this.lightTargets.set(printer.id, true);
-        if (fresh.light !== null) {
+        const observed = this.deps.getStatus(printer.id);
+        if (observed && observed.light !== null) {
           this.deps.setStatus(printer.id, {
-            ...fresh,
-            light: true,
-            updatedAt: new Date().toISOString()
+            ...observed,
+            light: true
           });
         }
         return true;
@@ -389,11 +388,11 @@ export class LightScheduler {
         await this.sendLight(printer, targetOn);
         this.lightTargets.set(printer.id, targetOn);
 
-        if (fresh.light !== null) {
+        const observed = this.deps.getStatus(printer.id);
+        if (observed && observed.light !== null) {
           this.deps.setStatus(printer.id, {
-            ...fresh,
-            light: targetOn,
-            updatedAt: new Date().toISOString()
+            ...observed,
+            light: targetOn
           });
         }
 

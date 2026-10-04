@@ -17,6 +17,8 @@ import { PrinterCommandError, type PrinterCommand, type PrinterLiveStatus } from
 const bambuCache = new Map<string, PrinterLiveStatus>();
 // Last known *raw* Bambu print payload, merged across partial MQTT reports.
 const bambuRawPrint = new Map<string, Record<string, unknown>>();
+// Temperature-only deltas refresh the report time but not the job's state.
+const bambuStateReportedAt = new Map<string, number>();
 // Last `info.get_version` reply — the device's own firmware/module report.
 const bambuDeviceInfo = new Map<string, Record<string, unknown>>();
 const bambuClients = new Map<string, mqtt.MqttClient>();
@@ -27,6 +29,18 @@ const bambuPushTimers = new Map<string, ReturnType<typeof setInterval>>();
 // missed delta would leave the cache stuck on "printing". Re-request a full
 // report periodically so the current state is always resurfaced.
 const BAMBU_PUSHALL_INTERVAL_MS = 30000;
+// Three unanswered full-report requests are no longer live telemetry, even if
+// the MQTT socket has not noticed that the printer stopped responding.
+const BAMBU_STATUS_MAX_AGE_MS = BAMBU_PUSHALL_INTERVAL_MS * 3;
+
+function markBambuOffline(printer: PrinterConfig, error: string): PrinterLiveStatus {
+  const status = makeOfflineStatus(printer, error);
+  bambuCache.set(printer.id, status);
+  // A reconnect's temperature-only delta must not revive an old RUNNING state.
+  bambuRawPrint.delete(printer.id);
+  bambuStateReportedAt.delete(printer.id);
+  return status;
+}
 
 function getBambuMqttErrorMessage(error: Error | string): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -77,11 +91,20 @@ export function getBambuRawPrint(printerId: string): Record<string, unknown> | n
   return bambuRawPrint.get(printerId) ?? null;
 }
 
-function bambuPrintIdentity(print: Record<string, unknown>): string | null {
-  return (
-    firstText(print.subtask_id, print.subtask_name, print.gcode_file, print.filename, print.task_name) ||
-    null
-  );
+function bambuPrintChanged(
+  previous: Record<string, unknown>,
+  next: Record<string, unknown>
+): boolean {
+  const previousId = firstText(previous.subtask_id);
+  const nextId = firstText(next.subtask_id);
+  // An explicit shared id is stronger than a filename being enriched. When a
+  // delta omits it, compare only matching fields, never an id against a name.
+  if (previousId && nextId) return previousId !== nextId;
+  return ["subtask_name", "gcode_file", "filename", "task_name"].some((field) => {
+    const previousName = firstText(previous[field]);
+    const nextName = firstText(next[field]);
+    return Boolean(previousName && nextName && previousName !== nextName);
+  });
 }
 
 function readBambuLightState(
@@ -129,12 +152,11 @@ export function mergeBambuRawPrint(
   print: Record<string, unknown>
 ): Record<string, unknown> {
   const previous = bambuRawPrint.get(printerId);
-  const nextId = bambuPrintIdentity(print);
-  const prevId = previous ? bambuPrintIdentity(previous) : null;
-  const startedNewPrint = nextId !== null && prevId !== null && nextId !== prevId;
+  const startedNewPrint = previous !== undefined && bambuPrintChanged(previous, print);
 
   if (startedNewPrint) {
     bambuCache.delete(printerId);
+    bambuStateReportedAt.delete(printerId);
   }
 
   const base: Record<string, unknown> = startedNewPrint ? {} : { ...(previous ?? {}) };
@@ -342,6 +364,7 @@ function ensureBambuClient(printer: PrinterConfig): void {
   });
 
   const reportTopic = `device/${printer.serial}/report`;
+  const isCurrentClient = () => bambuClients.get(printer.id) === client;
   const requestFullReport = () => {
     client.publish(
       bambuRequestTopic(printer),
@@ -359,18 +382,20 @@ function ensureBambuClient(printer: PrinterConfig): void {
   };
 
   client.on("connect", () => {
+    if (!isCurrentClient()) return;
     client.subscribe(reportTopic);
     requestFullReport();
     requestDeviceInfo();
   });
 
   const pushTimer = setInterval(() => {
-    if (client.connected) requestFullReport();
+    if (isCurrentClient() && client.connected) requestFullReport();
   }, BAMBU_PUSHALL_INTERVAL_MS);
   pushTimer.unref?.();
   bambuPushTimers.set(printer.id, pushTimer);
 
-  client.on("message", (_topic, payload) => {
+  client.on("message", (topic, payload) => {
+    if (!isCurrentClient() || topic !== reportTopic) return;
     try {
       const json = JSON.parse(payload.toString());
 
@@ -382,8 +407,11 @@ function ensureBambuClient(printer: PrinterConfig): void {
 
       const print = getBambuPrintPayload(json);
       if (!print) return;
-
       const merged = mergeBambuRawPrint(printer.id, print);
+      const rawState = firstText(print.gcode_state, print.print_status, print.status, print.state);
+      if (toStatusState(rawState) !== "unknown") {
+        bambuStateReportedAt.set(printer.id, Date.now());
+      }
       const status = buildBambuStatus(printer, { print: merged });
       if (!status) return;
 
@@ -394,9 +422,18 @@ function ensureBambuClient(printer: PrinterConfig): void {
   });
 
   client.on("error", (error) => {
-    bambuCache.set(printer.id, makeOfflineStatus(printer, getBambuMqttErrorMessage(error)));
+    if (!isCurrentClient()) return;
+    markBambuOffline(printer, getBambuMqttErrorMessage(error));
   });
-
+  const disconnected = () => {
+    if (!isCurrentClient()) return;
+    // Preserve a more specific error already reported by the MQTT client.
+    if (bambuCache.get(printer.id)?.online !== false) {
+      markBambuOffline(printer, "Bambu MQTT: соединение потеряно");
+    }
+  };
+  client.on("close", disconnected);
+  client.on("offline", disconnected);
   bambuClients.set(printer.id, client);
 }
 
@@ -404,6 +441,24 @@ export function getBambuStatus(printer: PrinterConfig): PrinterLiveStatus {
   ensureBambuClient(printer);
 
   const cached = bambuCache.get(printer.id);
+  if (cached?.online) {
+    if (!bambuClients.get(printer.id)?.connected) {
+      return markBambuOffline(printer, "Bambu MQTT: соединение потеряно");
+    }
+    const reportedAt = bambuStateReportedAt.get(printer.id);
+    if (reportedAt === undefined) {
+      // An MQTT socket and temperature delta confirm connectivity, not a
+      // usable job state. Commands and lifecycle observers must await pushall.
+      return {
+        ...cached, online: false, status: "unknown",
+        error: "Bambu MQTT: ожидание актуального состояния задания"
+      };
+    }
+    const ageMs = Date.now() - reportedAt;
+    if (!Number.isFinite(ageMs) || ageMs > BAMBU_STATUS_MAX_AGE_MS) {
+      return markBambuOffline(printer, "Bambu MQTT: актуальный статус не получен более 90 секунд");
+    }
+  }
   if (cached) return cached;
 
   return {
@@ -506,6 +561,7 @@ export function dropBambuConnection(printerId: string): void {
   }
   bambuCache.delete(printerId);
   bambuRawPrint.delete(printerId);
+  bambuStateReportedAt.delete(printerId);
   bambuDeviceInfo.delete(printerId);
 }
 
@@ -524,5 +580,6 @@ export function shutdownBambuConnections(): void {
   bambuPushTimers.clear();
   bambuCache.clear();
   bambuRawPrint.clear();
+  bambuStateReportedAt.clear();
   bambuDeviceInfo.clear();
 }

@@ -97,7 +97,7 @@ function makeService(guards: StartGuardStore, live: () => PrinterLiveStatus) {
   const cached = makeStatus({ status: "idle" });
   const poller = {
     getStatus: () => cached,
-    setStatus: () => {}
+    refreshStatus: (config: PrinterConfig, provider: (config: PrinterConfig) => Promise<PrinterLiveStatus>) => provider(config)
   } as unknown as PrinterPoller;
   const events = { push: () => {} } as unknown as EventFeed;
   const cameras = { getEntry: () => undefined } as unknown as CameraService;

@@ -206,3 +206,47 @@ test("a cleared fault list from a fresh report replaces the old one", () => {
   // clearing them — never a delta that merely omitted the register.
   assert.deepEqual(mergeBambuStatus(previous, next).faults, []);
 });
+
+test("a name-only delta for the same subtask retains the cached id, state and progress", () => {
+  const id = "identity-name-only-same";
+  mergeBambuRawPrint(id, {
+    gcode_state: "RUNNING", subtask_id: "job-1", subtask_name: "part.3mf", mc_percent: 50
+  });
+  const merged = mergeBambuRawPrint(id, { subtask_name: "part.3mf", nozzle_temper: 210 });
+  assert.equal(merged.subtask_id, "job-1");
+  assert.equal(merged.gcode_state, "RUNNING");
+  assert.equal(merged.mc_percent, 50);
+});
+
+test("the same explicit subtask id permits filename enrichment without resetting the job", () => {
+  const id = "identity-name-enriched";
+  mergeBambuRawPrint(id, {
+    gcode_state: "RUNNING", subtask_id: "job-1", subtask_name: "part", mc_percent: 50
+  });
+  const merged = mergeBambuRawPrint(id, { subtask_id: "job-1", subtask_name: "part.3mf" });
+  assert.equal(merged.gcode_state, "RUNNING");
+  assert.equal(merged.mc_percent, 50);
+  assert.equal(merged.subtask_name, "part.3mf");
+});
+
+test("a changed shared name without a subtask id clears the preceding job's state", () => {
+  const id = "identity-name-only-new";
+  mergeBambuRawPrint(id, {
+    gcode_state: "FINISH", subtask_id: "job-1", subtask_name: "part.3mf", mc_percent: 100
+  });
+  const merged = mergeBambuRawPrint(id, { subtask_name: "different.3mf", nozzle_temper: 210 });
+  assert.equal(merged.subtask_id, undefined);
+  assert.equal(merged.gcode_state, undefined);
+  assert.equal(merged.mc_percent, undefined);
+});
+
+test("different filename field types alone cannot prove the printer started a new job", () => {
+  const id = "identity-unshared-name";
+  mergeBambuRawPrint(id, {
+    gcode_state: "RUNNING", subtask_id: "job-1", subtask_name: "part", mc_percent: 50
+  });
+  const merged = mergeBambuRawPrint(id, { gcode_file: "part.gcode.3mf" });
+  assert.equal(merged.subtask_id, "job-1");
+  assert.equal(merged.gcode_state, "RUNNING");
+  assert.equal(merged.mc_percent, 50);
+});

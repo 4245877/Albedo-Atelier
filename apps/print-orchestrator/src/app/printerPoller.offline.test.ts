@@ -240,3 +240,48 @@ test("Moonraker: a rebooted device (no end evidence) goes to manual check, not a
   assert.equal(inventory.calls.length, 0);
   assert.match(feedText(events), /спишите вручную/);
 });
+
+for (const reconnect of [false, true]) {
+  test(`unknown telemetry ${reconnect ? "after reconnect" : "during a print"} retains the original run and AMS baseline`, async () => {
+    const inventory = recordingInventory();
+    const sequence = [
+      baseStatus({ status: "idle" }),
+      baseStatus({ status: "printing", stateText: "RUNNING", amsTrays: [tray(0, 100)] }),
+      ...(reconnect ? [offlineStatus()] : []),
+      baseStatus({ status: "unknown", currentFile: null, nozzleTemp: 210 }),
+      baseStatus({ status: "printing", stateText: "RUNNING", amsTrays: [tray(0, 92)] }),
+      baseStatus({ status: "idle", stateText: "FINISH", progressPct: 100, amsTrays: [tray(0, 80)] })
+    ];
+    const { poller, events } = makePoller(bambuConfig(), sequence, inventory.client);
+    await pollTimes(poller, sequence.length + 2);
+
+    assert.equal(inventory.calls.length, 1);
+    assert.equal(inventory.calls[0].grams, 200, "deduction uses the original baseline, not the resumed report");
+    assert.equal(events.list().filter((event) => event.text.includes("начал печать")).length, 1);
+    assert.doesNotMatch(feedText(events), /во время потери связи/);
+    assert.equal(poller.today.getDone(), 1);
+  });
+
+  test(`completion following unknown telemetry ${reconnect ? "after reconnect" : "during a print"} closes the retained run once`, async () => {
+    const inventory = recordingInventory();
+    const sequence = [
+      baseStatus({ status: "idle" }),
+      baseStatus({ status: "printing", stateText: "RUNNING", amsTrays: [tray(0, 100)] }),
+      ...(reconnect ? [offlineStatus()] : []),
+      baseStatus({ status: "unknown", currentFile: null, nozzleTemp: 210 }),
+      baseStatus({ status: "idle", stateText: "FINISH", progressPct: 100, amsTrays: [tray(0, 80)] })
+    ];
+    const { poller, events } = makePoller(bambuConfig(), sequence, inventory.client);
+    await pollTimes(poller, sequence.length + 2);
+
+    assert.equal(inventory.calls.length, 1);
+    assert.equal(inventory.calls[0].grams, 200);
+    assert.equal(events.list().filter((event) => event.text.includes("начал печать")).length, 1);
+    assert.equal(poller.today.getDone(), reconnect ? 0 : 1);
+    if (reconnect) {
+      assert.equal(events.list().filter((event) => event.text.includes("расход восстановлен")).length, 1);
+    } else {
+      assert.equal(events.list().filter((event) => event.text.includes("завершил печать")).length, 1);
+    }
+  });
+}

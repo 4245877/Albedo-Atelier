@@ -132,8 +132,7 @@ export class PrinterCommandService {
       const printer = this.getReachableConfig(id);
       // Fresh device read: the identity check and the cancel must act on the job
       // ACTUALLY printing now, not a poll-cache snapshot from seconds ago.
-      const status = await this.liveStatus(printer);
-      this.poller.setStatus(printer.id, status);
+      const status = await this.poller.refreshStatus(printer, this.liveStatus);
       if (!isBusyStatus(status.status)) {
         throw new JobError(`На «${printer.name}» нет активной печати для отмены`);
       }
@@ -236,8 +235,7 @@ export class PrinterCommandService {
       }
       this.recentStarts.delete(printer.id);
 
-      const status = await this.liveStatus(printer);
-      this.poller.setStatus(printer.id, status);
+      const status = await this.poller.refreshStatus(printer, this.liveStatus);
 
       // Reconcile any durable start intent BEFORE anything is (re)sent. This is
       // what survives a lost Moonraker response, a retry and a process restart:
@@ -362,8 +360,7 @@ export class PrinterCommandService {
   async clearStartGuard(id: string): Promise<PrinterView> {
     const printer = this.getReachableConfig(id);
     return this.runExclusive(id, async () => {
-      const status = await this.liveStatus(printer);
-      this.poller.setStatus(printer.id, status);
+      const status = await this.poller.refreshStatus(printer, this.liveStatus);
       if (isBusyStatus(status.status)) {
         throw new JobError(
           `«${printer.name}» сейчас печатает — снимать блокировку запуска нельзя`
@@ -416,8 +413,7 @@ export class PrinterCommandService {
 
   /** Re-polls one printer right after a command so the view reflects reality. */
   private async refresh(printer: PrinterConfig): Promise<PrinterView> {
-    const status = await this.liveStatus(printer);
-    this.poller.setStatus(printer.id, status);
+    const status = await this.poller.refreshStatus(printer, this.liveStatus);
     return buildPrinterView(printer, status, this.cameras.getEntry(printer.id), null, this.specsOf(printer));
   }
 }

@@ -7,6 +7,7 @@ import type { PersistedToday } from "../infra/persistence/stateStore";
 import { env } from "../shared/env";
 import type { StoreLogger } from "../shared/logger";
 import { hhmm } from "../shared/time";
+import { KeyedMutex } from "../shared/keyedMutex";
 import type { CameraService } from "./cameraService";
 import type { EventFeed } from "./eventFeed";
 import { FilamentConsumption } from "./filamentConsumption";
@@ -59,6 +60,10 @@ const HOURS_PERSIST_INTERVAL_MS = 60 * 1000;
  */
 export class PrinterPoller {
   private statuses = new Map<string, PrinterLiveStatus>();
+  /** Partial/unknown reports remain visible but cannot erase lifecycle evidence. */
+  private lifecycleStatuses = new Map<string, PrinterLiveStatus>();
+  /** Polls and command repolls share one read/observation order per printer. */
+  private readonly statusReads = new KeyedMutex();
   /** hh:mm of the last observed state change per printer. */
   private changedAt = new Map<string, string>();
   private lastPollAt: number | null = null;
@@ -251,35 +256,7 @@ export class PrinterPoller {
       this.pruneStaleEntries(enabled);
       await Promise.all(
         enabled.map(async (printer) => {
-          const status = await this.statusProvider(printer);
-          const prev = this.statuses.get(printer.id);
-          // Before anything else: if this printer is mid-print but we hold no
-          // in-memory identity for it, recover it from the canonical run. This
-          // is the restart path — `recordTransition` mints a run only on a
-          // not-printing → printing EDGE, which by definition never arrives for
-          // a print that was already running when the process started.
-          this.hydrateRunFromCanonical(printer, status);
-          this.recordTransition(printer, prev, status);
-          // A run that started without an AMS snapshot (partial start report)
-          // adopts the first full report that arrives while it is still active.
-          this.backfillAmsStart(printer, status);
-          // Credit the interval since the last poll to the PREVIOUS status —
-          // only time we watched the printer actually printing counts.
-          this.accruePrintingTime(printer.id, prev);
-          this.statuses.set(printer.id, status);
-          // Reconcile the canonical SQLite run with the observed reality. The
-          // observer is self-guarding; the extra try keeps the poll loop alive
-          // whatever happens inside.
-          try {
-            this.runObserver?.(printer.id, prev, status);
-          } catch (error) {
-            this.logger.error?.({ err: error, printer: printer.id }, "run observer failed");
-          }
-          // Keep fulfillment's loaded-reel binding current from live telemetry,
-          // so the completion deduction always has a target with no manual entry.
-          // Runs every poll (deduped internally), so the binding exists well
-          // before the print finishes.
-          this.filamentSync.syncPrinter(printer, status);
+          await this.refreshStatus(printer);
         })
       );
       await this.lights.applyPolicy(enabled);
@@ -305,9 +282,55 @@ export class PrinterPoller {
     return this.statuses.get(id);
   }
 
-  /** Overwrites one printer's status (used after a command re-poll). */
+  /** Applies a device observation, including its lifecycle transitions. */
   setStatus(id: string, status: PrinterLiveStatus): void {
-    this.statuses.set(id, status);
+    const printer = this.enabledConfigs().find((config) => config.id === id);
+    if (printer) this.observeStatus(printer, status);
+    else this.statuses.set(id, status);
+  }
+
+  /**
+   * Commands and periodic polls must not overwrite each other's observed
+   * transitions. Serialize their device reads, then process every fresh result
+   * through the same pipeline before exposing it to callers.
+   */
+  refreshStatus(
+    printer: PrinterConfig,
+    provider: (printer: PrinterConfig) => Promise<PrinterLiveStatus> = this.statusProvider
+  ): Promise<PrinterLiveStatus> {
+    return this.statusReads.run(printer.id, async () => {
+      const status = await provider(printer);
+      this.observeStatus(printer, status);
+      return status;
+    });
+  }
+
+  private observeStatus(printer: PrinterConfig, status: PrinterLiveStatus): void {
+    const prev = this.lifecycleStatuses.get(printer.id);
+    const telemetryPrev = this.statuses.get(printer.id);
+    if (status.online && status.status === "unknown") {
+      // A temperature-only reconnect report says nothing about whether the
+      // existing print ended. Keep its lifecycle baseline until a real state
+      // arrives, while exposing the partial telemetry and stopping time credit.
+      this.accruePrintingTime(printer.id, telemetryPrev);
+      this.statuses.set(printer.id, status);
+      this.filamentSync.syncPrinter(printer, status);
+      return;
+    }
+    this.hydrateRunFromCanonical(printer, status);
+    this.recordTransition(printer, prev, status);
+    this.backfillAmsStart(printer, status);
+    // Credit only intervals that began while actually printing, including
+    // observations made by commands between two periodic polls.
+    this.accruePrintingTime(printer.id, telemetryPrev);
+    this.statuses.set(printer.id, status);
+    this.lifecycleStatuses.set(printer.id, status);
+    try {
+      this.runObserver?.(printer.id, prev, status);
+    } catch (error) {
+      this.logger.error?.({ err: error, printer: printer.id }, "run observer failed");
+    }
+    this.filamentSync.syncPrinter(printer, status);
   }
 
   getChangedAt(id: string): string | undefined {
@@ -367,6 +390,7 @@ export class PrinterPoller {
     const live = new Set(enabled.map((printer) => printer.id));
     const maps: Map<string, unknown>[] = [
       this.statuses,
+      this.lifecycleStatuses,
       this.changedAt,
       this.lastAccrualAt,
       this.printRuns

@@ -138,7 +138,8 @@ export class RunLifecycleService {
     const run = repos.printRuns.findActiveByPrinter(printerId);
     if (!run) return;
 
-    if (!next.online) return; // offline says nothing about the print
+    // Neither a lost connection nor a partial report identifies a print ending.
+    if (!next.online || next.status === "unknown") return;
 
     const busy = next.status === "printing" || next.status === "paused";
     if (busy) {

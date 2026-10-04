@@ -604,3 +604,24 @@ test("a run the printer IS printing cannot be waved away as «не начала�
   assert.equal(store.repositories.printRuns.getById(runId)?.state, "UNKNOWN", "nothing moved");
   assert.equal(store.repositories.tasks.getById(taskId)?.state, "DISPATCHING");
 });
+
+for (const reconnect of [false, true]) {
+  test(`unknown telemetry ${reconnect ? "after reconnect" : "during a print"} cannot mark a canonical run ended`, async () => {
+    const { store, lifecycle, runId, taskId } = await runningRun();
+    const before = store.repositories.printRuns.getById(runId)!;
+    const previous = reconnect ? status({ status: "offline", online: false }) : printing();
+    const partial = status({ status: "unknown", currentFile: null, nozzleTemp: 210 });
+    lifecycle.observe("k2", previous, partial);
+    const after = store.repositories.printRuns.getById(runId)!;
+    assert.equal(after.state, "RUNNING");
+    assert.equal(after.updatedAt, before.updatedAt, "a partial report cannot write a lifecycle verdict");
+    assert.equal(store.repositories.tasks.getById(taskId)?.state, "PRINTING");
+
+    lifecycle.observe("k2", partial, printing());
+    assert.equal(store.repositories.printRuns.getById(runId)?.state, "RUNNING");
+    assert.equal(store.repositories.printRuns.listByTask(taskId).length, 1);
+    lifecycle.observe("k2", printing(), idle({ stateText: "complete", progressPct: 100 }));
+    assert.equal(store.repositories.printRuns.getById(runId)?.state, "SUCCEEDED");
+    store.close();
+  });
+}
