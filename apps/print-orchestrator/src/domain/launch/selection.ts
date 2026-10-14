@@ -1,4 +1,5 @@
 import type { CompatibilityVerdict } from "../scheduling/compatibility";
+import type { FeedPlan } from "../printers/feedPlan";
 
 /**
  * One refusal/《confirm this》/note, in the vocabulary the *launch* speaks.
@@ -100,6 +101,12 @@ export interface LaunchCandidateInput {
   pendingManualOperations: number;
   /** Whether the orchestrator can start this printer without a human at it. */
   remoteStartSupported: boolean;
+  /**
+   * Where the filament would come from on this printer (Bambu: AMS slot(s) or
+   * the external spool), as the admission policy resolved it. Display only — the
+   * refusal, when there is one, is already among the blockers.
+   */
+  feed?: FeedPlan | null;
 }
 
 /** A ranked candidate: admissible or not, with the arithmetic that says why. */

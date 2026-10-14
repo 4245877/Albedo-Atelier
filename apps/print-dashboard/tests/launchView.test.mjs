@@ -263,10 +263,21 @@ test("во время запуска кнопка заблокирована и 
 test("после успеха окно показывает результат вместо кнопки запуска", () => {
   const html = launchModalHtml(
     preview(),
-    ui({ done: { printerName: "Bambu Lab A1 Combo" } })
+    ui({ done: { printerName: "Bambu Lab A1 Combo", phase: "started" } })
   );
-  assert.match(html, /Печать запущена/);
+  assert.match(html, /Печать началась/);
   assert.doesNotMatch(html, /data-launch-go/, "нечего нажимать второй раз");
+});
+
+test("HIGH-17: принятая, но не подтверждённая команда не называется «печать запущена»", () => {
+  const html = launchModalHtml(
+    preview(),
+    ui({ done: { printerName: "Creality K2", phase: "accepted" } })
+  );
+  assert.match(html, /Команда принята принтером/);
+  assert.match(html, /ещё не показал, что печатает/);
+  assert.doesNotMatch(html, /Печать началась|Печать запущена/);
+  assert.doesNotMatch(html, /data-launch-go/, "повторный запуск не предлагается — команда уже ушла");
 });
 
 test("ошибка запуска показывается, и кнопка снова доступна для повтора", () => {

@@ -48,11 +48,13 @@ export function registerLaunchRoutes(
     };
   });
 
-  app.get<{ Params: { taskId: string }; Querystring: { printer?: string } }>(
+  app.get<{ Params: { taskId: string }; Querystring: { printer?: string; feed?: string } }>(
     "/launch/:taskId",
     async (request) => ({
       ok: true,
-      preview: services.launch.preview(request.params.taskId, request.query.printer)
+      preview: services.launch.preview(request.params.taskId, request.query.printer, {
+        feedChoice: readFeedChoiceQuery(request.query.feed)
+      })
     })
   );
 
@@ -64,6 +66,7 @@ export function registerLaunchRoutes(
       override?: { codes?: unknown; reason?: unknown };
       idempotencyKey?: unknown;
       operator?: unknown;
+      feedChoice?: unknown;
     };
   }>("/launch/:taskId", async (request) => {
     const body = request.body ?? {};
@@ -90,11 +93,47 @@ export function registerLaunchRoutes(
       // second print. Absent, the dispatch still guards physically (one active
       // run per printer), but the caller loses the safe-retry answer.
       ...(str(body.idempotencyKey) ? { idempotencyKey: str(body.idempotencyKey) as string } : {}),
-      ...(str(body.operator) ? { actor: str(body.operator) as string } : {})
+      ...(str(body.operator) ? { actor: str(body.operator) as string } : {}),
+      ...(body.feedChoice !== undefined ? { feedChoice: readFeedChoice(body.feedChoice) } : {})
     });
 
     return { ok: true, ...outcome };
   });
+}
+
+/**
+ * `{ "<filament index>": <tray id> }` — the operator's AMS tray choice. Only the
+ * shape is checked here; whether the tray holds the right material is the
+ * dispatch gate's decision.
+ */
+function readFeedChoice(raw: unknown): Record<number, number> | null {
+  if (raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ValidationError("Поле «feedChoice» должно быть объектом { индекс филамента: id лотка }");
+  }
+  const out: Record<number, number> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const index = Number(key);
+    if (!Number.isInteger(index) || index < 0 || index > 31) {
+      throw new ValidationError(`«feedChoice»: недопустимый индекс филамента «${key}»`);
+    }
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 255) {
+      throw new ValidationError(`«feedChoice»: недопустимый лоток для филамента ${index}`);
+    }
+    out[index] = value;
+  }
+  return out;
+}
+
+/** `?feed=0:3,1:2` — the same choice as a query string, for the pure preview. */
+function readFeedChoiceQuery(raw: string | undefined): Record<number, number> | null {
+  if (!raw || !raw.trim()) return null;
+  const pairs: Record<string, number> = {};
+  for (const part of raw.split(",")) {
+    const [k, v] = part.split(":");
+    pairs[k?.trim() ?? ""] = Number(v);
+  }
+  return readFeedChoice(pairs);
 }
 
 function str(value: unknown): string | null {

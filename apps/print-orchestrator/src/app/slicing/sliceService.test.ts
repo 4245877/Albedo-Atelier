@@ -1250,3 +1250,62 @@ test("a sweep failure never stops the service from starting", () => {
   fs.rmSync(path.join(TMP, "work"), { recursive: true, force: true });
   assert.doesNotThrow(() => slice.recover());
 });
+
+// ── HIGH-06 / HIGH-07: the scale a slice is cut at is part of what it IS ──────
+
+test("HIGH-06: the same STL bytes confirmed in different units are NOT served from one cache entry", async () => {
+  const artifactId = await uploadModel();
+  const setId = await approvedSet();
+
+  artifacts.confirmModelScale(artifactId, { units: "millimeter" });
+  const asMm = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+  assert.equal(runner.sliceCount, 1);
+  assert.equal(runner.lastScaleFactor, 1);
+
+  artifacts.confirmModelScale(artifactId, { units: "inch" });
+  const asInch = await slice.createSlice({ artifactId, profileSetId: setId });
+  await slice.whenIdle();
+  assert.ok(!asInch.warnings.some((w) => w.code === "cache_hit"), "a 2-inch cube is not the 2 mm cube's G-code");
+  assert.notEqual(slice.getVariant(asInch.id).cacheKey, slice.getVariant(asMm.id).cacheKey);
+  assert.equal(runner.sliceCount, 2, "a real second slice at the new scale");
+  assert.equal(runner.lastScaleFactor, 25.4);
+});
+
+test("HIGH-07: a slice pins the scale it is cut with, and why", async () => {
+  const artifactId = await uploadModel();
+  const setId = await approvedSet();
+  // Nobody has said what the STL's numbers mean.
+  const unconfirmed = await slice.createSlice({ artifactId, profileSetId: setId });
+  assert.deepEqual(slice.getVariant(unconfirmed.id).metadata.scale, { factor: 1, reason: "unconfirmed" });
+
+  artifacts.confirmModelScale(artifactId, { units: "cm" });
+  const confirmed = await slice.createSlice({ artifactId, profileSetId: setId });
+  assert.deepEqual(slice.getVariant(confirmed.id).metadata.scale, { factor: 10, reason: "confirmed_by_operator" });
+  await slice.whenIdle();
+});
+
+test("a unit changed between queueing and slicing does not silently re-scale the queued slice", async () => {
+  const artifactId = await uploadModel();
+  const setId = await approvedSet();
+  artifacts.confirmModelScale(artifactId, { units: "millimeter" });
+  // Hold the worker so the change lands while the slice is still pending.
+  slice.close();
+  slice = new SliceService(store, storage, artifacts, runner, {
+    tmpRoot: path.join(TMP, "work"),
+    timeoutMs: 5000,
+    concurrency: 1,
+    listPrinters: () => PRINTERS
+  });
+  const queued = await slice.createSlice({ artifactId, profileSetId: setId });
+  artifacts.confirmModelScale(artifactId, { units: "inch" });
+  await slice.whenIdle();
+  const done = slice.getVariant(queued.id);
+  if (done.state === "ready") {
+    // The worker ran before the change: it must have cut at the PINNED factor.
+    assert.equal(runner.lastScaleFactor, 1);
+  } else {
+    assert.equal(done.state, "blocked");
+    assert.ok(done.blockers.some((b) => b.code === "scale_changed"));
+  }
+});

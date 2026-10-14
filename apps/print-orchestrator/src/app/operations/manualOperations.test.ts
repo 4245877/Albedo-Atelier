@@ -6,6 +6,7 @@ import { OPERATION_LABELS } from "../../domain/operations/states";
 import { REASON } from "../../domain/dispatch/reasons";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import { openPrintQueueStore } from "../../infra/db/store";
+import { establishClearBed } from "../dispatch/testkit/bed";
 import type { PrinterConfig } from "../../infra/printers/config";
 import type { PrinterLiveStatus } from "../../infra/printers/status";
 import { DispatchService, type DispatchDeps } from "../dispatch/dispatchService";
@@ -60,6 +61,8 @@ interface Harness {
 
 function makeHarness(): Harness {
   const store = openPrintQueueStore(":memory:");
+  // The operator has confirmed the plate empty — the only evidence of a free bed.
+  for (const id of ["k2"]) establishClearBed(store, id);
   const clock = { now: NIGHT };
   const now = (): Date => clock.now;
   const startCalls: string[] = [];
@@ -108,7 +111,10 @@ function makeHarness(): Harness {
     store,
     resolvePrinter: (ref) => (ref.trim().toLowerCase() === "k2" ? K2 : undefined),
     getStatus: () => undefined,
-    startPhysical: async (_printerId, file) => void startCalls.push(file),
+    startPhysical: async (_printerId, file) => {
+      startCalls.push(file);
+      return { confirmed: true };
+    },
     classifyError: () => "unknown",
     listFiles: async (_printer, dir) => ({
       path: dir,

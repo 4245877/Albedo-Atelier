@@ -80,7 +80,8 @@ function queueRow(state, row, index) {
                Флага «ночь» рядом больше нет вовсе: сервер выводит его из
                выбора слева, а не хранит вторым полем для ручной синхронизации. -->
           <label class="sch-check"><input type="checkbox" name="unattended"${t.unattendedAllowed ? " checked" : ""} />
-            можно печатать без присутствия оператора</label>
+            можно печатать без присутствия оператора
+            <span class="slice-hint">(ночной запуск и автоочередь берут только такие задания)</span></label>
           <div class="sch-edit-actions">
             <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
             ${t.pinnedPrinterId ? `<button type="button" class="btn btn-sm" data-sch-action="unpin">Снять закрепление</button>` : ""}
@@ -234,7 +235,8 @@ const RELEASE_LABEL = {
   OPERATION_IN_PROGRESS: "идёт ручная операция",
   RELEASE_UNKNOWN_SCHEDULE: "срок неизвестен: нет расписания оператора",
   RELEASE_UNKNOWN_DURATION: "срок неизвестен: нет длительности операции",
-  FROZEN_ASSIGNMENT: "занят замороженным назначением"
+  FROZEN_ASSIGNMENT: "занят замороженным назначением",
+  AWAITING_PART_REMOVAL: "ждёт снятия детали и подготовки стола"
 };
 
 const UNPLACED_LABEL = {

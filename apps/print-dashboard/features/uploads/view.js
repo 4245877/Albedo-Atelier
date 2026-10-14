@@ -382,6 +382,15 @@ function metaRows(a, item) {
     add("Выбрана пластина", plateChoiceLabel(item, d));
     add("Материал", a.material);
     add("G-code внутри", fmtGcodePayload(d));
+    // Нарезанный пакет: что сервер вычитал из самого G-code, который поедет на
+    // принтер, — а не только из описания пакета.
+    if (d.threeMfClass === "sliced") {
+      add("Принтер", d.printerModel);
+      add("Время печати", fmtDuration(a.estimatedDurationS));
+      add("Филамент", a.estimatedFilamentG != null ? `${a.estimatedFilamentG} г` : null);
+      add("Высота слоя", a.layerHeightMm != null ? `${a.layerHeightMm} мм` : null);
+      add("Сопло", a.nozzleDiameterMm != null ? `${a.nozzleDiameterMm} мм` : null);
+    }
     add("Габариты", fmtGeometry(d));
     add("По пластинам", fmtPlates(d.geometry));
   }
@@ -430,7 +439,12 @@ function fmtProducer(d) {
 function fmtGcodePayload(d) {
   if (!d.hasGcodePayload) return "нет — это модель, её ещё нужно нарезать";
   const n = Array.isArray(d.gcodeEntries) ? d.gcodeEntries.length : 0;
-  return n > 1 ? `да, ${n} шт.` : "да";
+  if (n > 1) return `да, ${n} шт.`;
+  const p = d.payload;
+  if (!p || !p.entry) return "да";
+  const sum =
+    p.md5Verified === true ? " · контрольная сумма сходится" : p.md5Verified === false ? " · контрольная сумма НЕ сходится" : "";
+  return `да — ${p.entry}${sum}`;
 }
 
 export function guessFormat(name) {

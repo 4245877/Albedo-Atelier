@@ -47,7 +47,7 @@ function installDom({ mode, work }) {
   };
   // Панели режимов, панели разделов и их вкладки.
   for (const id of ["mode-hall", "mode-works"]) el(id);
-  for (const id of ["uploads", "slicing", "scheduler", "operations", "hardware", "automations"]) el(id);
+  for (const id of ["newprint", "uploads", "slicing", "scheduler", "operations", "hardware", "automations"]) el(id);
 
   const bySelector = (sel) => {
     const mode = /\.mode-tab\[data-mode="(\w+)"\]/.exec(sel);
@@ -137,7 +137,8 @@ test("без сохранённого раздела «Работы» откры
     const started = [];
     nav.setupNav({ onWorkOpen: (id) => started.push(id) });
     nav.restoreMode();
-    assert.deepEqual(started, ["uploads"], "раздел по умолчанию — и ровно один");
+    // По умолчанию — путь новой печати: «Работы» открываются на работе, а не на настройках.
+    assert.deepEqual(started, ["newprint"], "раздел по умолчанию — и ровно один");
   } finally {
     restore();
   }
@@ -163,7 +164,7 @@ test("неизвестный сохранённый раздел не роняе
     const started = [];
     nav.setupNav({ onWorkOpen: (id) => started.push(id) });
     nav.restoreMode();
-    assert.deepEqual(started, ["uploads"], "падаем на раздел по умолчанию, а не на ошибку");
+    assert.deepEqual(started, ["newprint"], "падаем на раздел по умолчанию, а не на ошибку");
   } finally {
     restore();
   }

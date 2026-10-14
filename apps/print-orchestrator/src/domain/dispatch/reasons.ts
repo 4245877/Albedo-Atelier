@@ -13,6 +13,12 @@ export const REASON = {
   BED_STATE_UNKNOWN: "BED_STATE_UNKNOWN",
   OPERATOR_INTERVENTION_REQUIRED: "OPERATOR_INTERVENTION_REQUIRED",
   AUTOMATIC_CONTINUATION_NOT_SUPPORTED: "AUTOMATIC_CONTINUATION_NOT_SUPPORTED",
+  /**
+   * The automatic queue was offered a job the operator asked to print by day
+   * while no operator is on shift. Only `auto` mode raises it — a person
+   * pressing «Запустить» is evidently there.
+   */
+  AUTO_DAY_ONLY: "AUTO_DAY_ONLY",
 
   // ── Operator schedule / manual operations ─────────────────────────────────
   /**
@@ -89,6 +95,18 @@ export const REASON = {
    * prints from one tray — but never automatically.
    */
   AMS_MAPPING_AMBIGUOUS: "AMS_MAPPING_AMBIGUOUS",
+  /** No AMS tray holds the material this job was sliced and checked for. */
+  AMS_MATERIAL_MISMATCH: "AMS_MATERIAL_MISMATCH",
+  /** Several trays hold it and nothing tells them apart — an operator picks the tray. */
+  AMS_SLOT_AMBIGUOUS: "AMS_SLOT_AMBIGUOUS",
+  /** The job's material is unknown, so no tray can be matched to it. */
+  AMS_MATERIAL_UNKNOWN: "AMS_MATERIAL_UNKNOWN",
+  /** No usable AMS report: the trays cannot be checked. */
+  AMS_STATE_UNKNOWN: "AMS_STATE_UNKNOWN",
+  /** A feeding combination this farm does not start (mixed sources, multi-tool package, unknown unit). */
+  AMS_FEED_UNSUPPORTED: "AMS_FEED_UNSUPPORTED",
+  /** The slice to be sent was cut at a different scale than the source's confirmed unit. */
+  SLICE_SCALE_MISMATCH: "SLICE_SCALE_MISMATCH",
 
   // ── File / artifact identity ──────────────────────────────────────────────
   TARGET_PRINTER_MISMATCH: "TARGET_PRINTER_MISMATCH",
@@ -215,6 +233,17 @@ export const NON_OVERRIDABLE: ReadonlySet<ReasonCode> = new Set<ReasonCode>([
   // prevent; the way out is to resolve the unconfirmed run, which is a separate
   // audited statement about what the operator actually saw.
   REASON.LAUNCH_UNCONFIRMED,
+  // The filament the printer would draw from. Printing a PETG job from a PLA tray
+  // is not a judgement call an operator accepts responsibility for; the way out
+  // is choosing the right tray (or loading the right spool), never a waiver.
+  REASON.AMS_MATERIAL_MISMATCH,
+  REASON.AMS_SLOT_AMBIGUOUS,
+  REASON.AMS_MATERIAL_UNKNOWN,
+  REASON.AMS_STATE_UNKNOWN,
+  REASON.AMS_FEED_UNSUPPORTED,
+  // A part printed at 1/25.4 of its size is not a risk an operator can accept;
+  // the way out is slicing it again at the confirmed scale.
+  REASON.SLICE_SCALE_MISMATCH,
   // A refusal nobody has taught this layer to read. Fail-closed by construction.
   REASON.PREFLIGHT_REASON_UNMAPPED
 ]);

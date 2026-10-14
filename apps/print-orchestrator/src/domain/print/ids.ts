@@ -22,6 +22,8 @@ export const ID_PREFIX = {
   profileRevision: "prof",
   profileSet: "pset",
   sliceVariant: "slc",
+  /** A batch of slices requested together (stamped on each variant, not a table). */
+  sliceBatch: "sbt",
   // operations domain (domain/operations)
   operator: "op",
   scheduleRule: "shr",

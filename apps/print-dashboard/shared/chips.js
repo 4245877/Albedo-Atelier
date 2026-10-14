@@ -30,6 +30,30 @@ export function badge(status) {
   return `<span class="badge ${s.badge}"><i class="dot${s.pulse ? " dot-pulse" : ""}"></i>${s.label}</span>`;
 }
 
+/* «Простаивает» ≠ «готов служить». Программа принтера стоит, но на столе может
+   лежать готовая деталь, запуск может быть не подтверждён, а стол — ни разу не
+   проверен. Сервер сводит это в `readiness`; бейдж обязан сказать то же самое,
+   а не повторять `idle` устройства. */
+export const READINESS = {
+  needs_clearance: { label: "ждёт снятия детали", badge: "badge-paused" },
+  bed_unknown: { label: "стол не подтверждён", badge: "badge-paused" },
+  starting: { label: "запуск принят", badge: "badge-printing", pulse: true },
+  held: { label: "запуск не подтверждён", badge: "badge-error", pulse: true },
+  maintenance: { label: "нужна операция", badge: "badge-paused" },
+  stale: { label: "данные устарели", badge: "badge-offline" },
+  setup: { label: "нужна настройка", badge: "badge-offline" },
+};
+
+/** Бейдж принтера с учётом готовности: печать/ошибка/связь — как есть, простой — по факту. */
+export function printerBadge(p) {
+  const r = p && p.readiness;
+  const quiet = p && (p.status === "idle" || p.status === "unknown");
+  const s = r && quiet && READINESS[r.state];
+  if (!s) return badge(p ? p.status : "unknown");
+  const title = r.detail ? ` title="${esc(r.detail)}"` : "";
+  return `<span class="badge ${s.badge}"${title}><i class="dot${s.pulse ? " dot-pulse" : ""}"></i>${s.label}</span>`;
+}
+
 /** Панель workflow-раздела: заголовок (экранируется), произвольное тело и хвост шапки. */
 export function panel(title, inner, head = "") {
   return `

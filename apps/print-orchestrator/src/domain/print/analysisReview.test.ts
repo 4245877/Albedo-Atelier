@@ -143,13 +143,44 @@ test("replacing the file lapses the acknowledgement", () => {
   assert.equal(analysisReviewAccepted(changed, a), false);
 });
 
-test("re-analysing the same bytes lapses it — nobody read THAT analysis", () => {
+test("HIGH-05: re-analysing the SAME bytes with the SAME analyzer keeps the answer — same file, same judgement", () => {
+  // The loop this breaks: a confirmation bumped the artifact's `updatedAt`, the
+  // gate called the analysis stale, the operator re-analysed, the new analysis id
+  // voided the confirmation, and round it went.
   const a = analysis();
   const held = acknowledged(a);
   const redone = analysis({ id: "ana_2" });
   const resolved = readAnalysisReview(held, redone)!;
+  assert.equal(resolved.stale, false);
+  assert.equal(analysisReviewAccepted(held, redone), true);
+});
+
+test("a re-analysis by a DIFFERENT analyzer version lapses it — it may conclude differently", () => {
+  const a = analysis();
+  const held = acknowledged(a);
+  const upgraded = analysis({ id: "ana_2", analyzerVersion: "1.4.0" });
+  const resolved = readAnalysisReview(held, upgraded)!;
   assert.equal(resolved.stale, true);
-  assert.match(resolved.staleReason!, /проанализирован заново/);
+  assert.match(resolved.staleReason!, /другой версией анализатора/);
+});
+
+test("an acknowledgement recorded before versions were kept stays bound to its analysis id", () => {
+  const a = analysis();
+  const legacy = artifact({
+    metadata: {
+      [ANALYSIS_REVIEW_KEY]: {
+        analysisId: a.id,
+        verdict: "review",
+        codes: reviewCodesOf(a),
+        sha256: SHA,
+        confirmedBy: "miha",
+        confirmedAt: ISO,
+        note: null
+      }
+    }
+  });
+  assert.equal(readAnalysisReview(legacy, a)!.stale, false);
+  assert.equal(readAnalysisReview(legacy, analysis({ id: "ana_2" }))!.stale, true);
 });
 
 test("a NEW finding is not covered by an acceptance made before it existed", () => {

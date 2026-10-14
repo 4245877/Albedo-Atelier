@@ -57,7 +57,10 @@ export class ArtifactQueries {
     return repos.artifacts
       .list()
       .map((artifact) => {
-        const task = repos.tasks.findByArtifactId(artifact.id);
+        // A source model keeps its link to the work made from it: its open
+        // preparation if there is one, else the newest task that used it (the
+        // promoted print), so the card never reads as "no task" after promotion.
+        const task = repos.tasks.findPreparableBySource(artifact.id) ?? repos.tasks.findLatestReferencing(artifact.id);
         const analysis = repos.artifactAnalyses.latestForArtifact(artifact.id);
         const hold = deletionHold(repos, artifact.id);
         return {
@@ -76,7 +79,7 @@ export class ArtifactQueries {
     const repos = this.ctx.store.repositories;
     const artifact = repos.artifacts.getById(id);
     if (!artifact) throw new NotFoundError(`Артефакт «${id}»`);
-    const task = repos.tasks.findByArtifactId(id);
+    const task = repos.tasks.findPreparableBySource(id) ?? repos.tasks.findLatestReferencing(id);
     const audit = [
       ...repos.audit.listByEntity("artifact", id),
       ...(task ? repos.audit.listByEntity("print_task", task.id) : [])

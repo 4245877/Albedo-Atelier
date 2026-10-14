@@ -16,6 +16,7 @@ import {
   supportsPrinterFiles,
   type PrinterFilesListing
 } from "../infra/printers/files";
+import type { AutoDecision, AutoQueueStatus, AutoTickResult } from "./automation/autoQueue";
 import type { DispatchService } from "./dispatch/dispatchService";
 import type { BedClearanceConfirmation, RunLifecycleService } from "./dispatch/runLifecycle";
 import { runDriverOperation } from "./driverErrors";
@@ -58,12 +59,10 @@ export class FarmCommands {
    * request re-reads the queue after the first completes, so it either takes
    * the next job or fails honestly with an empty queue.
    */
-  private queueDispatchChain: Promise<unknown> = Promise.resolve();
-
   private runQueueDispatch<T>(task: () => Promise<T>): Promise<T> {
-    const next = this.queueDispatchChain.catch(() => {}).then(task);
-    this.queueDispatchChain = next.catch(() => {});
-    return next;
+    // The chain lives on the runtime: the automatic queue dispatches from the
+    // same queue and must wait in the same line.
+    return this.runtime.runQueueDispatch(task);
   }
 
   // ── Cameras (→ CameraService; the runtime resolves the config) ─────────────
@@ -401,7 +400,9 @@ export class FarmCommands {
       assignment.id,
       { mode: "manual", actor }
     );
-    this.runtime.deviceCommands.resolveStartGuard(result.printerId);
+    // The start guard is NOT dropped here: it stays until the printer is seen
+    // running the job (or a person resolves it). Dropping it after a merely
+    // accepted command is what let a restart treat that command as never sent.
     return {
       runId: result.runId,
       taskId: result.taskId,
@@ -455,9 +456,8 @@ export class FarmCommands {
         taskId: row.task.id,
         mode: "manual"
       });
-      // The run is durably RUNNING and the queue entry RELEASED — the guard has
-      // nothing left to protect.
-      this.runtime.deviceCommands.resolveStartGuard(result.printerId);
+      // The guard is released by the run itself once the printer is seen
+      // printing (or the run completes); see `confirmRunStarted`.
       return { job, printer: result.printerName, runId: result.runId };
     });
   }
@@ -466,6 +466,34 @@ export class FarmCommands {
 
   toggleAutomation(id: string, on?: boolean): Automation {
     return this.runtime.automations.toggle(id, on);
+  }
+
+  // ── Automatic queue (→ AutoQueueExecutor) ──────────────────────────────────
+
+  /** What the automatic queue is, and what it would start right now (a dry run — no side effects). */
+  autoQueueOverview(): { status: AutoQueueStatus; plan: AutoDecision[] } {
+    this.runtime.ensureQueue();
+    return { status: this.runtime.autoQueue.status(), plan: this.runtime.autoQueue.plan() };
+  }
+
+  /**
+   * One pass now, exactly as the timer would make it — refused (409) unless the
+   * deployment allows the automatic queue and the operator has armed it.
+   */
+  async autoQueueTick(): Promise<AutoTickResult> {
+    this.runtime.ensureQueue();
+    const status = this.runtime.autoQueue.status();
+    if (!status.configured) {
+      throw new JobError("Автоочередь выключена при развёртывании (AUTO_QUEUE_ENABLED=false) — проход невозможен", {
+        code: "AUTO_QUEUE_NOT_CONFIGURED"
+      });
+    }
+    if (!status.armed) {
+      throw new JobError("Правило «Автоочередь» выключено — включите его, чтобы делать проходы", {
+        code: "AUTO_QUEUE_DISARMED"
+      });
+    }
+    return this.runtime.autoQueue.tick();
   }
 
   advanceNightPick(): NightPrint {
@@ -539,9 +567,35 @@ export class FarmCommands {
             ? preview.artifactSha256
             : entry.candidate.artifactSha256
       });
-      this.runtime.deviceCommands.resolveStartGuard(result.printerId);
       return { candidate: entry.candidate, window: env.nightWindow, runId: result.runId };
     });
+  }
+
+  /**
+   * **Stops the print a task is running** — the physical half of "cancel this
+   * job", which a logical cancel refuses to fake.
+   *
+   * Identity is checked at both levels before anything is sent: the task's own
+   * active run must be the one holding the printer, and the device (read fresh,
+   * inside the printer's command lock) must be printing that run's file. Either
+   * mismatch is a 409 and nothing is cancelled. The run, the task and the bed
+   * then follow from what the printer reports — a cancelled print still leaves
+   * the plate `AWAITING_CLEARANCE`, because whatever was printed is on it.
+   */
+  async stopTask(taskId: string): Promise<{ runId: string; printerId: string }> {
+    this.runtime.ensureQueue();
+    const repos = (this.runtime.printQueueStore as PrintQueueStore).repositories;
+    const task = repos.tasks.getById(taskId);
+    if (!task) throw new NotFoundError(`Задание «${taskId}»`);
+    const run = repos.printRuns.findActiveByTask(task.id);
+    if (!run || (run.state !== "RUNNING" && run.state !== "PAUSED")) {
+      throw new JobError(
+        `«${task.title}» не печатается сейчас — останавливать нечего` +
+          (run ? ` (запуск ${run.state === "UNKNOWN" ? "не подтверждён" : "ещё не подтверждён принтером"})` : "")
+      );
+    }
+    await this.cancelPrinter(run.printerId, { runId: run.id, job: run.file });
+    return { runId: run.id, printerId: run.printerId };
   }
 
   /**

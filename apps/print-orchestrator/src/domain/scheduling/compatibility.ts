@@ -71,6 +71,7 @@ export const PREFLIGHT_REASON = {
   BUILD_VOLUME_UNKNOWN: "build_volume_unknown",
   DIMENSIONS_UNKNOWN: "dimensions_unknown",
   MODEL_SCALE_UNKNOWN: "model_scale_unknown",
+  SLICE_SCALE_MISMATCH: "slice_scale_mismatch",
   TOO_LARGE: "too_large",
   GCODE_FLAVOR_MISMATCH: "gcode_flavor_mismatch",
   AMS_UNSUPPORTED: "ams_unsupported",
@@ -249,6 +250,13 @@ export interface CompatibilityEvidence {
    * absent, and absent refuses.
    */
   amsSlotMapping?: "resolved" | null;
+  /**
+   * Set when the slice that would be sent was provably cut at a different scale
+   * than the source model's current unit confirmation (the operator confirmed
+   * "inches" after an STL was sliced as millimetres). The message says so; a
+   * wrong-size part is a refusal, never a review.
+   */
+  sliceScaleMismatch?: string | null;
   /** Verified slice ETA (seconds), or null. */
   sliceEtaS: number | null;
   /** G-code-analysis ETA (seconds), or null. */
@@ -508,7 +516,9 @@ export function evaluateCompatibility(
   // honest `review` (visible in the matrix, refused by an unattended dispatch),
   // and a box read from an un-scaled STL must never be silently trusted just
   // because the printer's build volume is unknown too.
-  if (task.dimensions !== null && !task.dimensionsScaleKnown) {
+  if (evidence.sliceScaleMismatch) {
+    block("slice_scale_mismatch", evidence.sliceScaleMismatch);
+  } else if (task.dimensions !== null && !task.dimensionsScaleKnown) {
     review(
       "model_scale_unknown",
       "Единицы измерения модели не подтверждены (STL без масштаба) — размеры нельзя считать миллиметрами"

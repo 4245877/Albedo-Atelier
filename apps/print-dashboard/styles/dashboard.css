@@ -1124,6 +1124,9 @@
    один класс вместо двух разных inline-стилей (см. render/printerView.js).
    b-селектор — чтобы перевесить «.printer-job b» выше. */
 b.job-error { color: var(--danger-ink); font-weight: 700; }
+/* Принтер простаивает, но следующую печать не примет (деталь на столе, стол не
+   подтверждён, запуск не подтверждён) — не ошибка, а то, что ждёт человека. */
+b.job-hold { color: var(--warn-ink); font-weight: 700; }
 
 /* Решение автоматики подсветки (state.lights) — приглушённая строка на
    карточке и в модальном окне; факт лампы показывает переключатель света. */
@@ -1329,6 +1332,9 @@ b.job-error { color: var(--danger-ink); font-weight: 700; }
 /* Переключатель в работе: подписи у него нет, поэтому занятость показывает
    пульс — но не блокирует чтение состояния. */
 .toggle[aria-busy="true"] { opacity: 0.7; cursor: progress; }
+/* Правило, которое сервер включить не даст (выключено при развёртывании). */
+.toggle[disabled] { opacity: 0.45; cursor: not-allowed; }
+.rule .row-sub svg { display: inline-block; width: 13px; height: 13px; vertical-align: -2px; margin-right: 2px; }
 
 /* ── 13 · Камеры ────────────────────────────────────────────── */
 

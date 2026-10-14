@@ -232,6 +232,8 @@ export interface Automation {
   name: string;
   desc: string;
   on: boolean;
+  /** Why it may not be switched on (a deployment switch is off); absent when it may. */
+  locked?: string;
 }
 
 export type SystemComponentStatus = "ok" | "warn" | "err";

@@ -292,9 +292,10 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
     // the next print starts, so it is still the final total at the completion poll.
     const filamentUsedMm = toFiniteNumber(printStats.filament_used);
 
-    const stateText = firstText(printStats.state) || null;
-    const stateMessage = firstText(printStats.message) || null;
-    const mappedStatus = toStatusState(printStats.state);
+    const { status: mappedStatus, stateText, stateMessage, klippyMessage } = resolveMoonrakerState(
+      printStats,
+      webhooks
+    );
 
     // Nozzle diameter comes from Klipper's parsed config (a setting, not a live
     // sensor). The Creality K2 runs Klipper over Moonraker, so this populates for
@@ -361,7 +362,7 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
       mediaPresent: null,
       error:
         mappedStatus === "error"
-          ? stateMessage || firstText(webhooks.state_message) || "Принтер сообщил об ошибке"
+          ? klippyMessage || stateMessage || firstText(webhooks.state_message) || "Принтер сообщил об ошибке"
           : null,
       updatedAt: new Date().toISOString()
     };
@@ -371,6 +372,46 @@ export async function getMoonrakerStatus(printer: PrinterConfig): Promise<Printe
       error instanceof Error ? error.message : "Неизвестная ошибка Moonraker"
     );
   }
+}
+
+/**
+ * The printer state a Moonraker report establishes — Klipper's own readiness
+ * first, the job state second.
+ *
+ * `print_stats` keeps reporting its last job state (`standby`, `complete`) while
+ * the firmware behind it is in `shutdown` or `error`: a printer that cannot move
+ * read as idle and startable. `webhooks.state` is the firmware's answer, and only
+ * `ready` lets the job state speak; `startup` is not a state yet (→ `unknown`,
+ * which the lifecycle treats as a partial report), `shutdown`/`error` are faults.
+ * A report with no `webhooks` block at all (older Moonraker, a trimmed query)
+ * falls back to the job state, as before.
+ */
+export function resolveMoonrakerState(
+  printStats: Record<string, unknown>,
+  webhooks: Record<string, unknown>
+): {
+  status: PrinterLiveStatus["status"];
+  stateText: string | null;
+  stateMessage: string | null;
+  klippyMessage: string | null;
+} {
+  const klippyState = firstText(webhooks.state).toLowerCase();
+  const klippyNotReady = klippyState !== "" && klippyState !== "ready";
+  if (klippyNotReady) {
+    const klippyMessage = firstText(webhooks.state_message) || `Klipper не готов (${klippyState})`;
+    return {
+      status: klippyState === "startup" ? "unknown" : "error",
+      stateText: `klippy:${klippyState}`,
+      stateMessage: klippyMessage,
+      klippyMessage
+    };
+  }
+  return {
+    status: toStatusState(printStats.state),
+    stateText: firstText(printStats.state) || null,
+    stateMessage: firstText(printStats.message) || null,
+    klippyMessage: null
+  };
 }
 
 export async function sendMoonrakerCommand(

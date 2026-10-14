@@ -68,3 +68,44 @@ test("persist is invoked on toggle so the change survives a restart", () => {
   store.toggle("night-lights");
   assert.ok(saves >= 1, "the toggle was persisted");
 });
+
+test("«Автоочередь» starts OFF, and a locked rule cannot be switched on — only off", () => {
+  const locked = "автоочередь выключена при развёртывании (AUTO_QUEUE_ENABLED=false)";
+  const store = new AutomationStore(undefined, undefined, undefined, (id) => (id === "auto-queue" ? locked : null));
+  const rule = store.list().find((r) => r.id === "auto-queue");
+  assert.equal(rule?.on, false, "off by default");
+  assert.equal(rule?.locked, locked, "the reason travels with the rule");
+  assert.throws(() => store.toggle("auto-queue", true), /AUTO_QUEUE_ENABLED=false/);
+  assert.throws(() => store.toggle("auto-queue"), /нельзя включить/, "a flip from off is an enable");
+  assert.equal(store.isEnabled("auto-queue"), false);
+  assert.doesNotThrow(() => store.toggle("auto-queue", false), "switching off is always allowed");
+  // Other rules are not affected by another rule's lock.
+  assert.equal(store.list().find((r) => r.id === "night-lights")?.locked, undefined);
+});
+
+test("a rule stored ON from earlier counts as off while its deployment switch is off", () => {
+  const store = new AutomationStore(
+    { states: { "auto-queue": true }, lastRun: null },
+    undefined,
+    undefined,
+    (id) => (id === "auto-queue" ? "выключена при развёртывании" : null)
+  );
+  assert.equal(store.isEnabled("auto-queue"), false);
+});
+
+test("the circuit breaker switches a rule off, persists it and says why in the feed", () => {
+  let persisted = 0;
+  const lines: string[] = [];
+  const feed = { push: (_icon: string, text: string) => void lines.push(text) } as unknown as ConstructorParameters<
+    typeof AutomationStore
+  >[1];
+  const store = new AutomationStore(undefined, feed, () => void (persisted += 1));
+  store.toggle("auto-queue", true);
+  const before = persisted;
+  store.disarm("auto-queue", "исход запуска неизвестен");
+  assert.equal(store.isEnabled("auto-queue"), false);
+  assert.equal(persisted, before + 1, "a restart does not re-arm what tripped");
+  assert.match(lines.at(-1) ?? "", /выключено автоматически: исход запуска неизвестен/);
+  store.disarm("auto-queue", "again");
+  assert.equal(persisted, before + 1, "disarming an off rule is a no-op");
+});

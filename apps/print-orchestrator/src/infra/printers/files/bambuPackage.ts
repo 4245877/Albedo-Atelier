@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { deflateRaw } from "node:zlib";
 
+import { bambuModelIdOf } from "../../../domain/printers/modelSpecs";
+
 /**
  * Builds the **`.gcode.3mf` plate package** a Bambu printer expects.
  *
@@ -42,28 +44,9 @@ import { deflateRaw } from "node:zlib";
 /** The path the start command's `param` names inside the package. */
 export const BAMBU_PLATE_GCODE_PATH = "Metadata/plate_1.gcode";
 
-/**
- * Bambu's own model identifiers, keyed by this project's catalogue code.
- *
- * They appear in `slice_info.config` as `printer_model_id` and are Bambu's
- * internal names, not the marketing ones — an A1 is `N2S`. Confirmed against a
- * package downloaded from this farm's A1. An unknown model yields `null`, and
- * the caller omits the field rather than guessing a neighbour: a package
- * claiming the wrong machine is worse than one that claims none.
- */
-const BAMBU_MODEL_IDS: Readonly<Record<string, string>> = {
-  "bambu-a1": "N2S",
-  "bambu-a1-mini": "N1",
-  "bambu-p1p": "C11",
-  "bambu-p1s": "C12",
-  "bambu-x1c": "BL-P001",
-  "bambu-x1e": "BL-P002"
-};
-
-/** Bambu's `printer_model_id` for a catalogue code, or null when unmapped. */
+/** Bambu's `printer_model_id` for a catalogue code, or null when unmapped (see `modelSpecs`). */
 export function bambuModelIdFor(modelCode: string | null | undefined): string | null {
-  if (!modelCode) return null;
-  return BAMBU_MODEL_IDS[modelCode] ?? null;
+  return bambuModelIdOf(modelCode);
 }
 
 export interface BambuPackageInput {

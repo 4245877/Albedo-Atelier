@@ -16,6 +16,7 @@ import {
 } from "./threemfPlates";
 import { describeProjectSettings, readProjectSettings } from "./threemfProjectSettings";
 import { suspectPrusaMultiBed } from "./threemfPrusaBeds";
+import { inspectSlicedPayload, resolveSlicedTarget } from "./threemfPayload";
 import { buildScene } from "./threemfScene";
 import { ANALYZER_VERSION, finding, worstVerdict, type AnalyzerResult, type AnalyzerLimits } from "./types";
 import { fileHandleSource, SafeZip, ZipSafetyError } from "./zip";
@@ -164,10 +165,12 @@ export async function analyze3mf(
     producer,
     zip,
     entryNames,
+    gcodeEntries: payload.gcodeEntries,
     limits,
     sliceInfo,
     plateCount: plates.count,
-    warnings
+    warnings,
+    blockers
   });
   Object.assign(data, outcome.data);
 
@@ -179,7 +182,8 @@ export async function analyze3mf(
     data,
     analyzer: "3mf",
     analyzerVersion: ANALYZER_VERSION,
-    material: outcome.material
+    material: outcome.material,
+    ...outcome.estimates
   };
 }
 
@@ -268,16 +272,19 @@ async function decide(input: {
   producer: ThreeMfProducer | null;
   zip: SafeZip;
   entryNames: string[];
+  gcodeEntries: string[];
   limits: AnalyzerLimits;
   sliceInfo: SliceInfo | null;
   plateCount: number;
   warnings: AnalysisFinding[];
+  blockers: AnalysisFinding[];
 }): Promise<{
   verdict: AnalyzerResult["verdict"];
   material: string | null;
   data: Record<string, unknown>;
+  estimates?: Pick<AnalyzerResult, "estimatedDurationS" | "estimatedFilamentG" | "nozzleDiameterMm" | "layerHeightMm">;
 }> {
-  const { threeMfClass, producer, zip, entryNames, limits, warnings } = input;
+  const { threeMfClass, producer, zip, entryNames, limits, warnings, blockers } = input;
   if (threeMfClass !== "sliced") {
     if (threeMfClass === "slicer_project") {
       // A project 3MF carries its own print settings, and this farm slices it
@@ -317,8 +324,32 @@ async function decide(input: {
   // sliced for. For a multi-plate package it describes only the FIRST plate,
   // which is precisely why such a package is not deliverable as-is (below).
   const first = input.sliceInfo?.plates[0] ?? null;
+
+  // The G-code the printer will actually run, held to the bare-G-code rules.
+  const payload = await inspectSlicedPayload({
+    zip,
+    gcodeEntries: input.gcodeEntries,
+    plateCount: input.plateCount,
+    limits
+  });
+  blockers.push(...payload.blockers);
+  warnings.push(...payload.warnings);
+  const gcode = payload.gcode;
+  if (gcode) {
+    blockers.push(...gcode.blockers);
+    // The target is judged once, for the package, below — not twice.
+    warnings.push(...gcode.warnings.filter((w) => w.code !== "gcode_unknown_target"));
+  }
+
+  const target = resolveSlicedTarget({
+    sliceInfoPrinter: first?.printer ?? null,
+    payloadPrinterModel: readText(gcode?.data.printerModel)
+  });
+  if (target.conflict) blockers.push(target.conflict);
+  const material = first?.material ?? gcode?.material ?? null;
+
   const verdicts: AnalyzerResult["verdict"][] = ["schedulable"];
-  if (!first?.material) verdicts.push("needs_input");
+  if (!material) verdicts.push("needs_input");
   // A sliced payload was produced against *someone else's* machine profile; its
   // speeds, temperatures and bed shape are not ours to trust. So the verdict is
   // `review` unconditionally — including when the file names a target printer,
@@ -328,13 +359,13 @@ async function decide(input: {
   warnings.push(
     finding(
       "threemf_sliced_payload",
-      first?.printer
-        ? `Файл уже нарезан для «${first.printer}» — параметры чужие и требуют подтверждения`
+      target.printerModel
+        ? `Файл уже нарезан для «${target.printerModel}» — параметры чужие и требуют подтверждения`
         : "Файл уже нарезан, но целевой принтер в нём не указан",
       "Проверьте, что материал и принтер совпадают с вашими, и подтвердите задание вручную."
     )
   );
-  if (!first?.printer) {
+  if (!target.printerModel && !target.conflict) {
     warnings.push(finding("threemf_unknown_target", "Целевой принтер не подтверждён в sliced 3MF"));
   }
   // An already-sliced package holding several plates is several finished prints
@@ -353,12 +384,48 @@ async function decide(input: {
   }
   return {
     verdict: worstVerdict(verdicts),
-    material: first?.material ?? null,
+    material,
     data: {
-      targetPrinter: first?.printer ?? null,
+      // The one key the dispatch gate reads as the file's declared target, in
+      // the farm's model vocabulary (see `resolveSlicedTarget`).
+      printerModel: target.printerModel,
+      printerModelId: target.printerModelId,
+      // Legacy display key; same value as `printerModel` when one is known.
+      targetPrinter: target.printerModel ?? first?.printer ?? null,
+      flavor: readText(gcode?.data.flavor),
+      payload: payload.entry
+        ? {
+            entry: payload.entry,
+            plateIndex: payload.plateIndex,
+            bytes: payload.bytes,
+            md5: payload.md5,
+            md5Verified: payload.md5Verified,
+            slicer: gcode?.data.slicer ?? null,
+            slicerVersion: gcode?.data.slicerVersion ?? null,
+            printerModel: gcode?.data.printerModel ?? null,
+            nozzleTempC: gcode?.data.nozzleTempC ?? null,
+            bedTempC: gcode?.data.bedTempC ?? null,
+            toolCount: gcode?.data.toolCount ?? null,
+            motionCommands: gcode?.data.motionCommands ?? null,
+            bbox: gcode?.data.bbox ?? null,
+            bboxBasis: gcode?.data.bboxBasis ?? null
+          }
+        : null,
       sliceInfo: input.sliceInfo ? { source: input.sliceInfo.entry } : null
+    },
+    estimates: {
+      // The package's own estimate first (what the slicer showed the operator),
+      // the payload header's as the fallback.
+      estimatedDurationS: first?.estimate.durationS ?? gcode?.estimatedDurationS ?? null,
+      estimatedFilamentG: first?.estimate.weightG ?? gcode?.estimatedFilamentG ?? null,
+      nozzleDiameterMm: gcode?.nozzleDiameterMm ?? null,
+      layerHeightMm: gcode?.layerHeightMm ?? null
     }
   };
+}
+
+function readText(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 /**

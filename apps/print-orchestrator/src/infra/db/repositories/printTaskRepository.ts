@@ -1,7 +1,13 @@
 import type { DatabaseSync } from "node:sqlite";
 
-import type { PrintTaskRepository, TaskQuery } from "../../../domain/print/repositories";
+import type {
+  FinishedTaskQuery,
+  PrintTaskRepository,
+  TaskQuery
+} from "../../../domain/print/repositories";
 import type { DayNightPreference, PrintTask, PrintTaskState } from "../../../domain/print/types";
+import { PREPARABLE_TASK_STATES } from "../../../domain/print/draftTask";
+import { FINISHED_TASK_STATES } from "../../../domain/print/reprint";
 import {
   asBool,
   asNumber,
@@ -140,6 +146,36 @@ export class SqlitePrintTaskRepository
     );
   }
 
+  findPreparableBySource(sourceArtifactId: string): PrintTask | null {
+    // The newest task whose executable IS the source model and that can still
+    // take a slice — the one a new slice belongs to. A task promoted onto its
+    // slice has moved `artifact_id` to the output and is no longer this source's
+    // preparation. Newest by insertion order: ids are random, and two drafts
+    // created within one clock tick must not be told apart by chance.
+    const states = PREPARABLE_TASK_STATES;
+    return this.queryOne(
+      `SELECT * FROM print_tasks
+        WHERE artifact_id = ? AND state IN (${states.map(() => "?").join(",")})
+        ORDER BY rowid DESC LIMIT 1`,
+      sourceArtifactId,
+      ...states
+    );
+  }
+
+  findLatestReferencing(artifactId: string): PrintTask | null {
+    return this.queryOne(
+      `SELECT * FROM print_tasks
+        WHERE artifact_id = ? OR source_artifact_id = ?
+        ORDER BY rowid DESC LIMIT 1`,
+      artifactId,
+      artifactId
+    );
+  }
+
+  listBySliceVariant(sliceVariantId: string): PrintTask[] {
+    return this.query("SELECT * FROM print_tasks WHERE slice_variant_id = ? ORDER BY rowid", sliceVariantId);
+  }
+
   listReferencingArtifact(artifactId: string): PrintTask[] {
     return this.query(
       `SELECT * FROM print_tasks
@@ -160,5 +196,33 @@ export class SqlitePrintTaskRepository
       );
     }
     return this.query("SELECT * FROM print_tasks ORDER BY created_at, id");
+  }
+
+  listFinished(query: FinishedTaskQuery): PrintTask[] {
+    const states = query.states && query.states.length > 0 ? query.states : FINISHED_TASK_STATES;
+    const where = [`t.state IN (${states.map(() => "?").join(", ")})`];
+    const params: SqlValue[] = [...states];
+    // A print is something that entered the queue or reached a printer; an
+    // upload's draft cancelled together with its file was neither.
+    where.push(
+      `(EXISTS (SELECT 1 FROM queue_entries q WHERE q.task_id = t.id)
+        OR EXISTS (SELECT 1 FROM print_runs r WHERE r.task_id = t.id))`
+    );
+    if (query.printerId) {
+      where.push("EXISTS (SELECT 1 FROM print_runs p WHERE p.task_id = t.id AND p.printer_id = ?)");
+      params.push(query.printerId);
+    }
+    if (query.before) {
+      where.push("(t.updated_at < ? OR (t.updated_at = ? AND t.id < ?))");
+      params.push(query.before.updatedAt, query.before.updatedAt, query.before.id);
+    }
+    params.push(Math.max(1, Math.floor(query.limit)));
+    return this.query(
+      `SELECT t.* FROM print_tasks t
+        WHERE ${where.join(" AND ")}
+        ORDER BY t.updated_at DESC, t.id DESC
+        LIMIT ?`,
+      ...params
+    );
   }
 }

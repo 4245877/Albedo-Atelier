@@ -53,7 +53,12 @@ export function createLaunchController({ getContent, refresh, close }) {
     return res.preview;
   }
 
-  async function open(taskId) {
+  /**
+   * Открыть окно для задания. `printerId` — принтер, уже выбранный оператором
+   * раньше (мастер «Новая печать»): окно сразу проверяет именно его, а не
+   * рекомендацию; если он не годится, окно скажет почему и предложит другие.
+   */
+  async function open(taskId, { printerId = null } = {}) {
     session = {
       taskId,
       idempotencyKey: newIdempotencyKey(taskId),
@@ -75,10 +80,11 @@ export function createLaunchController({ getContent, refresh, close }) {
       <div class="modal-head"><h2 id="modal-title">Запуск печати</h2></div>
       <div class="launch-loading">Проверяю принтеры…</div>`;
     try {
-      const preview = await load(taskId);
+      const preview = await load(taskId, printerId);
       if (!session || session.taskId !== taskId) return; // окно уже сменили
       session.preview = preview;
-      session.ui.selectedPrinterId = preview.recommendedPrinterId;
+      const chosen = printerId && preview.candidates.some((c) => c.printerId === printerId) ? printerId : null;
+      session.ui.selectedPrinterId = chosen ?? preview.recommendedPrinterId;
       render();
     } catch (err) {
       getContent().innerHTML = `
@@ -144,11 +150,17 @@ export function createLaunchController({ getContent, refresh, close }) {
       );
       if (!session) return;
       ui.busy = false;
-      ui.done = { printerName: res.printerName || candidate.printerName };
+      // «Запущена» — только если принтер сам показал, что печатает. Принятая
+      // команда (Moonraker ответил 200) — это ещё не печать: окно говорит, что
+      // ждёт подтверждения, а не празднует раньше времени.
+      const phase = res.run && res.run.phase === "accepted" ? "accepted" : "started";
+      ui.done = { printerName: res.printerName || candidate.printerName, phase };
       render();
       toast(
-        `Печать «${esc(preview.displayTitle)}» запущена на «${esc(ui.done.printerName)}»`,
-        "toast-ok"
+        phase === "started"
+          ? `Печать «${esc(preview.displayTitle)}» началась на «${esc(ui.done.printerName)}»`
+          : `Команда принята «${esc(ui.done.printerName)}» — жду, когда принтер подтвердит начало печати`,
+        phase === "started" ? "toast-ok" : ""
       );
       await refresh();
     } catch (err) {

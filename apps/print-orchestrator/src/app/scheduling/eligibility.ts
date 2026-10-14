@@ -2,7 +2,7 @@ import { operationMinutes } from "../../domain/operations/planning";
 import { resolveFarmAvailability, type OperatorScheduleInput } from "../../domain/operations/schedule";
 import { OPERATION_LABELS } from "../../domain/operations/states";
 import { OPEN_OPERATION_STATES } from "../../domain/operations/types";
-import type { PrintTask } from "../../domain/print/types";
+import type { Assignment, PrintTask } from "../../domain/print/types";
 import {
   evaluateDispatchEligibility,
   type DeviceArtifactFacts,
@@ -14,8 +14,12 @@ import {
   type EligibilityStage
 } from "../../domain/dispatch/eligibility";
 import { readAnalysisReview } from "../../domain/print/analysisReview";
+import type { ArtifactAnalysis } from "../../domain/print/types";
+import { resolveFeedPlan, type FeedPlan } from "../../domain/printers/feedPlan";
+import { feedRequirementFor } from "../dispatch/feedRequirement";
 import { supportsPrinterUpload } from "../../infra/printers/files";
-import { ANALYZER_VERSION } from "../artifacts/analyzers";
+import { ANALYZER_VERSION, isAnalysisCurrent } from "../artifacts/analyzers";
+import { assignmentHolds } from "../../domain/print/assignmentAuthority";
 import { profileRevisionIdsOf, resolveTaskBinding } from "../dispatch/binding";
 import { expectedDeviceSize, stalenessOf } from "../dispatch/deviceFileIdentity";
 import type { SchedulerContext } from "./context";
@@ -50,6 +54,8 @@ export interface EligibilityRequest {
   adapterUploadSupported?: boolean;
   /** The tracked device file, when the caller already read it; `null` = untracked. */
   deviceArtifact?: DeviceArtifactFacts | null;
+  /** Operator's explicit filament-source choice: job filament index → tray id. */
+  feedChoice?: Readonly<Record<number, number>> | null;
 }
 
 /**
@@ -107,6 +113,8 @@ export class EligibilityQueries {
         : null;
     const reviewAccepted = review !== null && !review.stale;
 
+    const feed = this.feedPlanFor(task, printer, resolved, request.feedChoice ?? null);
+
     const facts: DispatchFacts = {
       mode: request.mode,
       stage: request.stage ?? "dispatch",
@@ -116,6 +124,7 @@ export class EligibilityQueries {
       // `task.night` is its persisted projection, kept in step by the write path.
       night: task.dayNightPreference === "night",
       unattendedAllowed: task.unattendedAllowed,
+      dayOnly: task.dayNightPreference === "day",
 
       file,
       filePathValid: request.filePathValid ?? true,
@@ -135,7 +144,12 @@ export class EligibilityQueries {
             detectedFormat: resolved.analysis.detectedFormat,
             blockers: resolved.analysis.blockers,
             analyzerVersion: resolved.analysis.analyzerVersion,
+            analyzerVersionCurrent: isAnalysisCurrent(
+              resolved.analysis.analyzerVersion,
+              resolved.analysis.detectedFormat
+            ),
             updatedAt: resolved.analysis.updatedAt,
+            analyzedSha256: readString(resolved.analysis.metadata, "analyzedSha256"),
             declaredTargetPrinter: readString(resolved.analysis.data, "printerModel"),
             declaredGcodeFlavor: readString(resolved.analysis.data, "flavor"),
             containsGcodePayload: readGcodePayload(resolved.analysis.data),
@@ -182,6 +196,8 @@ export class EligibilityQueries {
               printer.protocol
             ),
 
+      feed,
+
       etaMinutes: etaMinutesOf(resolved.evidence.sliceEtaS, resolved.evidence.gcodeEtaS),
       nightWindow: this.ctx.config.nightWindow,
       farmTimeZone: this.ctx.config.farmTimeZone,
@@ -189,15 +205,66 @@ export class EligibilityQueries {
       now: this.ctx.config.now()
     };
 
+    // With an AMS the "loaded material" is not one spool, it is whichever tray the
+    // plan picked — so the generic material rule must judge the tray that will
+    // actually feed, not the one the printer happened to use last. When the plan
+    // could not pick one, its own refusal says why; repeating it as a «заправлен
+    // PLA» clash (about an unrelated tray) would only blur the cause.
+    const printerInput = this.evidence.printerInputFor(printer, resolved.buildVolume);
+    let evidence = resolved.evidence;
+    if (feed && feed.kind === "ams") {
+      printerInput.material = feed.assignments[0]?.material ?? printerInput.material;
+      evidence = { ...evidence, amsSlotMapping: "resolved" };
+    } else if (feed && feed.kind === "unresolved") {
+      printerInput.material = resolved.taskInput.material ?? printerInput.material;
+    }
+
     return evaluateDispatchEligibility({
       preflight: {
         task: resolved.taskInput,
-        printer: this.evidence.printerInputFor(printer, resolved.buildVolume),
-        evidence: resolved.evidence,
+        printer: printerInput,
+        evidence,
         config: this.ctx.compatibilityConfig
       },
       facts
     });
+  }
+
+  /**
+   * The filament source a start on this printer would use — Bambu only, the one
+   * adapter whose start command has to name it. Computed from the job's *own*
+   * filaments and the live tray report by the one planner the start command
+   * re-checks against; never "the first loaded tray".
+   */
+  private feedPlanFor(
+    task: PrintTask,
+    printer: SchedulerPrinterRef,
+    resolved: { analysis: ArtifactAnalysis | null; taskInput: { material: string | null } },
+    choice: Readonly<Record<number, number>> | null
+  ): FeedPlan | null {
+    if (printer.protocol !== "bambu") return null;
+    const state = this.ctx.config.feedStateOf?.(printer.id) ?? null;
+    const { requirement, problem } = feedRequirementFor({
+      analysis: resolved.analysis,
+      material: resolved.taskInput.material
+    });
+    if (!state || state.hasAms === null) {
+      return {
+        kind: "unresolved",
+        code: "AMS_STATE_UNKNOWN",
+        message: "принтер не сообщает, откуда подаётся филамент (AMS/внешняя катушка) — запуск невозможен до получения телеметрии",
+        choices: []
+      };
+    }
+    if (!state.hasAms) {
+      // No AMS: the external spool is the only path, and the ordinary material
+      // rule already compares it against the job.
+      return resolveFeedPlan({ hasAms: false, trays: state.trays, requirement: requirement ?? { filaments: [], slotCount: 1 } });
+    }
+    if (!requirement) {
+      return { kind: "unresolved", code: "AMS_FEED_UNSUPPORTED", message: problem ?? "задание нельзя сопоставить с лотками AMS", choices: [] };
+    }
+    return resolveFeedPlan({ hasAms: true, trays: state.trays, requirement, choice });
   }
 
   /**
@@ -268,14 +335,15 @@ export class EligibilityQueries {
     if (!record) return null;
 
     const artifact = task.artifactId ? repos.artifacts.getById(task.artifactId) : null;
+    // The placement this device copy belongs to — one that actually holds the
+    // task on this printer, never a draft's proposal for the same pair.
     const reservation = repos.assignments
       .listByTask(task.id)
       .find(
         (a) =>
-          a.state !== "CANCELLED" &&
-          a.state !== "RELEASED" &&
+          a.printerId === printerId &&
           a.invalidatedAt === null &&
-          a.printerId === printerId
+          assignmentHolds(a, a.planId ? (repos.plans.getById(a.planId)?.state ?? null) : null)
       );
     const staleReason = stalenessOf(record, {
       printerId,
@@ -319,7 +387,13 @@ export class EligibilityQueries {
    */
   private confirmedReservation(taskId: string, sliceVariantId: string | null): DispatchReservation | null {
     const repos = this.ctx.store.repositories;
-    for (const assignment of repos.assignments.listByTask(taskId)) {
+    // The NEWEST decision decides. This used to read the oldest one, so a
+    // placement withdrawn earlier kept answering for the task after a person
+    // had placed it again — every printer, the newly chosen one included, was
+    // refused as «назначение устарело» / «расходится с планом», and the task
+    // could not be started anywhere.
+    let stalePlan: DispatchReservation | null = null;
+    for (const assignment of [...repos.assignments.listByTask(taskId)].reverse()) {
       if (assignment.state === "CANCELLED" || assignment.state === "RELEASED") continue;
 
       let planId: string | null = null;
@@ -331,22 +405,36 @@ export class EligibilityQueries {
         continue;
       }
 
-      const b = assignment.binding;
-      return {
-        planId,
-        assignmentId: assignment.id,
-        printerId: assignment.printerId,
-        sliceVariantId: b.sliceVariantId ?? sliceVariantId,
-        artifactSha256: b.artifactSha256,
-        profileRevisionIds: [b.machineRevisionId, b.processRevisionId, b.filamentRevisionId].filter(
-          (id): id is string => typeof id === "string" && id.length > 0
-        ),
-        expectedRemotePath: b.expectedRemotePath,
-        stale: assignment.invalidatedAt !== null,
-        staleReason: assignment.invalidatedReason
-      };
+      const reservation = this.reservationOf(assignment, planId, sliceVariantId);
+      if (!reservation.stale) return reservation;
+      // A withdrawn MANUAL placement binds nothing (HIGH-13): the operator took
+      // the decision back, or the task changed under it and the launch makes a
+      // fresh one. A confirmed PLAN's placement that went stale still demands a
+      // replan — unless a newer decision (found first, above) superseded it.
+      if (planId !== null && stalePlan === null) stalePlan = reservation;
     }
-    return null;
+    return stalePlan;
+  }
+
+  private reservationOf(
+    assignment: Assignment,
+    planId: string | null,
+    sliceVariantId: string | null
+  ): DispatchReservation {
+    const b = assignment.binding;
+    return {
+      planId,
+      assignmentId: assignment.id,
+      printerId: assignment.printerId,
+      sliceVariantId: b.sliceVariantId ?? sliceVariantId,
+      artifactSha256: b.artifactSha256,
+      profileRevisionIds: [b.machineRevisionId, b.processRevisionId, b.filamentRevisionId].filter(
+        (id): id is string => typeof id === "string" && id.length > 0
+      ),
+      expectedRemotePath: b.expectedRemotePath,
+      stale: assignment.invalidatedAt !== null,
+      staleReason: assignment.invalidatedReason
+    };
   }
 }
 

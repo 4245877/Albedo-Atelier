@@ -10,6 +10,7 @@ import { ID_PREFIX, newId } from "../../domain/print/ids";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { Artifact, ArtifactAnalysis, PrintTask } from "../../domain/print/types";
 import { openPrintQueueStore } from "../../infra/db/store";
+import { establishClearBed } from "../dispatch/testkit/bed";
 import type { PrinterConfig } from "../../infra/printers/config";
 import type { PrinterFilesListing } from "../../infra/printers/files";
 import { ArtifactStorage } from "../../infra/storage/artifactStorage";
@@ -111,9 +112,10 @@ interface Harness {
   dispatch: DispatchService;
   lifecycle: RunLifecycleService;
   launch: LaunchService;
+  scheduler: SchedulerService;
   storage: ArtifactStorage;
   uploads: { printerId: string; remotePath: string; bytes: Uint8Array }[];
-  startCalls: { printerId: string; file: string }[];
+  startCalls: { printerId: string; file: string; plateGcodePath: string | null }[];
   onDevice: Map<string, { path: string; size: number }[]>;
   knobs: Knobs;
 }
@@ -134,6 +136,9 @@ afterEach(() => {
 
 async function makeHarness(tmp: string): Promise<Harness> {
   const store = openPrintQueueStore(":memory:");
+  // Every harness printer starts with a plate an operator confirmed empty — the
+  // only evidence of a free bed (untracked is UNKNOWN and the gate refuses it).
+  for (const id of ["bambu-a1", "k2", "ender3"]) establishClearBed(store, id);
   const storage = new ArtifactStorage({ root: path.join(tmp, "artifacts") });
   await storage.init();
 
@@ -230,7 +235,13 @@ async function makeHarness(tmp: string): Promise<Harness> {
     nightWindow: "21:30 – 07:30",
     farmTimeZone: "UTC",
     compatibility: { telemetryStaleMs: 120_000 },
-    unknownEtaAssumptionS: 4 * 3600
+    unknownEtaAssumptionS: 4 * 3600,
+    // No AMS anywhere in this harness: each Bambu feeds from its external spool,
+    // which holds whatever the `loaded` knob says.
+    feedStateOf: (id: string) => ({
+      hasAms: false,
+      trays: [{ trayId: 254, external: true, material: knobs.loaded[id] ?? null, color: null, active: true }]
+    })
   };
   const scheduler = new SchedulerService(store, refs, schedulerConfig);
   const eligibility = (): EligibilityQueries => {
@@ -245,9 +256,10 @@ async function makeHarness(tmp: string): Promise<Harness> {
       return PRINTERS.find((p) => p.id.toLowerCase() === wanted || p.name.toLowerCase() === wanted);
     },
     getStatus: () => undefined,
-    startPhysical: async (printerId, file) => {
+    startPhysical: async (printerId, file, _runId, options) => {
       if (knobs.failStart) throw new Error(knobs.failStart);
-      startCalls.push({ printerId, file });
+      startCalls.push({ printerId, file, plateGcodePath: options?.plateGcodePath ?? null });
+      return { confirmed: true };
     },
     classifyError: () => "unknown",
     listFiles,
@@ -280,6 +292,7 @@ async function makeHarness(tmp: string): Promise<Harness> {
     dispatch,
     lifecycle,
     launch,
+    scheduler,
     storage,
     uploads,
     startCalls,
@@ -386,14 +399,22 @@ function seedGcodeUpload() {
 }
 
 /** An uploaded sliced 3MF: startable, and produced against a foreign profile. */
-function seedSliced3mfUpload() {
+function seedSliced3mfUpload(plateEntry = "Metadata/plate_1.gcode") {
   return seedUpload({
     name: "bracket.gcode.3mf",
     // A ZIP is what the detector sees; the 3MF analyzer then finds the plate.
     bytes: Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), A1_GCODE]),
     detectedFormat: "3mf",
     verdict: "review",
-    data: { threeMfClass: "sliced", hasGcodePayload: true, targetPrinter: "Bambu Lab A1" },
+    // The 1.4.0 shape: the payload the analyzer opened, and the declared target
+    // under the key the dispatch gate reads.
+    data: {
+      threeMfClass: "sliced",
+      hasGcodePayload: true,
+      printerModel: "Bambu Lab A1",
+      targetPrinter: "Bambu Lab A1",
+      payload: { entry: plateEntry, plateIndex: Number(/plate_(\d+)/.exec(plateEntry)?.[1] ?? 1), md5Verified: null }
+    },
     warnings: [
       { code: "threemf_sliced_payload", message: "Файл уже нарезан для «Bambu Lab A1»" }
     ]
@@ -513,6 +534,37 @@ test("sliced 3MF: the enqueue is refused until a named operator accepts the revi
 
   await h.launch.launch(task.id, {});
   assert.equal(h.startCalls.length, 1);
+  assert.equal(h.startCalls[0].plateGcodePath, "Metadata/plate_1.gcode");
+});
+
+test("HIGH-11: an operator's plate-2 export is started by ITS entry, not the adapter's plate_1", async () => {
+  const { task, artifact } = seedSliced3mfUpload("Metadata/plate_2.gcode");
+  h.artifacts.confirmAnalysisReview(artifact.id, { actor: "мастер" });
+  h.queue.enqueueExecutableArtifact(task.id);
+  bedClear("bambu-a1");
+
+  await h.launch.launch(task.id, {});
+  assert.equal(h.startCalls.length, 1);
+  assert.equal(h.startCalls[0].plateGcodePath, "Metadata/plate_2.gcode");
+});
+
+test("HIGH-11: a package whose analysis names no payload entry is refused before anything is reserved", async () => {
+  const { task, artifact } = seedUpload({
+    name: "legacy.gcode.3mf",
+    bytes: Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), A1_GCODE]),
+    detectedFormat: "3mf",
+    verdict: "review",
+    // What a pre-1.4.0 analysis recorded: a payload exists, nobody read it.
+    data: { threeMfClass: "sliced", hasGcodePayload: true, printerModel: "Bambu Lab A1" },
+    warnings: []
+  });
+  h.artifacts.confirmAnalysisReview(artifact.id, { actor: "мастер" });
+  h.queue.enqueueExecutableArtifact(task.id);
+  bedClear("bambu-a1");
+
+  await assert.rejects(h.launch.launch(task.id, {}), /не определён G-code/);
+  assert.equal(h.startCalls.length, 0);
+  assert.equal(h.store.repositories.printRuns.findActiveByTask(task.id), null, "nothing reserved");
 });
 
 test("an uploaded plate package is delivered as-is, never wrapped a second time", async () => {
@@ -529,16 +581,36 @@ test("an uploaded plate package is delivered as-is, never wrapped a second time"
   assert.equal(h.uploads[0].bytes.byteLength, artifact.sizeBytes);
 });
 
-test("the review acknowledgement lapses when the analysis is redone", () => {
+test("HIGH-05: re-analysing the SAME bytes with the SAME analyzer keeps the operator's answer", () => {
   const { task, artifact } = seedSliced3mfUpload();
   h.artifacts.confirmAnalysisReview(artifact.id, { actor: "мастер" });
 
-  // A fresh analysis of the same bytes: nobody has read THIS one.
+  // A fresh run of the same analyzer over the same bytes: the same judgement.
+  // Voiding the confirmation here is what fed the confirm → "stale" → re-analyse
+  // → confirmation lost loop.
   const repos = h.store.repositories;
   const previous = repos.artifactAnalyses.latestForArtifact(artifact.id)!;
   repos.artifactAnalyses.insert({
     ...previous,
     id: newId(ID_PREFIX.artifactAnalysis),
+    createdAt: "2026-08-15T12:00:00.000Z",
+    updatedAt: "2026-08-15T12:00:00.000Z"
+  });
+
+  const detail = h.queue.enqueueExecutableArtifact(task.id);
+  assert.equal(detail.task.state, "QUEUED");
+});
+
+test("the review acknowledgement lapses when a DIFFERENT analyzer version redoes the analysis", () => {
+  const { task, artifact } = seedSliced3mfUpload();
+  h.artifacts.confirmAnalysisReview(artifact.id, { actor: "мастер" });
+
+  const repos = h.store.repositories;
+  const previous = repos.artifactAnalyses.latestForArtifact(artifact.id)!;
+  repos.artifactAnalyses.insert({
+    ...previous,
+    id: newId(ID_PREFIX.artifactAnalysis),
+    analyzerVersion: "9.9.9",
     createdAt: "2026-08-15T12:00:00.000Z",
     updatedAt: "2026-08-15T12:00:00.000Z"
   });
@@ -820,3 +892,129 @@ test("queue readiness names the obstacle instead of reporting QUEUED as ready", 
   assert.ok(row.summary.length > 0, "and the readiness says what is in the way");
   assert.ok(row.primaryProblem, "with one named cause, not a bare «нет готового принтера»");
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stage 3 — what an assignment may claim (HIGH-12/13) and the FAILED retry (HIGH-16)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** A queued, launchable G-code task. */
+function queuedGcodeTask(): PrintTask {
+  const { task } = seedGcodeUpload();
+  return h.queue.enqueueExecutableArtifact(task.id).task;
+}
+
+function assignmentsOf(taskId: string) {
+  return h.store.repositories.assignments.listByTask(taskId);
+}
+
+test("HIGH-12: a manual launch on the printer a DRAFT plan suggested neither reuses the proposal nor needs the plan", async () => {
+  const task = queuedGcodeTask();
+  bedClear("bambu-a1");
+  const draft = h.scheduler.buildDraftPlan();
+  const proposal = draft.assignments.find((a) => a.assignment.taskId === task.id)?.assignment;
+  assert.ok(proposal, JSON.stringify(draft.unplaced));
+  assert.equal(proposal.printerId, "bambu-a1");
+  assert.equal(proposal.state, "PROPOSED");
+
+  // This used to reuse the draft's proposal and fail «подтвердите план перед запуском».
+  await h.launch.launch(task.id, { printerId: "bambu-a1" });
+  assert.equal(h.startCalls.length, 1);
+
+  const run = h.store.repositories.printRuns.findActiveByTask(task.id);
+  assert.ok(run);
+  const used = h.store.repositories.assignments.getById(run.assignmentId ?? "");
+  assert.equal(used?.source, "manual", "the operator's own placement ran");
+  assert.notEqual(used?.id, proposal.id);
+  // The draft's suggestion for this task is withdrawn, and the draft — now an
+  // answer to a question that changed — cannot be confirmed as it stands.
+  const withdrawn = h.store.repositories.assignments.getById(proposal.id);
+  assert.ok(withdrawn?.invalidatedAt);
+  assert.match(withdrawn?.invalidatedReason ?? "", /вручную/);
+  assert.throws(() => h.scheduler.confirmPlan(draft.plan.id), /План устарел/);
+});
+
+test("HIGH-12: placing a task by hand withdraws the draft's proposal for it; the draft must be recomputed", () => {
+  const task = queuedGcodeTask();
+  bedClear("bambu-a1");
+  const draft = h.scheduler.buildDraftPlan();
+  const proposal = draft.assignments.find((a) => a.assignment.taskId === task.id)?.assignment;
+  assert.ok(proposal);
+
+  const manual = h.queue.assignTask(task.id, "bambu-a1", { reason: "оператор решил сам" });
+  assert.equal(manual.source, "manual");
+  assert.ok(h.store.repositories.assignments.getById(proposal.id)?.invalidatedAt);
+  // The task is still queued work — only the draft's answer for it is gone.
+  assert.throws(() => h.scheduler.confirmPlan(draft.plan.id), /часть предложений снята/);
+  // The recompute treats the operator's placement as decided: the task is not
+  // proposed anywhere again, so confirming can never give it a second placement.
+  const fresh = h.scheduler.recomputeRecommendations("assignment_changed");
+  assert.notEqual(fresh.plan.id, draft.plan.id);
+  assert.ok(!fresh.assignments.some((a) => a.assignment.taskId === task.id && a.assignment.planId === fresh.plan.id));
+});
+
+test("HIGH-12: a DRAFT plan's proposal for another task does not take the printer from a manual start", async () => {
+  const proposed = queuedGcodeTask();
+  bedClear("bambu-a1");
+  const draft = h.scheduler.buildDraftPlan();
+  assert.equal(draft.assignments.find((a) => a.assignment.taskId === proposed.id)?.assignment.printerId, "bambu-a1");
+
+  const urgent = queuedGcodeTask();
+  await h.launch.launch(urgent.id, { printerId: "bambu-a1" });
+  assert.equal(h.startCalls.length, 1);
+  assert.ok(h.store.repositories.printRuns.findActiveByTask(urgent.id));
+});
+
+test("HIGH-13: an invalidated placement holds neither its task nor its printer", async () => {
+  const first = queuedGcodeTask();
+  const placed = h.queue.assignTask(first.id, "bambu-a1", { reason: "оператор" });
+  h.queue.invalidateAssignment(placed.id, "оператор передумал");
+  bedClear("bambu-a1");
+
+  // Another task may take the printer the withdrawn placement named…
+  const other = queuedGcodeTask();
+  await h.launch.launch(other.id, { printerId: "bambu-a1" });
+  assert.equal(h.startCalls.length, 1);
+  h.lifecycle.completeRun(h.store.repositories.printRuns.findActiveByTask(other.id)!.id, "SUCCEEDED");
+  bedClear("bambu-a1");
+
+  // …and the task itself can be placed again (it used to be «уже назначено»).
+  const again = h.queue.assignTask(first.id, "bambu-a1", { reason: "снова" });
+  assert.notEqual(again.id, placed.id);
+  assert.equal(assignmentsOf(first.id).filter((a) => a.invalidatedAt === null && a.state === "PROPOSED").length, 1);
+});
+
+test("HIGH-13: a confirmed or manual placement still holds the printer — only advice and history stopped holding it", () => {
+  const first = queuedGcodeTask();
+  h.queue.assignTask(first.id, "bambu-a1", { reason: "оператор" });
+  const second = queuedGcodeTask();
+  assert.throws(() => h.queue.assignTask(second.id, "bambu-a1"), /уже занят назначением/);
+  assert.throws(() => h.queue.assignTask(first.id, "bambu-a1"), /уже назначено/);
+});
+
+test("HIGH-16: a FAILED print retried goes back INTO the queue, at the tail, and can be launched again", async () => {
+  const task = queuedGcodeTask();
+  const waiting = queuedGcodeTask();
+  bedClear("bambu-a1");
+  await h.launch.launch(task.id, { printerId: "bambu-a1" });
+  const run = h.store.repositories.printRuns.findActiveByTask(task.id)!;
+  h.lifecycle.completeRun(run.id, "FAILED", { reason: "отлип от стола" });
+  assert.equal(h.store.repositories.tasks.getById(task.id)?.state, "FAILED");
+  assert.equal(h.store.repositories.queue.findByTaskId(task.id)?.state, "RELEASED");
+
+  const retried = h.queue.releaseTask(task.id);
+  assert.equal(retried.state, "QUEUED");
+  const entry = h.store.repositories.queue.findByTaskId(task.id)!;
+  assert.equal(entry.state, "WAITING", "a queued task is IN the queue");
+  const waitingEntry = h.store.repositories.queue.findByTaskId(waiting.id)!;
+  assert.ok(entry.position > waitingEntry.position, "the retry joins the tail");
+  assert.ok(h.queue.listOpenQueue().some((row) => row.task.id === task.id));
+  // The failed attempt stays in history.
+  assert.equal(h.store.repositories.printRuns.getById(run.id)?.state, "FAILED");
+
+  // The failed part is still on the plate: clear it, and the retry launches.
+  bedClear("bambu-a1");
+  await h.launch.launch(task.id, { printerId: "bambu-a1" });
+  assert.equal(h.startCalls.length, 2);
+  assert.notEqual(h.store.repositories.printRuns.findActiveByTask(task.id)?.id, run.id);
+});
+

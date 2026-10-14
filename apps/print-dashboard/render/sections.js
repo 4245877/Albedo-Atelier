@@ -672,15 +672,21 @@ export function renderAutomations(state) {
     ? `${on} из ${state.automations.length} активны`
     : "не настроены";
   $("#auto-body").innerHTML = `
-    ${state.automations.map((a) => `
+    ${state.automations.map((a) => {
+      // Правило, которое сервер не даст включить (выключено при развёртывании),
+      // рисуется неактивным — с причиной, а не тостом об отказе после клика.
+      const locked = !a.on && a.locked;
+      return `
       <div class="rule">
         <button class="toggle ${a.on ? "on" : ""}" data-act="rule" data-id="${a.id}"
-          role="switch" aria-checked="${a.on}" aria-label="${esc(a.name)}"></button>
+          role="switch" aria-checked="${a.on}" aria-label="${esc(a.name)}"${locked ? ` disabled title="${esc(a.locked)}"` : ""}></button>
         <div class="grow">
           <div class="row-title">${esc(a.name)}</div>
           <div class="row-sub">${esc(a.desc)}</div>
+          ${locked ? `<div class="row-sub">${icon("lock")} ${esc(a.locked)}</div>` : ""}
         </div>
-      </div>`).join("") || `<ul class="row-list">${emptyRow("Правила автоматизации ещё не установлены — движок автоматизаций пока не подключён, Владыка")}</ul>`}
+      </div>`;
+    }).join("") || `<ul class="row-list">${emptyRow("Правила автоматизации ещё не установлены — движок автоматизаций пока не подключён, Владыка")}</ul>`}
     <div class="row">
       <span class="row-icon">${icon("clock")}</span>
       <div class="grow"><div class="row-sub">Последний запуск: <b>${esc(state.automationLastRun || "нет данных")}</b></div></div>
@@ -730,8 +736,9 @@ export function renderMaintenance(state) {
 const QUICK = [
   // Одно действие, а не два: «добавить задание» и «загрузить файл» вели в разные
   // места и создавали два разных жизненных цикла — второй без артефакта, хеша и
-  // анализа. Задание теперь рождается ровно одним путём.
-  ["upload", "Добавить задание — загрузить файл", { goto: "uploads" }],
+  // анализа. Задание теперь рождается ровно одним путём — «Новой печатью»:
+  // файл → принтер → рецепт → нарезка → запуск.
+  ["plus", "Новая печать", { goto: "newprint" }],
   ["printer", "Принять принтер", { goto: "hardware" }],
   ["gear", "Настройки", { act: "settings" }],
 ];

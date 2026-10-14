@@ -16,9 +16,13 @@ import {
   type Dimensions
 } from "../../domain/scheduling/compatibility";
 import { OPERATION_LABELS } from "../../domain/operations/states";
+import { resolveBedOccupancy } from "../../domain/print/bedOccupancy";
 import { OPEN_OPERATION_STATES } from "../../domain/operations/types";
 import { executableKindOf } from "../../domain/print/executable";
-import { readModelScale, type ResolvedModelScale } from "../../domain/print/modelScale";
+import { readModelScale, resolveSliceScale, type ResolvedModelScale } from "../../domain/print/modelScale";
+import { evaluateSliceScale, readPinnedSliceScale, type SliceScaleStatus } from "../../domain/slicing/sliceScaleProvenance";
+import { verifySlicedScale } from "../../domain/slicing/scaleVerification";
+import { readSourceGeometry } from "../slicing/sourceGeometry";
 import { selectedPlate, type PlateView } from "../../domain/print/plateSelection";
 import { resolveUnits } from "../../domain/shared/units";
 import { readFilament, readMachine } from "../../domain/slicing/orcaProfile";
@@ -130,8 +134,11 @@ export class EvidenceResolver {
         : artifact.kind !== "gcode"
       : typeof task.metadata.file !== "string" || task.metadata.file.trim() === "";
 
-    const variant = this.readyVariantFor(task.id, printer);
+    const variant = this.executableVariantFor(task, printer);
     const profileSet = variant ? repos.profileSets.getById(variant.profileSetId) : null;
+    // Was this slice cut at the scale the source model is confirmed at NOW? A
+    // G-code's millimetres are only as true as the unit the STL was sliced in.
+    const sliceScale = variant ? this.sliceScaleOf(variant) : null;
     const machineFields = profileSet ? this.machineFieldsOf(profileSet) : null;
     const filamentFields = profileSet ? this.filamentFieldsOf(profileSet) : null;
     // A ready G-code file's readiness proof (the night gate uses it in place of a
@@ -176,6 +183,7 @@ export class EvidenceResolver {
       configBed !== null && profileDerived !== null && dimsDiffer(configBed, profileDerived);
 
     const bed = repos.bedCycles.findOpenByPrinter(printer.id);
+    const latestBed = bed ?? repos.bedCycles.latestByPrinter(printer.id);
 
     const taskInput: CompatibilityTaskInput = {
       id: task.id,
@@ -185,7 +193,10 @@ export class EvidenceResolver {
       dimensions,
       // No dimensions at all is already reported as `dimensions_unknown`; the
       // scale flag only matters when there ARE numbers, so it defaults to true.
-      dimensionsScaleKnown: readDimensions?.scaleKnown ?? true,
+      // A slice cut from an unconfirmed STL is not proven millimetres just
+      // because G-code is (HIGH-07): its provenance decides.
+      dimensionsScaleKnown:
+        (readDimensions?.scaleKnown ?? true) && (sliceScale === null || sliceScale.known || sliceScale.mismatch),
       placement: readPlacement(analysis),
       requiredNozzleMm,
       gcodeFlavor,
@@ -208,7 +219,7 @@ export class EvidenceResolver {
       profileSetApproved: profileSet ? profileSet.approved : null,
       profileSetBlocked: profileSet ? profileSet.validation === "blocked" : false,
       runtimeAvailable: this.ctx.config.runtimeAvailable,
-      bedCycle: this.bedStateFor(printer, bed ? bed.state : null),
+      bedCycle: bedStateFor(printer, latestBed),
       heldByUnstartedRun: this.heldByUnstartedRun(printer.id),
       buildVolumeConflict,
       telemetryAgeMs: printer.telemetryAgeMs,
@@ -219,6 +230,7 @@ export class EvidenceResolver {
       // resolver fills — the refusal is not a placeholder for it, it is the
       // correct answer until one exists.
       amsSlotMapping: null,
+      sliceScaleMismatch: sliceScale?.mismatch ? sliceScale.reason : null,
       sliceEtaS: variant?.orcaEtaS ?? null,
       gcodeEtaS: analysis?.estimatedDurationS ?? null
     };
@@ -272,29 +284,6 @@ export class EvidenceResolver {
   }
 
   /**
-   * The bed occupancy to reason with. A tracked cycle is authoritative; without
-   * one we infer honestly from live telemetry instead of assuming CLEAR — a printer
-   * that is physically printing (a legacy start outside the model) reads `RUNNING`,
-   * and a printer we cannot observe reads `UNKNOWN`, so neither is silently treated
-   * as a free bed.
-   */
-  private bedStateFor(printer: SchedulerPrinterRef, trackedState: BedCycleState | null): BedCycleState {
-    if (trackedState !== null) return trackedState;
-    if (printer.status === "printing" || printer.status === "paused") return "RUNNING";
-    // A canonical run holding the printer means the bed is not free even when
-    // telemetry isn't reporting a print: a fail-closed UNKNOWN run is an UNKNOWN bed
-    // (a human reconciles it), a PENDING/RUNNING/PAUSED run is a busy (RUNNING) bed —
-    // either way never silently inferred CLEAR below.
-    if (heldByActiveRun(printer.activeRunState)) {
-      return printer.activeRunState === "UNKNOWN" ? "UNKNOWN" : "RUNNING";
-    }
-    const staleMs = this.ctx.compatibilityConfig.telemetryStaleMs;
-    const fresh = printer.telemetryAgeMs !== null && printer.telemetryAgeMs <= staleMs;
-    if (printer.online && fresh && printer.status === "idle") return "CLEAR";
-    return "UNKNOWN";
-  }
-
-  /**
    * Whether a dispatched-but-never-observed run is holding this printer.
    *
    * Read from the same authoritative `findActiveByPrinter` query the dispatch
@@ -323,6 +312,50 @@ export class EvidenceResolver {
     // `list()` is newest-first by created_at; prefer the most recent approval.
     sets.sort((a, b) => (b.approvedAt ?? b.updatedAt).localeCompare(a.approvedAt ?? a.updatedAt));
     return sets[0] ?? null;
+  }
+
+  /**
+   * **The slice whose output the dispatch would send — and only that one.**
+   *
+   * A task bound to a slice (`task.sliceVariantId`, set by promotion) is judged
+   * by exactly that variant: its profile set, ETA, box and scale. This used to
+   * pick "the newest ready variant for this printer", so after a second slice
+   * the preview, the planner and the eligibility check evaluated a file nobody
+   * was going to send while the dispatch sent the promoted one (HIGH-08). A
+   * bound variant that is no longer ready yields no slice at all — never a
+   * stand-in. Only an UNbound task (a draft whose slices are still being
+   * compared) falls back to the best ready variant for this printer.
+   */
+  private executableVariantFor(task: PrintTask, printer: SchedulerPrinterRef): SliceVariant | null {
+    if (task.sliceVariantId) {
+      const bound = this.ctx.store.repositories.sliceVariants.getById(task.sliceVariantId);
+      return bound && bound.state === "ready" && bound.outputArtifactId !== null ? bound : null;
+    }
+    return this.readyVariantFor(task.id, printer);
+  }
+
+  /** The slice's scale provenance against its source model as it stands now. */
+  private sliceScaleOf(variant: SliceVariant): SliceScaleStatus {
+    const repos = this.ctx.store.repositories;
+    const source = repos.artifacts.getById(variant.sourceArtifactId);
+    if (!source) {
+      return { known: false, mismatch: false, reason: "исходная модель недоступна — масштаб нарезки нельзя проверить" };
+    }
+    const sourceAnalysis = repos.artifactAnalyses.latestForArtifact(source.id);
+    const geometry = readSourceGeometry(sourceAnalysis);
+    const current = resolveSliceScale(geometry.fileDeclaresUnit, readModelScale(source));
+    const pinned = readPinnedSliceScale(variant);
+    let legacyBoxMatches: boolean | null = null;
+    if (!pinned && Math.abs(current.factor - 1) > 1e-9 && geometry.sizeRaw && geometry.plateCount <= 1) {
+      const produced = readSliceDims(variant.dimensions)?.dimensions ?? null;
+      const expected = {
+        x: geometry.sizeRaw.x * current.factor,
+        y: geometry.sizeRaw.y * current.factor,
+        z: geometry.sizeRaw.z * current.factor
+      };
+      legacyBoxMatches = produced ? verifySlicedScale(expected, produced).ok : null;
+    }
+    return evaluateSliceScale({ pinned, current, legacyBoxMatches });
   }
 
   /**
@@ -398,6 +431,29 @@ export class EvidenceResolver {
 }
 
 // ── Free helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * The bed occupancy to reason with — the farm's one rule
+ * ({@link resolveBedOccupancy}), fed with the newest tracked cycle.
+ *
+ * There used to be a sixth rule here: an online, fresh, `idle` printer with no
+ * open cycle read `CLEAR`. That is the inference the bed model exists to forbid —
+ * `idle` is the state of the printer's *program*, and a printer that has just
+ * finished a part, or printed one started from its own screen, reports exactly
+ * that while the part stands on the plate. A bed is now `CLEAR` only when a
+ * recorded clearance says so.
+ */
+export function bedStateFor(
+  printer: Pick<SchedulerPrinterRef, "status" | "online" | "activeRunState">,
+  latestCycle: Pick<BedCycle, "state"> | null
+): BedCycleState {
+  return resolveBedOccupancy({
+    latestCycle,
+    liveStatus: printer.status ?? null,
+    online: printer.online,
+    activeRunState: printer.activeRunState ?? null
+  }).state;
+}
 
 /**
  * Whether a canonical run in this state holds the printer — i.e. it is one of the

@@ -8,7 +8,8 @@ import {
   parseMoonrakerJobFilament,
   parseMoonrakerNozzleDiameter,
   readMoonrakerLightState,
-  readMoonrakerJobMetadata
+  readMoonrakerJobMetadata,
+  resolveMoonrakerState
 } from "./moonraker";
 
 /*
@@ -219,4 +220,35 @@ test("the empty answer Moonraker's own route gives on this device carries nothin
   });
 
   assert.deepEqual(job, { filament: null, estimatedTimeSec: null, slicerFilamentG: null });
+});
+
+/*
+ * Klipper readiness (webhooks.state) outranks the job state: a firmware in
+ * `shutdown` keeps `print_stats.state = standby`, which used to read as an idle,
+ * startable printer.
+ */
+
+test("Klipper in shutdown is an error, whatever print_stats still says", () => {
+  const r = resolveMoonrakerState(
+    { state: "standby" },
+    { state: "shutdown", state_message: "MCU 'mcu' shutdown: Timer too close" }
+  );
+  assert.equal(r.status, "error");
+  assert.equal(r.stateText, "klippy:shutdown");
+  assert.match(r.stateMessage ?? "", /Timer too close/);
+});
+
+test("Klipper error and startup are never idle", () => {
+  assert.equal(resolveMoonrakerState({ state: "standby" }, { state: "error" }).status, "error");
+  assert.equal(resolveMoonrakerState({ state: "standby" }, { state: "startup" }).status, "unknown");
+});
+
+test("a print in progress when Klipper shuts down is reported as an error, not as printing", () => {
+  assert.equal(resolveMoonrakerState({ state: "printing" }, { state: "shutdown" }).status, "error");
+});
+
+test("ready Klipper lets the job state speak; a report without webhooks keeps the old behaviour", () => {
+  assert.equal(resolveMoonrakerState({ state: "standby" }, { state: "ready" }).status, "idle");
+  assert.equal(resolveMoonrakerState({ state: "printing" }, { state: "ready" }).status, "printing");
+  assert.equal(resolveMoonrakerState({ state: "complete" }, {}).stateText, "complete");
 });

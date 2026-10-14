@@ -1,4 +1,5 @@
-import { ValidationError } from "../../core/errors";
+import { JobError, ValidationError } from "../../core/errors";
+import { ACTIVE_RUN_STATES } from "../../domain/print/types";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import {
   ASSIGNMENT_TRANSITIONS,
@@ -170,27 +171,27 @@ export class PrintQueueContext {
     return saved;
   }
 
-  /** Cancels/releases an assignment and returns its bed to a safe state. */
+  /**
+   * Withdraws an assignment that has **no live run**, and leaves its bed in a
+   * state nobody has to trust.
+   *
+   * This used to mark a RUNNING/PAUSED run `CANCELLED` itself — a print that was
+   * still running on the machine, logically ended by a database write — and send
+   * the reserved bed back to `CLEAR` while the start command might be in flight.
+   * Neither is a thing a queue edit may decide. A live run is refused here
+   * outright (stopping it is a physical command, and the run follows from what
+   * the printer then reports); a bed is only ever moved *away* from free.
+   */
   unwindAssignment(assignment: Assignment, to: "CANCELLED" | "RELEASED", actor?: string): void {
     const repos = this.store.repositories;
-    // Cancel any live run first so the run's own terminal invariant holds.
-    for (const run of repos.printRuns.listByTask(assignment.taskId)) {
-      if (run.assignmentId === assignment.id && (run.state === "RUNNING" || run.state === "PAUSED")) {
-        const saved = repos.printRuns.update({
-          ...run,
-          state: "CANCELLED",
-          endedAt: this.nowIso(),
-          updatedAt: this.nowIso()
-        });
-        this.recordAudit({
-          entityType: "print_run",
-          entityId: saved.id,
-          action: "cancelled",
-          from: run.state,
-          to: "CANCELLED",
-          actor
-        });
-      }
+    const live = repos.printRuns
+      .listByTask(assignment.taskId)
+      .find((run) => run.assignmentId === assignment.id && ACTIVE_RUN_STATES.includes(run.state));
+    if (live) {
+      throw new JobError(
+        `Назначение ${assignment.id} исполняется (печать ${live.id}, ${live.state}) — снять его можно только после того, как принтер подтвердит исход`,
+        { assignmentId: assignment.id, runId: live.id, runState: live.state }
+      );
     }
     this.transitionAssignment(assignment, to, actor);
 
@@ -208,9 +209,12 @@ export class PrintQueueContext {
     if (assignment.bedCycleId) {
       const bed = repos.bedCycles.getById(assignment.bedCycleId);
       if (bed) {
-        // A reserved bed had nothing printed → back to CLEAR; a running/awaiting
-        // bed may hold a part → AWAITING_CLEARANCE for the operator.
-        if (bed.state === "RESERVED") this.transitionBed(bed, "CLEAR", actor);
+        // A reservation is only made inside the dispatch transaction, together
+        // with the run that owns it — so a RESERVED bed with no live run left is a
+        // leftover whose physical outcome nobody recorded. It goes to UNKNOWN for
+        // a person to confirm, never straight back to CLEAR. A bed that ran may
+        // hold a part → AWAITING_CLEARANCE.
+        if (bed.state === "RESERVED") this.transitionBed(bed, "UNKNOWN", actor);
         else if (bed.state === "RUNNING") this.transitionBed(bed, "AWAITING_CLEARANCE", actor);
       }
     }

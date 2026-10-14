@@ -11,6 +11,9 @@ import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { Artifact, ArtifactAnalysis, PrintTask } from "../../domain/print/types";
 import type { ProfileRevision, ProfileSet, ProfileType, SliceVariant } from "../../domain/slicing/types";
 import { openPrintQueueStore } from "../../infra/db/store";
+import { establishClearBed } from "../dispatch/testkit/bed";
+import { declareSourceUnits } from "../slicing/testkit/source";
+import type { FeedTray } from "../../domain/printers/feedPlan";
 import type { PrinterConfig } from "../../infra/printers/config";
 import { buildDeviceFileName, type PrinterFilesListing } from "../../infra/printers/files";
 import { ArtifactStorage } from "../../infra/storage/artifactStorage";
@@ -103,6 +106,12 @@ interface Knobs {
   faults: Record<string, PrinterFault[]>;
   /** Media readability per printer; null = the device does not report it. */
   mediaPresent: Record<string, boolean | null>;
+  /**
+   * What each printer reports it can feed from (Bambu AMS / external spool).
+   * Absent → an external spool holding the printer's `material` knob, which is
+   * what this farm's A1 Combo reports today.
+   */
+  feed: Record<string, { hasAms: boolean | null; trays: FeedTray[] | null } | null>;
 }
 
 interface Harness {
@@ -131,8 +140,14 @@ afterEach(() => {
   fs.rmSync(TMP, { recursive: true, force: true });
 });
 
-async function makeHarness(tmp: string): Promise<Harness> {
+async function makeHarness(tmp: string, options: { untrackedBeds?: string[] } = {}): Promise<Harness> {
   const store = openPrintQueueStore(":memory:");
+  // Every harness printer starts with a plate an operator confirmed empty — the
+  // only evidence of a free bed (untracked is UNKNOWN and the gate refuses it) —
+  // unless a test is about the plate nobody has confirmed yet.
+  for (const id of ["bambu-a1", "k2"]) {
+    if (!options.untrackedBeds?.includes(id)) establishClearBed(store, id);
+  }
   const storage = new ArtifactStorage({ root: path.join(tmp, "artifacts") });
   await storage.init();
 
@@ -149,7 +164,8 @@ async function makeHarness(tmp: string): Promise<Harness> {
     classify: "unknown",
     faults: {},
     telemetryAgeMs: {},
-    mediaPresent: {}
+    mediaPresent: {},
+    feed: {}
   };
 
   const queue = new PrintQueueService(store, {
@@ -218,7 +234,14 @@ async function makeHarness(tmp: string): Promise<Harness> {
     nightWindow: "21:30 – 07:30",
     farmTimeZone: "UTC",
     compatibility: { telemetryStaleMs: 120_000 },
-    unknownEtaAssumptionS: 4 * 3600
+    unknownEtaAssumptionS: 4 * 3600,
+    feedStateOf: (id: string) =>
+      id in knobs.feed
+        ? knobs.feed[id]
+        : {
+            hasAms: false,
+            trays: [{ trayId: 254, external: true, material: knobs.material[id] ?? null, color: null, active: true }]
+          }
   };
   const scheduler = new SchedulerService(store, refs, schedulerConfig);
   const eligibility = (): EligibilityQueries => {
@@ -236,6 +259,7 @@ async function makeHarness(tmp: string): Promise<Harness> {
     startPhysical: async (printerId, file) => {
       if (knobs.failStart) throw new Error(knobs.failStart);
       startCalls.push({ printerId, file });
+      return { confirmed: true };
     },
     classifyError: () => knobs.classify,
     listFiles,
@@ -334,6 +358,8 @@ function seedQueuedBambuJob(targetPrinterId = "bambu-a1"): { task: PrintTask; va
   };
   repos.artifacts.insert(source);
   repos.artifacts.insert(output);
+  // The source 3MF declares its unit — the slice's millimetres are proven.
+  declareSourceUnits(h.store, source.id);
 
   const analysis: ArtifactAnalysis = {
     id: newId(ID_PREFIX.artifactAnalysis),
@@ -624,10 +650,28 @@ test("confirming a bed with no tracked history at all establishes a CLEAR cycle"
   assert.equal(cycles[0].metadata.established, true, "recorded as an assertion, not a print result");
 });
 
-test("an online, idle printer with no tracked cycle needs no checkbox", () => {
-  // Documents the existing inference (`evidence.bedStateFor`): fresh telemetry
-  // reporting idle reads as CLEAR. Asking anyway on every launch is what trains
-  // operators to click through safety prompts without reading them.
+test("CRITICAL-02: an idle printer whose plate nobody ever confirmed asks — idle is not empty", async () => {
+  // This used to document the opposite inference: fresh telemetry reporting
+  // `idle` read as CLEAR. `idle` is the state of the printer's program; a part
+  // finished an hour ago, or printed from the printer's own screen, sits on the
+  // plate of an idle printer just the same.
+  h = await makeHarness(TMP, { untrackedBeds: ["bambu-a1"] });
+  const { task } = seedQueuedBambuJob();
+  const preview = h.launch.preview(task.id, "bambu-a1");
+  const bed = preview.confirmations.find((c) => c.code === "bed_clear");
+  assert.ok(bed, "the operator is asked to look at the plate");
+  assert.match(bed.detail, /не знает, что сейчас на столе/);
+  assert.equal(preview.state, "needs_confirmation");
+
+  await assert.rejects(() => h.launch.launch(task.id, { printerId: "bambu-a1" }));
+  assert.deepEqual(h.startCalls, [], "nothing starts on an unconfirmed plate");
+
+  // The tick records a real CLEAR cycle, and the launch goes through.
+  await h.launch.launch(task.id, { printerId: "bambu-a1", confirmations: ["bed_clear"] });
+  assert.equal(h.startCalls.length, 1);
+});
+
+test("a plate already confirmed clear needs no checkbox — confirmations are not asked for nothing", () => {
   const { task } = seedQueuedBambuJob();
   const preview = h.launch.preview(task.id);
   assert.deepEqual(preview.confirmations, []);
@@ -1079,4 +1123,59 @@ test("the preview says which problems a human may accept, and which they may not
       assert.equal(problem.overridable, false, `${problem.code} must never be waivable`);
     }
   }
+});
+
+// ── Automatic mode (the automatic queue's launch) ───────────────────────────
+
+test("auto mode refuses confirmations and overrides outright — only a person gives them", async () => {
+  const { task } = seedQueuedBambuJob("k2");
+  h.knobs.material.k2 = "PETG";
+  bedClear("k2");
+  h.queue.setTaskScheduling(task.id, { unattendedAllowed: true });
+  await assert.rejects(() => h.launch.launch(task.id, { mode: "auto", confirmations: ["bed_clear"] }), ValidationError);
+  await assert.rejects(
+    () => h.launch.launch(task.id, { mode: "auto", override: { codes: ["MATERIAL_UNKNOWN"], reason: "я уверен" } }),
+    ValidationError
+  );
+  assert.deepEqual(h.startCalls, [], "nothing was sent");
+});
+
+test("auto mode: an unrecorded bed stays a refusal — the tick a person would give is not available", async () => {
+  h = await makeHarness(TMP, { untrackedBeds: ["k2"] });
+  const { task } = seedQueuedBambuJob("k2");
+  h.knobs.material.k2 = "PETG";
+  h.queue.setTaskScheduling(task.id, { unattendedAllowed: true });
+
+  const manual = h.launch.preview(task.id, "k2");
+  const manualK2 = manual.candidates.find((c) => c.printerId === "k2")!;
+  assert.equal(manualK2.eligible, true, "attended: the bed is a confirmation, not a wall");
+  assert.ok(manual.confirmations.some((c) => c.code === "bed_clear"));
+
+  const auto = h.launch.preview(task.id, "k2", { mode: "auto" });
+  const autoK2 = auto.candidates.find((c) => c.printerId === "k2")!;
+  assert.equal(autoK2.eligible, false, "automatic: nobody can tick it");
+  assert.ok(autoK2.blockers.some((b) => b.code === "BED_STATE_UNKNOWN"));
+  await assert.rejects(() => h.launch.launch(task.id, { printerId: "k2", mode: "auto" }), JobError);
+  assert.equal(h.store.repositories.bedCycles.latestByPrinter("k2"), null, "no clearance was recorded on anyone's behalf");
+  assert.deepEqual(h.startCalls, []);
+});
+
+test("auto mode: a fully recorded job starts through the same path, and the run says it was automatic", async () => {
+  const { task } = seedQueuedBambuJob("k2");
+  h.knobs.material.k2 = "PETG";
+  bedClear("k2");
+  h.queue.setTaskScheduling(task.id, { unattendedAllowed: true });
+  const outcome = await h.launch.launch(task.id, { printerId: "k2", mode: "auto", actor: "auto-queue" });
+  assert.equal(h.startCalls.length, 1);
+  const run = h.store.repositories.printRuns.getById(outcome.run.runId)!;
+  assert.equal(run.metadata.mode, "auto");
+});
+
+test("auto mode: a job without the permission to run unattended is refused before anything moves", async () => {
+  const { task } = seedQueuedBambuJob("k2");
+  h.knobs.material.k2 = "PETG";
+  bedClear("k2");
+  await assert.rejects(() => h.launch.launch(task.id, { printerId: "k2", mode: "auto" }), JobError);
+  assert.deepEqual(h.uploads, [], "no file was delivered for a refused automatic start");
+  assert.deepEqual(h.startCalls, []);
 });

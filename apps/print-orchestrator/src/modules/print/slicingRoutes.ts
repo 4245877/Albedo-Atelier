@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 
 import type { PrintServices } from "../../bootstrap/createRuntime";
 import type { CreateProfileSetInput } from "../../app/slicing/profileService";
-import type { CreateSliceInput } from "../../app/slicing/sliceService";
+import type { CreateSliceBatchInput, CreateSliceInput } from "../../app/slicing/sliceService";
 import { ValidationError } from "../../core/errors";
 import type { ProfileType } from "../../domain/slicing/types";
 
@@ -27,14 +27,18 @@ import type { ProfileType } from "../../domain/slicing/types";
  * Actions (guarded):
  *   POST /slicing/presets/import        (re)import the vendored catalog → profile revisions
  *   POST /slicing/profile-sets          create a set                body: { name, machine, process, filament, printer?/printerClass? }
- *   POST /slicing/profile-sets/:id/approve  approve (refused if blockers)
+ *   POST /slicing/profile-sets/:id/approve  approve (refused if blockers or a member was superseded)
+ *   POST /slicing/profile-sets/:id/successor  new unapproved set on the members' current revisions
  *   POST /slicing/slice                 start slicing               body: { artifactId, profileSetId, targetPrinterId?, force? }
  *   POST /slicing/variants/:id/rerun    re-run a finished variant
  *   POST /slicing/variants/:id/promote  hand off a ready variant's output → queued print task
+ *   POST /slicing/variants/:id/reprint  a NEW print from a ready variant (its own task closed)  body: { requestId? }
+ *   POST /slicing/batches               slice several models with one recipe  body: { artifactIds[], profileSetId, targetPrinterId? }
+ *   POST /slicing/batches/promote       promote several ready variants, each on its own  body: { variantIds[] }
  */
 export function registerSlicingRoutes(
   app: FastifyInstance,
-  services: Pick<PrintServices, "printQueue" | "slicing">
+  services: Pick<PrintServices, "printQueue" | "slicing" | "history">
 ): void {
   // ── Runtime & profiles ─────────────────────────────────────────────────────
 
@@ -64,6 +68,11 @@ export function registerSlicingRoutes(
   app.post<{ Params: { id: string } }>("/slicing/profile-sets/:id/approve", async (request) => ({
     ok: true,
     set: services.slicing.profiles.approveSet(request.params.id)
+  }));
+
+  app.post<{ Params: { id: string } }>("/slicing/profile-sets/:id/successor", async (request) => ({
+    ok: true,
+    set: services.slicing.profiles.createSuccessorSet(request.params.id)
   }));
 
   // ── Presets import ─────────────────────────────────────────────────────────
@@ -109,6 +118,53 @@ export function registerSlicingRoutes(
     ok: true,
     task: services.printQueue.promoteSliceVariant(request.params.id, shapePromote(request.body))
   }));
+
+  // A NEW print from a ready variant whose own task is closed or was promoted onto
+  // another slice — the verified G-code reused, never re-sliced. A variant its own
+  // draft can still take is refused here with `promote_instead`.
+  app.post<{ Params: { id: string }; Body: { requestId?: unknown } }>(
+    "/slicing/variants/:id/reprint",
+    async (request) => {
+      const result = await services.history.reprintVariant(request.params.id, {
+        requestId: optionalString(request.body?.requestId) ?? null
+      });
+      return { ok: true, task: result.detail, route: result.route, deduplicated: result.deduplicated };
+    }
+  );
+
+  // ── Batches: several models, one recipe ────────────────────────────────────
+  // Each model is sliced exactly as POST /slicing/slice would; per-model refusals
+  // come back as rows, a recipe problem refuses the whole request.
+  app.post<{ Body: unknown }>("/slicing/batches", async (request) => ({
+    ok: true,
+    batch: await services.slicing.slices.createBatch(shapeCreateBatch(request.body))
+  }));
+
+  // «Поставить готовые в очередь»: each variant promoted on its own.
+  app.post<{ Body: unknown }>("/slicing/batches/promote", async (request) => ({
+    ok: true,
+    items: services.printQueue.promoteSliceVariants(shapeVariantIds(request.body))
+  }));
+}
+
+function shapeCreateBatch(body: unknown): CreateSliceBatchInput {
+  const src = (body ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(src.artifactIds)) throw new ValidationError("Поле «artifactIds» должно быть списком");
+  const input: CreateSliceBatchInput = {
+    artifactIds: src.artifactIds.filter((id): id is string => typeof id === "string"),
+    profileSetId: requireString(src.profileSetId ?? src.profileSet, "profileSetId")
+  };
+  const printerId = optionalString(src.targetPrinterId ?? src.printerId);
+  if (printerId) input.targetPrinterId = printerId;
+  const printerClass = optionalString(src.targetPrinterClass ?? src.printerClass);
+  if (printerClass) input.targetPrinterClass = printerClass;
+  return input;
+}
+
+function shapeVariantIds(body: unknown): string[] {
+  const src = (body ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(src.variantIds)) throw new ValidationError("Поле «variantIds» должно быть списком");
+  return src.variantIds.filter((id): id is string => typeof id === "string");
 }
 
 /** The optional on-device file override for a slice handoff. */
@@ -160,5 +216,8 @@ function shapeCreateSlice(body: unknown): CreateSliceInput {
   const printerClass = optionalString(src.targetPrinterClass ?? src.printerClass);
   if (printerClass) input.targetPrinterClass = printerClass;
   if (src.force === true) input.force = true;
+  // «Подготовить заново» from history names the print it repeats (lineage only).
+  const previousTaskId = optionalString(src.previousTaskId);
+  if (previousTaskId) input.previousTaskId = previousTaskId;
   return input;
 }

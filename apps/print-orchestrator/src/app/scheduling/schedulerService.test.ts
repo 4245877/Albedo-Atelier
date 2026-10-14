@@ -10,6 +10,8 @@ import type {
 } from "../../domain/print/types";
 import type { ProfileRevision, ProfileSet, SliceVariant } from "../../domain/slicing/types";
 import { openPrintQueueStore } from "../../infra/db/store";
+import { establishClearBed } from "../dispatch/testkit/bed";
+import { declareSourceUnits } from "../slicing/testkit/source";
 import {
   SchedulerService,
   type SchedulerConfig,
@@ -40,6 +42,11 @@ function makeService(
   printers: SchedulerPrinterRef[],
   cfg: SchedulerConfig = config()
 ): SchedulerService {
+  // Each printer's plate was confirmed empty by an operator — the only evidence
+  // of a free bed. (Never once, and only if the test has not recorded its own.)
+  for (const p of printers) {
+    if (!db.repositories.bedCycles.latestByPrinter(p.id)) establishClearBed(db, p.id, new Date(NOW.getTime() - 60_000));
+  }
   return new SchedulerService(db, () => printers, cfg);
 }
 
@@ -217,6 +224,8 @@ function insertSlicedTask(
   const output: Artifact = { ...source, id: `art_out_${id}`, kind: "gcode", name: `${id}.gcode` };
   repos.artifacts.insert(source);
   repos.artifacts.insert(output);
+  // The source's unit is known (a 3MF declaring it): the slice's size is proven.
+  declareSourceUnits(db, source.id);
 
   const machine = revision(`m_${id}`, "machine", {
     nozzle_diameter: "0.4",

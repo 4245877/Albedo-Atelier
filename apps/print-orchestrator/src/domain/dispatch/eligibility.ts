@@ -26,6 +26,7 @@
  */
 
 import { gcodeFlavorFitsProtocol } from "../shared/gcodeFlavor";
+import type { FeedPlan, FeedProblemCode } from "../printers/feedPlan";
 import { normalizePrinterModel, printerModelsMatchStrict } from "../slicing/printerModel";
 import {
   evaluateCompatibility,
@@ -47,7 +48,27 @@ import {
   type ReasonCode
 } from "./reasons";
 
-export type DispatchMode = "manual" | "night";
+/**
+ * Who is standing behind the start.
+ *
+ *  - `manual` — an operator pressed «Запустить» and can answer the open
+ *    questions (tick «стол свободен», confirm the material, accept a review);
+ *  - `night` — the operator confirmed a night candidate and is leaving: the
+ *    print runs unattended inside the night window;
+ *  - `auto` — the automatic queue started it: nobody pressed anything for THIS
+ *    start. Every open question is a refusal, every unattended-mode rule
+ *    applies, and the job must carry the operator's permission to run without
+ *    them; its time preference is honoured instead of the night flag.
+ */
+export type DispatchMode = "manual" | "night" | "auto";
+
+/**
+ * The modes nobody attends at the moment of the start — the ones that must
+ * refuse what an attended operator would have resolved by looking.
+ */
+export function isUnattendedMode(mode: DispatchMode): boolean {
+  return mode === "night" || mode === "auto";
+}
 
 /**
  * **Which half of the launch this evaluation is deciding.**
@@ -150,6 +171,12 @@ export interface DispatchFacts {
   night: boolean;
   /** Whether the job may run with no operator present. A permission, not a time. */
   unattendedAllowed: boolean;
+  /**
+   * The job asks to print by day (`dayNightPreference === "day"`). Read only by
+   * `auto` mode: an automatic start of a day job waits for an operator on shift.
+   * Absent = no such preference.
+   */
+  dayOnly?: boolean;
 
   // ── File identity ─────────────────────────────────────────────────────────
   /** Resolved on-device path, or null when the task names no file. */
@@ -164,7 +191,22 @@ export interface DispatchFacts {
     detectedFormat: string | null;
     blockers: { code: string; message: string }[];
     analyzerVersion: string | null;
+    /**
+     * Whether that version's analysis of THIS format is still current — a
+     * release that changed only how 3MF is read leaves a G-code's analysis
+     * current. Resolved by the caller, which knows the analyzer's history;
+     * absent, the version must equal {@link DispatchFacts.currentAnalyzerVersion}.
+     */
+    analyzerVersionCurrent?: boolean;
     updatedAt: string;
+    /**
+     * Content hash of the bytes this analysis read. Freshness is decided by it:
+     * an artifact's `updatedAt` also moves on every *metadata* write (a scale or
+     * review confirmation), which used to mark a perfectly current analysis
+     * stale, demand a re-analysis — and thereby lapse the very confirmation
+     * that had been written. Null for analyses recorded before it was kept.
+     */
+    analyzedSha256?: string | null;
     /** Target printer/model the file itself declares (`;printer_model=`), when any. */
     declaredTargetPrinter: string | null;
     /** G-code flavor the file itself declares, when any. */
@@ -273,6 +315,12 @@ export interface DispatchFacts {
   adapterUploadSupported: boolean;
   /** The tracked device file for the path this dispatch would start; null when untracked. */
   deviceArtifact: DeviceArtifactFacts | null;
+  /**
+   * The filament source the start would use, for an adapter that has to name
+   * one (Bambu: AMS slot or external spool), resolved by the caller from the job
+   * and the live tray report. `null`/absent for adapters with no such choice.
+   */
+  feed?: FeedPlan | null;
 
   // ── Night ─────────────────────────────────────────────────────────────────
   /** ETA in minutes from analysis/slice; null when genuinely unknown. */
@@ -298,6 +346,8 @@ export interface DispatchEligibility extends EligibilityResult {
   preflight: CompatibilityResult;
   /** Resolved night-window arithmetic; null outside night mode or when unresolvable. */
   nightWindowFit: NightWindowFit | null;
+  /** The filament source the start would use (Bambu), for the UI and the dispatch to pin. */
+  feed?: FeedPlan | null;
 }
 
 /**
@@ -339,6 +389,7 @@ const PREFLIGHT_CODE_MAP: Record<PreflightReasonCode, ReasonCode> = {
   build_volume_conflict: REASON.BUILD_VOLUME_UNKNOWN,
   dimensions_unknown: REASON.DIMENSIONS_UNKNOWN,
   model_scale_unknown: REASON.MODEL_SCALE_UNKNOWN,
+  slice_scale_mismatch: REASON.SLICE_SCALE_MISMATCH,
   build_volume_unknown: REASON.BUILD_VOLUME_UNKNOWN,
   too_large: REASON.BUILD_VOLUME_EXCEEDED,
   gcode_flavor_mismatch: REASON.GCODE_FLAVOR_MISMATCH,
@@ -390,6 +441,9 @@ const REVIEW_IS_BLOCKER_AT_NIGHT: ReadonlySet<ReasonCode> = new Set<ReasonCode>(
 
 function reviewSeverity(code: ReasonCode, mode: DispatchMode): "warning" | "blocker" {
   if (REVIEW_IS_BLOCKER_ALWAYS.has(code)) return "blocker";
+  // An automatic start has nobody to answer ANY open question — not only the
+  // night list: a review is by definition something a human closes.
+  if (mode === "auto") return "blocker";
   if (mode === "night" && REVIEW_IS_BLOCKER_AT_NIGHT.has(code)) return "blocker";
   return "warning";
 }
@@ -419,14 +473,41 @@ export function evaluateDispatchEligibility(
   pushBed(facts, push);
   pushManualOperations(facts, push);
   pushReservation(facts, push);
-  const nightWindowFit = facts.mode === "night" ? pushNight(facts, push) : null;
+  pushFeed(facts, push);
+  const nightWindowFit =
+    facts.mode === "night" ? pushNight(facts, push) : facts.mode === "auto" ? pushAuto(facts, push) : null;
 
   return {
     status: statusOf(reasons),
     reasons: dedupe(reasons),
     preflight,
-    nightWindowFit
+    nightWindowFit,
+    feed: facts.feed ?? null
   };
+}
+
+const FEED_REASON: Record<FeedProblemCode, ReasonCode> = {
+  AMS_MATERIAL_MISMATCH: REASON.AMS_MATERIAL_MISMATCH,
+  AMS_SLOT_AMBIGUOUS: REASON.AMS_SLOT_AMBIGUOUS,
+  AMS_MATERIAL_UNKNOWN: REASON.AMS_MATERIAL_UNKNOWN,
+  AMS_STATE_UNKNOWN: REASON.AMS_STATE_UNKNOWN,
+  AMS_FEED_UNSUPPORTED: REASON.AMS_FEED_UNSUPPORTED
+};
+
+/**
+ * The filament source. A start that cannot say which spool feeds the job is
+ * refused outright — there is no "probably the loaded one". An ambiguity carries
+ * its choices so the screen can ask the one question that resolves it.
+ */
+function pushFeed(f: DispatchFacts, push: (r: EligibilityReason) => void): void {
+  const plan = f.feed;
+  if (!plan || plan.kind !== "unresolved") return;
+  push(
+    reason(FEED_REASON[plan.code], "blocker", plan.message, {
+      feedCode: plan.code,
+      choices: plan.choices
+    })
+  );
 }
 
 // ── Rule groups ───────────────────────────────────────────────────────────────
@@ -484,7 +565,7 @@ function liftPreflight(preflight: CompatibilityResult, facts: DispatchFacts): El
     // A G-code flavor the firmware does not speak is advisory when *planning*
     // but a refusal when actually sending the file to that firmware.
     const severity: "warning" | "blocker" =
-      code === REASON.GCODE_FLAVOR_MISMATCH || (mode === "night" && code === REASON.PRINTER_BUSY)
+      code === REASON.GCODE_FLAVOR_MISMATCH || (isUnattendedMode(mode) && code === REASON.PRINTER_BUSY)
         ? "blocker"
         : "warning";
     out.push(
@@ -555,10 +636,12 @@ function pushFileIdentity(f: DispatchFacts, push: (r: EligibilityReason) => void
         // profile — becomes launchable, and it stays a `warning` so the reason
         // is still on screen, still in the audit trail, and still a refusal for
         // an unattended start (which has nobody to have accepted anything).
+        // Only an attended start can lean on an acknowledgement: night and auto
+        // have nobody who accepted anything for THIS start.
         const acknowledged =
           a.reviewAccepted === true &&
           ACKNOWLEDGEABLE_VERDICTS.has(a.verdict) &&
-          f.mode !== "night";
+          f.mode === "manual";
         push(
           reason(
             REASON.ANALYSIS_VERDICT,
@@ -593,7 +676,7 @@ function pushFileIdentity(f: DispatchFacts, push: (r: EligibilityReason) => void
     pushDeviceDelivery(f, push);
   }
 
-  if (f.mode === "night") {
+  if (isUnattendedMode(f.mode)) {
     if (!f.artifact) {
       push(reason(REASON.ARTIFACT_MISSING, "blocker", "у задания нет зарегистрированного артефакта"));
     } else if (!f.artifact.sha256) {
@@ -695,10 +778,23 @@ function pushStaleness(
   push: (r: EligibilityReason) => void
 ): void {
   if (!f.artifact?.sha256) return;
-  if (a.updatedAt < f.artifact.updatedAt) {
-    push(reason(REASON.ANALYSIS_STALE, "blocker", "файл изменился после последнего анализа"));
+  // Content identity, not timestamps. An artifact never changes its bytes under
+  // its id (every upload is a new artifact), so an analysis that does not
+  // record what it read is still about these bytes; one that does is stale
+  // exactly when the hashes differ.
+  if (a.analyzedSha256 && a.analyzedSha256 !== f.artifact.sha256) {
+    push(
+      reason(REASON.ANALYSIS_STALE, "blocker", "файл изменился после последнего анализа", {
+        analyzedSha256: a.analyzedSha256,
+        artifactSha256: f.artifact.sha256
+      })
+    );
   }
-  if (a.analyzerVersion && a.analyzerVersion !== f.currentAnalyzerVersion) {
+  const outdated =
+    a.analyzerVersionCurrent !== undefined
+      ? !a.analyzerVersionCurrent
+      : Boolean(a.analyzerVersion) && a.analyzerVersion !== f.currentAnalyzerVersion;
+  if (a.analyzerVersion && outdated) {
     push(
       reason(
         REASON.ANALYZER_OUTDATED,
@@ -751,7 +847,9 @@ function pushDeclaredTarget(
         )
       );
     }
-  } else if (f.mode === "night" && a.detectedFormat === "gcode") {
+  } else if (isUnattendedMode(f.mode) && (a.detectedFormat === "gcode" || a.containsGcodePayload === true)) {
+    // A sliced package runs G-code too: the same "made for which machine?"
+    // question, and the same unattended refusal when the file cannot answer it.
     push(
       reason(
         REASON.TARGET_PRINTER_UNKNOWN,
@@ -796,7 +894,7 @@ function pushDeviceFile(f: DispatchFacts, push: (r: EligibilityReason) => void):
       );
       break;
     case "unsupported":
-      if (f.mode === "night") {
+      if (isUnattendedMode(f.mode)) {
         push(
           reason(
             REASON.DEVICE_FILE_NOT_VERIFIED,
@@ -815,7 +913,7 @@ function pushDeviceFile(f: DispatchFacts, push: (r: EligibilityReason) => void):
       }
       break;
     case "name-only":
-      if (f.mode === "night" && f.artifact) {
+      if (isUnattendedMode(f.mode) && f.artifact) {
         push(
           reason(
             REASON.DEVICE_FILE_NOT_VERIFIED,
@@ -930,7 +1028,7 @@ function pushDeviceDelivery(f: DispatchFacts, push: (r: EligibilityReason) => vo
       return;
   }
 
-  if (tracked.transferMode === "manual_file_transfer" && f.mode === "night") {
+  if (tracked.transferMode === "manual_file_transfer" && isUnattendedMode(f.mode)) {
     push(
       reason(
         REASON.DEVICE_TRANSFER_NOT_CONFIRMED,
@@ -1020,7 +1118,7 @@ function pushBed(f: DispatchFacts, push: (r: EligibilityReason) => void): void {
         "требуется вмешательство оператора: снять модель или заменить пластину"
       )
     );
-    if (f.mode === "night" && !f.automaticContinuationAllowed) {
+    if (isUnattendedMode(f.mode) && !f.automaticContinuationAllowed) {
       push(
         reason(
           REASON.AUTOMATIC_CONTINUATION_NOT_SUPPORTED,
@@ -1080,7 +1178,7 @@ function pushManualOperations(f: DispatchFacts, push: (r: EligibilityReason) => 
   // "Continuing automatically" is what the operator's presence gates. Nothing to
   // continue past ⇒ nothing for a schedule to decide.
   const needsOperator = f.blockingOperations.length > 0;
-  const automatic = f.mode === "night";
+  const automatic = isUnattendedMode(f.mode);
 
   if (!f.operatorScheduleResolved) {
     push(
@@ -1220,7 +1318,45 @@ function pushNight(f: DispatchFacts, push: (r: EligibilityReason) => void): Nigh
       )
     );
   }
+  return pushNightWindow(f, push);
+}
 
+/**
+ * The automatic queue's own rules, on top of everything unattended.
+ *
+ *  - The operator's permission to run THIS job without them is mandatory — the
+ *    same `unattendedAllowed` a night start needs: an automatic start is a start
+ *    nobody attended.
+ *  - The job's time preference is honoured rather than a night flag: a `night`
+ *    job only inside the night window and only if it fits (the night arithmetic,
+ *    verbatim); a `day` job only while an operator is on shift; `any` — any time.
+ */
+function pushAuto(f: DispatchFacts, push: (r: EligibilityReason) => void): NightWindowFit | null {
+  if (!f.unattendedAllowed) {
+    push(
+      reason(
+        REASON.UNATTENDED_NOT_ALLOWED,
+        "blocker",
+        "для задания не дано разрешение печатать без присутствия оператора — автоочередь его не запускает"
+      )
+    );
+  }
+  if (f.night) return pushNightWindow(f, push);
+  if (f.dayOnly === true && (!f.operatorScheduleResolved || f.operatorPresence !== "AVAILABLE")) {
+    push(
+      reason(
+        REASON.AUTO_DAY_ONLY,
+        "blocker",
+        `задание отмечено «днём», а оператора сейчас нет на смене (${f.operatorReason}) — автоочередь подождёт`,
+        { presence: f.operatorPresence }
+      )
+    );
+  }
+  return null;
+}
+
+/** The night window arithmetic: a known ETA that fits into the time left. */
+function pushNightWindow(f: DispatchFacts, push: (r: EligibilityReason) => void): NightWindowFit | null {
   if (f.etaMinutes === null) {
     // Fail-closed: an assumed ETA may decorate a preview, never authorise a start.
     push(

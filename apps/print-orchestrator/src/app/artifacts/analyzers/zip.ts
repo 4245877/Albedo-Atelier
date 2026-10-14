@@ -1,4 +1,5 @@
 import type { FileHandle } from "node:fs/promises";
+import { pipeline, Readable } from "node:stream";
 import zlib from "node:zlib";
 import { promisify } from "node:util";
 
@@ -65,6 +66,8 @@ const S_IFLNK = 0xa000;
 const FLAG_ENCRYPTED = 0x0001;
 const METHOD_STORE = 0;
 const METHOD_DEFLATE = 8;
+/** Compressed bytes read per step when streaming an entry. */
+const STREAM_CHUNK_BYTES = 1 << 20;
 
 /**
  * Operator-facing next steps. A refusal is only useful if it says what to do,
@@ -216,27 +219,7 @@ export class SafeZip {
    * blindly.
    */
   async read(name: string, maxBytes: number): Promise<Buffer> {
-    const entry = this.entries.find((e) => e.name === name && !e.isDirectory);
-    if (!entry) throw new ZipSafetyError(`Записи «${name}» нет в архиве`, "zip_missing_entry");
-
-    const cap = Math.min(maxBytes, entry.uncompressedSize || maxBytes);
-    if (entry.uncompressedSize > maxBytes) {
-      throw new ZipSafetyError(
-        `Запись «${name}» слишком большая для разбора (${entry.uncompressedSize} Б)`,
-        "zip_entry_too_large"
-      );
-    }
-
-    const local = await this.source.read(entry.localHeaderOffset, LOCAL_HEADER_SIZE);
-    if (local.length < LOCAL_HEADER_SIZE || local.readUInt32LE(0) !== SIG_LOCAL) {
-      throw new ZipSafetyError(`Повреждённый локальный заголовок «${name}»`, "zip_corrupt");
-    }
-    const nameLen = local.readUInt16LE(26);
-    const extraLen = local.readUInt16LE(28);
-    const dataOffset = entry.localHeaderOffset + LOCAL_HEADER_SIZE + nameLen + extraLen;
-    if (dataOffset + entry.compressedSize > this.source.size) {
-      throw new ZipSafetyError(`Данные записи «${name}» выходят за пределы файла`, "zip_corrupt");
-    }
+    const { entry, dataOffset, cap } = await this.locate(name, maxBytes);
     const compressed = await this.source.read(dataOffset, entry.compressedSize);
     if (compressed.length < entry.compressedSize) {
       throw new ZipSafetyError(`Данные записи «${name}» обрываются`, "zip_corrupt");
@@ -258,12 +241,98 @@ export class SafeZip {
         throw new ZipSafetyError(`Не удалось распаковать «${name}»`, "zip_inflate_failed");
       }
     }
-    throw new ZipSafetyError(
-      `Неподдерживаемый метод сжатия ${entry.method} у «${name}»`,
-      "zip_method",
-      "Пересохраните файл в слайсере — он использует необычное сжатие внутри архива."
-    );
+    throw unsupportedMethod(entry, name);
   }
+
+  /**
+   * The same entry as {@link read}, **streamed**: decompressed chunks under the
+   * same caps, without ever holding the whole entry in memory.
+   *
+   * For a payload that can legitimately be hundreds of megabytes once inflated
+   * — a sliced package's G-code — where `read` would allocate all of it at once.
+   * The output is counted as it is produced and the stream fails with
+   * `zip_entry_too_large` the moment it passes the cap, so an entry that lies
+   * about its size is stopped at the cap, not after it.
+   */
+  async *stream(name: string, maxBytes: number, chunkBytes = STREAM_CHUNK_BYTES): AsyncGenerator<Buffer> {
+    const { entry, dataOffset, cap } = await this.locate(name, maxBytes);
+    if (entry.method !== METHOD_STORE && entry.method !== METHOD_DEFLATE) {
+      throw unsupportedMethod(entry, name);
+    }
+    const source = this.source;
+    async function* compressed(): AsyncGenerator<Buffer> {
+      for (let at = 0; at < entry.compressedSize; at += chunkBytes) {
+        const want = Math.min(chunkBytes, entry.compressedSize - at);
+        const chunk = await source.read(dataOffset + at, want);
+        if (chunk.length < want) throw new ZipSafetyError(`Данные записи «${name}» обрываются`, "zip_corrupt");
+        yield chunk;
+      }
+    }
+
+    let produced = 0;
+    const counted = (chunk: Buffer): Buffer => {
+      produced += chunk.length;
+      if (produced > cap) {
+        throw new ZipSafetyError(`Запись «${name}» распаковывается больше лимита ${cap} Б`, "zip_entry_too_large");
+      }
+      return chunk;
+    };
+
+    if (entry.method === METHOD_STORE) {
+      for await (const chunk of compressed()) yield counted(chunk);
+      return;
+    }
+
+    const inflate = zlib.createInflateRaw();
+    // Errors from either side surface on the iteration below: a short read
+    // destroys the inflater with it, a corrupt stream errors the inflater itself.
+    pipeline(Readable.from(compressed()), inflate, () => undefined);
+    try {
+      for await (const chunk of inflate) yield counted(chunk as Buffer);
+    } catch (error) {
+      if (error instanceof ZipSafetyError) throw error;
+      throw new ZipSafetyError(`Не удалось распаковать «${name}»`, "zip_inflate_failed");
+    } finally {
+      inflate.destroy();
+    }
+  }
+
+  /** Finds an entry's data through its local header, after the size checks both readers share. */
+  private async locate(
+    name: string,
+    maxBytes: number
+  ): Promise<{ entry: ZipEntry; dataOffset: number; cap: number }> {
+    const entry = this.entries.find((e) => e.name === name && !e.isDirectory);
+    if (!entry) throw new ZipSafetyError(`Записи «${name}» нет в архиве`, "zip_missing_entry");
+
+    const cap = Math.min(maxBytes, entry.uncompressedSize || maxBytes);
+    if (entry.uncompressedSize > maxBytes) {
+      throw new ZipSafetyError(
+        `Запись «${name}» слишком большая для разбора (${entry.uncompressedSize} Б)`,
+        "zip_entry_too_large"
+      );
+    }
+
+    const local = await this.source.read(entry.localHeaderOffset, LOCAL_HEADER_SIZE);
+    if (local.length < LOCAL_HEADER_SIZE || local.readUInt32LE(0) !== SIG_LOCAL) {
+      throw new ZipSafetyError(`Повреждённый локальный заголовок «${name}»`, "zip_corrupt");
+    }
+    const nameLen = local.readUInt16LE(26);
+    const extraLen = local.readUInt16LE(28);
+    const dataOffset = entry.localHeaderOffset + LOCAL_HEADER_SIZE + nameLen + extraLen;
+    if (dataOffset + entry.compressedSize > this.source.size) {
+      throw new ZipSafetyError(`Данные записи «${name}» выходят за пределы файла`, "zip_corrupt");
+    }
+    return { entry, dataOffset, cap };
+  }
+}
+
+function unsupportedMethod(entry: ZipEntry, name: string): ZipSafetyError {
+  return new ZipSafetyError(
+    `Неподдерживаемый метод сжатия ${entry.method} у «${name}»`,
+    "zip_method",
+    "Пересохраните файл в слайсере — он использует необычное сжатие внутри архива."
+  );
 }
 
 // ── Central directory ────────────────────────────────────────────────────────

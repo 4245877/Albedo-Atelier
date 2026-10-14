@@ -244,3 +244,30 @@ test("причина отказа экранируется — она прихо
   assert.doesNotMatch(html, /<b>x<\/b>/);
   assert.match(html, /&lt;b&gt;x&lt;\/b&gt;/);
 });
+
+test("HIGH-11: нарезанный пакет показывает, что сервер вычитал из самого G-code", () => {
+  const html = itemHtml(
+    item(
+      ready({
+        verdict: "review",
+        material: "PLA",
+        estimatedDurationS: 4500,
+        estimatedFilamentG: 12.5,
+        layerHeightMm: 0.2,
+        nozzleDiameterMm: 0.4,
+        data: {
+          threeMfClass: "sliced",
+          hasGcodePayload: true,
+          gcodeEntries: ["Metadata/plate_2.gcode"],
+          printerModel: "Bambu Lab A1",
+          payload: { entry: "Metadata/plate_2.gcode", md5Verified: true }
+        }
+      })
+    ),
+    { detailsOpen: true }
+  );
+  assert.match(html, /Bambu Lab A1/);
+  assert.match(html, /Metadata\/plate_2\.gcode · контрольная сумма сходится/);
+  assert.match(html, /12\.5 г/);
+  assert.match(html, /0\.4 мм/);
+});

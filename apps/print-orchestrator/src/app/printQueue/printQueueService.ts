@@ -1,3 +1,4 @@
+import { AppError, ValidationError } from "../../core/errors";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import type {
   Assignment,
@@ -22,6 +23,14 @@ import {
 
 export type { CreateTaskInput, ManualTaskInput, TaskSchedulingPatch } from "./taskCommands";
 export type { TaskDetail } from "./queueQueries";
+
+/** Most variants one «поставить готовые в очередь» may carry. */
+const MAX_PROMOTE_BATCH = 50;
+
+/** One variant's outcome in a batch promotion. */
+export type PromoteBatchItem =
+  | { variantId: string; ok: true; taskId: string; title: string }
+  | { variantId: string; ok: false; code: string; error: string };
 
 /**
  * The application service for the persistent print queue: the one place that
@@ -134,6 +143,33 @@ export class PrintQueueService {
   }
 
   /**
+   * The batch's «поставить готовые в очередь»: each variant promoted exactly as
+   * {@link promoteSliceVariant} does, each in its own transaction. The models of
+   * a batch are independent prints — one whose output failed its check must not
+   * undo the others, and is reported in its own row instead.
+   */
+  promoteSliceVariants(variantIds: readonly string[], actor?: string): PromoteBatchItem[] {
+    const ids = [...new Set(variantIds.map((id) => (typeof id === "string" ? id.trim() : "")))].filter(Boolean);
+    if (ids.length === 0) throw new ValidationError("Не выбрано ни одного варианта");
+    if (ids.length > MAX_PROMOTE_BATCH) {
+      throw new ValidationError(`За раз можно поставить в очередь не больше ${MAX_PROMOTE_BATCH} вариантов`);
+    }
+    return ids.map((variantId): PromoteBatchItem => {
+      try {
+        const detail = this.tasks.promoteSliceVariant(variantId, {}, actor);
+        return { variantId, ok: true, taskId: detail.task.id, title: detail.task.title };
+      } catch (error) {
+        return {
+          variantId,
+          ok: false,
+          code: error instanceof AppError ? String(error.details?.code ?? error.code) : "error",
+          error: error instanceof Error ? error.message : "постановка в очередь не удалась"
+        };
+      }
+    });
+  }
+
+  /**
    * The slicing-free twin of {@link promoteSliceVariant}: puts an uploaded
    * G-code or sliced 3MF into the queue. See {@link ExecutableEnqueue} for why
    * this is its own use case and not a flag on `releaseTask`.
@@ -171,6 +207,15 @@ export class PrintQueueService {
 
   cancelTask(id: string, reason?: string, actor?: string): PrintTask {
     return this.tasks.cancelTask(id, reason, actor);
+  }
+
+  /** {@link cancelTask} with the outcome: cancelled now, or a cancel requested of an in-flight start. */
+  cancel(
+    id: string,
+    reason?: string,
+    actor?: string
+  ): { task: PrintTask; outcome: "cancelled" | "cancel_requested"; message: string } {
+    return this.tasks.cancel(id, reason, actor);
   }
 
   setTaskScheduling(id: string, patch: TaskSchedulingPatch, actor?: string): PrintTask {

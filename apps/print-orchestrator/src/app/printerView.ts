@@ -16,6 +16,7 @@ import type { PrinterConfig } from "../infra/printers/config";
 import { supportsPrinterFiles } from "../infra/printers/files";
 import {
   supportsPrinterLight,
+  supportsPrinterControl,
   supportsPrinterStart,
   type PrinterLiveStatus
 } from "../infra/printers/status";
@@ -131,6 +132,7 @@ export function buildPrinterView(
     latestSnapshotUrl,
     filesSupported: supportsPrinterFiles(printer),
     remoteStartSupported: supportsPrinterStart(printer),
+    printControlSupported: supportsPrinterControl(printer),
     // Filled by the caller (the read model reads the bed cycle + the open
     // interventions); null here so a view built without a store is honest about
     // knowing nothing rather than claiming the plate is clear.

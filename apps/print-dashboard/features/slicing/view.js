@@ -152,7 +152,10 @@ export function profilesHtml(state) {
 }
 
 function profileRow(p) {
-  const st = STATUS[p.status] || { label: p.status, cls: "info" };
+  const st =
+    p.metadata && p.metadata.supersededBy
+      ? { label: "заменён", cls: "info" }
+      : STATUS[p.status] || { label: p.status, cls: "info" };
   const findings = [...(p.blockers || []), ...(p.warnings || [])];
   const detail = findings.length
     ? `<ul class="slice-findings">
@@ -185,11 +188,23 @@ function setRow(s) {
   // Причина, по которой утвердить нельзя, доступна не только как title (мышь), но и
   // как aria-label — скринридер прочитает её на disabled-кнопке.
   const blockedReason = "Утвердить нельзя: есть блокеры — устраните их и обновите набор";
+  // Профили набора каталог с тех пор разрешает иначе: утвердить его заново нельзя,
+  // а перейти на новые настройки — только через обновлённый набор (прежний,
+  // если утверждён, продолжает резать утверждёнными настройками).
+  const superseded = (s.warnings || []).some((w) => w.code === "profile_superseded");
+  const supersededReason = "Профили набора обновились в каталоге — создайте обновлённый набор и утвердите его";
   const approved = s.approved
     ? chip("утверждён", "ok")
     : `<button type="button" class="btn btn-sm" data-slice-action="approve" data-id="${esc(s.id)}"${
-        s.validation === "blocked" ? ` disabled title="${esc(blockedReason)}" aria-label="${esc(blockedReason)}"` : ""
+        s.validation === "blocked"
+          ? ` disabled title="${esc(blockedReason)}" aria-label="${esc(blockedReason)}"`
+          : superseded
+            ? ` disabled title="${esc(supersededReason)}" aria-label="${esc(supersededReason)}"`
+            : ""
       }>Утвердить</button>`;
+  const successor = superseded
+    ? `<button type="button" class="btn btn-sm" data-slice-action="successor" data-id="${esc(s.id)}">${icon("refresh")}<span>Создать обновлённый набор</span></button>`
+    : "";
   const blockers = (s.blockers || []).map((b) => `<li class="slice-block-li">${icon("blocked")}${esc(b.message)}</li>`).join("");
   const warnings = (s.warnings || []).map((w) => `<li class="slice-warn">${icon("warn")}${esc(w.message)}</li>`).join("");
   const target = s.printerId ? `принтер ${esc(s.printerId)}` : s.printerClass ? `класс ${esc(s.printerClass)}` : "—";
@@ -199,6 +214,7 @@ function setRow(s) {
         <span class="slice-name">${esc(s.name)}</span>
         ${chip(esc(v.label), v.cls)} <span class="slice-tag">${target}</span>
         <span class="slice-spacer"></span>
+        ${successor}
         ${approved}
       </div>
       ${blockers || warnings ? `<ul class="slice-findings">${blockers}${warnings}</ul>` : ""}
@@ -209,13 +225,16 @@ export function createSetHtml(state) {
   // Набор утверждается только из active-профилей (иначе валидация даёт блокер).
   // Поэтому выбираемы лишь active; неактивные показаны, но disabled и с причиной —
   // чтобы не делать путь с заведомо неутверждаемым набором основным.
-  const active = (list) => list.filter((p) => p.status === "active");
+  // Заменённая ревизия (каталог теперь разрешает те же байты иначе) — история:
+  // она ещё служит утверждённым на ней наборам, но новый набор на ней не строят.
+  const superseded = (p) => Boolean(p.metadata && p.metadata.supersededBy);
+  const active = (list) => list.filter((p) => p.status === "active" && !superseded(p));
   const opts = (list) => {
     const on = active(list)
       .map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`)
       .join("");
     const off = list
-      .filter((p) => p.status !== "active")
+      .filter((p) => p.status !== "active" && !superseded(p))
       .map(
         (p) => `<option value="${esc(p.id)}" disabled>${esc(p.name)} · ${esc(statusLabel(p.status))} (недоступен)</option>`
       )
@@ -355,10 +374,30 @@ function variantRow(state, v) {
    сопло, размер результата, статус анализа G-code и состояние продвижения.
    Кнопка активна только для варианта, который сервер действительно примет;
    сервер всё равно перепроверяет — это подсказка, а не разрешение. */
-function promoteHtml(state, v) {
+/* Состояния задания словами оператора — «в очереди: COMPLETED» о напечатанной
+   детали было неправдой в каждом слове. */
+const TASK_STATE_LABEL = {
+  DRAFT: "черновик",
+  QUEUED: "в очереди",
+  PLANNED: "в плане",
+  ASSIGNED: "назначено на принтер",
+  DISPATCHING: "запускается",
+  PRINTING: "печатается",
+  NEEDS_REVIEW: "на проверке",
+  COMPLETED: "напечатано",
+  FAILED: "печать не удалась",
+  CANCELLED: "отменено"
+};
+const FINISHED_TASK = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
+/* Состояния, в которых задание ещё принимает слайс (как promotion на сервере). */
+const PREPARABLE_TASK = new Set(["DRAFT", "QUEUED", "PLANNED", "NEEDS_REVIEW"]);
+
+export function promoteHtml(state, v) {
   if (v.state !== "ready" || !v.outputArtifactId) return "";
 
-  const promotedTask = (state.tasks || []).find((t) => t.sliceVariantId === v.id);
+  // Последнее задание, собранное из этого варианта (повтор печати делает копию
+  // варианта, так что здесь — само исходное задание).
+  const promotedTask = (state.tasks || []).filter((t) => t.sliceVariantId === v.id).at(-1);
   const output = (state.outputs || []).find((a) => a.artifact && a.artifact.id === v.outputArtifactId);
   const analysis = output && output.analysis;
 
@@ -393,19 +432,49 @@ function promoteHtml(state, v) {
     ? `<ul class="slice-findings">${outBlockers}${outWarnings}</ul>`
     : "";
 
+  const disabled = analysisReady ? "" : ' disabled title="Выходной файл не прошёл проверку анализа"';
+  const label = (t) => esc(TASK_STATE_LABEL[t.state] || t.state);
+
+  if (promotedTask && FINISHED_TASK.has(promotedTask.state)) {
+    // Печать закрыта — она история. Тот же проверенный G-code можно напечатать
+    // снова НОВОЙ печатью; закрытое задание сервер не трогает.
+    return `
+      <div class="slice-promote">
+        ${detailRow}
+        <div class="slice-meta">${analysisChip} ${chip(label(promotedTask), promotedTask.state === "COMPLETED" ? "ok" : "mute")}</div>
+        <div class="slice-out">Задание: <code>${esc(promotedTask.title)}</code></div>
+        ${outFindings}
+        <button type="button" class="btn btn-primary btn-sm" data-slice-action="reprint-task"
+          data-id="${esc(promotedTask.id)}"${disabled}>${icon("refresh")}<span>Напечатать ещё раз</span></button>
+      </div>`;
+  }
+
   if (promotedTask) {
     // Состояние продвижения сохраняется на сервере, поэтому переживает F5.
     return `
       <div class="slice-promote">
         ${detailRow}
-        <div class="slice-meta">${analysisChip} ${chip(`в очереди: ${esc(promotedTask.state)}`, "ok")}</div>
+        <div class="slice-meta">${analysisChip} ${chip(label(promotedTask), "ok")}</div>
         <div class="slice-out">Задание: <code>${esc(promotedTask.title)}</code>
           — файл <code>${esc(promotedTask.onDeviceFile || "—")}</code></div>
         <button type="button" class="btn btn-sm" data-goto="scheduler">${icon("arrowRight")}<span>Перейти к очереди</span></button>
       </div>`;
   }
 
-  const disabled = analysisReady ? "" : ' disabled title="Выходной файл не прошёл проверку анализа"';
+  // Своё задание варианта уже не примет слайс (закрыто или печатает другим) —
+  // готовый G-code печатается новой печатью, без повторной нарезки.
+  const owner = (state.tasks || []).find((t) => t.id === v.taskId);
+  if (owner && !PREPARABLE_TASK.has(owner.state)) {
+    return `
+      <div class="slice-promote">
+        ${detailRow}
+        <div class="slice-meta">${analysisChip} ${chip(`задание: ${label(owner)}`, "mute")}</div>
+        ${outFindings}
+        <button type="button" class="btn btn-primary btn-sm" data-slice-action="reprint-variant"
+          data-id="${esc(v.id)}"${disabled}>${icon("refresh")}<span>Напечатать по этому варианту</span></button>
+      </div>`;
+  }
+
   return `
     <div class="slice-promote">
       ${detailRow}

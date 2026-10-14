@@ -122,9 +122,55 @@ test("a promoted variant shows its queue state and a way to the queue (state sur
   // The button is gone precisely because the SERVER says it is already queued —
   // a reload re-renders the same thing, and a second click cannot duplicate it.
   assert.doesNotMatch(html, /data-slice-action="promote"/);
-  assert.match(html, /в очереди: QUEUED/);
+  assert.match(html, /в очереди/);
+  assert.doesNotMatch(html, /QUEUED/, "the operator reads a state, not an enum");
   assert.match(html, /cube\.gcode/);
   assert.match(html, /data-goto="scheduler"/);
+});
+
+test("a variant whose print is finished offers printing the same G-code again — never «в очереди: COMPLETED»", () => {
+  const html = variantsHtml(
+    baseState({
+      tasks: [{ id: "task_1", title: "cube.stl", state: "COMPLETED", sliceVariantId: "slc_1", onDeviceFile: "cube.gcode" }]
+    })
+  );
+  assert.doesNotMatch(html, /в очереди/);
+  assert.match(html, /напечатано/);
+  assert.match(html, /data-slice-action="reprint-task"\s+data-id="task_1"/);
+  assert.doesNotMatch(html, /data-slice-action="reprint-task"[^>]*disabled/);
+  assert.doesNotMatch(html, /data-slice-action="promote"/);
+});
+
+test("a ready variant whose own task is closed (never promoted onto it) prints as a new job", () => {
+  const html = variantsHtml(
+    baseState({
+      variants: [{ ...READY_VARIANT, taskId: "task_draft" }],
+      tasks: [{ id: "task_draft", title: "cube.stl", state: "CANCELLED", sliceVariantId: null }]
+    })
+  );
+  assert.match(html, /data-slice-action="reprint-variant"\s+data-id="slc_1"/);
+  assert.doesNotMatch(html, /data-slice-action="promote"/, "promotion onto a closed task would be refused");
+});
+
+test("a ready variant whose draft can still take it keeps «Добавить в очередь»", () => {
+  const html = variantsHtml(
+    baseState({
+      variants: [{ ...READY_VARIANT, taskId: "task_draft" }],
+      tasks: [{ id: "task_draft", title: "cube.stl", state: "DRAFT", sliceVariantId: null }]
+    })
+  );
+  assert.match(html, /data-slice-action="promote"/);
+  assert.doesNotMatch(html, /reprint/);
+});
+
+test("reprint is offered only for an output that still passes its check", () => {
+  const html = variantsHtml(
+    baseState({
+      outputs: [{ ...OUTPUT_OK, analysis: { ...OUTPUT_OK.analysis, verdict: "blocked" } }],
+      tasks: [{ id: "task_1", title: "cube.stl", state: "COMPLETED", sliceVariantId: "slc_1" }]
+    })
+  );
+  assert.match(html, /data-slice-action="reprint-task"[^>]*disabled/);
 });
 
 test("execution: a prepared file offers a start; the stages stay visibly distinct", () => {

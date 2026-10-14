@@ -7,7 +7,7 @@
 import { API_BASE, apiGet, apiPost } from "../api.js";
 import { reconcileCameras } from "../cameraPlayers.js";
 import { $, esc, setBusy, toast } from "../util.js";
-import { badge } from "../shared/chips.js";
+import { printerBadge } from "../shared/chips.js";
 import { confirmAction, createFocusTrap } from "../shared/dialog.js";
 import { fmtBytes, fmtLeft } from "../shared/format.js";
 import {
@@ -155,11 +155,11 @@ function launchController() {
   return launchRef;
 }
 
-/** Открывает окно запуска для задания очереди. */
-export function openLaunchModal(taskId) {
+/** Открывает окно запуска для задания очереди (с уже выбранным принтером, если он есть). */
+export function openLaunchModal(taskId, { printerId = null } = {}) {
   current = { kind: "launch", taskId };
   openShell();
-  launchController().open(taskId);
+  launchController().open(taskId, { printerId });
   focusModal();
 }
 
@@ -233,7 +233,7 @@ function teleRows(p) {
   if (p.nozzleType) {
     rows.push([
       "Тип сопла",
-      p.nozzleTypeSource === "config" ? `${p.nozzleType} (из конфигурации)` : p.nozzleType,
+      ["manual", "config", "catalog"].includes(p.nozzleTypeSource) ? `${p.nozzleType} (из конфигурации)` : p.nozzleType,
     ]);
   }
   if (p.liveMaterialSource === "printer" && p.activeTray != null) {
@@ -255,7 +255,7 @@ function printerModalHtml(p, light) {
   return `
     <div class="modal-head">
       <h2 id="modal-title">${esc(p.name)}<span class="type-chip ${p.type === "FDM" ? "type-fdm" : "type-resin"}">${esc(p.type)}</span></h2>
-      ${badge(p.status)}
+      ${printerBadge(p)}
     </div>
     <div class="modal-printer">
       <div class="modal-cam">${camBlock(p, "modal")}</div>
@@ -349,7 +349,7 @@ function filesShellHtml(p, path, bodyHtml) {
   return `
     <div class="modal-head">
       <h2 id="modal-title">Файлы — ${esc(p.name)}</h2>
-      ${badge(p.status)}
+      ${printerBadge(p)}
     </div>
     ${filesCrumbsHtml(path)}
     ${bodyHtml}

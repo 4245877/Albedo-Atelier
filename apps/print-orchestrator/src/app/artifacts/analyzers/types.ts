@@ -26,8 +26,53 @@ import type { AnalysisFinding, AnalysisVerdict, DetectedFormat } from "../../../
  * bounding box and, through {@link file://../../../domain/print/plateSelection.ts},
  * which plate is sliced; a `1.2.0` row simply has no plate list, so a stored
  * plate choice cannot be validated against it. Re-analysis is the upgrade path.
+ *
+ * `1.4.0` opens a sliced 3MF's payload: the embedded `plate_N.gcode` is streamed
+ * out and held to the bare-G-code analysis (command policy, header metadata,
+ * printed box), checked against its `.md5` sidecar, and named so the start
+ * command names the same entry; the declared target is normalised into
+ * `printerModel` — the key the dispatch gate reads — instead of an unread
+ * `targetPrinter` (see {@link file://./threemfPayload.ts}). Nothing changed for
+ * STL or bare G-code, so their `1.3.0` rows stay current (see
+ * {@link isAnalysisCurrent}); a `1.3.0` 3MF row is outdated.
  */
-export const ANALYZER_VERSION = "1.3.0";
+export const ANALYZER_VERSION = "1.4.0";
+
+/**
+ * Per format, the oldest analyzer version whose result is still current.
+ *
+ * A release that changes how ONE format is read must not make every other
+ * file's analysis outdated: the dispatch gate refuses an outdated analysis, so a
+ * blanket bump would stop every queued G-code until someone re-ran its analysis
+ * by hand, for a change that never touched it. A format missing here (an
+ * `unknown` file) is current only at exactly {@link ANALYZER_VERSION}.
+ */
+const CURRENT_SINCE: Readonly<Record<string, string>> = {
+  stl: "1.3.0",
+  gcode: "1.3.0",
+  "3mf": "1.4.0"
+};
+
+/** Whether an analysis written by `analyzerVersion` still speaks for the current analyzer. */
+export function isAnalysisCurrent(analyzerVersion: string | null, detectedFormat: string | null): boolean {
+  if (!analyzerVersion || analyzerVersion === ANALYZER_VERSION) return true;
+  const since = detectedFormat ? CURRENT_SINCE[detectedFormat] : undefined;
+  if (!since) return false;
+  const atLeast = compareVersions(analyzerVersion, since);
+  const atMost = compareVersions(analyzerVersion, ANALYZER_VERSION);
+  return atLeast !== null && atMost !== null && atLeast >= 0 && atMost <= 0;
+}
+
+/** Numeric `x.y.z` comparison; null when either side is not one. */
+function compareVersions(a: string, b: string): number | null {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  if (pa.length !== 3 || pb.length !== 3 || [...pa, ...pb].some((n) => !Number.isInteger(n) || n < 0)) return null;
+  for (let i = 0; i < 3; i += 1) {
+    if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
+  }
+  return 0;
+}
 
 /**
  * The pure output of analysing one file's bytes — no persistence, no ids. The

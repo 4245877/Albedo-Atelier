@@ -146,8 +146,6 @@ const mapper: RowMapper<Assignment> = {
 };
 
 /** An assignment still holding its printer: anything not yet released/cancelled. */
-const OPEN_STATES = "('PROPOSED','RESERVED','ACTIVE')";
-
 export class SqliteAssignmentRepository
   extends BaseRepository<Assignment>
   implements AssignmentRepository
@@ -170,10 +168,17 @@ export class SqliteAssignmentRepository
     );
   }
 
-  findOpenByPrinter(printerId: string): Assignment | null {
-    return this.queryOne(
-      `SELECT * FROM assignments WHERE printer_id = ? AND state IN ${OPEN_STATES}
-       ORDER BY created_at DESC, id DESC LIMIT 1`,
+  listHoldingByPrinter(printerId: string): Assignment[] {
+    // The SQL form of `assignmentHolds` (domain/print/assignmentAuthority.ts):
+    // physical holds always; decisions while not invalidated; never a draft's
+    // proposal. Kept in one statement so "is this printer taken?" is one read.
+    return this.query(
+      `SELECT a.* FROM assignments a LEFT JOIN plans p ON p.id = a.plan_id
+        WHERE a.printer_id = ?
+          AND (a.state IN ('RESERVED','ACTIVE')
+               OR (a.state = 'PROPOSED' AND a.invalidated_at IS NULL
+                   AND ((a.plan_id IS NULL AND a.source = 'manual') OR p.state = 'ACTIVE')))
+        ORDER BY a.created_at DESC, a.id DESC`,
       printerId
     );
   }

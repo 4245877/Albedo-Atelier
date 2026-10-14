@@ -123,6 +123,18 @@ export interface PlannerConfig {
    */
   unknownEtaAssumptionS: number;
   weights?: Partial<PlannerWeights>;
+  /**
+   * When a printer can take its NEXT print after one that ends at `endMs`.
+   *
+   * A finished print does not free a printer: somebody has to take the part off
+   * the plate and ready the plate, in a window that person actually works. The
+   * planner used to start the next job on the same printer at the very instant
+   * the previous one ended (HIGH-15). `readyAtMs: null` means nobody is known to
+   * do it — the printer takes nothing further in this plan, exactly as the
+   * release projection treats a plate already waiting. Omitted, no turnaround is
+   * modelled (the pure unit tests of placement order).
+   */
+  readyAfterPrint?: (printerId: string, endMs: number) => { readyAtMs: number | null; reason: string };
 }
 
 export interface ScoreComponent {
@@ -406,10 +418,23 @@ export function buildPlan(
       warnings
     });
 
-    // Advance the chosen printer's state so the next task sees it occupied. Both
-    // terms are known quantities now — an unknown release or ETA never reaches
-    // here — so the projected free-time carries no hidden assumption.
-    chosen.freeAtMs = end;
+    // Advance the chosen printer's state so the next task sees it occupied — until
+    // the part is off and the plate ready, not merely until the print ends. Both
+    // terms are known quantities now (an unknown release or ETA never reaches
+    // here); an unknown turnaround makes the printer unusable for the rest of the
+    // plan rather than inventing the moment a human clears it.
+    const turnaround = config.readyAfterPrint?.(best.printerId, end) ?? { readyAtMs: end, reason: "" };
+    if (turnaround.readyAtMs === null) {
+      chosen.freeAtMs = null;
+      chosen.releaseCode = "AWAITING_PART_REMOVAL";
+      chosen.releaseReason = turnaround.reason;
+    } else {
+      chosen.freeAtMs = Math.max(end, turnaround.readyAtMs);
+      if (chosen.freeAtMs > end) {
+        chosen.releaseCode = "AWAITING_PART_REMOVAL";
+        chosen.releaseReason = turnaround.reason;
+      }
+    }
     if (task.material) chosen.material = task.material;
     if (task.requiredNozzleMm !== null) chosen.nozzleMm = task.requiredNozzleMm;
   }

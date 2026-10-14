@@ -8,6 +8,7 @@ import { EMPTY_ASSIGNMENT_BINDING, type Assignment, type Plan } from "../../doma
 import { REASON } from "../../domain/dispatch/reasons";
 import type { PrinterConfig } from "../../infra/printers/config";
 import { openPrintQueueStore } from "../../infra/db/store";
+import { establishClearBed } from "./testkit/bed";
 import { PrintQueueService } from "../printQueue/printQueueService";
 import { SchedulerContext } from "../scheduling/context";
 import { EligibilityQueries } from "../scheduling/eligibility";
@@ -54,6 +55,9 @@ interface Harness {
 
 function makeHarness(): Harness {
   const store = openPrintQueueStore(":memory:");
+  // Every harness printer starts with a plate an operator confirmed empty — the
+  // only evidence of a free bed (untracked is UNKNOWN and the gate refuses it).
+  for (const id of ["k2", "x1c"]) establishClearBed(store, id);
   const queue = new PrintQueueService(store);
   const startCalls: Harness["startCalls"] = [];
 
@@ -87,7 +91,20 @@ function makeHarness(): Harness {
       nightWindow: "21:30 – 07:30",
       farmTimeZone: "UTC",
       compatibility: { telemetryStaleMs: 120_000 },
-      unknownEtaAssumptionS: 4 * 3600
+      unknownEtaAssumptionS: 4 * 3600,
+      // The Bambu in this harness reports no AMS: it feeds from its external spool.
+      feedStateOf: (id: string) => ({
+        hasAms: false,
+        trays: [
+          {
+            trayId: 254,
+            external: true,
+            material: refs().find((r) => r.id === id)?.material ?? null,
+            color: null,
+            active: true
+          }
+        ]
+      })
     });
     return new EligibilityQueries(ctx, new EvidenceResolver(ctx));
   };
@@ -99,7 +116,10 @@ function makeHarness(): Harness {
       return PRINTERS.find((p) => p.id.toLowerCase() === wanted || p.name.toLowerCase() === wanted);
     },
     getStatus: () => undefined,
-    startPhysical: async (printerId, file) => void startCalls.push({ printerId, file }),
+    startPhysical: async (printerId, file) => {
+      startCalls.push({ printerId, file });
+      return { confirmed: true };
+    },
     classifyError: () => "unknown",
     listFiles: async (_printer, dir) => ({
       path: dir,

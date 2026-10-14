@@ -131,7 +131,7 @@ const READ_CHUNK_BYTES = 1 << 20;
  * verdict and the metadata are identical, which is what the analyzer's fixture
  * tests pin.
  */
-async function scanGcode(path: string): Promise<Scan> {
+async function scanGcode(text: AsyncIterable<string>): Promise<Scan> {
   const scan: Scan = {
     meta: {
       slicer: null,
@@ -320,35 +320,42 @@ async function scanGcode(path: string): Promise<Scan> {
     }
   };
 
-  const stream = fs.createReadStream(path, {
-    encoding: "utf8",
-    highWaterMark: READ_CHUNK_BYTES
-  });
-
   let carry = "";
-  try {
-    for await (const chunk of stream) {
-      let pending = carry + (chunk as string);
-      // A `\r` at a chunk boundary must wait for the next chunk to know whether it
-      // is a lone break or half of a CRLF pair.
-      let heldCr = "";
-      if (pending.charCodeAt(pending.length - 1) === 13) {
-        heldCr = "\r";
-        pending = pending.slice(0, -1);
-      }
-      const parts = pending.split(LINE_BREAK);
-      carry = (parts.pop() ?? "") + heldCr;
-      for (let i = 0; i < parts.length; i += 1) handleLine(parts[i]);
+  for await (const chunk of text) {
+    let pending = carry + chunk;
+    // A `\r` at a chunk boundary must wait for the next chunk to know whether it
+    // is a lone break or half of a CRLF pair.
+    let heldCr = "";
+    if (pending.charCodeAt(pending.length - 1) === 13) {
+      heldCr = "\r";
+      pending = pending.slice(0, -1);
     }
-    if (carry.length > 0) handleLine(carry);
-  } finally {
-    stream.destroy();
+    const parts = pending.split(LINE_BREAK);
+    carry = (parts.pop() ?? "") + heldCr;
+    for (let i = 0; i < parts.length; i += 1) handleLine(parts[i]);
   }
+  if (carry.length > 0) handleLine(carry);
 
   return scan;
 }
 
+/** A G-code file on disk. */
 export async function analyzeGcode(path: string): Promise<AnalyzerResult> {
+  const stream = fs.createReadStream(path, { encoding: "utf8", highWaterMark: READ_CHUNK_BYTES });
+  try {
+    return await analyzeGcodeText(stream as AsyncIterable<string>);
+  } finally {
+    stream.destroy();
+  }
+}
+
+/**
+ * G-code from any source, as text chunks — a file, or the payload of a sliced
+ * package streamed out of its archive (see {@link file://./threemf.ts}). One
+ * analysis for both, so a plate inside a `.gcode.3mf` is held to exactly the
+ * command policy, metadata reading and geometry a bare `.gcode` is.
+ */
+export async function analyzeGcodeText(text: AsyncIterable<string>): Promise<AnalyzerResult> {
   const warnings: AnalysisFinding[] = [];
   const blockers: AnalysisFinding[] = [];
 
@@ -365,7 +372,7 @@ export async function analyzeGcode(path: string): Promise<AnalyzerResult> {
     hasRelativeMoves,
     usedInches,
     tools
-  } = await scanGcode(path);
+  } = await scanGcode(text);
 
   // ── Findings ────────────────────────────────────────────────────────────
   const commands = policy.evaluate({ slicer: meta.slicer, printerModel: meta.printerModel });

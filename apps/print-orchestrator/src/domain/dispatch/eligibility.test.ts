@@ -961,3 +961,172 @@ test("an unanswered payload question refuses — «probably a print» is not evi
   });
   assert.ok(codes(result).includes(REASON.FORMAT_MISMATCH));
 });
+
+// ── HIGH-05: freshness is the bytes and the analyzer, never a metadata timestamp ──
+
+test("a confirmation that bumped the artifact's updatedAt does NOT make its analysis stale", () => {
+  // The artifact row moved (a scale or review confirmation was written to its
+  // metadata) long after the analysis — its bytes did not.
+  const result = evaluate("manual", {
+    facts: {
+      artifact: { id: "a1", sha256: "a".repeat(64), sizeBytes: 1000, updatedAt: "2026-07-27T10:00:00Z" },
+      analysis: {
+        ...facts("manual").analysis!,
+        updatedAt: "2026-07-26T11:00:00Z",
+        analyzedSha256: "a".repeat(64)
+      }
+    }
+  });
+  assert.ok(!codes(result).includes("ANALYSIS_STALE"), JSON.stringify(result.reasons));
+});
+
+test("an analysis of DIFFERENT bytes is stale, whatever the timestamps say", () => {
+  const result = evaluate("manual", {
+    facts: {
+      analysis: { ...facts("manual").analysis!, analyzedSha256: "b".repeat(64), updatedAt: "2099-01-01T00:00:00Z" }
+    }
+  });
+  assert.ok(blockerCodes(result).includes("ANALYSIS_STALE"));
+});
+
+test("an analysis made by an older analyzer is still refused as outdated", () => {
+  const result = evaluate("manual", {
+    facts: { analysis: { ...facts("manual").analysis!, analyzerVersion: "0.9.0" } }
+  });
+  assert.ok(blockerCodes(result).includes("ANALYZER_OUTDATED"));
+});
+
+// ── HIGH-11: a sliced package is a print like a bare G-code ─────────────────
+
+test("HIGH-11: a sliced package with no declared machine is refused at night, like a bare G-code", () => {
+  const sliced = (mode: DispatchMode) => ({
+    ...facts(mode).analysis!,
+    detectedFormat: "3mf",
+    containsGcodePayload: true,
+    declaredTargetPrinter: null
+  });
+  assert.ok(blockerCodes(evaluate("night", { facts: { analysis: sliced("night") } })).includes(REASON.TARGET_PRINTER_UNKNOWN));
+  assert.ok(
+    !blockerCodes(evaluate("manual", { facts: { analysis: sliced("manual") } })).includes(REASON.TARGET_PRINTER_UNKNOWN),
+    "attended, the operator vouches for it"
+  );
+});
+
+test("HIGH-11: the caller's per-format currency decides 'outdated', not the bare version string", () => {
+  const older = { ...facts("manual").analysis!, analyzerVersion: "1.3.0" };
+  // A G-code read by 1.3.0 is current under 1.4.0 (only 3MF reading changed)…
+  const gcode = evaluate("manual", { facts: { analysis: { ...older, analyzerVersionCurrent: true } } });
+  assert.ok(!blockerCodes(gcode).includes("ANALYZER_OUTDATED"));
+  // …a 3MF read by 1.3.0 is not.
+  const pkg = evaluate("manual", { facts: { analysis: { ...older, analyzerVersionCurrent: false } } });
+  assert.ok(blockerCodes(pkg).includes("ANALYZER_OUTDATED"));
+});
+
+// ── Automatic queue: the `auto` mode ────────────────────────────────────────
+// Nobody pressed anything for an automatic start. Everything unattended applies,
+// every open question is a refusal, and the job carries the operator's
+// permission to run without them; its time preference replaces the night flag.
+
+test("auto: a fully prepared job with the permission has no blocker", () => {
+  const result = evaluate("auto", { facts: { unattendedAllowed: true } });
+  assert.deepEqual(blockerCodes(result), [], JSON.stringify(result.reasons));
+});
+
+test("auto: without the operator's permission to run unattended, refused", () => {
+  const result = evaluate("auto", { facts: { unattendedAllowed: false } });
+  assert.ok(blockerCodes(result).includes(REASON.UNATTENDED_NOT_ALLOWED));
+});
+
+test("auto: every open question is a refusal — nobody is there to answer it", () => {
+  const cases: [string, Parameters<typeof evaluate>[1], ReasonCode][] = [
+    ["unknown size", { task: { dimensions: null } }, REASON.DIMENSIONS_UNKNOWN],
+    ["unreported material", { printer: { material: null } }, REASON.MATERIAL_UNKNOWN],
+    ["unknown nozzle", { printer: { nozzleMm: null } }, REASON.NOZZLE_UNKNOWN],
+    ["unrecorded bed", { evidence: { bedCycle: null }, facts: { bedState: null } }, REASON.BED_STATE_UNKNOWN]
+  ];
+  for (const [what, over, code] of cases) {
+    const manual = evaluate("manual", over);
+    const auto = evaluate("auto", { ...over, facts: { unattendedAllowed: true, ...(over?.facts ?? {}) } });
+    assert.ok(blockerCodes(auto).includes(code), `${what}: auto refuses (${JSON.stringify(auto.reasons)})`);
+    if (code !== REASON.BED_STATE_UNKNOWN) {
+      assert.ok(!blockerCodes(manual).includes(code), `${what}: an attended start may answer it`);
+    }
+  }
+});
+
+test("auto: an accepted review verdict does not count — nobody accepted it for THIS start", () => {
+  const analysis = {
+    id: "an1",
+    state: "ready",
+    verdict: "review",
+    detectedFormat: "gcode",
+    blockers: [],
+    analyzerVersion: "1.0.0",
+    updatedAt: "2026-07-26T11:00:00Z",
+    declaredTargetPrinter: "K2 Plus",
+    declaredGcodeFlavor: "klipper",
+    reviewAccepted: true,
+    reviewAcceptedBy: "miha"
+  };
+  const manual = evaluate("manual", { facts: { analysis } });
+  assert.ok(!blockerCodes(manual).includes(REASON.ANALYSIS_VERDICT));
+  const auto = evaluate("auto", { facts: { analysis, unattendedAllowed: true } });
+  assert.ok(blockerCodes(auto).includes(REASON.ANALYSIS_VERDICT));
+});
+
+test("auto: a file only an operator vouched for, or one matched by name alone, is refused", () => {
+  const manualTransfer = evaluate("auto", {
+    facts: {
+      unattendedAllowed: true,
+      deviceArtifact: {
+        state: "VERIFIED",
+        transferMode: "manual_file_transfer",
+        verification: "operator_confirmed",
+        remotePath: "chalice.gcode",
+        lastError: null,
+        stale: false,
+        staleReason: null
+      }
+    }
+  });
+  assert.ok(blockerCodes(manualTransfer).includes(REASON.DEVICE_TRANSFER_NOT_CONFIRMED));
+  const nameOnly = evaluate("auto", { facts: { unattendedAllowed: true, deviceFileIdentity: "name-only" } });
+  assert.ok(blockerCodes(nameOnly).includes(REASON.DEVICE_FILE_NOT_VERIFIED));
+});
+
+test("auto: the planner's «busy, print after it» is a refusal, as at night", () => {
+  // The preflight lifts a plate held by another job as a soft `printer_busy`
+  // (the planner may queue behind it). Attended, it stays a warning; nobody
+  // attends an automatic start, so — like night — it refuses.
+  const busy = { evidence: { bedCycle: "RUNNING" as const } };
+  const manual = evaluate("manual", busy);
+  assert.ok(!blockerCodes(manual).includes(REASON.PRINTER_BUSY));
+  const auto = evaluate("auto", { ...busy, facts: { unattendedAllowed: true } });
+  assert.ok(blockerCodes(auto).includes(REASON.PRINTER_BUSY));
+});
+
+test("auto: a night job follows the night window and must fit; outside it, it waits", () => {
+  const inside = evaluate("auto", { facts: { unattendedAllowed: true, night: true } }); // 23:00, 8h30 left
+  assert.deepEqual(blockerCodes(inside), []);
+  const outside = evaluate("auto", {
+    facts: { unattendedAllowed: true, night: true, now: new Date("2026-07-26T12:00:00Z") }
+  });
+  assert.ok(blockerCodes(outside).includes(REASON.NIGHT_WINDOW_TOO_SHORT));
+  // `any` time preference: no window rule at all.
+  const anyTime = evaluate("auto", { facts: { unattendedAllowed: true, now: new Date("2026-07-26T12:00:00Z") } });
+  assert.deepEqual(blockerCodes(anyTime), []);
+});
+
+test("auto: a day job waits for an operator on shift; a person pressing the button is evidently there", () => {
+  const asleep = { dayOnly: true, operatorPresence: "ASLEEP", operatorReason: "оператор спит" } as const;
+  const auto = evaluate("auto", { facts: { unattendedAllowed: true, ...asleep } });
+  assert.ok(blockerCodes(auto).includes(REASON.AUTO_DAY_ONLY));
+  const unknown = evaluate("auto", {
+    facts: { unattendedAllowed: true, dayOnly: true, operatorScheduleResolved: false, operatorPresence: "UNKNOWN", operatorReason: "нет расписания" }
+  });
+  assert.ok(blockerCodes(unknown).includes(REASON.AUTO_DAY_ONLY), "an unknown schedule is not an operator on shift");
+  const onShift = evaluate("auto", { facts: { unattendedAllowed: true, dayOnly: true } });
+  assert.ok(!codes(onShift).includes(REASON.AUTO_DAY_ONLY));
+  const manual = evaluate("manual", { facts: asleep });
+  assert.ok(!codes(manual).includes(REASON.AUTO_DAY_ONLY), "only the automatic queue waits for the shift");
+});

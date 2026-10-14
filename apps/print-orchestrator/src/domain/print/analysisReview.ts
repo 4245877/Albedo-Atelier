@@ -34,6 +34,14 @@ export const ANALYSIS_REVIEW_KEY = "analysisReview";
 export interface AnalysisReviewAcknowledgement {
   /** The analysis that was read. */
   analysisId: string;
+  /**
+   * The analyzer version that produced it. With the bytes' hash and the finding
+   * codes this is the acknowledgement's real identity: a re-run of the SAME
+   * analyzer over the SAME bytes reaching the same findings is the same
+   * judgement, and must not silently void the operator's answer. Null for
+   * acknowledgements recorded before it was kept (they stay bound to the id).
+   */
+  analyzerVersion?: string | null;
   /** The verdict at the time it was read (always `review` or `needs_input`). */
   verdict: string;
   /** Finding codes visible when it was accepted; a new code is not covered. */
@@ -89,6 +97,7 @@ export function makeAnalysisReview(input: {
   const note = typeof input.note === "string" ? input.note.trim() : "";
   return {
     analysisId: analysis.id,
+    analyzerVersion: analysis.analyzerVersion,
     verdict: analysis.verdict,
     codes: reviewCodesOf(analysis),
     sha256: input.artifact.sha256,
@@ -116,6 +125,7 @@ export function readAnalysisReview(
 
   const acknowledgement: AnalysisReviewAcknowledgement = {
     analysisId,
+    analyzerVersion: typeof rec.analyzerVersion === "string" ? rec.analyzerVersion : null,
     verdict: typeof rec.verdict === "string" ? rec.verdict : "review",
     codes: Array.isArray(rec.codes) ? rec.codes.filter((c): c is string => typeof c === "string") : [],
     sha256: typeof rec.sha256 === "string" ? rec.sha256 : null,
@@ -147,7 +157,15 @@ function lapseReason(
     return "содержимое файла изменилось после подтверждения";
   }
   if (!analysis) return "анализ, который подтверждали, больше не существует";
-  if (analysis.id !== ack.analysisId) return "файл проанализирован заново — подтвердите ещё раз";
+  if (analysis.id !== ack.analysisId) {
+    // A re-analysis is the same judgement only when it is the same analyzer
+    // reading the same bytes (checked above) — the findings are compared below.
+    // A different analyzer version, or an acknowledgement that never recorded
+    // one, may reach different conclusions about the same file.
+    if (!ack.analyzerVersion || ack.analyzerVersion !== analysis.analyzerVersion) {
+      return "файл проанализирован заново другой версией анализатора — подтвердите ещё раз";
+    }
+  }
   if (analysis.state !== "ready") return "анализ не завершён";
   if (analysis.blockers.length > 0) return "анализ выявил критические проблемы";
   // A reason nobody read cannot have been accepted.

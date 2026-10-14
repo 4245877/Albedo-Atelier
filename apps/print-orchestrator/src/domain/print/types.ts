@@ -722,6 +722,8 @@ export type AuditEntityType =
   | "profile_revision"
   | "profile_set"
   | "slice_variant"
+  /** A batch of slices requested together (its id is stamped on each variant). */
+  | "slice_batch"
   | "device_artifact"
   | "operator"
   | "schedule_rule"

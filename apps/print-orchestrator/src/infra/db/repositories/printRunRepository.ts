@@ -146,6 +146,14 @@ export class SqlitePrintRunRepository
     );
   }
 
+  findLastStartedByPrinter(printerId: string): PrintRun | null {
+    return this.queryOne(
+      `SELECT * FROM print_runs WHERE printer_id = ? AND started_at IS NOT NULL
+       ORDER BY started_at DESC, id DESC LIMIT 1`,
+      printerId
+    );
+  }
+
   findByIdempotencyKey(key: string): PrintRun | null {
     return this.queryOne("SELECT * FROM print_runs WHERE idempotency_key = ?", key);
   }

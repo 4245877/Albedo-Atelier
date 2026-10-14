@@ -130,6 +130,8 @@ test("удаление файла: подтверждение, запрос на
     await until('document.querySelectorAll("#worknav .work-tab").length > 0', "the app to boot");
     await evalValue('document.querySelector(\'.mode-tab[data-mode="works"]\').click(), 1');
     await until('document.getElementById("mode-works") && !document.getElementById("mode-works").hidden', "the works mode");
+    // «Работы» открываются на «Новой печати»; файлы — в своём разделе.
+    await evalValue('document.querySelector(\'[data-work-tab="uploads"]\').click(), 1');
     await until("document.querySelectorAll('#upload-list .upload-item').length === 2", "both file cards");
 
     // ── Занятый файл кнопки не даёт, а причину показывает ──
@@ -241,6 +243,8 @@ test("вкладка вернулась: список сверяется с се
     await until('document.querySelectorAll("#worknav .work-tab").length > 0', "the app to boot");
     await evalValue('document.querySelector(\'.mode-tab[data-mode="works"]\').click(), 1');
     await until('document.getElementById("mode-works") && !document.getElementById("mode-works").hidden', "the works mode");
+    // «Работы» открываются на «Новой печати»; файлы — в своём разделе.
+    await evalValue('document.querySelector(\'[data-work-tab="uploads"]\').click(), 1');
     await until("document.querySelectorAll('#upload-list .upload-item').length === 2", "both file cards");
 
     assert.deepEqual(await evalValue(deleteBtn("art_a")), { disabled: true, deletes: false }, "the busy file starts blocked");
@@ -332,6 +336,8 @@ test("каскад: кнопка жива, окно называет задан�
     await until('document.querySelectorAll("#worknav .work-tab").length > 0', "the app to boot");
     await evalValue('document.querySelector(\'.mode-tab[data-mode="works"]\').click(), 1');
     await until('document.getElementById("mode-works") && !document.getElementById("mode-works").hidden', "the works mode");
+    // «Работы» открываются на «Новой печати»; файлы — в своём разделе.
+    await evalValue('document.querySelector(\'[data-work-tab="uploads"]\').click(), 1');
     await until("document.querySelectorAll('#upload-list .upload-item').length === 1", "the file card");
 
     // ── Занятый очередью файл кнопку ДАЁТ, и подсказка обещает отмену ──

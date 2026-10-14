@@ -1,4 +1,5 @@
 import type { AmsKind } from "./modelSpecs";
+import type { PrinterReadinessView } from "./readiness";
 import type { SpecSource } from "./specs";
 
 export type PrinterTechnology = "FDM" | "Resin";
@@ -62,6 +63,12 @@ export interface PrinterBedView {
   awaitingClearance: boolean;
   /** The open PART_REMOVAL/PLATE_SERVICE operation to confirm, when there is one. */
   operationId: string | null;
+  /** False when no cycle was ever recorded — the state is then UNKNOWN, never CLEAR. */
+  tracked?: boolean;
+  /** True when the current occupancy comes from a print Albedo did not start. */
+  external?: boolean;
+  /** True when a person may resolve it now by confirming the plate is empty. */
+  confirmable?: boolean;
 }
 
 export interface PrinterView {
@@ -171,6 +178,18 @@ export interface PrinterView {
   filesSupported: boolean;
   /** Whether the backend can remote-start an on-device file (Moonraker only). */
   remoteStartSupported: boolean;
+  /**
+   * Whether the adapter can pause / resume / cancel a running print. False for
+   * the Creality WebSocket adapter, which only reads telemetry: offering those
+   * buttons there produced a command that could only ever fail.
+   */
+  printControlSupported?: boolean;
+  /**
+   * Whether the printer can take the next job, as one honest sentence — see
+   * `describePrinterReadiness`. Filled by the read model (it needs the bed, the
+   * runs and the operations); absent on views built without a store.
+   */
+  readiness?: PrinterReadinessView;
   /**
    * What is on the plate, as the system tracks it — not as the printer's own
    * `status` implies. The two are routinely different in the way that matters:

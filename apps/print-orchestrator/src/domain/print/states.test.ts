@@ -105,9 +105,12 @@ test("PrintRun: ACTIVE_RUN_STATES is exactly the non-terminal run states (single
   }
 });
 
-test("QueueEntry: WAITING ⇄ HELD, both release; RELEASED is terminal", () => {
+test("QueueEntry: WAITING ⇄ HELD, both release; RELEASED reopens only back to WAITING (a FAILED retry)", () => {
   assert.ok(canTransition(QUEUE_ENTRY_TRANSITIONS, "WAITING", "HELD"));
   assert.ok(canTransition(QUEUE_ENTRY_TRANSITIONS, "HELD", "WAITING"));
   assert.ok(canTransition(QUEUE_ENTRY_TRANSITIONS, "WAITING", "RELEASED"));
-  assert.ok(isTerminal(QUEUE_ENTRY_TRANSITIONS, "RELEASED"));
+  // HIGH-16: a task has one entry (unique task_id); a retried FAILED task can be
+  // back in the queue only by reopening it — and only into WAITING.
+  assert.ok(canTransition(QUEUE_ENTRY_TRANSITIONS, "RELEASED", "WAITING"));
+  assert.ok(!canTransition(QUEUE_ENTRY_TRANSITIONS, "RELEASED", "HELD"));
 });

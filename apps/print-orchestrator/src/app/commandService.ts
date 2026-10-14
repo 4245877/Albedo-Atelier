@@ -21,6 +21,7 @@ import type { LightScheduler } from "./lightScheduler";
 import type { PrinterPoller } from "./printerPoller";
 import type { StoreLogger } from "../shared/logger";
 import { buildPrinterView, isBusyStatus } from "./printerView";
+import { sameJobFile } from "../infra/printers/files/jobIdentity";
 import type { SnapshotMeta, SnapshotStore } from "../infra/persistence/snapshotStore";
 
 /** Result of a manual snapshot: the refreshed view plus the saved image's metadata. */
@@ -204,8 +205,25 @@ export class PrinterCommandService {
     id: string,
     file: string,
     jobRef?: string,
-    opts: { runId?: string } = {}
+    opts: StartPrintOptions = {}
   ): Promise<PrinterView> {
+    return (await this.startPrintObserved(id, file, jobRef, opts)).view;
+  }
+
+  /**
+   * {@link startPrint}, plus what the device was actually seen to do.
+   *
+   * `confirmed` is true only when the printer itself reported running this job —
+   * its start call waited for that (Bambu), or the poll right after the send
+   * already shows it printing the file. An adapter answering "command accepted"
+   * (Moonraker's `200`) is not confirmation, and is not reported as one.
+   */
+  async startPrintObserved(
+    id: string,
+    file: string,
+    jobRef?: string,
+    opts: StartPrintOptions = {}
+  ): Promise<{ view: PrinterView; status: PrinterLiveStatus; confirmed: boolean }> {
     const runId = opts.runId ?? null;
     // Printer first: `normalizeStartablePath` answers "can this be started?" from
     // the target adapter's capability table, so validating before the config is
@@ -251,7 +269,11 @@ export class PrinterCommandService {
           if (guards && existing.state !== "ACKED") {
             guards.upsert({ ...existing, state: "ACKED", updatedAt: nowIso() });
           }
-          return buildPrinterView(printer, status, this.cameras.getEntry(printer.id), null, this.specsOf(printer));
+          return {
+            view: buildPrinterView(printer, status, this.cameras.getEntry(printer.id), null, this.specsOf(printer)),
+            status,
+            confirmed: true
+          };
         }
         if (decision === "busy-other") {
           // Something else is printing; our guarded start never ran. Drop the
@@ -277,6 +299,11 @@ export class PrinterCommandService {
         );
       }
 
+      // The last moment at which "nothing has been sent" is a fact: an operator's
+      // cancel, a changed feed source — anything the caller must re-check under
+      // this printer's lock — refuses here, before any trace of a send exists.
+      opts.beforeSend?.();
+
       // Record the intent durably BEFORE dispatch. A failed persist here aborts
       // the start (fail-closed): a command we cannot account for is never fired.
       // This write is intentionally synchronous and its failure is not swallowed.
@@ -291,8 +318,12 @@ export class PrinterCommandService {
       });
 
       this.recentStarts.set(printer.id, Date.now() + RECENT_START_HOLD_MS);
+      let sent: { confirmed: boolean };
       try {
-        await sendPrinterStart(printer, target);
+        sent = await sendPrinterStart(printer, target, {
+          feed: opts.feed ?? null,
+          plateGcodePath: opts.plateGcodePath ?? null
+        });
       } catch (error) {
         const outcome = classifyDispatchError(error);
         if (outcome === "rejected") {
@@ -338,8 +369,22 @@ export class PrinterCommandService {
         }
       }
 
-      this.events.push("▶", `Оператор запустил печать «${target}» на <b>${printer.name}</b>`, "ok");
-      return this.refresh(printer);
+      const fresh = await this.poller.refreshStatus(printer, this.liveStatus);
+      const observed =
+        isBusyStatus(fresh.status) && sameJobFile(fresh.currentFile, target);
+      const confirmed = sent.confirmed || observed;
+      this.events.push(
+        "▶",
+        confirmed
+          ? `Печать «${target}» на <b>${printer.name}</b> началась`
+          : `Команда запуска «${target}» принята <b>${printer.name}</b> — ждём, когда принтер подтвердит начало печати`,
+        confirmed ? "ok" : "info"
+      );
+      return {
+        view: buildPrinterView(printer, fresh, this.cameras.getEntry(printer.id), null, this.specsOf(printer)),
+        status: fresh,
+        confirmed
+      };
     });
   }
 
@@ -416,6 +461,26 @@ export class PrinterCommandService {
     const status = await this.poller.refreshStatus(printer, this.liveStatus);
     return buildPrinterView(printer, status, this.cameras.getEntry(printer.id), null, this.specsOf(printer));
   }
+}
+
+/** Options of a physical start. */
+export interface StartPrintOptions {
+  /** The canonical run this start belongs to (kept on the durable guard). */
+  runId?: string;
+  /**
+   * Called inside the printer's command lock, after the device was re-read and
+   * before the durable guard is written. Throwing aborts the start with nothing
+   * sent — the hook the dispatch uses to honour a cancel that raced it.
+   */
+  beforeSend?: () => void;
+  /** The pinned filament source (Bambu AMS), forwarded verbatim to the adapter. */
+  feed?: Record<string, unknown> | null;
+  /**
+   * The G-code entry inside a plate package the start must name — the one the
+   * analysis read (`Metadata/plate_2.gcode` for an operator's plate-2 export).
+   * Absent → the adapter's own package layout (`Metadata/plate_1.gcode`).
+   */
+  plateGcodePath?: string | null;
 }
 
 /** ISO-8601 stamp for guard records. */

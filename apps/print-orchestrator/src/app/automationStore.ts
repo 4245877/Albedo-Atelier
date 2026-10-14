@@ -1,5 +1,5 @@
 import type { Automation } from "../domain/dashboard/types";
-import { NotFoundError } from "../core/errors";
+import { JobError, NotFoundError } from "../core/errors";
 import { hhmm } from "../shared/time";
 import type { EventFeed } from "./eventFeed";
 import type { PersistedAutomations } from "../infra/persistence/stateStore";
@@ -34,6 +34,16 @@ export const AUTOMATION_RULES: readonly AutomationRule[] = [
     name: "Подсказки ночной печати",
     desc: "Подбирает из очереди безопасную деталь на ночь и оценивает риск",
     defaultOn: true
+  },
+  {
+    // Off by default, and lockable: the deployment switch AUTO_QUEUE_ENABLED
+    // decides whether it may be switched on at all (see `lockedReason`).
+    id: "auto-queue",
+    name: "Автоочередь",
+    desc:
+      "Сама запускает следующее задание на свободном принтере — только задания с разрешением печатать без оператора, " +
+      "только по записанной очистке стола, известному материалу и проверенному файлу. Если исход запуска потерян — выключается сама",
+    defaultOn: false
   }
 ] as const;
 
@@ -50,7 +60,12 @@ export class AutomationStore {
   constructor(
     initial: PersistedAutomations = { states: {}, lastRun: null },
     private readonly events?: EventFeed,
-    private readonly persist: () => void = () => {}
+    private readonly persist: () => void = () => {},
+    /**
+     * Why a rule may not be switched on right now (a deployment switch is off),
+     * or null. A locked rule can still be switched OFF — only enabling is refused.
+     */
+    private readonly lockedReason: (id: string) => string | null = () => null
   ) {
     for (const rule of AUTOMATION_RULES) {
       const stored = initial.states[rule.id];
@@ -59,18 +74,25 @@ export class AutomationStore {
     this.lastRun = initial.lastRun ?? null;
   }
 
-  /** True when a rule exists and is enabled. Unknown ids are treated as off. */
+  /**
+   * True when a rule exists and is enabled — and is not locked: a rule its
+   * deployment switch forbids counts as off even if it was stored on earlier.
+   */
   isEnabled(id: string): boolean {
-    return this.states.get(id) === true;
+    return this.states.get(id) === true && this.lockedReason(id) === null;
   }
 
   list(): Automation[] {
-    return AUTOMATION_RULES.map((rule) => ({
-      id: rule.id,
-      name: rule.name,
-      desc: rule.desc,
-      on: this.isEnabled(rule.id)
-    }));
+    return AUTOMATION_RULES.map((rule) => {
+      const locked = this.lockedReason(rule.id);
+      return {
+        id: rule.id,
+        name: rule.name,
+        desc: rule.desc,
+        on: this.isEnabled(rule.id),
+        ...(locked ? { locked } : {})
+      };
+    });
   }
 
   getLastRun(): string | null {
@@ -89,6 +111,10 @@ export class AutomationStore {
     }
 
     const next = typeof on === "boolean" ? on : !this.isEnabled(id);
+    const locked = this.lockedReason(id);
+    if (next && locked) {
+      throw new JobError(`Правило «${rule.name}» нельзя включить: ${locked}`, { code: "AUTOMATION_LOCKED" });
+    }
     this.states.set(id, next);
     this.lastRun = hhmm();
     this.events?.push(
@@ -99,6 +125,19 @@ export class AutomationStore {
     this.persist();
 
     return { id: rule.id, name: rule.name, desc: rule.desc, on: next };
+  }
+
+  /**
+   * The circuit breaker: an automation switches ITSELF off, with the reason in
+   * the feed. Persisted — a restart does not re-arm what tripped; a person does.
+   */
+  disarm(id: string, reason: string): void {
+    const rule = AUTOMATION_RULES.find((candidate) => candidate.id === id);
+    if (!rule || this.states.get(id) !== true) return;
+    this.states.set(id, false);
+    this.lastRun = hhmm();
+    this.events?.push("✠", `Правило «${rule.name}» выключено автоматически: ${reason}`, "err");
+    this.persist();
   }
 
   /** The durable projection: on/off state by id plus the last-run stamp. */

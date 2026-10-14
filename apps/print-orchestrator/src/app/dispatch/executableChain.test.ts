@@ -12,6 +12,7 @@ import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { Artifact, ArtifactAnalysis, PrintTask } from "../../domain/print/types";
 import type { ProfileRevision, ProfileSet, ProfileType, SliceVariant } from "../../domain/slicing/types";
 import { openPrintQueueStore } from "../../infra/db/store";
+import { establishClearBed } from "./testkit/bed";
 import type { PrinterConfig } from "../../infra/printers/config";
 import { buildDeviceFileName, type PrinterFilesListing } from "../../infra/printers/files";
 import { ArtifactStorage } from "../../infra/storage/artifactStorage";
@@ -100,6 +101,9 @@ afterEach(() => {
 
 async function makeHarness(tmp: string): Promise<Harness> {
   const store = openPrintQueueStore(":memory:");
+  // Every harness printer starts with a plate an operator confirmed empty — the
+  // only evidence of a free bed (untracked is UNKNOWN and the gate refuses it).
+  for (const id of ["k2", "ender-ws"]) establishClearBed(store, id);
   const storage = new ArtifactStorage({ root: path.join(tmp, "artifacts") });
   await storage.init();
 
@@ -183,7 +187,10 @@ async function makeHarness(tmp: string): Promise<Harness> {
       return PRINTERS.find((p) => p.id.toLowerCase() === wanted || p.name.toLowerCase() === wanted);
     },
     getStatus: () => undefined,
-    startPhysical: async (printerId, file) => void startCalls.push({ printerId, file }),
+    startPhysical: async (printerId, file) => {
+      startCalls.push({ printerId, file });
+      return { confirmed: true };
+    },
     classifyError: () => "unknown",
     listFiles,
     evaluateEligibility: (input) => eligibility().evaluate(input),

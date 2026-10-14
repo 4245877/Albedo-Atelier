@@ -168,8 +168,7 @@ export function installActions({ getState, refresh }) {
     // файла на принтере, то есть второй жизненный цикл без артефакта, хеша и
     // анализа; см. render/modals.js.
     if (act === "add-job") {
-      document.querySelector('[data-goto="uploads"]')?.click();
-      document.getElementById("uploads")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      gotoSection("newprint");
       return;
     }
     if (act === "add-printer") { openInfoModal("add-printer"); return; }

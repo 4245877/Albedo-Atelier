@@ -399,12 +399,20 @@ export function launchModalHtml(preview, ui) {
   const cost = costLine(preview);
 
   if (ui.done) {
+    const accepted = ui.done.phase === "accepted";
     return `
-      <div class="modal-head"><h2 id="modal-title">Печать запущена</h2></div>
+      <div class="modal-head"><h2 id="modal-title">${accepted ? "Команда принята принтером" : "Печать началась"}</h2></div>
       <div class="launch-done">
-        <div class="launch-done-mark">${icon("check", { cls: "ico-xl" })}</div>
+        <div class="launch-done-mark">${icon(accepted ? "clock" : "check", { cls: "ico-xl" })}</div>
         <div class="launch-sum-title">${esc(preview.displayTitle)}</div>
         <div class="launch-sum-sub">${esc(ui.done.printerName)}</div>
+        ${
+          accepted
+            ? `<p class="launch-note">Принтер принял команду, но ещё не показал, что печатает. Я слежу за ним:
+                 как только телеметрия подтвердит начало печати, задание перейдёт в «Печатается».
+                 Если печать не начнётся за 3 минуты, запуск будет отмечен как неподтверждённый — повторно команда не отправляется.</p>`
+            : ""
+        }
       </div>
       <div class="modal-actions">
         <button type="button" class="btn btn-sm btn-primary" data-modal-close>Закрыть</button>

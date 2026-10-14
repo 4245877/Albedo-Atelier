@@ -8,7 +8,7 @@ import {
   type ReleaseOperationInput
 } from "../../domain/scheduling/release";
 import type { SchedulerContext } from "./context";
-import { heldByActiveRun } from "./evidence";
+import { bedStateFor, heldByActiveRun } from "./evidence";
 import type { SchedulerPrinterRef } from "./types";
 
 /**
@@ -105,18 +105,25 @@ export class ReleaseProjector {
 
     if (out.some((op) => op.blocking)) return out;
 
-    const bed = this.ctx.store.repositories.bedCycles.findOpenByPrinter(printer.id);
-    if (bed && bed.state !== "CLEAR" && bed.state !== "RUNNING" && bed.state !== "RESERVED") {
+    // The same occupancy rule the dispatch gate applies (see `bedStateFor`). A
+    // printer whose bed was never tracked is UNKNOWN here too: planning a start
+    // onto it would promise the very confirmation nobody has given.
+    const latest = this.ctx.store.repositories.bedCycles.latestByPrinter(printer.id);
+    const state = bedStateFor(printer, latest);
+    if (state === "AWAITING_CLEARANCE" || state === "UNKNOWN") {
       out.push({
         id: `virtual-bed-${printer.id}`,
         type: "PART_REMOVAL",
-        label: `стол не освобождён (${bed.state}), операция снятия не зарегистрирована`,
+        label:
+          latest === null
+            ? "стол ни разу не подтверждён свободным — подтвердите состояние стола"
+            : `стол не освобождён (${state}), операция снятия не зарегистрирована`,
         printerId: printer.id,
         inProgress: false,
         blocking: true,
         minutes: null, // unknown on purpose → release stays unknown
         windowStartMs: null,
-        createdAtMs: Date.parse(bed.updatedAt) || nowMs
+        createdAtMs: latest ? Date.parse(latest.updatedAt) || nowMs : nowMs
       });
     }
     return out;

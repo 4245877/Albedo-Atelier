@@ -111,6 +111,9 @@ const IN_FLIGHT: ReadonlySet<string> = new Set([
   "CANCELLED"
 ]);
 
+/** Task states after which that print is over. */
+const CLOSED: ReadonlySet<string> = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
+
 export function resolveArtifactStatus(
   artifact: Artifact,
   analysis: ArtifactAnalysis | null,
@@ -210,7 +213,13 @@ function resolveNextAction(input: {
   reviewRequired: boolean | undefined;
   plateRequired: boolean;
 }): ArtifactNextAction {
-  const { artifact, analysis, task, executable } = input;
+  const { artifact, analysis, executable } = input;
+  // A source model outlives every print made from it. Once that print is over —
+  // finished, failed or cancelled — the model can be prepared again: the next
+  // slice opens a new task and the closed one stays history. For a model, then,
+  // a closed task is context for the next step, not its subject.
+  const previous = !executable && input.task !== null && CLOSED.has(input.task.state) ? input.task : null;
+  const task = previous ? null : input.task;
   const taskId = task?.id ?? null;
 
   if (!analysis || analysis.state === "pending" || analysis.state === "running") {
@@ -310,8 +319,10 @@ function resolveNextAction(input: {
     return {
       kind: "slice",
       label: "Нарезать",
-      explanation:
-        "Это модель — перед печатью её нужно нарезать под конкретный принтер (раздел «Слайсинг»).",
+      explanation: previous
+        ? `Прошлое задание по этой модели закрыто (${previous.state}). Чтобы напечатать её, нарежьте модель заново — ` +
+          "появится новое задание, а история прошлого не изменится."
+        : "Это модель — перед печатью её нужно нарезать под конкретный принтер (раздел «Слайсинг»).",
       actionable: true,
       taskId
     };

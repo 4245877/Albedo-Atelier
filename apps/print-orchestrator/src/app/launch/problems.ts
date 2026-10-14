@@ -210,7 +210,11 @@ const TRANSLATIONS: Record<string, Translation> = {
     action:
       "STL не содержит единиц измерения, поэтому размеры недоказуемы. " +
       "Подтвердите масштаб модели (мм или дюймы) перед запуском."
+  },  slice_scale_mismatch: {
+    title: "Модель нарезана не в том масштабе",
+    action: "Единицы модели подтверждены иначе, чем при нарезке. Нарежьте модель заново."
   },
+
   PRINTER_NOT_CONFIGURED: {
     title: "Принтер не настроен",
     action: "Не хватает данных для связи с принтером — заполните их в настройках принтера."
@@ -390,6 +394,11 @@ const TRANSLATIONS: Record<string, Translation> = {
     title: "Задание не помечено для ночного запуска",
     action: "Выберите «ночью» в параметрах планирования задания."
   },
+  AUTO_DAY_ONLY: {
+    title: "Дневное задание ждёт оператора",
+    action:
+      "Задание отмечено «днём»: автоочередь запустит его, когда оператор будет на смене. Запустить сейчас можно вручную."
+  },
   UNATTENDED_NOT_ALLOWED: {
     title: "Печать без присмотра не разрешена",
     action: "Разрешите unattended-печать в параметрах задания, если готовы оставить её без оператора."
@@ -493,6 +502,30 @@ const TRANSLATIONS: Record<string, Translation> = {
   AMS_MAPPING_AMBIGUOUS: {
     title: "Не определено, какой филамент в какой слот",
     action: "Нарежьте под один материал или подтвердите запуск вручную."
+  },
+  SLICE_SCALE_MISMATCH: {
+    title: "Модель нарезана не в том масштабе",
+    action: "Единицы модели подтверждены иначе, чем при нарезке. Нарежьте модель заново — старый файл напечатал бы деталь не того размера."
+  },
+  AMS_MATERIAL_MISMATCH: {
+    title: "В AMS нет нужного материала",
+    action: "Заправьте катушку с материалом задания в любой лоток AMS или выберите лоток того же материала явно."
+  },
+  AMS_SLOT_AMBIGUOUS: {
+    title: "Нужный материал есть в нескольких лотках",
+    action: "Выберите, из какого лотка печатать, — запуск не будет угадывать за вас."
+  },
+  AMS_MATERIAL_UNKNOWN: {
+    title: "Материал задания неизвестен",
+    action: "Укажите материал задания: без него нельзя выбрать лоток AMS."
+  },
+  AMS_STATE_UNKNOWN: {
+    title: "Принтер не сообщает состояние AMS",
+    action: "Дождитесь свежей телеметрии принтера (проверьте связь), затем повторите."
+  },
+  AMS_FEED_UNSUPPORTED: {
+    title: "Такую подачу филамента запустить нельзя",
+    action: "Нарежьте задание под один источник филамента (AMS или внешняя катушка)."
   },
   GCODE_FLAVOR_MISMATCH: {
     title: "Файл собран под другую прошивку",
@@ -660,6 +693,14 @@ const CAUSE_RANK: Record<string, number> = {
   UNRESOLVED_DISPATCH: 1,
   PRINTER_FAULT: 0,
   PRINTER_MEDIA_MISSING: 0,
+  // A wrong-filament start is a fact about the job and the spool, not about the
+  // device being busy — it explains the refusal before any state rule does.
+  SLICE_SCALE_MISMATCH: 2,
+  AMS_MATERIAL_MISMATCH: 2,
+  AMS_SLOT_AMBIGUOUS: 2,
+  AMS_MATERIAL_UNKNOWN: 2,
+  AMS_STATE_UNKNOWN: 6,
+  AMS_FEED_UNSUPPORTED: 2,
   LAUNCH_UNCONFIRMED: 1,
   PRINTER_OFFLINE: 4,
   PRINTER_ERROR: 5,
@@ -672,7 +713,9 @@ const CAUSE_RANK: Record<string, number> = {
   BUILD_VOLUME_UNKNOWN: 7,
   BED_STATE_UNKNOWN: 7,
   BED_NOT_CLEAR: 3,
-  OPERATOR_INTERVENTION_REQUIRED: 8
+  OPERATOR_INTERVENTION_REQUIRED: 8,
+  // A time preference, not a fault: every physical refusal explains more.
+  AUTO_DAY_ONLY: 9
 };
 
 const DEFAULT_CAUSE_RANK = 3;

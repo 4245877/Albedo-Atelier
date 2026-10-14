@@ -8,6 +8,7 @@ import { openPrintQueueStore } from "../../infra/db/store";
 import { PrintQueueService } from "../printQueue/printQueueService";
 import { DispatchService, type DispatchDeps } from "./dispatchService";
 import { RunLifecycleService } from "./runLifecycle";
+import { establishClearBed } from "./testkit/bed";
 import type { PrinterConfig } from "../../infra/printers/config";
 
 /*
@@ -66,6 +67,7 @@ async function runningRun(): Promise<{
   taskId: string;
 }> {
   const store = openPrintQueueStore(":memory:");
+  establishClearBed(store, "k2");
   const queue = new PrintQueueService(store);
   const taskId = queue.createTask({
     title: "Chalice",
@@ -77,7 +79,8 @@ async function runningRun(): Promise<{
     store,
     resolvePrinter: () => K2,
     getStatus: () => idle(),
-    startPhysical: async () => {},
+    // The follow-up poll saw the printer running the job.
+    startPhysical: async () => ({ confirmed: true }),
     classifyError: () => "unknown",
     listFiles: async () => ({
       path: "",
@@ -202,6 +205,7 @@ async function bambuRun(): Promise<{
   taskId: string;
 }> {
   const store = openPrintQueueStore(":memory:");
+  establishClearBed(store, "a1");
   const queue = new PrintQueueService(store);
   const file = "cube-a1b2c3d4.gcode.3mf";
   const taskId = queue.createTask({ title: "Cube", printer: "a1", material: "PLA", file }).task.id;
@@ -210,7 +214,8 @@ async function bambuRun(): Promise<{
     store,
     resolvePrinter: () => A1,
     getStatus: () => status({ id: "a1" }),
-    startPhysical: async () => {},
+    // A Bambu start returns only once the device reports the job running.
+    startPhysical: async () => ({ confirmed: true }),
     classifyError: () => "unknown",
     listFiles: async () => ({
       path: "",
@@ -346,6 +351,7 @@ async function unconfirmedRun(): Promise<{
   taskId: string;
 }> {
   const store = openPrintQueueStore(":memory:");
+  establishClearBed(store, "k2");
   const queue = new PrintQueueService(store);
   const taskId = queue.createTask({
     title: "Chalice",

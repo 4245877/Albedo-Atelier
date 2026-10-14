@@ -116,7 +116,11 @@ export class AnalysisRunner {
         // failed here with a message that has none of the worker's detail.
         analysisBudgetMs(artifact.sizeBytes, this.ctx.options.timeoutMs) + 3000
       );
-      this.applyResult(analysisId, result);
+      // The identity of the bytes this verdict is ABOUT. Freshness is decided by
+      // it (and the analyzer version), never by the artifact row's `updatedAt`,
+      // which moves on every metadata write — a scale or review confirmation —
+      // without a single byte of the file changing.
+      this.applyResult(analysisId, result, artifact.sha256);
     } catch (error) {
       this.failAnalysis(analysisId, errorMessage(error));
     }
@@ -170,7 +174,7 @@ export class AnalysisRunner {
     });
   }
 
-  private applyResult(analysisId: string, result: AnalyzerResult): void {
+  private applyResult(analysisId: string, result: AnalyzerResult, analyzedSha256: string | null): void {
     this.ctx.store.transaction(() => {
       const repos = this.ctx.store.repositories;
       const current = repos.artifactAnalyses.getById(analysisId);
@@ -180,6 +184,7 @@ export class AnalysisRunner {
         current,
         "ready",
         {
+          metadata: { ...current.metadata, ...(analyzedSha256 ? { analyzedSha256 } : {}) },
           detectedFormat: result.detectedFormat,
           verdict: result.verdict,
           analyzer: result.analyzer,
@@ -203,7 +208,9 @@ export class AnalysisRunner {
       // reason is the sentence a person reads next to the task, so it carries
       // the blocker's own next-step hint rather than a bare technical phrase.
       if (result.verdict === "blocked") {
-        const task = repos.tasks.findByArtifactId(current.artifactId);
+        // The file's current preparation — not its oldest task, which after a
+        // closed or promoted first draft is history and would hide the live one.
+        const task = repos.tasks.findPreparableBySource(current.artifactId);
         if (task && task.state === "DRAFT") {
           this.ctx.transitionTask(task, "NEEDS_REVIEW", blockedReason(result), "blocked");
         }

@@ -79,16 +79,37 @@ export class SqliteBedCycleRepository
   }
 
   /**
-   * The current live cycle for a printer: the most recent one not in `CLEAR`
-   * (i.e. RESERVED/RUNNING/AWAITING_CLEARANCE/UNKNOWN). A printer has at most one
-   * of these by construction — the service only opens a new cycle from CLEAR.
+   * The printer's **current** cycle — the newest row, whatever its state — or
+   * null when the bed has never been tracked at all.
+   *
+   * "Never tracked" and "tracked and cleared" are different facts, and only the
+   * second is evidence of a free plate. Reading only non-CLEAR rows (the old
+   * query) collapsed the two into "nothing open", and every caller then had to
+   * guess what an empty answer meant; the guess was "free".
    */
-  findOpenByPrinter(printerId: string): BedCycle | null {
+  latestByPrinter(printerId: string): BedCycle | null {
+    // Insertion order, not `created_at`: cycles are appended in the order things
+    // happened to the plate, and a wall clock that steps backwards (NTP, a host
+    // resync) must not resurrect an older row as "the plate now".
     return this.queryOne(
-      `SELECT * FROM bed_cycles WHERE printer_id = ? AND state <> 'CLEAR'
-       ORDER BY created_at DESC, id DESC LIMIT 1`,
+      `SELECT * FROM bed_cycles WHERE printer_id = ?
+       ORDER BY rowid DESC LIMIT 1`,
       printerId
     );
+  }
+
+  /**
+   * The current cycle when it is **not** `CLEAR` (RESERVED/RUNNING/
+   * AWAITING_CLEARANCE/UNKNOWN), else null.
+   *
+   * Defined over the newest row, not over "the newest non-CLEAR row": an external
+   * print observed after a stale, never-cleared cycle opens a newer cycle, and
+   * the older row must not resurface as the plate's state once that newer one is
+   * cleared.
+   */
+  findOpenByPrinter(printerId: string): BedCycle | null {
+    const latest = this.latestByPrinter(printerId);
+    return latest && latest.state !== "CLEAR" ? latest : null;
   }
 
   listByPrinter(printerId: string): BedCycle[] {

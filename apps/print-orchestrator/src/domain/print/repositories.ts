@@ -81,10 +81,38 @@ export interface TaskQuery {
   states?: PrintTask["state"][];
 }
 
+/**
+ * One page of finished prints, newest first — the history listing.
+ *
+ * "Finished" is a terminal task that was ever a print: it entered the queue or
+ * reached a printer. An upload's draft cancelled with its file never was one,
+ * and listing it would bury the real history under upload noise.
+ */
+export interface FinishedTaskQuery {
+  /** At most this many rows. */
+  limit: number;
+  /** Keyset cursor: only rows strictly older than this (`updatedAt`, then `id`). */
+  before?: { updatedAt: string; id: string } | null;
+  /** Only these terminal states; absent or empty means all of them. */
+  states?: PrintTask["state"][];
+  /** Only prints that ran (had a run) on this printer. */
+  printerId?: string | null;
+}
+
 export interface PrintTaskRepository extends WritableRepository<PrintTask> {
   findByLegacyRef(legacyRef: string): PrintTask | null;
   /** The (single) task created for an uploaded artifact; oldest first if several. */
   findByArtifactId(artifactId: string): PrintTask | null;
+  /**
+   * The newest task whose executable is still this source model and that can
+   * still take a slice (`PREPARABLE_TASK_STATES`) — where a new slice of it
+   * belongs. Null once every such task was promoted onto a slice or closed.
+   */
+  findPreparableBySource(sourceArtifactId: string): PrintTask | null;
+  /** The newest task that names this artifact as its executable OR its source. */
+  findLatestReferencing(artifactId: string): PrintTask | null;
+  /** Every task bound to this slice variant (`slice_variant_id`), any state. */
+  listBySliceVariant(sliceVariantId: string): PrintTask[];
   /**
    * Every task naming the artifact in EITHER binding column — `artifact_id` (the
    * executable) or `source_artifact_id` (the model it was sliced from). A
@@ -94,6 +122,8 @@ export interface PrintTaskRepository extends WritableRepository<PrintTask> {
    */
   listReferencingArtifact(artifactId: string): PrintTask[];
   list(query?: TaskQuery): PrintTask[];
+  /** Finished prints, newest first (see {@link FinishedTaskQuery}). */
+  listFinished(query: FinishedTaskQuery): PrintTask[];
 }
 
 export interface QueueEntryRepository extends WritableRepository<QueueEntry> {
@@ -112,8 +142,14 @@ export interface AssignmentRepository extends WritableRepository<Assignment> {
   listByTask(taskId: string): Assignment[];
   /** Every assignment attached to a plan (any state), oldest first — one indexed query per plan. */
   listByPlan(planId: string): Assignment[];
-  /** The current non-terminal assignment on a printer, if any. */
-  findOpenByPrinter(printerId: string): Assignment | null;
+  /**
+   * Every assignment that really holds this printer, newest first — a start in
+   * flight or a print (`RESERVED`/`ACTIVE`), or a standing decision (a manual
+   * placement, or one under the confirmed plan) that has not been invalidated. A
+   * draft plan's proposal and a withdrawn placement hold nothing. See
+   * `domain/print/assignmentAuthority.ts`.
+   */
+  listHoldingByPrinter(printerId: string): Assignment[];
   /** Every assignment whose binding names this artifact (any state), newest first. */
   listReferencingArtifact(artifactId: string): Assignment[];
   /** Every assignment whose binding names this slice variant (any state), newest first. */
@@ -121,7 +157,12 @@ export interface AssignmentRepository extends WritableRepository<Assignment> {
 }
 
 export interface BedCycleRepository extends WritableRepository<BedCycle> {
-  /** The current non-terminal (not CLEAR) cycle for a printer, if any. */
+  /**
+   * The printer's current (newest) cycle in any state, or null when its bed has
+   * never been tracked. Null means *unknown*, never *clear*.
+   */
+  latestByPrinter(printerId: string): BedCycle | null;
+  /** The current cycle when it is not CLEAR, if any. */
   findOpenByPrinter(printerId: string): BedCycle | null;
   listByPrinter(printerId: string): BedCycle[];
 }
@@ -141,6 +182,8 @@ export interface PrintRunRepository extends WritableRepository<PrintRun> {
   findActiveByTask(taskId: string): PrintRun | null;
   /** The run created for a dispatch idempotency key, if any. */
   findByIdempotencyKey(key: string): PrintRun | null;
+  /** The most recently *started* run on a printer (any state), or null. */
+  findLastStartedByPrinter(printerId: string): PrintRun | null;
   /** Every active run — boot-time dispatch recovery reads this. */
   listActive(): PrintRun[];
 }

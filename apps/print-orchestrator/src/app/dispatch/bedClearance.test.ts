@@ -6,6 +6,7 @@ import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { PrinterConfig } from "../../infra/printers/config";
 import type { PrinterLiveStatus } from "../../infra/printers/status";
 import { openPrintQueueStore } from "../../infra/db/store";
+import { establishClearBed } from "./testkit/bed";
 import { PrintQueueService } from "../printQueue/printQueueService";
 import { SchedulerContext } from "../scheduling/context";
 import { EligibilityQueries } from "../scheduling/eligibility";
@@ -44,8 +45,12 @@ interface Harness {
   knobs: { status: PrinterLiveStatus["status"]; online: boolean; autoContinuation: boolean };
 }
 
-function makeHarness(): Harness {
+function makeHarness(options: { untracked?: boolean } = {}): Harness {
   const store = openPrintQueueStore(":memory:");
+  // Every harness printer starts with a plate an operator confirmed empty — the
+  // only evidence of a free bed (untracked is UNKNOWN and the gate refuses it) —
+  // unless the test is about the printer that has no history at all.
+  if (!options.untracked) for (const id of ["k2"]) establishClearBed(store, id);
   const queue = new PrintQueueService(store);
   const startCalls: string[] = [];
   const knobs: Harness["knobs"] = { status: "idle", online: true, autoContinuation: false };
@@ -88,7 +93,10 @@ function makeHarness(): Harness {
     store,
     resolvePrinter: (ref) => (ref.trim().toLowerCase() === "k2" ? K2 : undefined),
     getStatus: () => undefined,
-    startPhysical: async (_printerId, file) => void startCalls.push(file),
+    startPhysical: async (_printerId, file) => {
+      startCalls.push(file);
+      return { confirmed: true };
+    },
     classifyError: () => "unknown",
     listFiles: async (_printer, dir) => ({
       path: dir,
@@ -294,7 +302,7 @@ test("a bed under an active print cannot be 'cleared' out from under it", async 
 });
 
 test("clearing a printer with no tracked cycle establishes one — recorded, never a silent no-op", () => {
-  const h = makeHarness();
+  const h = makeHarness({ untracked: true });
   // This used to be a NotFoundError. That was defensible as a statement about
   // the data ("there is no cycle to clear") but wrong as a product rule: a
   // printer with no history reads as bed state UNKNOWN, the dispatch gate blocks
@@ -319,7 +327,7 @@ test("clearing a printer with no tracked cycle establishes one — recorded, nev
 });
 
 test("an unverified auto-clear cannot establish a cycle either", () => {
-  const h = makeHarness();
+  const h = makeHarness({ untracked: true });
   // The `auto_cleared` guard must hold on the no-history path too, or the new
   // branch becomes a way around it.
   assert.throws(

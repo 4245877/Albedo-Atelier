@@ -1,6 +1,7 @@
 import {
   isKnownUnit,
   mmPerUnit,
+  resolveUnits,
   UNIT_TO_MM,
   type ModelUnits
 } from "../shared/units";
@@ -70,7 +71,13 @@ export function makeModelScaleConfirmation(input: {
   confirmedBy: string;
   confirmedAt: string;
 }): ModelScaleConfirmation | null {
-  const units = typeof input.units === "string" ? input.units.trim().toLowerCase() : "";
+  // One spelling table for the whole system (`resolveUnits`): the dashboard's
+  // unit picker sent `mm`/`cm`/`m`, which this used to compare against the
+  // canonical `millimeter`/`centimeter`/`meter` only — every choice except
+  // «дюймы» came back 400 and the STL could never be confirmed. The record is
+  // always stored in canonical form, whichever alias arrived.
+  const resolved = resolveUnits(input.units);
+  const units = resolved.units;
   if (!isKnownUnit(units)) return null;
 
   const rawFactor = input.scaleFactor;
@@ -98,7 +105,7 @@ export function readModelScale(artifact: Artifact): ResolvedModelScale | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const rec = raw as Record<string, unknown>;
 
-  const units = typeof rec.units === "string" ? rec.units.trim().toLowerCase() : "";
+  const units = resolveUnits(rec.units).units;
   if (!isKnownUnit(units)) return null;
 
   const scaleFactor = typeof rec.scaleFactor === "number" ? rec.scaleFactor : 1;

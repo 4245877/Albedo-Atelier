@@ -43,14 +43,18 @@ const HALL_NAV = [
   ["today", "Показатели"],
 ].filter(([id]) => isSectionVisible(id));
 
-/* Разделы Работ: подпись, значок и ключ ленивой инициализации. */
+/* Разделы Работ: подпись, значок, группа. Первая группа — работа (путь новой
+   печати и сами файлы); вторая — настройки, куда приходят настраивать профили,
+   план и оператора, а не печатать. Открывается по умолчанию первый раздел. */
 const WORK_NAV = [
-  ["uploads", "Загрузка", "upload"],
-  ["slicing", "Слайсинг", "slice"],
-  ["scheduler", "Планировщик", "calendar"],
-  ["operations", "Оператор", "operator"],
-  ["hardware", "Оборудование", "gear"],
-  ["automations", "Автоматизации", "sigil"],
+  ["newprint", "Новая печать", "plus", "work"],
+  ["uploads", "Загрузка", "upload", "work"],
+  ["history", "История", "clock", "work"],
+  ["slicing", "Слайсинг", "slice", "settings"],
+  ["scheduler", "Планировщик", "calendar", "settings"],
+  ["operations", "Оператор", "operator", "settings"],
+  ["hardware", "Оборудование", "gear", "settings"],
+  ["automations", "Автоматизации", "sigil", "settings"],
 ];
 
 const MODE_ICON = { hall: "crown", works: "slice" };
@@ -81,12 +85,20 @@ export function renderNav() {
   const work = $("#worknav");
   if (work) {
     work.innerHTML = WORK_NAV
-      .map(([id, label, ico], i) => `
+      .map(([id, label, ico, group], i) => {
+        // Граница групп — подпись, а не вкладка: для чтения экраном она скрыта,
+        // у списка вкладок остаются только вкладки.
+        const sep =
+          i > 0 && group !== WORK_NAV[i - 1][3]
+            ? `<span class="worknav-sep" aria-hidden="true">Настройки</span>`
+            : "";
+        return `${sep}
         <button type="button" class="work-tab${i === 0 ? " is-active" : ""}" role="tab"
           id="worktab-${id}" aria-controls="${id}" aria-selected="${i === 0}"
           tabindex="${i === 0 ? 0 : -1}" data-work-tab="${id}">
           <span class="work-tab-ico">${icon(ico)}</span><span>${label}</span>
-        </button>`)
+        </button>`;
+      })
       .join("");
   }
 

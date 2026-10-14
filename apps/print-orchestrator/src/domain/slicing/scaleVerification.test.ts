@@ -61,12 +61,21 @@ test("nothing confirmed is an honest unknown — both layers hold the same raw n
 });
 
 test("a unit nobody can convert is not a confirmation at all", () => {
-  // "in"/"cm" are not the vocabulary — only the full names are convertible, and
-  // an unrecognised one must leave the size unproven rather than silently mean 1.
-  for (const bogus of ["in", "cm", "inches", "", "unknown"]) {
+  // An unrecognised token must leave the size unproven rather than silently mean 1.
+  for (const bogus of ["", "unknown", "furlong", "дюйм-ы"]) {
     const scale = resolveSliceScale(false, readModelScale(artifact(confirmed(bogus))));
     assert.equal(scale.factor, 1, bogus);
     assert.equal(scale.reason, "unconfirmed", bogus);
+  }
+});
+
+test("HIGH-04: the common spellings resolve through the one unit table", () => {
+  // The dashboard sent «cm»/«mm»/«m»; the server refused everything but the
+  // canonical names, so an STL could only be confirmed in inches. One table now.
+  for (const [alias, factor] of [["in", 25.4], ["inches", 25.4], ["cm", 10], ["mm", 1], ["m", 1000]] as const) {
+    const scale = resolveSliceScale(false, readModelScale(artifact(confirmed(alias))));
+    assert.equal(scale.factor, factor, alias);
+    assert.equal(scale.reason, "confirmed_by_operator", alias);
   }
 });
 

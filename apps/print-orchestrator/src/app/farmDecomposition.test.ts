@@ -118,6 +118,12 @@ function orderedRuntime(): OrderedRuntime {
         order.push("poller.stop");
       }
     },
+    autoQueue: {
+      start: () => order.push("autoQueue.start"),
+      stop: async () => {
+        order.push("autoQueue.stop");
+      }
+    },
     artifactService: {
       close: () => order.push("artifact.close"),
       whenIdle: async () => {}
@@ -153,6 +159,11 @@ test("FarmLifecycle.start recovers durable state BEFORE starting the poll loop",
     order.indexOf("filamentStock.refresh") < order.indexOf("poller.start"),
     "the warehouse cache is warmed before traffic, so the materials card never opens on a placeholder"
   );
+  assert.ok(
+    order.indexOf("autoQueue.start") > order.indexOf("poller.start") &&
+      order.indexOf("autoQueue.start") > order.indexOf("recover"),
+    "the automatic queue starts LAST: after recovery, with telemetry flowing"
+  );
 });
 
 test("FarmLifecycle.stop stops the poll loop + workers and closes the DB LAST", async () => {
@@ -162,9 +173,10 @@ test("FarmLifecycle.stop stops the poll loop + workers and closes the DB LAST", 
 
   const dispose = order.indexOf("disposeQueue");
   assert.ok(dispose >= 0, "the store is closed");
-  for (const step of ["poller.stop", "artifact.close", "slice.close", "state.flush"]) {
+  for (const step of ["autoQueue.stop", "poller.stop", "artifact.close", "slice.close", "state.flush"]) {
     assert.ok(order.indexOf(step) >= 0 && order.indexOf(step) < dispose, `${step} happens before the DB closes`);
   }
+  assert.equal(order[0], "autoQueue.stop", "no automatic start may begin while the farm is shutting down");
 });
 
 test("FarmLifecycle.stop is idempotent — a second call awaits the same shutdown", async () => {

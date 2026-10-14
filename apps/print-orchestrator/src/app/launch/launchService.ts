@@ -6,11 +6,13 @@ import {
   type LaunchCandidateInput,
   type LaunchReason
 } from "../../domain/launch/selection";
+import { assignmentHolds } from "../../domain/print/assignmentAuthority";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
 import type { Assignment, PrintTask } from "../../domain/print/types";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import { NON_OVERRIDABLE, type EligibilityReason } from "../../domain/dispatch/reasons";
 import type { DispatchEligibility } from "../../domain/dispatch/eligibility";
+import type { FeedPlan } from "../../domain/printers/feedPlan";
 import type { PrinterConfig } from "../../infra/printers/config";
 import { capabilitiesOf } from "../../infra/printers/capabilities";
 import type { DeviceArtifactService } from "../dispatch/deviceArtifactService";
@@ -192,6 +194,8 @@ export interface LaunchPreview {
    * the way out of a failed attempt is where the attempt failed.
    */
   unresolvedRunId: string | null;
+  /** Where the filament would come from on the focused printer (Bambu), when it has to be named. */
+  feed: FeedPlan | null;
 }
 
 /**
@@ -240,7 +244,21 @@ export interface LaunchRequest {
   override?: { codes: string[]; reason: string };
   /** Retry-safe key: the same key never starts a second print. */
   idempotencyKey?: string;
+  /**
+   * The operator's filament-source choice for the chosen printer (Bambu AMS):
+   * job filament index → global tray id. Only needed when the preview reports
+   * the tray as ambiguous; admitted and pinned by the dispatch gate as given.
+   */
+  feedChoice?: Readonly<Record<number, number>> | null;
   actor?: string;
+  /**
+   * Who is behind the start. `manual` (default) — an operator, who may tick the
+   * physical confirmations and accept overridable warnings. `auto` — the
+   * automatic queue: the policy runs in its strict unattended mode, and neither
+   * confirmations nor overrides are accepted, because nobody is there to give
+   * them. A bed nobody recorded as clear stays a refusal.
+   */
+  mode?: "manual" | "auto";
 }
 
 export interface LaunchOutcome {
@@ -275,7 +293,12 @@ export class LaunchService {
 
   // ── Preview ────────────────────────────────────────────────────────────────
 
-  preview(taskId: string, forPrinterId?: string): LaunchPreview {
+  preview(
+    taskId: string,
+    forPrinterId?: string,
+    options: { feedChoice?: Readonly<Record<number, number>> | null; mode?: "manual" | "auto" } = {}
+  ): LaunchPreview {
+    const mode = options.mode ?? "manual";
     const task = this.requireTask(taskId);
     const repos = this.deps.store.repositories;
     const artifact = task.artifactId ? repos.artifacts.getById(task.artifactId) : null;
@@ -287,7 +310,14 @@ export class LaunchService {
     const nozzleMm = binding?.nozzleMm ?? analysis?.nozzleDiameterMm ?? null;
     const etaSeconds = binding?.etaS ?? analysis?.estimatedDurationS ?? null;
 
-    const candidates = this.buildCandidates(task, material, nozzleMm);
+    const candidates = this.buildCandidates(
+      task,
+      material,
+      nozzleMm,
+      undefined,
+      { printerId: forPrinterId ?? null, choice: options.feedChoice ?? null },
+      mode
+    );
     const {
       candidates: ranked,
       recommendedPrinterId,
@@ -343,7 +373,8 @@ export class LaunchService {
       unresolvedRunId:
         activeRun && activeRun.startedAt === null && activeRun.state !== "RUNNING"
           ? activeRun.id
-          : null
+          : null,
+      feed: focus?.feed ?? null
     };
   }
 
@@ -507,8 +538,17 @@ export class LaunchService {
     if (!dispatch) throw new JobError("Служба запуска ещё не инициализирована");
 
     const actor = request.actor?.trim() || "operator";
+    const mode = request.mode ?? "manual";
     const steps: string[] = [];
     const task = this.requireTask(taskId);
+    // An automatic start has nobody to give a confirmation or accept a warning:
+    // a request that carries either is not an automatic start.
+    if (mode === "auto" && request.override) {
+      throw new ValidationError("Автоматический запуск не принимает override — его даёт только оператор");
+    }
+    if (mode === "auto" && (request.confirmations ?? []).length > 0) {
+      throw new ValidationError("Автоматический запуск не принимает подтверждений — их даёт только человек у принтера");
+    }
 
     // 0 ── Idempotency, before any admission rule runs.
     //
@@ -540,7 +580,8 @@ export class LaunchService {
             printerId: existing.printerId,
             printerName: printer?.name ?? existing.printerId,
             file: existing.file ?? "",
-            deduplicated: true
+            deduplicated: true,
+            phase: existing.startedAt ? "started" : "accepted"
           },
           printerId: existing.printerId,
           printerName: printer?.name ?? existing.printerId,
@@ -551,7 +592,7 @@ export class LaunchService {
 
     // 1 ── Choose the printer. An explicit choice is honoured but still admitted
     //      through the same eligibility check; "I picked it" is not an override.
-    const preview = this.preview(task.id, request.printerId);
+    const preview = this.preview(task.id, request.printerId, { feedChoice: request.feedChoice ?? null, mode });
     const chosenId = request.printerId ?? preview.recommendedPrinterId;
     if (!chosenId) {
       throw new JobError(
@@ -632,9 +673,10 @@ export class LaunchService {
     const gate = this.deps.scheduler.dispatchEligibility({
       taskId: task.id,
       printerId: printer.id,
-      mode: "manual",
+      mode,
       stage: "preflight",
-      automaticContinuationAllowed: this.deps.automaticContinuationAllowed(printer.id)
+      automaticContinuationAllowed: this.deps.automaticContinuationAllowed(printer.id),
+      feedChoice: request.feedChoice ?? null
     });
     const remaining = remainingBlockers(gate, request.override?.codes ?? []);
     if (remaining.length > 0) {
@@ -686,7 +728,7 @@ export class LaunchService {
     //      The idempotency key is the caller's, so a double click or a
     //      refresh-and-retry returns the original run instead of a second print.
     const run = await dispatch.startAssignment(assignment.id, {
-      mode: "manual",
+      mode,
       actor,
       // Forwarded, never interpreted: which codes may be waived, and whether a
       // reason and an operator were given, is the dispatch gate's decision, and
@@ -694,10 +736,14 @@ export class LaunchService {
       ...(request.override
         ? { override: { ...request.override, operator: actor } }
         : {}),
-      ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {})
+      ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
+      ...(request.feedChoice ? { feedChoice: request.feedChoice } : {})
     });
     if (request.override) steps.push("override_accepted");
-    steps.push(run.deduplicated ? "already_started" : "started");
+    // "started" only when the printer was SEEN running the job; a command the
+    // device merely accepted is reported as exactly that, and the dashboard
+    // follows the run until telemetry (or a person) settles it.
+    steps.push(run.deduplicated ? "already_started" : run.phase === "started" ? "started" : "start_accepted");
 
     return { run, printerId: printer.id, printerName: printer.name, steps };
   }
@@ -731,14 +777,22 @@ export class LaunchService {
     return task;
   }
 
-  /** The newest assignment that still describes a real placement. */
+  /**
+   * The newest assignment that is a real placement of this task — one that
+   * HOLDS it (`assignmentHolds`): a manual placement, one under the confirmed
+   * plan, or a start already in flight.
+   *
+   * A draft plan's proposal is deliberately not one. It used to be: a manual
+   * launch on the printer the draft happened to suggest "reused" that proposal,
+   * and the dispatch then refused it as «подтвердите план перед запуском» — a
+   * manual print that required approving a plan nobody had asked for (HIGH-12).
+   */
   private liveAssignment(taskId: string): Assignment | null {
+    const repos = this.deps.store.repositories;
     return (
-      this.deps.store.repositories.assignments
+      repos.assignments
         .listByTask(taskId)
-        .filter(
-          (a) => a.invalidatedAt === null && a.state !== "CANCELLED" && a.state !== "RELEASED"
-        )
+        .filter((a) => assignmentHolds(a, a.planId ? (repos.plans.getById(a.planId)?.state ?? null) : null))
         .at(-1) ?? null
     );
   }
@@ -812,12 +866,16 @@ export class LaunchService {
     task: PrintTask,
     requiredMaterial: string | null,
     requiredNozzleMm: number | null,
-    depth?: ReadonlyMap<string, number>
+    depth?: ReadonlyMap<string, number>,
+    feed?: { printerId: string | null; choice: Readonly<Record<number, number>> | null },
+    mode: "manual" | "auto" = "manual"
   ): LaunchCandidateInput[] {
     const openByPrinter = depth ?? this.openQueueDepth();
-    return this.preflight(task).map(({ printer, eligibility }) => {
+    return this.preflight(task, feed, mode).map(({ printer, eligibility }) => {
       const config = this.deps.resolvePrinter(printer.id);
-      const split = splitReasons(eligibility);
+      // Only a person can tick a confirmation: in auto mode a confirmable
+      // blocker (unrecorded bed, unreported material) stays a blocker.
+      const split = splitReasons(eligibility, mode === "manual");
       return {
         printerId: printer.id,
         printerName: printer.name,
@@ -833,15 +891,23 @@ export class LaunchService {
         queueLength: openByPrinter.get(printer.id) ?? 0,
         pendingManualOperations: this.deps.manualOperations.openBlockingFor(printer.id).length,
         remoteStartSupported:
-          printer.remoteStartSupported && (config ? capabilitiesOf(config).supportsUpload : false)
+          printer.remoteStartSupported && (config ? capabilitiesOf(config).supportsUpload : false),
+        feed: eligibility.feed ?? null
       };
     });
   }
 
   /** The shared preflight evaluation — one call site for preview and launch. */
-  private preflight(task: PrintTask) {
+  private preflight(
+    task: PrintTask,
+    feed?: { printerId: string | null; choice: Readonly<Record<number, number>> | null },
+    mode: "manual" | "auto" = "manual"
+  ) {
     return this.deps.scheduler.launchPreflight(task, {
-      automaticContinuationAllowed: (id) => this.deps.automaticContinuationAllowed(id)
+      mode,
+      automaticContinuationAllowed: (id) => this.deps.automaticContinuationAllowed(id),
+      // A tray choice is about ONE printer's AMS — never applied to another.
+      feedChoice: (id) => (feed?.choice && feed.printerId === id ? feed.choice : null)
     });
   }
 
@@ -980,7 +1046,10 @@ function queueDepthOf(rows: readonly { task: PrintTask }[]): Map<string, number>
  * non-overridable blocker was still offered as a checkbox, and the operator's
  * confirmation was then refused by the gate.
  */
-function splitReasons(eligibility: DispatchEligibility): {
+function splitReasons(
+  eligibility: DispatchEligibility,
+  confirmable = true
+): {
   blockers: LaunchReason[];
   reviews: LaunchReason[];
   warnings: LaunchReason[];
@@ -995,7 +1064,7 @@ function splitReasons(eligibility: DispatchEligibility): {
       // *resolves* by causing a real server action — an unknown bed becomes a
       // recorded CLEAR cycle — which is a confirmation, not a waiver, and must
       // not make the printer look impossible.
-      if (item.confirmation) reviews.push(item);
+      if (item.confirmation && confirmable) reviews.push(item);
       else blockers.push(item);
       continue;
     }

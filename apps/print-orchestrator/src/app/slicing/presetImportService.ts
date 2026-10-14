@@ -7,6 +7,12 @@ import type { AnalysisFinding, AuditEntityType, Metadata } from "../../domain/pr
 import { checkProfileSelf } from "../../domain/slicing/compatibility";
 import { dedupeFindings, finding } from "../../domain/slicing/findings";
 import {
+  SUPERSEDED_BY_KEY,
+  SUPERSEDED_CODE,
+  supersededBy,
+  supersededFinding
+} from "../../domain/slicing/revisionLineage";
+import {
   parentNameFromFinding,
   resolveInheritance,
   type ByName,
@@ -52,6 +58,11 @@ export interface ProfileImportOutcome {
   blockers: AnalysisFinding[];
   /** Whether this pass inserted a new revision, changed an existing one, or left it. */
   change: "inserted" | "updated" | "unchanged";
+  /**
+   * Revisions of the same bytes this pass marked superseded: their settings
+   * resolved differently before, and this revision is the catalog's now.
+   */
+  superseded?: string[];
 }
 
 export interface PresetImportResult {
@@ -213,8 +224,12 @@ export class PresetImportService {
   private orphanProfiles(loaded: readonly LoadedProfile[]): LoadedProfile[] {
     const catalogHashes = new Set(loaded.map((p) => p.rawSha256).filter(Boolean));
     const out: LoadedProfile[] = [];
+    // Bytes, not rows: one set of bytes may have several revisions (one per
+    // resolution it ever had), and it is the bytes that get re-evaluated once.
+    const seen = new Set<string>();
     for (const rev of this.store.repositories.profileRevisions.list()) {
-      if (!rev.rawSha256 || catalogHashes.has(rev.rawSha256)) continue;
+      if (!rev.rawSha256 || catalogHashes.has(rev.rawSha256) || seen.has(rev.rawSha256)) continue;
+      seen.add(rev.rawSha256);
       let settings: Record<string, unknown> | null = null;
       let parseError: string | null = null;
       try {
@@ -350,6 +365,18 @@ export class PresetImportService {
 
   // ── Persistence ────────────────────────────────────────────────────────────
 
+  /**
+   * Records one evaluation. The *verdict* on the bytes — status, findings, labels —
+   * is re-derived on every pass and may change. The *effective settings* may not:
+   * once a revision has a resolution (`resolvedJson`, and the provenance that
+   * explains it) that resolution is fixed, because an approved set pins the
+   * revision id and every slice cut from it is explained by it (HIGH-10).
+   *
+   * So the same bytes resolving to different settings — a parent preset edited, a
+   * vendor tree replaced — become a NEW revision, and the earlier ones are marked
+   * superseded by it (see `domain/slicing/revisionLineage`). Nothing is rewritten
+   * under an id that something already relies on.
+   */
   private upsert(
     e: ReturnType<PresetImportService["evaluate"]>,
     actor: string
@@ -357,62 +384,122 @@ export class PresetImportService {
     const repos = this.store.repositories;
     const p = e.profile;
     const iso = this.now();
-    const base = {
+    const verdict = {
       logicalId: p.logicalId,
       type: p.type,
       name: p.name,
       inherits: p.inherits,
       status: e.status,
-      resolvedJson: e.resolvedJson,
-      resolvedSha256: e.resolvedSha256,
       orcaVersion: p.orcaVersion,
       source: p.source,
       warnings: e.warnings,
-      blockers: e.blockers,
-      // Provenance is refreshed on every pass: the same bytes can resolve through a
-      // different chain once a vendor parent is installed.
-      metadata: e.provenance
+      blockers: e.blockers
     };
+    const siblings = repos.profileRevisions.listByRawSha256(p.rawSha256);
 
-    const existing = p.rawSha256 ? repos.profileRevisions.findByRawSha256(p.rawSha256) : null;
-    if (existing) {
-      const changed =
-        existing.status !== base.status ||
-        existing.resolvedSha256 !== base.resolvedSha256 ||
-        JSON.stringify(existing.warnings) !== JSON.stringify(base.warnings) ||
-        JSON.stringify(existing.blockers) !== JSON.stringify(base.blockers) ||
-        JSON.stringify(existing.metadata) !== JSON.stringify(base.metadata);
-      if (!changed) {
-        return { logicalId: p.logicalId, type: p.type, name: p.name, status: existing.status, warnings: existing.warnings, blockers: existing.blockers, change: "unchanged" };
-      }
-      const updated = repos.profileRevisions.update({ ...existing, ...base, updatedAt: iso });
+    // The stored revision this evaluation is about:
+    //  - unresolvable now → the current one: its verdict changes (quarantine), its
+    //    settings stay, as the record of what it was;
+    //  - resolved → the revision that already has exactly these settings, else one
+    //    that never had any (it gains its first); neither → a new revision.
+    const target =
+      e.resolvedSha256 === null
+        ? currentAmong(siblings)
+        : (siblings.find((r) => r.resolvedSha256 === e.resolvedSha256) ??
+          siblings.find((r) => r.resolvedSha256 === null) ??
+          null);
+
+    if (!target) {
+      const revision: ProfileRevision = {
+        id: newId(ID_PREFIX.profileRevision),
+        ...verdict,
+        rawJson: p.raw,
+        rawSha256: p.rawSha256,
+        resolvedJson: e.resolvedJson,
+        resolvedSha256: e.resolvedSha256,
+        createdAt: iso,
+        updatedAt: iso,
+        version: 1,
+        metadata: e.provenance
+      };
+      repos.profileRevisions.insert(revision);
+      const previous = currentAmong(siblings);
       this.recordAudit(actor, {
-        entityId: updated.id,
-        action: "profile_reevaluated",
-        from: existing.status,
-        to: updated.status,
-        detail: { logicalId: p.logicalId }
+        entityId: revision.id,
+        action: previous ? "profile_resolution_changed" : "profile_imported",
+        to: revision.status,
+        detail: previous
+          ? { logicalId: p.logicalId, type: p.type, previousRevisionId: previous.id }
+          : { logicalId: p.logicalId, type: p.type }
       });
-      return { logicalId: p.logicalId, type: p.type, name: p.name, status: updated.status, warnings: updated.warnings, blockers: updated.blockers, change: "updated" };
+      const superseded = this.supersede(siblings, revision, actor);
+      return { ...outcomeOf(revision, "inserted"), ...(superseded.length > 0 ? { superseded } : {}) };
     }
 
-    const revision: ProfileRevision = {
-      id: newId(ID_PREFIX.profileRevision),
-      ...base,
-      rawJson: p.raw,
-      rawSha256: p.rawSha256,
-      createdAt: iso,
-      updatedAt: iso,
-      version: 1
+    const firstResolution = target.resolvedSha256 === null && e.resolvedSha256 !== null;
+    const sameResolution = target.resolvedSha256 !== null && target.resolvedSha256 === e.resolvedSha256;
+    const next: ProfileRevision = {
+      ...target,
+      ...verdict,
+      // Settings are set once and never replaced.
+      resolvedJson: firstResolution ? e.resolvedJson : target.resolvedJson,
+      resolvedSha256: firstResolution ? e.resolvedSha256 : target.resolvedSha256,
+      // Provenance explains the settings, so it moves only with them — or with a
+      // fresh derivation of the very same settings (a different chain to them),
+      // which also makes a revision whose resolution came back current again.
+      metadata: firstResolution || sameResolution ? e.provenance : target.metadata
     };
-    repos.profileRevisions.insert(revision);
-    this.recordAudit(actor, {
-      entityId: revision.id,
-      action: "profile_imported",
-      to: revision.status,
-      detail: { logicalId: p.logicalId, type: p.type }
-    });
-    return { logicalId: p.logicalId, type: p.type, name: p.name, status: revision.status, warnings: revision.warnings, blockers: revision.blockers, change: "inserted" };
+    const changed =
+      target.status !== next.status ||
+      target.resolvedSha256 !== next.resolvedSha256 ||
+      JSON.stringify(target.warnings) !== JSON.stringify(next.warnings) ||
+      JSON.stringify(target.blockers) !== JSON.stringify(next.blockers) ||
+      JSON.stringify(target.metadata) !== JSON.stringify(next.metadata);
+    const saved = changed ? repos.profileRevisions.update({ ...next, updatedAt: iso }) : target;
+    if (changed) {
+      this.recordAudit(actor, {
+        entityId: saved.id,
+        action: "profile_reevaluated",
+        from: target.status,
+        to: saved.status,
+        detail: { logicalId: p.logicalId }
+      });
+    }
+    // The catalog's resolution is this revision's: any sibling with other settings
+    // is history now.
+    const superseded = e.resolvedSha256 !== null ? this.supersede(siblings, saved, actor) : [];
+    return {
+      ...outcomeOf(saved, changed ? "updated" : "unchanged"),
+      ...(superseded.length > 0 ? { superseded } : {})
+    };
+  }
+
+  /**
+   * Marks every sibling other than `current` as superseded by it: a link and a
+   * warning, nothing else — status, settings and provenance stay exactly as they
+   * were. Returns the ids newly marked.
+   */
+  private supersede(siblings: readonly ProfileRevision[], current: ProfileRevision, actor: string): string[] {
+    const repos = this.store.repositories;
+    const marked: string[] = [];
+    for (const sibling of siblings) {
+      if (sibling.id === current.id || supersededBy(sibling) === current.id) continue;
+      repos.profileRevisions.update({
+        ...sibling,
+        warnings: [...sibling.warnings.filter((w) => w.code !== SUPERSEDED_CODE), supersededFinding(current)],
+        metadata: { ...sibling.metadata, [SUPERSEDED_BY_KEY]: current.id },
+        updatedAt: this.now()
+      });
+      this.recordAudit(actor, {
+        entityId: sibling.id,
+        action: "profile_superseded",
+        from: sibling.status,
+        to: sibling.status,
+        detail: { logicalId: sibling.logicalId, supersededBy: current.id }
+      });
+      marked.push(sibling.id);
+    }
+    return marked;
   }
 
   private recordAudit(
@@ -425,4 +512,22 @@ export class PresetImportService {
       entityId: input.entityId ?? "catalog"
     });
   }
+}
+
+/** The revision of these bytes that is current: not superseded (newest if, unexpectedly, several). */
+function currentAmong(siblings: readonly ProfileRevision[]): ProfileRevision | null {
+  const current = siblings.filter((r) => supersededBy(r) === null);
+  return (current.length > 0 ? current : siblings).at(-1) ?? null;
+}
+
+function outcomeOf(rev: ProfileRevision, change: ProfileImportOutcome["change"]): ProfileImportOutcome {
+  return {
+    logicalId: rev.logicalId,
+    type: rev.type,
+    name: rev.name,
+    status: rev.status,
+    warnings: rev.warnings,
+    blockers: rev.blockers,
+    change
+  };
 }

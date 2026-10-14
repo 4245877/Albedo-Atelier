@@ -15,6 +15,7 @@ import { EligibilityQueries } from "../scheduling/eligibility";
 import { EvidenceResolver } from "../scheduling/evidence";
 import type { SchedulerPrinterRef } from "../scheduling/types";
 import { DispatchService, type DispatchDeps } from "./dispatchService";
+import { establishClearBed } from "./testkit/bed";
 import { RunLifecycleService } from "./runLifecycle";
 import { seedDeviceFile } from "./testkit/deviceFiles";
 
@@ -82,6 +83,11 @@ interface Harness {
   knobs: {
     status: PrinterLiveStatus;
     startImpl: (printerId: string, file: string, runId: string) => Promise<void>;
+    /**
+     * Whether the simulated printer is SEEN running the job when the start
+     * returns (a Bambu confirms in its start call; Moonraker only accepts).
+     */
+    confirmStart: boolean;
     classify: (error: unknown) => "rejected" | "unknown";
     deviceFiles: { filename: string; size: number }[];
     telemetryAgeMs: number | null;
@@ -96,11 +102,15 @@ interface Harness {
 
 function makeHarness(): Harness {
   const store = openPrintQueueStore(":memory:");
+  // The operator has confirmed the K2's plate empty — the only evidence of a
+  // free bed. (Untracked is UNKNOWN, and the gate refuses it.)
+  establishClearBed(store, "k2");
   const queue = new PrintQueueService(store);
   const startCalls: Harness["startCalls"] = [];
   const knobs: Harness["knobs"] = {
     status: idle(),
     startImpl: async () => {},
+    confirmStart: true,
     classify: () => "unknown",
     deviceFiles: [{ filename: "chalice.gcode", size: 1000 }],
     telemetryAgeMs: 1_000,
@@ -118,9 +128,11 @@ function makeHarness(): Harness {
         ? K2
         : undefined,
     getStatus: () => knobs.status,
-    startPhysical: async (printerId, file, runId) => {
+    startPhysical: async (printerId, file, runId, options) => {
+      options?.beforeSend?.();
       startCalls.push({ printerId, file, runId });
       await knobs.startImpl(printerId, file, runId);
+      return { confirmed: knobs.confirmStart };
     },
     classifyError: (e) => knobs.classify(e),
     listFiles: async (_printer, dir) => ({
@@ -269,7 +281,8 @@ function addNightTask(
     createdAt: iso,
     updatedAt: iso,
     version: 1,
-    metadata: {},
+    // What the analyzer now records: the hash of the bytes it actually read.
+    metadata: { analyzedSha256: over.sha === undefined ? "a".repeat(64) : over.sha },
     ...(over.analysis ?? {})
   });
   const detail = h.queue.addTask({
@@ -530,10 +543,26 @@ for (const [label, mutate] of Object.entries({
   });
 }
 
+test("HIGH-05: a metadata write (a later updatedAt, same bytes) does NOT make the analysis stale", async () => {
+  const h = makeHarness();
+  const { taskId, artifactId } = addNightTask(h);
+  const repos = h.store.repositories;
+  const artifact = repos.artifacts.getById(artifactId)!;
+  // e.g. a scale or review confirmation written to the artifact's metadata
+  repos.artifacts.update({
+    ...artifact,
+    metadata: { ...artifact.metadata, note: "подтверждено" },
+    updatedAt: new Date(Date.now() + 60_000).toISOString()
+  });
+  const eligibility = h.eligibility().evaluate({ taskId, printerId: "k2", mode: "night" });
+  assert.ok(!eligibility.reasons.some((r) => r.code === "ANALYSIS_STALE"), JSON.stringify(eligibility.reasons));
+});
+
 test("night dispatch refuses when the file changed after analysis (stale analysis)", async () => {
   const h = makeHarness();
   const { taskId, artifactId } = addNightTask(h);
-  // The artifact content moved AFTER the analysis was produced.
+  // The artifact content moved AFTER the analysis was produced: the analysis
+  // read bytes «a…», the artifact now names bytes «c…».
   const repos = h.store.repositories;
   const artifact = repos.artifacts.getById(artifactId)!;
   repos.artifacts.update({
@@ -624,19 +653,134 @@ test("a second task cannot dispatch to a printer that already runs (one active r
   assert.equal(h.startCalls.length, 1, "the busy printer saw no second command");
 });
 
-test("cancelTask on a live dispatched run: run CANCELLED, task CANCELLED, bed awaiting clearance", async () => {
+// ── CRITICAL-01: a logical cancel never frees a physically occupied printer ─────
+
+test("cancelling a task that is PRINTING is refused — nothing about the run, bed or printer changes", async () => {
   const h = makeHarness();
   const taskId = addManualTask(h);
   const result = await h.dispatch.dispatch({ taskId, mode: "manual" });
   const repos = h.store.repositories;
   assert.equal(repos.printRuns.getById(result.runId)?.state, "RUNNING");
 
-  h.queue.cancelTask(taskId, "оператор отменил");
-  assert.equal(repos.tasks.getById(taskId)?.state, "CANCELLED", "task kept, not deleted");
-  assert.equal(repos.printRuns.getById(result.runId)?.state, "CANCELLED");
-  assert.equal(repos.assignments.getById(result.assignmentId)?.state, "CANCELLED");
-  assert.equal(repos.bedCycles.findOpenByPrinter("k2")?.state, "AWAITING_CLEARANCE");
+  assert.throws(
+    () => h.queue.cancelTask(taskId, "оператор отменил"),
+    (e: unknown) => e instanceof JobError && /Остановите печать/.test(e.message)
+  );
+  assert.equal(repos.tasks.getById(taskId)?.state, "PRINTING", "the task still reflects the machine");
+  assert.equal(repos.printRuns.getById(result.runId)?.state, "RUNNING", "no logical end of a physical print");
+  assert.equal(repos.bedCycles.findOpenByPrinter("k2")?.state, "RUNNING", "the bed is still in use");
+});
+
+test("a cancel that races the start BEFORE the command left aborts it: nothing sent, task closed, bed free again", async () => {
+  const h = makeHarness();
+  const taskId = addManualTask(h);
+  // The operator presses «отменить» while the dispatch is waiting for the printer
+  // lock — i.e. after the reservation committed, before the command is sent.
+  h.knobs.startImpl = async () => {
+    throw new Error("unreachable: the start must have been aborted before this");
+  };
+  const deps = (h.dispatch as unknown as { deps: DispatchDeps }).deps;
+  const realStart = deps.startPhysical;
+  deps.startPhysical = async (printerId, file, runId, options) => {
+    const outcome = h.queue.cancel(taskId, "передумали");
+    assert.equal(outcome.outcome, "cancel_requested", "an in-flight start is not cancelled logically");
+    return realStart(printerId, file, runId, options);
+  };
+
+  await assert.rejects(h.dispatch.dispatch({ taskId, mode: "manual" }), /отменён оператором до отправки/);
+  const repos = h.store.repositories;
+  assert.equal(h.startCalls.length, 0, "the command never reached the printer");
+  assert.equal(repos.tasks.getById(taskId)?.state, "CANCELLED", "the operator's cancel is carried out");
   assert.equal(repos.queue.findByTaskId(taskId)?.state, "RELEASED");
+  assert.equal(repos.printRuns.listByTask(taskId)[0]?.state, "CANCELLED");
+  assert.equal(repos.bedCycles.findOpenByPrinter("k2"), null, "nothing was printed: the reserved bed is free again");
+  assert.equal(repos.startGuards.get("k2"), null, "no guard was ever written");
+});
+
+test("a cancel AFTER the command left keeps the printer held; the print, when seen, runs; the bed is never freed by it", async () => {
+  const h = makeHarness();
+  h.knobs.confirmStart = false; // Moonraker-style: the device accepts, nobody has seen it print yet
+  const taskId = addManualTask(h);
+  const result = await h.dispatch.dispatch({ taskId, mode: "manual" });
+  assert.equal(result.phase, "accepted");
+  const repos = h.store.repositories;
+  assert.equal(repos.printRuns.getById(result.runId)?.state, "PENDING", "accepted is not running");
+
+  const outcome = h.queue.cancel(taskId, "передумали");
+  assert.equal(outcome.outcome, "cancel_requested");
+  assert.equal(repos.tasks.getById(taskId)?.state, "DISPATCHING", "the task still reflects the machine");
+  assert.equal(repos.bedCycles.findOpenByPrinter("k2")?.state, "RESERVED", "the bed is NOT released");
+  assert.ok(repos.printRuns.getById(result.runId)?.metadata.cancelRequestedAt, "the request is recorded");
+
+  // The printer turns out to have started after all.
+  h.lifecycle.observe("k2", idle(), idle({ status: "printing", currentFile: "chalice.gcode" }));
+  assert.equal(repos.printRuns.getById(result.runId)?.state, "RUNNING");
+  assert.equal(repos.bedCycles.findOpenByPrinter("k2")?.state, "RUNNING");
+
+  // …and when it ends, the plate is held for a person, as for any print.
+  h.lifecycle.observe(
+    "k2",
+    idle({ status: "printing", currentFile: "chalice.gcode" }),
+    idle({ currentFile: "chalice.gcode", stateText: "cancelled" })
+  );
+  assert.equal(repos.bedCycles.findOpenByPrinter("k2")?.state, "AWAITING_CLEARANCE");
+});
+
+test("a cancel requested while the start was in doubt closes the task once the printer provably did not start", async () => {
+  const h = makeHarness();
+  h.knobs.confirmStart = false;
+  const taskId = addManualTask(h);
+  const result = await h.dispatch.dispatch({ taskId, mode: "manual" });
+  h.queue.cancel(taskId, "передумали");
+
+  h.lifecycle.resolveRun(result.runId, "CANCELLED", { status: idle(), reason: "печать не началась" });
+  const repos = h.store.repositories;
+  assert.equal(repos.tasks.getById(taskId)?.state, "CANCELLED", "closed, not re-queued");
+  assert.equal(repos.queue.findByTaskId(taskId)?.state, "RELEASED");
+  assert.equal(repos.printRuns.getById(result.runId)?.state, "CANCELLED");
+});
+
+// ── HIGH-17: an accepted command is not a running print ────────────────────────
+
+test("an accepted (not observed) start stays PENDING: bed reserved, guard-free attempt ACKED, task dispatching", async () => {
+  const h = makeHarness();
+  h.knobs.confirmStart = false;
+  const taskId = addManualTask(h);
+  const result = await h.dispatch.dispatch({ taskId, mode: "manual" });
+  const repos = h.store.repositories;
+  const run = repos.printRuns.getById(result.runId)!;
+
+  assert.equal(result.phase, "accepted");
+  assert.equal(run.state, "PENDING");
+  assert.equal(run.startedAt, null, "no start time until a print is seen");
+  assert.equal(run.metadata.dispatchPhase, "accepted");
+  assert.equal(repos.tasks.getById(taskId)?.state, "DISPATCHING");
+  assert.equal(repos.dispatchAttempts.getById(result.attemptId)?.state, "ACKED", "the device acknowledged the command");
+  assert.equal(repos.bedCycles.findOpenByPrinter("k2")?.state, "RESERVED");
+
+  // Telemetry then shows the job: THAT is the start.
+  h.lifecycle.observe("k2", idle(), idle({ status: "printing", currentFile: "chalice.gcode" }));
+  assert.equal(repos.printRuns.getById(result.runId)?.state, "RUNNING");
+  assert.ok(repos.printRuns.getById(result.runId)?.startedAt);
+  assert.equal(repos.tasks.getById(taskId)?.state, "PRINTING");
+  assert.equal(repos.queue.findByTaskId(taskId)?.state, "RELEASED");
+});
+
+test("an accepted start the printer never begins goes UNKNOWN after the grace period — held, never retried", async () => {
+  const h = makeHarness();
+  h.knobs.confirmStart = false;
+  const taskId = addManualTask(h);
+  const result = await h.dispatch.dispatch({ taskId, mode: "manual" });
+  const repos = h.store.repositories;
+  const clock = { now: Date.now() + 5 * 60_000 };
+  const lifecycle = new RunLifecycleService(h.store, { now: () => new Date(clock.now) });
+
+  lifecycle.observe("k2", idle(), idle());
+  const run = repos.printRuns.getById(result.runId)!;
+  assert.equal(run.state, "UNKNOWN", "an accepted start that never began is a question for a person");
+  assert.equal(repos.bedCycles.findOpenByPrinter("k2")?.state, "RESERVED", "the printer stays held");
+  await assert.rejects(h.dispatch.dispatch({ taskId, mode: "manual" }), JobError);
+  assert.equal(h.startCalls.length, 1, "nothing was re-sent");
 });
 
 test("a completed run leaves the bed AWAITING_CLEARANCE and NO dispatch may presume it clear", async () => {

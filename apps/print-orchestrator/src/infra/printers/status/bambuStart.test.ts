@@ -8,8 +8,11 @@ import {
   BambuStartUnconfirmedError,
   buildBambuStartPayload,
   confirmBambuStart,
-  resolveAmsUse
+  feedStateFromReport,
+  liveFeedState,
+  sendBambuStart
 } from "./bambuStart";
+import { resolveFeedPlan, type FeedPlan } from "../../../domain/printers/feedPlan";
 import { PrinterCommandError } from "./types";
 
 /**
@@ -78,6 +81,24 @@ test("a .gcode.3mf is started as a project_file naming the plate inside it", () 
   assert.equal(payload.bed_type, "auto");
 });
 
+test("HIGH-11: an uploaded package is started by the plate entry its analysis read", () => {
+  // An operator's export of plate 2 carries `plate_2.gcode`; naming plate_1
+  // would start a plate that is not in the file.
+  const { payload } = buildBambuStartPayload(PRINTER, "bracket-1a2b3c4d.gcode.3mf", null, "Metadata/plate_2.gcode");
+  assert.equal(payload.command, "project_file");
+  assert.equal(payload.param, "Metadata/plate_2.gcode");
+
+  // The name ends up inside a device command: only the plate-entry shape passes,
+  // refused before anything is published.
+  for (const bad of ["../plate_1.gcode", "Metadata/plate_1.gcode; M502", "Metadata/x.gcode", "Metadata/plate_0.gcode"]) {
+    assert.throws(
+      () => buildBambuStartPayload(PRINTER, "bracket-1a2b3c4d.gcode.3mf", null, bad),
+      (e: unknown) => e instanceof PrinterCommandError,
+      bad
+    );
+  }
+});
+
 test("a bare .gcode uses the simpler gcode_file command with an absolute path", () => {
   const { payload } = buildBambuStartPayload(PRINTER, "cube-1a2b3c4d.gcode");
   assert.equal(payload.command, "gcode_file");
@@ -94,40 +115,158 @@ test("calibration is not silently switched on for every print", () => {
   assert.equal(payload.timelapse, false);
 });
 
-// ── AMS is read from the device, not assumed from the model name ─────────────
+// ── The filament source comes from the job, never "the first loaded tray" ────
+
+/** A one-filament job asking for `material`, planned against the CURRENT report. */
+function planFor(material: string, choice?: Record<number, number>): FeedPlan {
+  const live = liveFeedState(PRINTER);
+  return resolveFeedPlan({
+    hasAms: live.hasAms === true,
+    trays: live.trays,
+    requirement: { filaments: [{ index: 0, material, color: null }], slotCount: 1 },
+    choice: choice ?? null
+  });
+}
 
 test("no AMS reported ⇒ use_ams false, even for a printer called «Combo»", () => {
   // This farm's A1 Combo reports zero AMS units and feeds from the external
   // spool. Telling the firmware to use a non-existent AMS is a refusal.
   reportState({ ams: { ams: [] }, vt_tray: { tray_type: "PETG" } });
-  const ams = resolveAmsUse(PRINTER);
-  assert.equal(ams.use, false);
+  const plan = planFor("PETG");
+  assert.equal(plan.kind, "external");
 
-  const { payload } = buildBambuStartPayload(PRINTER, "part.gcode.3mf");
+  const { payload } = buildBambuStartPayload(PRINTER, "part.gcode.3mf", plan);
   assert.equal(payload.use_ams, false);
   assert.ok(!("ams_mapping" in payload), "no mapping is sent when the AMS is not used");
 });
 
-test("an AMS with a loaded tray maps to that slot in the documented 5-slot form", () => {
+test("CRITICAL-03: the tray holding the job's material is used, not the first loaded one", () => {
+  // Slot 1 (tray 0) holds PLA and is loaded first; the PETG job must go to slot 3.
   reportState({
-    ams: { ams: [{ id: "0", tray: [{ id: "0" }, { id: "1", tray_type: "PETG" }] }] }
+    ams: {
+      tray_now: "0",
+      ams: [
+        {
+          id: "0",
+          tray: [
+            { id: "0", tray_type: "PLA", tray_color: "FFFFFFFF" },
+            { id: "1" },
+            { id: "2", tray_type: "PETG", tray_color: "000000FF" }
+          ]
+        }
+      ]
+    }
   });
-  const ams = resolveAmsUse(PRINTER);
-
-  assert.equal(ams.use, true);
-  // Reverse-indexed, -1 = unused, the active slot last.
-  assert.deepEqual(ams.mapping, [-1, -1, -1, -1, 1]);
-
-  const { payload } = buildBambuStartPayload(PRINTER, "part.gcode.3mf");
+  const plan = planFor("PETG");
+  assert.equal(plan.kind, "ams");
+  const { payload } = buildBambuStartPayload(PRINTER, "part.gcode.3mf", plan);
   assert.equal(payload.use_ams, true);
-  assert.deepEqual(payload.ams_mapping, [-1, -1, -1, -1, 1]);
+  // Bambu Studio's form: indexed by the job's filament (one), value = global tray id.
+  assert.deepEqual(payload.ams_mapping, [2]);
+  assert.deepEqual(payload.ams_mapping2, [{ ams_id: 0, slot_id: 2 }]);
 });
 
-test("telemetry we have never received is not read as «no AMS» plus a guess", () => {
-  // Nothing reported at all: fail closed to the external spool rather than
-  // inventing a slot that may hold the wrong filament.
-  const ams = resolveAmsUse(PRINTER);
-  assert.equal(ams.use, false);
+test("a second AMS unit is addressed by its real global tray id (ams_id × 4 + slot)", () => {
+  reportState({
+    ams: {
+      ams: [
+        { id: "0", tray: [{ id: "0", tray_type: "PLA" }] },
+        { id: "1", tray: [{ id: "3", tray_type: "PETG" }] }
+      ]
+    }
+  });
+  const plan = planFor("PETG");
+  assert.equal(plan.kind, "ams");
+  const { payload } = buildBambuStartPayload(PRINTER, "part.gcode.3mf", plan);
+  assert.deepEqual(payload.ams_mapping, [7]);
+  assert.deepEqual(payload.ams_mapping2, [{ ams_id: 1, slot_id: 3 }]);
+});
+
+test("no tray with the job's material ⇒ unresolved, and the payload builder refuses it", () => {
+  reportState({ ams: { ams: [{ id: "0", tray: [{ id: "0", tray_type: "PLA" }] }] } });
+  const plan = planFor("PETG");
+  assert.equal(plan.kind, "unresolved");
+  assert.equal(plan.kind === "unresolved" && plan.code, "AMS_MATERIAL_MISMATCH");
+  assert.throws(
+    () => buildBambuStartPayload(PRINTER, "part.gcode.3mf", plan),
+    (e: unknown) => e instanceof PrinterCommandError && e.definitivelyRejected
+  );
+});
+
+test("two trays with the material and nothing to tell them apart ⇒ ambiguous until an operator picks", () => {
+  reportState({
+    ams: {
+      ams: [
+        {
+          id: "0",
+          tray: [
+            { id: "0", tray_type: "PETG", tray_color: "FF0000FF" },
+            { id: "1", tray_type: "PETG", tray_color: "00FF00FF" }
+          ]
+        }
+      ]
+    }
+  });
+  const ambiguous = planFor("PETG");
+  assert.equal(ambiguous.kind === "unresolved" && ambiguous.code, "AMS_SLOT_AMBIGUOUS");
+  const chosen = planFor("PETG", { 0: 1 });
+  assert.equal(chosen.kind, "ams");
+  assert.deepEqual(chosen.kind === "ams" && chosen.mapping, [1]);
+});
+
+test("an operator cannot pick a tray of a different material family", () => {
+  reportState({ ams: { ams: [{ id: "0", tray: [{ id: "0", tray_type: "PLA" }, { id: "1", tray_type: "PETG" }] }] } });
+  const plan = planFor("PETG", { 0: 0 });
+  assert.equal(plan.kind === "unresolved" && plan.code, "AMS_MATERIAL_MISMATCH");
+});
+
+test("a bare .gcode cannot be started through the AMS — there is no mapping in gcode_file", () => {
+  reportState({ ams: { ams: [{ id: "0", tray: [{ id: "0", tray_type: "PETG" }] }] } });
+  const plan = planFor("PETG");
+  assert.throws(() => buildBambuStartPayload(PRINTER, "part.gcode", plan), PrinterCommandError);
+});
+
+test("the pinned tray is re-checked right before publishing: a swapped spool refuses with nothing sent", async () => {
+  reportState({
+    online: true,
+    ams: { ams: [{ id: "0", tray: [{ id: "0", tray_type: "PETG", tray_color: "000000FF" }] }] }
+  } as Record<string, unknown>);
+  const plan = planFor("PETG");
+  assert.equal(plan.kind, "ams");
+  // Between the decision and the send, someone loads PLA into that slot.
+  reportState({ ams: { ams: [{ id: "0", tray: [{ id: "0", tray_type: "PLA", tray_color: "000000FF" }] }] } });
+  await assert.rejects(
+    sendBambuStart(PRINTER, "part.gcode.3mf", { feed: plan as unknown as Record<string, unknown> }),
+    (e: unknown) =>
+      e instanceof PrinterCommandError && e.definitivelyRejected && /PLA/.test(e.message)
+  );
+});
+
+test("an AMS printer refuses a start with no pinned feed at all (no silent first-tray fallback)", async () => {
+  reportState({ ams: { ams: [{ id: "0", tray: [{ id: "0", tray_type: "PETG" }] }] } });
+  await assert.rejects(
+    sendBambuStart(PRINTER, "part.gcode.3mf", { feed: null }),
+    (e: unknown) => e instanceof PrinterCommandError && e.definitivelyRejected
+  );
+});
+
+test("telemetry we have never received is not read as «no AMS»", () => {
+  // Nothing reported at all: the feeding options are unknown, not "external".
+  const live = liveFeedState(PRINTER);
+  assert.equal(live.hasAms, null);
+  assert.equal(live.trays, null);
+});
+
+test("the report parser exposes the external spool as tray 254 beside the AMS slots", () => {
+  const state = feedStateFromReport({
+    ams: { tray_now: "254", ams: [{ id: "0", tray: [{ id: "0", tray_type: "PLA" }] }] },
+    vt_tray: { tray_type: "PETG", tray_color: "112233FF" }
+  });
+  assert.equal(state.hasAms, true);
+  const external = state.trays.find((t) => t.external);
+  assert.equal(external?.trayId, 254);
+  assert.equal(external?.material, "PETG");
+  assert.equal(external?.active, true);
 });
 
 // ── What counts as proof it started ──────────────────────────────────────────

@@ -282,7 +282,11 @@ function operationRow(row) {
 
   /* Подтверждение выполнения — главное действие строки, поэтому оно
      единственное выделено; отмена стоит последней и подписана. */
-  const actionable = op.state === "IN_PROGRESS" || row.ready;
+  // Подтвердить уже сделанное физически можно ВСЕГДА — расписание оператора
+  // прогнозирует, когда работа будет сделана, но не запрещает отметить, что она
+  // сделана. Скрывать кнопку вне рабочего окна значило держать принтер
+  // занятым из-за календаря, хотя деталь уже снята.
+  const actionable = op.state === "IN_PROGRESS" || op.state === "READY" || op.state === "PENDING";
   const actions = actionable
     ? `<button type="button" class="btn btn-ok btn-sm" data-ops-action="complete" data-id="${esc(op.id)}">${icon("check")}<span>Выполнено</span></button>
        <button type="button" class="btn btn-sm" data-ops-action="fail" data-id="${esc(op.id)}">не удалось</button>`

@@ -93,6 +93,9 @@ const state = {
   system: [{ icon: "❖", text: "mock", kind: "ok" }], feed: [], warnings: []
 };
 
+/** The board payload the mock serves — for scenarios that extend it (`{ ...MOCK_DASHBOARD, … }`). */
+export const MOCK_DASHBOARD = state;
+
 const API = {
   "/api/dashboard": state,
   "/api/print/artifacts": { artifacts: [] },

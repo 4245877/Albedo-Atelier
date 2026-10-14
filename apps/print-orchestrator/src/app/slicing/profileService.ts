@@ -12,6 +12,7 @@ import {
 import { finding } from "../../domain/slicing/findings";
 import { parentNameFromFinding } from "../../domain/slicing/inheritance";
 import { printerModelsMatchStrict } from "../../domain/slicing/printerModel";
+import { currentRevisionOf, SUPERSEDED_CODE, supersededBy } from "../../domain/slicing/revisionLineage";
 import {
   readFilament,
   readMachine,
@@ -52,6 +53,8 @@ export interface CreateProfileSetInput {
   printerId?: string | null;
   printerClass?: string | null;
   actor?: string;
+  /** The set this one replaces with current revisions ({@link ProfileService.createSuccessorSet}). */
+  successorOf?: string;
 }
 
 /** One printer's machine-profile coverage — surfaces the "no Ender 3 V3 KE profile" gap. */
@@ -167,6 +170,17 @@ export class ProfileService {
     const machine = this.requireRevision(input.machineRevisionId, "machine");
     const process = this.requireRevision(input.processRevisionId, "process");
     const filament = this.requireRevision(input.filamentRevisionId, "filament");
+    // A new set is built on the settings the catalog resolves to NOW. A superseded
+    // revision keeps serving the sets already approved on it, but starting a new
+    // one on settings the catalog has replaced would approve history.
+    for (const rev of [machine, process, filament]) {
+      const next = supersededBy(rev);
+      if (next) {
+        throw new ValidationError(
+          `Профиль «${rev.name}» (ревизия ${rev.id}) заменён ревизией ${next} — каталог разрешает его иначе. Выберите актуальную ревизию`
+        );
+      }
+    }
     // Exactly one target: a concrete printer (printerId) OR a class (printerClass),
     // never both and never neither — an ambiguous or absent target cannot be
     // validated against real hardware.
@@ -205,7 +219,7 @@ export class ProfileService {
       createdAt: iso,
       updatedAt: iso,
       version: 1,
-      metadata: {}
+      metadata: input.successorOf ? { successorOf: input.successorOf } : {}
     };
     this.store.transaction(() => {
       this.store.repositories.profileSets.insert(set);
@@ -214,7 +228,11 @@ export class ProfileService {
         entityId: set.id,
         action: "created",
         to: validation,
-        detail: { blockers: findings.blockers.length, warnings: findings.warnings.length }
+        detail: {
+          blockers: findings.blockers.length,
+          warnings: findings.warnings.length,
+          ...(input.successorOf ? { successorOf: input.successorOf } : {})
+        }
       });
     });
     return set;
@@ -242,7 +260,11 @@ export class ProfileService {
         printerClass: set.printerClass
       });
       const validation = validationStatus(findings);
-      const blocked = findings.blockers.length > 0;
+      // Approving is endorsing these exact effective settings. Settings the catalog
+      // has since re-resolved are not approvable anew — not a blocker, though: a set
+      // already approved on them keeps its approval and keeps slicing with them.
+      const superseded = [machine, process, filament].filter((r) => supersededBy(r) !== null);
+      const blocked = findings.blockers.length > 0 || superseded.length > 0;
       const iso = this.nowIso();
 
       const saved = this.store.repositories.profileSets.update({
@@ -260,17 +282,59 @@ export class ProfileService {
         entityId: set.id,
         action: blocked ? "approval_refused" : "approved",
         to: validation,
-        detail: blocked ? { blockers: findings.blockers.length } : undefined
+        detail: blocked
+          ? { blockers: findings.blockers.length, ...(superseded.length > 0 ? { superseded: superseded.map((r) => r.id) } : {}) }
+          : undefined
       });
-      return { saved, blockers: findings.blockers, blocked };
+      return { saved, blockers: findings.blockers, blocked, superseded };
     });
 
     if (outcome.blocked) {
+      if (outcome.blockers.length > 0) {
+        throw new JobError(
+          `Нельзя утвердить набор с блокерами: ${outcome.blockers.map((b) => b.message).join("; ")}`
+        );
+      }
       throw new JobError(
-        `Нельзя утвердить набор с блокерами: ${outcome.blockers.map((b) => b.message).join("; ")}`
+        `Нельзя утвердить набор: профили ${outcome.superseded.map((r) => `«${r.name}»`).join(", ")} с тех пор разрешаются каталогом иначе. ` +
+          "Создайте обновлённый набор на актуальных ревизиях и утвердите его"
       );
     }
     return outcome.saved;
+  }
+
+  /**
+   * A new, unapproved set with the same target whose members are the CURRENT
+   * revisions of this set's — how an operator adopts settings the catalog has
+   * re-resolved since the set was approved (HIGH-10). The original set is left
+   * exactly as it is, approval included: nothing changes until the successor is
+   * approved, and slices already cut keep naming the set they were cut with.
+   */
+  createSuccessorSet(id: string, actor = "operator"): ProfileSet {
+    const set = this.requireSet(id);
+    const getById = (revId: string) => this.store.repositories.profileRevisions.getById(revId);
+    const machine = currentRevisionOf(this.requireRevision(set.machineRevisionId, "machine"), getById);
+    const process = currentRevisionOf(this.requireRevision(set.processRevisionId, "process"), getById);
+    const filament = currentRevisionOf(this.requireRevision(set.filamentRevisionId, "filament"), getById);
+    if (
+      machine.id === set.machineRevisionId &&
+      process.id === set.processRevisionId &&
+      filament.id === set.filamentRevisionId
+    ) {
+      throw new ValidationError("Профили набора актуальны — обновлять нечего");
+    }
+    return this.createSet({
+      // One marker, however many generations: «K2 · PETG · обновлён», not
+      // «… · обновлён · обновлён».
+      name: `${set.name.replace(/( · обновлён)+$/, "")} · обновлён`,
+      machineRevisionId: machine.id,
+      processRevisionId: process.id,
+      filamentRevisionId: filament.id,
+      printerId: set.printerId,
+      printerClass: set.printerClass,
+      actor,
+      successorOf: set.id
+    });
   }
 
   /**
@@ -335,7 +399,9 @@ export class ProfileService {
     // Keep the store's cached availability (read synchronously by the scheduler) in
     // step with this fresh probe, so the tab and the planner never disagree.
     this.options.onRuntimeProbed?.(runtime.available);
-    const all = this.store.repositories.profileRevisions.list();
+    // Current revisions only: a superseded one is a past resolution of bytes that
+    // are counted (and offered) once, through the revision that replaced it.
+    const all = this.store.repositories.profileRevisions.list().filter((r) => supersededBy(r) === null);
     const profileCounts = {
       active: all.filter((r) => r.status === "active").length,
       quarantined: all.filter((r) => r.status === "quarantined").length,
@@ -359,7 +425,9 @@ export class ProfileService {
 
   /** For each farm printer, whether a machine profile (any / active) covers it. */
   printerCoverage(machines?: ProfileRevision[]): PrinterCoverage[] {
-    const machineProfiles = machines ?? this.store.repositories.profileRevisions.list("machine");
+    const machineProfiles = (machines ?? this.store.repositories.profileRevisions.list("machine")).filter(
+      (m) => supersededBy(m) === null
+    );
     return this.listPrinters().map((printer) => {
       const matches = machineProfiles.filter((m) => modelMatches(m, printer));
       const active = matches.find((m) => m.status === "active") ?? null;
@@ -397,6 +465,28 @@ export class ProfileService {
    *     class with no compatible member is a blocker (a partial fit is a warning).
    */
   private validate(
+    machine: ProfileRevision | null,
+    process: ProfileRevision | null,
+    filament: ProfileRevision | null,
+    target: { printerId: string | null; printerClass: string | null }
+  ): FindingSet {
+    const findings = this.validateMembers(machine, process, filament, target);
+    for (const rev of [machine, process, filament]) {
+      const next = rev ? supersededBy(rev) : null;
+      if (rev && next) {
+        findings.warnings.push(
+          finding(
+            SUPERSEDED_CODE,
+            `Профиль «${rev.name}» каталог теперь разрешает иначе (ревизия ${next}): набор печатает утверждёнными ранее настройками. ` +
+              "Чтобы перейти на новые — создайте обновлённый набор и утвердите его"
+          )
+        );
+      }
+    }
+    return findings;
+  }
+
+  private validateMembers(
     machine: ProfileRevision | null,
     process: ProfileRevision | null,
     filament: ProfileRevision | null,

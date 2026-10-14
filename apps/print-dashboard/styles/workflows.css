@@ -493,7 +493,9 @@
 }
 /* Рабочие разделы — длинные, панели в них крупные: интервал чуть шире общего
    ритма доски, иначе соседние панели читаются как одна. */
+#newprint-body,
 #uploads-body,
+#history-body,
 #slicing-body,
 #scheduler-body,
 #operations-body,
@@ -1002,7 +1004,9 @@
      блоком оставалось видно, что раздел на этом не заканчивается. */
   .upload-listbox.is-scrollable .upload-list { max-height: 62vh; }
   .upload-listbar .btn { flex: 1 1 100%; }
+  #newprint-body,
   #uploads-body,
+  #history-body,
   #slicing-body,
   #scheduler-body,
   #operations-body,
@@ -2291,3 +2295,135 @@
 }
 .row-title-link:hover,
 .row-title-link:focus-visible { text-decoration: underline; }
+
+/* ── «Новая печать»: путь из шести шагов ──────────────────────────
+   Полоса шагов — та же золотая волосяная линия и антиква, что у заголовков
+   панелей; сами шаги — обычные .slice-panel, чтобы путь читался тем же языком,
+   что и остальные рабочие разделы. Только токены темы: светлая и тёмная темы
+   работают без отдельных цветов. */
+.np { display: flex; flex-direction: column; gap: 18px; }
+.np-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  counter-reset: none;
+}
+.np-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px 6px 6px;
+  border: 1px solid var(--card-edge);
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--ink-faint);
+  background: var(--card);
+}
+.np-step-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--card-edge);
+  font-size: 12px;
+  font-weight: 600;
+}
+.np-step-mark svg { width: 13px; height: 13px; }
+.np-step.is-current {
+  color: var(--ink);
+  border-color: var(--gold-line);
+  background: color-mix(in srgb, var(--gold-soft) 45%, var(--card));
+}
+.np-step.is-current .np-step-mark { border-color: var(--gold-line); color: var(--ink); }
+.np-step.is-done { color: var(--ink-soft); }
+.np-step.is-done .np-step-mark { border-color: transparent; background: color-mix(in srgb, var(--ok) 22%, transparent); color: var(--ink); }
+.np-step.is-skipped { opacity: 0.6; }
+.np-panel.is-done { background: transparent; }
+.np-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.np-row { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; margin-top: 10px; }
+.np-row label { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-soft); }
+.np-upload { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; cursor: pointer; margin-bottom: 12px; }
+.np-link {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--gold-line);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.np-foot { margin: 0; }
+
+/* «Новая печать»: пакет моделей — строки-флажки выбора. */
+.np-mode { margin: 4px 0 0; }
+.np-check .slice-item-head { cursor: pointer; }
+.np-check input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--gold); flex: none; }
+.np-check.is-on { border-color: var(--gold-line); }
+.np-last { margin: 0 0 10px; }
+
+/* ── Автоочередь (раздел «Автоматизации») ─────────────────────── */
+#auto-queue-body { padding-top: 0; }
+.aq .slice-panel-head { flex-wrap: wrap; gap: 6px 10px; }
+.aq-chips { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.aq code { font-size: 12px; }
+
+/* ── История печати ─────────────────────────────────────────────
+   Та же лента .slice-item, что у остальных рабочих разделов; фильтр — ряд
+   пилюль-переключателей, подробности — пары «что — чем» без таблицы. */
+.hist { display: flex; flex-direction: column; gap: 14px; }
+.hist-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.hist-filter {
+  border: 1px solid var(--card-edge);
+  border-radius: 999px;
+  padding: 5px 12px;
+  background: var(--card);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.hist-filter:hover { border-color: var(--gold-line); color: var(--ink); }
+.hist-filter.is-active {
+  color: var(--ink);
+  border-color: var(--gold-line);
+  background: color-mix(in srgb, var(--gold-soft) 45%, var(--card));
+}
+.hist-facts { gap: 6px 14px; }
+.hist-facts svg { width: 14px; height: 14px; vertical-align: -2px; margin-right: 4px; opacity: 0.7; }
+.hist-item .np-row { margin-top: 8px; }
+.hist-details {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--card-edge);
+}
+.hist-kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0; font-size: 13px; }
+.hist-kv > div { display: contents; }
+.hist-kv dt { color: var(--ink-faint); }
+.hist-kv dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+
+/* Граница групп вкладок «Работ»: работа | настройки. */
+.worknav-sep {
+  flex: none;
+  align-self: center;
+  margin: 0 2px 0 10px;
+  padding-left: 12px;
+  border-left: 1px solid var(--card-edge);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+}
+
+@media (max-width: 640px) {
+  .hist-kv { grid-template-columns: 1fr; gap: 2px; }
+  .hist-kv dd { margin-bottom: 6px; }
+  .np-step { padding: 5px 10px 5px 5px; font-size: 12.5px; }
+  .np-row > .btn { flex: 1 1 100%; justify-content: center; }
+}
+

@@ -18,6 +18,7 @@ import type {
 } from "../domain/dashboard/types";
 import { resolvePrinterSpecs, type ResolvedPrinterSpecs } from "../domain/printers/specs";
 import type { PrinterBedView, PrinterView } from "../domain/printers/types";
+import type { PrinterReadinessView } from "../domain/printers/readiness";
 import type { FarmMetrics, FarmReadiness } from "../domain/farm/types";
 import { env } from "../shared/env";
 import { hhmm, minutesToHhmm, parseLocalTimeWindow } from "../shared/time";
@@ -133,7 +134,13 @@ export class DashboardReadModel {
      * constructible without a store, and a view with no answer says `null`
      * rather than implying an empty bed.
      */
-    private readonly bedCycleOf: ((printerId: string) => PrinterBedView | null) | null = null
+    private readonly bedCycleOf: ((printerId: string) => PrinterBedView | null) | null = null,
+    /**
+     * Whether the printer can take the next job, from the same facts the gate
+     * reads (bed, runs, operations). Optional like the two above: absent means
+     * the view carries no readiness rather than an invented «свободен».
+     */
+    private readonly readinessOf: ((printerId: string, view: PrinterView) => PrinterReadinessView | null) | null = null
   ) {}
 
   private view(printer: PrinterConfig): PrinterView {
@@ -146,6 +153,8 @@ export class DashboardReadModel {
     );
     view.activeRunId = this.activeRunId ? this.activeRunId(printer.id) : null;
     view.bedCycle = this.bedCycleOf ? this.bedCycleOf(printer.id) : null;
+    const readiness = this.readinessOf ? this.readinessOf(printer.id, view) : null;
+    if (readiness) view.readiness = readiness;
     return view;
   }
 

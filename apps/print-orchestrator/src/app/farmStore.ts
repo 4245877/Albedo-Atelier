@@ -63,6 +63,10 @@ export class FarmStore implements PrintServices {
   get launch() {
     return this.runtime.launch;
   }
+  /** Finished prints, their settings, and printing them again. */
+  get history() {
+    return this.runtime.history;
+  }
   /** The operator availability calendar (timezone, weekly windows, sleep), lazy. */
   get operatorSchedule() {
     return this.runtime.operatorSchedule;

@@ -1,5 +1,6 @@
 import { JobError, NotFoundError } from "../../core/errors";
 import { DEFAULT_OPERATION_MINUTES, OPERATION_LABELS } from "../../domain/operations/states";
+import { assignmentHolds } from "../../domain/print/assignmentAuthority";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
 import {
   ASSIGNMENT_TRANSITIONS,
@@ -215,23 +216,64 @@ export class PlanningService {
         );
       }
 
+      // A proposal withdrawn since the draft was built (its task was placed by
+      // hand, edited, re-sliced) makes the draft an answer to a question that has
+      // changed: recompute it rather than confirm the part that still stands.
+      const withdrawn = this.assignmentsOf(plan.id).filter((a) => a.state === "PROPOSED" && a.invalidatedAt !== null);
+      if (withdrawn.length > 0) {
+        throw new JobError(
+          `План устарел: часть предложений снята (${withdrawn
+            .map((a) => this.store.repositories.tasks.getById(a.taskId)?.title ?? a.taskId)
+            .join(", ")}) — пересчитайте черновик`,
+          { withdrawn: withdrawn.map((a) => ({ assignmentId: a.id, taskId: a.taskId, reason: a.invalidatedReason })) }
+        );
+      }
+
+      // The near-term work this draft deliberately did NOT re-plan (HIGH-14).
+      const frozen = this.frozenToCarry(plan);
+      if (frozen.problems.length > 0) {
+        throw new JobError(
+          `План устарел: ${frozen.problems.map((p) => `${p.title} — ${p.reason}`).join("; ")} — пересчитайте черновик`,
+          { frozenProblems: frozen.problems }
+        );
+      }
+
       assertTransition("план", PLAN_TRANSITIONS, plan.state, "ACTIVE");
 
+      const iso = this.ctx.nowIso();
+
+      // Carry the frozen placements onto this plan BEFORE their old plan is
+      // superseded. They were confirmed earlier and are still committed to — the
+      // draft only left them out of its pool so it would not move them. Cancelling
+      // them with their old plan (as this did) dropped the operator's nearest
+      // confirmed jobs out of every plan at the moment a recalculation was accepted.
+      for (const a of frozen.carry) {
+        this.store.repositories.assignments.update({ ...a, planId: plan.id, updatedAt: iso });
+        this.ctx.recordAudit({
+          entityType: "assignment",
+          entityId: a.id,
+          action: "carried_over",
+          actor,
+          detail: { fromPlanId: a.planId, toPlanId: plan.id, taskId: a.taskId, printerId: a.printerId }
+        });
+      }
+      const carriedIds = new Set(frozen.carry.map((a) => a.id));
+
       // Supersede the currently-confirmed plan, if any, before this one goes ACTIVE
-      // (also what the single-ACTIVE storage guard requires).
+      // (also what the single-ACTIVE storage guard requires). What it still holds
+      // after the carry-over is its re-planned tail, which this draft replaces.
       for (const other of this.store.repositories.plans.list()) {
         if (other.id !== plan.id && other.state === "ACTIVE") {
           this.cancelActive(other, `superseded by ${plan.id}`);
         }
       }
 
-      const iso = this.ctx.nowIso();
-
       // Freeze the binding as it is *at confirmation*: what the operator confirms is
       // the executable identity of each placement, not whatever the draft happened
       // to see. From here the dispatch verifies against these exact values.
       for (const assignment of this.assignmentsOf(plan.id)) {
-        if (assignment.state !== "PROPOSED") continue;
+        // A carried placement keeps the binding it was confirmed with.
+        if (assignment.state !== "PROPOSED" || carriedIds.has(assignment.id)) continue;
         const task = this.store.repositories.tasks.getById(assignment.taskId);
         if (!task) continue;
         const { binding } = resolveTaskBinding(this.store.repositories, task);
@@ -354,6 +396,41 @@ export class PlanningService {
     return null;
   }
 
+  /**
+   * The frozen placements a draft recorded (`metadata.frozenAssignmentIds`), as
+   * they stand at confirmation: the ones still live are carried onto the new
+   * plan; one finished or cancelled since is simply done; one withdrawn
+   * (invalidated) since leaves its task in no plan at all — that is a draft
+   * built on a state that no longer holds, and confirmation refuses it.
+   */
+  private frozenToCarry(plan: Plan): {
+    carry: Assignment[];
+    problems: { taskId: string; title: string; reason: string }[];
+  } {
+    const repos = this.store.repositories;
+    const ids = Array.isArray(plan.metadata.frozenAssignmentIds)
+      ? plan.metadata.frozenAssignmentIds.filter((id): id is string => typeof id === "string")
+      : [];
+    const carry: Assignment[] = [];
+    const problems: { taskId: string; title: string; reason: string }[] = [];
+    for (const id of ids) {
+      const a = repos.assignments.getById(id);
+      // A manual placement belongs to no plan and needs no carrying.
+      if (!a || a.planId === plan.id || a.planId === null) continue;
+      if (a.state === "CANCELLED" || a.state === "RELEASED") continue;
+      if (a.state === "PROPOSED" && a.invalidatedAt !== null) {
+        problems.push({
+          taskId: a.taskId,
+          title: repos.tasks.getById(a.taskId)?.title ?? a.taskId,
+          reason: `ближайшее подтверждённое назначение снято${a.invalidatedReason ? ` (${a.invalidatedReason})` : ""}`
+        });
+        continue;
+      }
+      carry.push(a);
+    }
+    return { carry, problems };
+  }
+
   /** Placed tasks in a plan that are no longer schedulable (title + id), for a confirm-time check. */
   private staleAssignments(planId: string): { taskId: string; title: string }[] {
     const schedulable = new Set(this.evidence.schedulableTasks().map((t) => t.id));
@@ -369,11 +446,20 @@ export class PlanningService {
     return stale;
   }
 
-  /** Supersedes a confirmed (ACTIVE) plan: cancels its still-open assignments, plan → CANCELLED. */
+  /**
+   * Supersedes a confirmed (ACTIVE) plan: withdraws its still-*proposed*
+   * placements, plan → CANCELLED.
+   *
+   * Only `PROPOSED` is withdrawn. A `RESERVED` assignment is a start command in
+   * flight and an `ACTIVE` one a print on the machine; neither is a
+   * recommendation a newer plan can take back, and cancelling one here (as this
+   * used to, for RESERVED) released a bed reservation out from under a dispatch
+   * that was about to finalize onto it. They keep running under their own run.
+   */
   private cancelActive(plan: Plan, reason: string): void {
     const repos = this.store.repositories;
     for (const a of this.assignmentsOf(plan.id)) {
-      if (a.state === "PROPOSED" || a.state === "RESERVED") {
+      if (a.state === "PROPOSED") {
         assertTransition("назначение", ASSIGNMENT_TRANSITIONS, a.state, "CANCELLED");
         repos.assignments.update({ ...a, state: "CANCELLED", updatedAt: this.ctx.nowIso() });
       }
@@ -454,8 +540,11 @@ export class PlanningService {
     const frozenEnds = new Map<string, number>();
     for (const a of frozen) {
       const end = readExplanation(a.metadata)?.endMs ?? null;
-      if (end !== null) frozenEnds.set(a.printerId, Math.max(frozenEnds.get(a.printerId) ?? 0, end));
-      else frozenEnds.set(a.printerId, Number.NaN); // an end nobody knows poisons the printer
+      // Free once the frozen print's part is off and the plate ready — not at its
+      // end (HIGH-15). An end, or a clearance, nobody knows poisons the printer.
+      const ready = end === null ? null : this.readyAfterPrint(end).readyAtMs;
+      if (ready !== null) frozenEnds.set(a.printerId, Math.max(frozenEnds.get(a.printerId) ?? 0, ready));
+      else frozenEnds.set(a.printerId, Number.NaN);
     }
 
     const plannerPrinters: PlannerPrinterInput[] = printers.map((p) => {
@@ -486,7 +575,8 @@ export class PlanningService {
 
     const planResult = buildPlan(plannerTasks, plannerPrinters, {
       nowMs: now,
-      unknownEtaAssumptionS: this.ctx.config.unknownEtaAssumptionS
+      unknownEtaAssumptionS: this.ctx.config.unknownEtaAssumptionS,
+      readyAfterPrint: (_printerId, endMs) => this.readyAfterPrint(endMs)
     });
 
     const iso = this.ctx.nowIso();
@@ -689,6 +779,15 @@ export class PlanningService {
         else released.push(a);
       }
     }
+    // An operator's manual placement is a decision as well (`assignmentHolds`):
+    // its task is not the planner's to move, and its printer is spoken for until
+    // that print has run. Left in the pool, a recompute proposed the same task
+    // somewhere else, and confirming it gave the task two placements.
+    for (const task of this.evidence.schedulableTasks()) {
+      for (const a of this.store.repositories.assignments.listByTask(task.id)) {
+        if (a.planId === null && assignmentHolds(a, null)) frozen.push(a);
+      }
+    }
     // Deterministic order regardless of how the store returned them.
     const byId = (x: Assignment, y: Assignment): number => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0);
     frozen.sort(byId);
@@ -708,11 +807,30 @@ export class PlanningService {
    * again?" without pretending the answer is a fact.
    */
   private projectBedRelease(endMs: number): { releaseMs: number | null; estimated: boolean } {
+    return { releaseMs: this.readyAfterPrint(endMs).readyAtMs, estimated: true };
+  }
+
+  /**
+   * When a printer is ready for its NEXT print after one ending at `endMs`: a
+   * person takes the part off and readies the plate, inside a window they really
+   * work. The one rule behind both the plan's placement order and its "plate
+   * free again" estimate (HIGH-15). Null when no such window is known — the same
+   * answer the release projection gives for a plate that is already waiting.
+   */
+  private readyAfterPrint(endMs: number): { readyAtMs: number | null; reason: string } {
+    const prep = this.ctx.config.bedPrepMinutes;
+    const minutes =
+      DEFAULT_OPERATION_MINUTES.PART_REMOVAL + (typeof prep === "number" && Number.isFinite(prep) && prep >= 0 ? prep : 5);
     const slot = this.release.nextOperatorSlot(endMs);
-    if (slot === null) return { releaseMs: null, estimated: true };
+    if (slot === null) {
+      return { readyAtMs: null, reason: "после печати деталь снять некому — нет известного окна оператора" };
+    }
     return {
-      releaseMs: slot + DEFAULT_OPERATION_MINUTES.PART_REMOVAL * 60_000,
-      estimated: true
+      readyAtMs: slot + minutes * 60_000,
+      reason:
+        slot > endMs
+          ? `снятие детали и подготовка стола (~${minutes} мин), когда оператор на месте`
+          : `снятие детали и подготовка стола (~${minutes} мин)`
     };
   }
 

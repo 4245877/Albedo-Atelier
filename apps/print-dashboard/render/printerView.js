@@ -27,8 +27,16 @@ export function jobLine(p) {
       return `<b class="job-error">${esc(p.error || "Ошибка")}</b>`;
     case "offline":
       return esc(p.error ? `Нет связи: ${p.error}` : "Нет связи с принтером");
-    case "idle":
+    case "idle": {
+      // `idle` — состояние программы, не стола. Готовность сервер считает по
+      // тем же фактам, что и допуск к запуску; без неё (старый backend) —
+      // прежняя строка.
+      const r = p.readiness;
+      if (r && r.state !== "ready") {
+        return `<b class="job-hold">${esc(r.label)}</b>${r.detail ? ` — ${esc(r.detail)}` : ""}`;
+      }
       return "Свободен — смиренно ожидает вашего повеления";
+    }
     case "unknown":
     default:
       return esc(p.error || "Состояние неизвестно — принтер ещё не ответил");
@@ -48,12 +56,16 @@ export function actionAvailability(p) {
   // Управляемость подсветки определяет ТОЛЬКО backend-флаг lightSupported —
   // читаемость состояния не означает, что подсветкой можно управлять.
   const lightSupported = Boolean(p.lightSupported);
+  // Creality WebSocket только читает телеметрию: пауза/продолжение/отмена там
+  // не существуют, и кнопка обещала бы команду, которая всегда упадёт.
+  const controlSupported = p.printControlSupported !== false;
   return {
     busy,
     offline,
-    canPause: p.status === "printing",
-    canResume: p.status === "paused",
-    canCancel: busy,
+    controlSupported,
+    canPause: controlSupported && p.status === "printing",
+    canResume: controlSupported && p.status === "paused",
+    canCancel: controlSupported && busy,
     lightSupported,
     /** light === null: состояние подсветки неизвестно (команда уйдёт вслепую). */
     lightUnknown: p.light == null,
@@ -113,16 +125,19 @@ export function printerActionModel(p, { context = "card" } = {}) {
 
   const all = [
     item({
+      supported: can.controlSupported,
       act: "pause", label: "Пауза", icon: "pause",
       disabled: !can.canPause,
       reason: can.canPause ? "" : can.offline ? offlineReason : "Принтер сейчас не печатает",
     }),
     item({
+      supported: can.controlSupported,
       act: "resume", label: "Продолжить", icon: "play",
       disabled: !can.canResume,
       reason: can.canResume ? "" : can.offline ? offlineReason : "Печать не поставлена на паузу",
     }),
     item({
+      supported: can.controlSupported,
       act: "cancel", label: "Отменить печать", icon: "cancelPrint", danger: true,
       disabled: !can.canCancel,
       reason: can.canCancel ? "" : "Сейчас нечего отменять — принтер не занят заданием",
@@ -175,7 +190,10 @@ export function printerActionModel(p, { context = "card" } = {}) {
       ? { act: "open", label: spec.label, icon: spec.icon }
       : byAct("snapshot") || byAct("files") || null;
   } else {
-    primary = byAct(spec.act);
+    // Нет управления печатью (Creality WS) — главным становится «Открыть», а не
+    // пустое место там, где была бы «Пауза».
+    primary = byAct(spec.act) ||
+      (context === "card" ? { act: "open", label: "Открыть", icon: "eye" } : byAct("snapshot") || byAct("files") || null);
   }
 
   // Вспомогательное — то, за чем тянутся чаще всего: свет, затем снимок.

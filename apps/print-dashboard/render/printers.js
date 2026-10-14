@@ -1,6 +1,6 @@
 import { API_BASE } from "../api.js";
 import { $, esc, emptyState } from "../util.js";
-import { badge } from "../shared/chips.js";
+import { printerBadge } from "../shared/chips.js";
 import { fmtLeft } from "../shared/format.js";
 import { icon } from "../shared/icons.js";
 import { actionBar, materialBlock, telemetryTempRows } from "./printerParts.js";
@@ -138,7 +138,7 @@ function printerCard(p, lightEntry) {
             <h3 class="printer-name">${esc(p.name)}<span class="type-chip ${p.type === "FDM" ? "type-fdm" : "type-resin"}">${p.type}</span></h3>
             <div class="printer-model">${esc(p.model || "модель не указана")}</div>
           </div>
-          ${badge(p.status)}
+          ${printerBadge(p)}
         </div>
         <div class="printer-job">${jobLine(p)}</div>
         ${progressBlock}
@@ -193,8 +193,14 @@ export function bedBlock(p) {
 export function renderPrinters(state) {
   const p = state.printers;
   const lightsById = new Map((state.lights || []).map((l) => [l.id, l]));
+  // «Свободны» считаются по готовности, а не по `idle`: простаивающий принтер с
+  // деталью на столе или неподтверждённым запуском следующую печать не примет.
+  const ready = p.filter((x) => (x.readiness ? x.readiness.canAcceptJob : x.status === "idle")).length;
+  const waiting = p.filter((x) => x.status === "idle" && x.readiness && !x.readiness.canAcceptJob).length;
   $("#printers-meta").textContent =
-    `${p.filter((x) => x.status === "printing").length} печатают · ${p.filter((x) => x.status === "idle").length} свободны · ${p.length} всего`;
+    `${p.filter((x) => x.status === "printing").length} печатают · ${ready} готовы` +
+    (waiting ? ` · ${waiting} ждут вмешательства` : "") +
+    ` · ${p.length} всего`;
   $("#printer-grid").innerHTML = p.map((x) => printerCard(x, lightsById.get(x.id))).join("") ||
     emptyState(
       "В зале ещё нет ни одного принтера, Владыка. Примите первого — и я тотчас возьму его под надзор.",

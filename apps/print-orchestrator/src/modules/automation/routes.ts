@@ -14,7 +14,7 @@ interface ToggleBody {
 /** The exact reads + commands the automation routes need, passed at registration. */
 export interface AutomationRoutesOptions {
   reads: Pick<DashboardReadModel, "getAutomations">;
-  commands: Pick<FarmCommands, "toggleAutomation">;
+  commands: Pick<FarmCommands, "toggleAutomation" | "autoQueueOverview" | "autoQueueTick">;
 }
 
 /**
@@ -22,7 +22,11 @@ export interface AutomationRoutesOptions {
  *
  *   GET  /              rules + last run summary
  *   POST /:id/toggle    flip or set a rule    body: { "on"?: boolean }
- *                       (omit `on` to toggle the current value)
+ *                       (omit `on` to toggle the current value; a locked rule
+ *                       refuses being switched ON with 409)
+ *   GET  /auto-queue    the automatic queue: status + a dry run of what it would
+ *                       start now (no side effects; answers even when it is off)
+ *   POST /auto-queue/tick  one pass now (409 unless configured AND armed)
  */
 export async function registerAutomationRoutes(
   app: FastifyInstance,
@@ -36,4 +40,8 @@ export async function registerAutomationRoutes(
     const on = typeof request.body?.on === "boolean" ? request.body.on : undefined;
     return { ok: true, automation: commands.toggleAutomation(request.params.id, on) };
   });
+
+  app.get("/auto-queue", async () => commands.autoQueueOverview());
+
+  app.post("/auto-queue/tick", async () => ({ ok: true, result: await commands.autoQueueTick() }));
 }

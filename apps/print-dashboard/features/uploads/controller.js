@@ -7,6 +7,7 @@
    (renderBoard его не трогает). Разметка элементов — view.js.
    ═══════════════════════════════════════════════════════════════ */
 
+import { UNIT_CHOICES } from "./units.js";
 import { apiDelete, apiGet, apiPost, uploadArtifact } from "../../api.js";
 import { confirmAction, createFocusTrap } from "../../shared/dialog.js";
 import { createInflightGuard } from "../../shared/inflight.js";
@@ -770,12 +771,7 @@ function pickUnits(item, box) {
   });
 }
 
-const UNIT_CHOICES = [
-  { value: "mm", label: "Миллиметры", factor: 1 },
-  { value: "cm", label: "Сантиметры", factor: 10 },
-  { value: "inch", label: "Дюймы", factor: 25.4 },
-  { value: "m", label: "Метры", factor: 1000 }
-];
+
 
 /* «100 × 50 × 20» + ×25.4 → «2540 × 1270 × 508 мм»: что именно получится, если
    выбрать эту единицу. Без этого выбор делается вслепую. */

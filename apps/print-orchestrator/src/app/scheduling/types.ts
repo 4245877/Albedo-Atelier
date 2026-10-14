@@ -12,6 +12,7 @@ import type { ManualOperation } from "../../domain/operations/types";
 import type { EtaSource } from "../../domain/scheduling/eta";
 import type { ApproximateHint, ScoreComponent, UnplacedCode } from "../../domain/scheduling/planner";
 import type { ReleaseSegment } from "../../domain/scheduling/release";
+import type { FeedTray } from "../../domain/printers/feedPlan";
 
 /** The live view of one printer the scheduler needs; assembled by the caller from telemetry + config. */
 export interface SchedulerPrinterRef {
@@ -93,6 +94,12 @@ export interface SchedulerConfig {
    */
   unknownEtaAssumptionS: number;
   /**
+   * Operator minutes to ready a plate for the next print once the finished part
+   * is off it (wipe, check, re-seat). Added to the part removal itself when the
+   * planner places one job after another on a printer. Absent → 5.
+   */
+  bedPrepMinutes?: number;
+  /**
    * The open manual interventions holding a printer. Absent means the farm has no
    * operator model wired in, and a printer with an occupied bed then resolves to
    * an *unknown* release — never to "free now".
@@ -105,6 +112,12 @@ export interface SchedulerConfig {
    * computable for anything that needs hands.
    */
   operatorAvailabilityAt?: (at: Date) => OperatorAvailability;
+  /**
+   * What a printer can feed filament from right now (Bambu: AMS slots and the
+   * external spool), from live telemetry. Absent/null → unknown; only consulted
+   * for adapters whose start command names a source.
+   */
+  feedStateOf?: (printerId: string) => { hasAms: boolean | null; trays: FeedTray[] | null } | null;
   /**
    * The **frozen horizon** in seconds: confirmed assignments whose planned start
    * falls inside it are not re-planned by a recompute. Beyond it, a confirmed but

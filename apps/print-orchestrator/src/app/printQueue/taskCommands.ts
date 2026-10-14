@@ -9,6 +9,7 @@ import type {
   QueueEntry
 } from "../../domain/print/types";
 import type { PrintTaskState } from "../../domain/print/types";
+import { PREPARABLE_TASK_STATES } from "../../domain/print/draftTask";
 import { evaluateSliceOutput } from "../../domain/slicing/outputGate";
 import {
   buildDeviceFileName,
@@ -19,12 +20,7 @@ import { isTaskTerminal, type PrintQueueContext } from "./context";
 import type { QueueQueries, TaskDetail } from "./queueQueries";
 
 /** Task states from which a finished slice may be handed off into the queue. */
-const PROMOTABLE_TASK_STATES: ReadonlySet<PrintTaskState> = new Set([
-  "DRAFT",
-  "QUEUED",
-  "PLANNED",
-  "NEEDS_REVIEW"
-]);
+const PROMOTABLE_TASK_STATES: ReadonlySet<PrintTaskState> = new Set(PREPARABLE_TASK_STATES);
 
 /** Allowed operator priority band. Beyond this a single job would dominate/break the score. */
 const PRIORITY_MIN = -10;
@@ -237,29 +233,133 @@ export class TaskCommands {
           { taskId: task.id, taskState: task.state }
         );
       }
-      const updated = this.ctx.transitionTask(task, "QUEUED", { reason: null }, "released", actor);
-      const entry = this.store.repositories.queue.findByTaskId(id);
+      const retry = task.state === "FAILED";
+      const updated = this.ctx.transitionTask(task, "QUEUED", { reason: null }, retry ? "retried" : "released", actor);
+      const repos = this.store.repositories;
+      const entry = repos.queue.findByTaskId(id);
       if (entry && entry.state === "HELD") {
         this.ctx.transitionEntry(entry, "WAITING", actor);
+      } else if (!entry || entry.state === "RELEASED") {
+        // A task that went to a printer left the queue: its entry was RELEASED
+        // when the run ended. Moving the task alone back to QUEUED (as this did)
+        // produced a "queued" task that was in no queue — invisible to the
+        // planner, the launch list and the dispatch gate alike (HIGH-16). The
+        // retry goes back in, at the tail: it is new work as far as the order of
+        // the queue is concerned.
+        const iso = this.ctx.nowIso();
+        const position = this.ctx.nextPosition();
+        if (entry) {
+          const reopened = this.ctx.transitionEntry(entry, "WAITING", actor);
+          repos.queue.update({ ...reopened, position, enqueuedAt: iso, updatedAt: iso });
+        } else {
+          const created: QueueEntry = {
+            id: newId(ID_PREFIX.queueEntry),
+            taskId: id,
+            position,
+            state: "WAITING",
+            enqueuedAt: iso,
+            updatedAt: iso,
+            version: 1
+          };
+          repos.queue.insert(created);
+          this.ctx.recordAudit({ entityType: "queue_entry", entityId: created.id, action: "enqueued", to: "WAITING", actor });
+        }
       }
       return updated;
     });
   }
 
   /**
-   * Cancels a task without deleting it: task → `CANCELLED`, its queue entry is
-   * `RELEASED`, and any open assignment/bed cycle is unwound (a reserved bed goes
-   * back to `CLEAR`; a running one to `AWAITING_CLEARANCE`, since a part may still
-   * be on it). The row and its whole chain stay as history.
+   * Cancels a task — **logically**, which is only ever safe for work that has no
+   * physical side yet. Kept for the callers that want the task back; see
+   * {@link cancel} for the outcome-carrying form the API uses.
    */
   cancelTask(id: string, reason?: string, actor?: string): PrintTask {
+    return this.cancel(id, reason, actor).task;
+  }
+
+  /**
+   * **What "отменить задание" may and may not do, by how far the work has got.**
+   *
+   * Cancelling used to be one transaction regardless of the physical state: the
+   * task went `CANCELLED`, its live run was marked `CANCELLED` and its reserved
+   * bed went back to `CLEAR` — while the start command was still in flight, or
+   * the printer was printing. The dispatch's own finalize then moved that same
+   * run to `RUNNING` on a bed the ledger now called free, and when the print
+   * ended nothing opened a clearance: the next job started onto the part.
+   *
+   * There are four different situations, and only the first is a logical cancel:
+   *
+   *  1. **Nothing physical yet** (queued, planned, a proposal, a draft): the task
+   *     is `CANCELLED`, its queue entry released, its proposals withdrawn. No bed
+   *     was reserved, so none is touched.
+   *  2. **A start that has not been confirmed** (task `DISPATCHING`, run
+   *     `PENDING`/`UNKNOWN`): the command may or may not have left. The intent is
+   *     recorded on the run and honoured by the dispatch *if it has not sent
+   *     yet* (checked under the printer's command lock, right before the send);
+   *     once sent, the printer stays held until telemetry or a person resolves
+   *     what happened — and the task is then closed instead of re-queued.
+   *  3. **A print running on the machine**: refused. Stopping it is a physical
+   *     command with its own identity check (`POST /tasks/:id/stop`); the run,
+   *     the task and the bed follow from what the printer then reports.
+   *  4. **Inconsistent leftovers** (a reservation with no run): withdrawn, and the
+   *     bed it held goes to `UNKNOWN` — never `CLEAR` — for a person to confirm.
+   */
+  cancel(
+    id: string,
+    reason?: string,
+    actor?: string
+  ): { task: PrintTask; outcome: "cancelled" | "cancel_requested"; message: string } {
     return this.store.transaction(() => {
       const repos = this.store.repositories;
       const task = this.queries.getTask(id);
+      const why = reason?.trim() || null;
+
+      const run = repos.printRuns.findActiveByTask(task.id);
+      if (run && (run.state === "RUNNING" || run.state === "PAUSED")) {
+        const printer = this.ctx.resolvePrinter(run.printerId);
+        throw new JobError(
+          `«${task.title}» печатается на «${printer?.name ?? run.printerId}» — отменить задание, не остановив печать, нельзя. ` +
+            "Остановите печать на принтере; задание закроется, когда принтер подтвердит остановку.",
+          { code: "TASK_PRINTING", taskId: task.id, runId: run.id, printerId: run.printerId }
+        );
+      }
+      if (run && (run.state === "PENDING" || run.state === "UNKNOWN")) {
+        if (!run.metadata.cancelRequestedAt) {
+          const iso = this.ctx.nowIso();
+          repos.printRuns.update({
+            ...run,
+            updatedAt: iso,
+            metadata: {
+              ...run.metadata,
+              cancelRequestedAt: iso,
+              cancelRequestedBy: actor ?? this.ctx.defaultActor,
+              ...(why ? { cancelReason: why } : {})
+            }
+          });
+          this.ctx.recordAudit({
+            entityType: "print_task",
+            entityId: task.id,
+            action: "cancel_requested",
+            actor,
+            detail: { runId: run.id, runState: run.state, printerId: run.printerId, reason: why }
+          });
+        }
+        const printer = this.ctx.resolvePrinter(run.printerId);
+        return {
+          task: this.queries.getTask(id),
+          outcome: "cancel_requested",
+          message:
+            `Команда запуска на «${printer?.name ?? run.printerId}» уже отправлена или отправляется — ` +
+            "если она ещё не ушла, запуск будет отменён; если ушла, принтер останется занятым, пока он не " +
+            "подтвердит состояние: остановите печать, если она началась, или отметьте, что она не началась."
+        };
+      }
+
       const updated = this.ctx.transitionTask(
         task,
         "CANCELLED",
-        { reason: reason?.trim() || task.reason },
+        { reason: why || task.reason },
         "cancelled",
         actor
       );
@@ -273,7 +373,7 @@ export class TaskCommands {
         if (assignment.state === "RELEASED" || assignment.state === "CANCELLED") continue;
         this.ctx.unwindAssignment(assignment, "CANCELLED", actor);
       }
-      return updated;
+      return { task: updated, outcome: "cancelled", message: `Задание «${task.title}» отменено` };
     });
   }
 

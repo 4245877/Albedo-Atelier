@@ -57,6 +57,11 @@ export async function sendPrinterCommand(
  * local MQTT (`print.project_file` / `print.gcode_file`). Creality control is
  * unimplemented and is reported as unsupported rather than faked.
  */
+/** Whether pause/resume/cancel can be sent to this printer at all (see `sendPrinterCommand`). */
+export function supportsPrinterControl(printer: PrinterConfig): boolean {
+  return printer.protocol === "moonraker" || printer.protocol === "bambu";
+}
+
 export function supportsPrinterStart(printer: PrinterConfig): boolean {
   return capabilitiesOf(printer).supportsRemoteStart;
 }
@@ -67,10 +72,24 @@ export function supportsPrinterStart(printer: PrinterConfig): boolean {
  * accepted it (Moonraker). Protocols with no implementation throw a structured
  * {@link PrinterCapabilityError}.
  */
-export async function sendPrinterStart(printer: PrinterConfig, filename: string): Promise<void> {
+export async function sendPrinterStart(
+  printer: PrinterConfig,
+  filename: string,
+  options: { feed?: Record<string, unknown> | null; plateGcodePath?: string | null } = {}
+): Promise<{ confirmed: boolean }> {
   requireCapability(printer, "supportsRemoteStart", "запустите файл на самом принтере");
-  if (printer.protocol === "bambu") return sendBambuStart(printer, filename);
-  return sendMoonrakerStart(printer, filename);
+  if (printer.protocol === "bambu") {
+    // The Bambu start does not return until the device's own report names the
+    // job as running (see `confirmBambuStart`) — that IS confirmation.
+    await sendBambuStart(printer, filename, {
+      feed: options.feed ?? null,
+      plateGcodePath: options.plateGcodePath ?? null
+    });
+    return { confirmed: true };
+  }
+  // Moonraker answering 200 says the request was accepted, nothing more.
+  await sendMoonrakerStart(printer, filename);
+  return { confirmed: false };
 }
 
 export function supportsPrinterLight(printer: PrinterConfig): boolean {

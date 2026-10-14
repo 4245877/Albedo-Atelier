@@ -176,6 +176,11 @@ export class FarmLifecycle {
     await runtime.filamentStock.refresh();
 
     await runtime.poller.start(logger);
+
+    // Last: the automatic queue, after recovery and with the poller running.
+    // It starts anything only when AUTO_QUEUE_ENABLED is on and the operator
+    // armed the rule; its first pass waits for fresh telemetry.
+    runtime.autoQueue.start(logger);
   }
 
   /**
@@ -235,6 +240,9 @@ export class FarmLifecycle {
     if (this.stopping) return this.stopping;
     this.stopping = (async () => {
       const runtime = this.runtime;
+      // 0. No new automatic starts; a pass in flight finishes first (its final
+      //    writes must land before the database closes).
+      await runtime.autoQueue.stop();
       // 1–2. No new polls, no device connections.
       await runtime.poller.stop();
       shutdownPrinterConnections();

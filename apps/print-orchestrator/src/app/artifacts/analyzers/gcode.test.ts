@@ -576,3 +576,17 @@ test("EXCLUDE_OBJECT_DEFINE alone does not open an object region", async () => {
   );
   assert.equal(r.data.bboxBasis, "extrusion");
 });
+
+test("HIGH-11: analysis currency is per format — 1.4.0 changed only how 3MF is read", async () => {
+  const { ANALYZER_VERSION, isAnalysisCurrent } = await import("./types");
+  assert.equal(ANALYZER_VERSION, "1.4.0");
+  assert.equal(isAnalysisCurrent("1.4.0", "3mf"), true);
+  assert.equal(isAnalysisCurrent("1.3.0", "gcode"), true);
+  assert.equal(isAnalysisCurrent("1.3.0", "stl"), true);
+  assert.equal(isAnalysisCurrent("1.3.0", "3mf"), false, "a sliced package read without its payload");
+  assert.equal(isAnalysisCurrent("1.2.0", "gcode"), false, "older changes still apply");
+  assert.equal(isAnalysisCurrent("1.3.0", "unknown"), false);
+  assert.equal(isAnalysisCurrent("9.9.9", "gcode"), false, "a newer writer is not ours to trust");
+  assert.equal(isAnalysisCurrent("garbage", "gcode"), false);
+  assert.equal(isAnalysisCurrent(null, "gcode"), true, "unversioned rows are judged elsewhere, as before");
+});

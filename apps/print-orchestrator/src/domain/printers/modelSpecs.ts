@@ -117,6 +117,41 @@ export function listModelSpecs(): readonly PrinterModelSpec[] {
 }
 
 /**
+ * Bambu's own model identifiers, keyed by catalogue code.
+ *
+ * They appear in a sliced package's `slice_info.config` as `printer_model_id`
+ * and in the plate package this farm builds — Bambu's internal names, not the
+ * marketing ones: an A1 is `N2S`. Confirmed against a package downloaded from
+ * this farm's A1. Strict both ways: an unknown code or id yields `null`, never
+ * the nearest-looking neighbour — a package claiming the wrong machine is worse
+ * than one that claims none.
+ */
+const BAMBU_MODEL_IDS: Readonly<Record<string, string>> = {
+  "bambu-a1": "N2S",
+  "bambu-a1-mini": "N1",
+  "bambu-p1p": "C11",
+  "bambu-p1s": "C12",
+  "bambu-x1c": "BL-P001",
+  "bambu-x1e": "BL-P002"
+};
+
+/** Bambu's `printer_model_id` for a catalogue code, or null when unmapped. */
+export function bambuModelIdOf(code: string | null | undefined): string | null {
+  if (!code) return null;
+  return BAMBU_MODEL_IDS[code.trim().toLowerCase()] ?? null;
+}
+
+/** The catalogued model a Bambu `printer_model_id` names (`N2S` → A1), or null. */
+export function modelSpecForBambuModelId(id: string | null | undefined): PrinterModelSpec | null {
+  const wanted = (id ?? "").trim().toUpperCase();
+  if (!wanted) return null;
+  for (const [code, modelId] of Object.entries(BAMBU_MODEL_IDS)) {
+    if (modelId === wanted) return lookupModelSpec(code);
+  }
+  return null;
+}
+
+/**
  * Bambu serial-number prefixes → catalogue codes.
  *
  * Bambu encodes the product line in the first three characters of the device

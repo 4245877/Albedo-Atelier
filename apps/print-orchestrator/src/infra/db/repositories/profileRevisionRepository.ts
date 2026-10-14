@@ -110,22 +110,8 @@ export class SqliteProfileRevisionRepository
     super(db, mapper);
   }
 
-  findByRawSha256(rawSha256: string): ProfileRevision | null {
-    return this.queryOne("SELECT * FROM profile_revisions WHERE raw_sha256 = ?", rawSha256);
-  }
-
-  findActiveByLogicalId(logicalId: string): ProfileRevision | null {
-    return this.queryOne(
-      "SELECT * FROM profile_revisions WHERE logical_id = ? AND status = 'active' LIMIT 1",
-      logicalId
-    );
-  }
-
-  latestByLogicalId(logicalId: string): ProfileRevision | null {
-    return this.queryOne(
-      "SELECT * FROM profile_revisions WHERE logical_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
-      logicalId
-    );
+  listByRawSha256(rawSha256: string): ProfileRevision[] {
+    return this.query("SELECT * FROM profile_revisions WHERE raw_sha256 = ? ORDER BY rowid", rawSha256);
   }
 
   list(type?: ProfileType): ProfileRevision[] {

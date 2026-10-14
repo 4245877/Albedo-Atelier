@@ -521,7 +521,21 @@
           <nav class="worknav" id="worknav" role="tablist" aria-label="Разделы работ"></nav>
 
           <div class="work-panels" id="work-panels">
-            <section id="uploads" class="card work-panel" aria-labelledby="uploads-title" data-work="uploads">
+            <section id="newprint" class="card work-panel" aria-labelledby="newprint-title" data-work="newprint">
+              <header class="card-head">
+                <h2 id="newprint-title">
+                  <span class="glyph" aria-hidden="true">
+                    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M10 4.2v11.6" /><path d="M4.2 10h11.6" />
+                    </svg>
+                  </span>Новая печать
+                </h2>
+                <span class="card-meta" id="newprint-meta">файл · принтер · рецепт · слайсинг · запуск</span>
+              </header>
+              <div class="card-body" id="newprint-body"></div>
+            </section>
+
+            <section id="uploads" class="card work-panel" aria-labelledby="uploads-title" data-work="uploads" hidden>
               <header class="card-head">
                 <h2 id="uploads-title">
                   <span class="glyph" aria-hidden="true">
@@ -534,6 +548,20 @@
                 <span class="card-meta" id="uploads-meta">STL · 3MF · G-code</span>
               </header>
               <div class="card-body" id="uploads-body"></div>
+            </section>
+
+            <section id="history" class="card work-panel" aria-labelledby="history-title" data-work="history" hidden>
+              <header class="card-head">
+                <h2 id="history-title">
+                  <span class="glyph" aria-hidden="true">
+                    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                      <circle cx="10" cy="10" r="6.6" /><path d="M10 6.2V10l2.6 1.6" />
+                    </svg>
+                  </span>История печати
+                </h2>
+                <span class="card-meta" id="history-meta">завершённые печати</span>
+              </header>
+              <div class="card-body" id="history-body"></div>
             </section>
 
             <section id="slicing" class="card work-panel" aria-labelledby="slicing-title" data-work="slicing" hidden>
@@ -608,6 +636,9 @@
                 <span class="card-meta" id="auto-meta"></span>
               </header>
               <div class="card-body" id="auto-body"></div>
+              <!-- Автоочередь — отдельный контейнер: список правил выше
+                   перерисовывается из payload доски, а этот блок — своим опросом. -->
+              <div class="card-body" id="auto-queue-body"></div>
             </section>
           </div>
         </div>

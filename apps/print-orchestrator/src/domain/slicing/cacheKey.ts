@@ -30,6 +30,15 @@ export interface CacheKeyParts {
    * side of a deploy — hits a cache entry whose G-code is a different plate.
    */
   plateSliceIndex?: number | null;
+  /**
+   * The factor the slicer multiplies the model's own numbers by (an operator's
+   * unit confirmation for an STL). The same bytes sliced as millimetres and as
+   * inches are two different parts; without this in the key the second request
+   * was served the first one's G-code. ALWAYS part of the key — omitting it for
+   * factor 1 would let a request at 1 hit an entry an older build cut at 25.4
+   * under the very same key.
+   */
+  scaleFactor: number;
   machineResolvedSha256: string;
   processResolvedSha256: string;
   filamentResolvedSha256: string;
@@ -44,6 +53,7 @@ export function computeCacheKey(parts: CacheKeyParts): string {
     ...(parts.plateIndex === undefined || parts.plateIndex === null
       ? []
       : [`plate:${parts.plateIndex}@${parts.plateSliceIndex ?? parts.plateIndex}`]),
+    `scale:${canonicalFactor(parts.scaleFactor)}`,
     `machine:${parts.machineResolvedSha256}`,
     `process:${parts.processResolvedSha256}`,
     `filament:${parts.filamentResolvedSha256}`,
@@ -51,4 +61,10 @@ export function computeCacheKey(parts: CacheKeyParts): string {
     `worker:${parts.workerVersion}`
   ].join("\n");
   return createHash("sha256").update(material).digest("hex");
+}
+
+/** A factor as a stable string: equal numbers always print identically. */
+function canonicalFactor(factor: number): string {
+  if (!Number.isFinite(factor) || factor <= 0) return "invalid";
+  return Number(factor.toPrecision(12)).toString();
 }

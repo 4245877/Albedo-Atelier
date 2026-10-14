@@ -1,4 +1,5 @@
 import { JobError, NotFoundError, ValidationError } from "../../core/errors";
+import { assignmentHolds } from "../../domain/print/assignmentAuthority";
 import { newId, ID_PREFIX } from "../../domain/print/ids";
 import type { Assignment, QueueEntry } from "../../domain/print/types";
 import { resolveTaskBinding } from "../dispatch/binding";
@@ -119,17 +120,22 @@ export class QueueCommands {
         );
       }
 
-      // Invariants first (the 008 partial unique indexes are the backstop):
-      // one live assignment per task, one per printer, no active run on either.
+      // Invariants first (the 008 partial unique indexes are the backstop): one
+      // assignment that HOLDS the task, one that holds the printer, no active run
+      // on either. "Holds" is `assignmentHolds`: a draft plan's proposal is advice
+      // and a withdrawn placement is history — neither may refuse an operator's
+      // decision (HIGH-12/13). They used to: a draft that merely suggested this
+      // task, or a placement already invalidated, made it «уже назначено».
+      const planState = (planId: string | null) => (planId ? (repos.plans.getById(planId)?.state ?? null) : null);
       const liveOfTask = repos.assignments
         .listByTask(taskId)
-        .find((a) => a.state !== "CANCELLED" && a.state !== "RELEASED");
+        .find((a) => assignmentHolds(a, planState(a.planId)));
       if (liveOfTask) {
         throw new JobError(
           `Задание «${task.title}» уже назначено (${liveOfTask.printerId}, ${liveOfTask.state}) — сначала снимите назначение`
         );
       }
-      const liveOnPrinter = repos.assignments.findOpenByPrinter(printer);
+      const liveOnPrinter = repos.assignments.listHoldingByPrinter(printer)[0];
       if (liveOnPrinter) {
         throw new JobError(
           `Принтер «${printer}» уже занят назначением ${liveOnPrinter.id} (${liveOnPrinter.state})`
@@ -141,6 +147,14 @@ export class QueueCommands {
         throw new JobError(
           `Есть активная печать ${activeRun.id} (${activeRun.state}) — назначение невозможно`
         );
+      }
+
+      // An operator's placement supersedes whatever a draft plan suggested for
+      // this task: those proposals are withdrawn (and a draft carrying one can no
+      // longer be confirmed without a recompute), so the ledger never holds two
+      // answers to "where does this task print".
+      if (!options.planId) {
+        this.ctx.invalidatePlacementsFor(taskId, "задание назначено вручную", actor);
       }
 
       const iso = this.ctx.nowIso();
@@ -166,6 +180,16 @@ export class QueueCommands {
         metadata: {}
       };
       repos.assignments.insert(assignment);
+      // The task's soft `targetPrinter` hint follows the decision. It is written
+      // by every dispatch attempt and survives a rejected one, so a job refused on
+      // printer A and then placed on B carried a hint (A) that contradicted its
+      // own placement (B) — and the dispatch refused it as «расхождение
+      // назначения», about a hint nobody had set as a binding. A hard pin is a
+      // binding and is left alone (the preflight refuses a placement elsewhere);
+      // a plan's placement keeps the plan's own rules.
+      if (!options.planId && task.pinnedPrinterId === null && task.targetPrinter !== printer) {
+        repos.tasks.update({ ...task, targetPrinter: printer, updatedAt: iso });
+      }
       this.ctx.recordAudit({
         entityType: "assignment",
         entityId: assignment.id,

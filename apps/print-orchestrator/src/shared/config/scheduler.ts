@@ -1,4 +1,4 @@
-import { readNonNegativeInt, readNonNegativeNumber } from "./readers";
+import { readBoolean, readNonNegativeInt, readNonNegativeNumber, readPositiveInt } from "./readers";
 import { envVar, type EnvSource } from "./registry";
 
 const VARS = {
@@ -35,6 +35,37 @@ const VARS = {
   /** Telemetry older than this (ms) is treated as stale by the scheduler → review. */
   schedulerTelemetryStaleMs: envVar("SCHEDULER_TELEMETRY_STALE_MS", "scheduler", (n, raw) =>
     readNonNegativeInt(n, raw, 120_000)
+  ),
+  /**
+   * Operator minutes to ready a plate for the next print after the finished part
+   * is removed. The planner places a printer's next job no earlier than: the
+   * print's end → the next moment an operator works → part removal + this.
+   */
+  schedulerBedPrepMinutes: envVar("SCHEDULER_BED_PREP_MINUTES", "scheduler", (n, raw) =>
+    readNonNegativeInt(n, raw, 5)
+  ),
+  /**
+   * The automatic queue's deployment switch. **Off by default**: with it off the
+   * executor never starts a print, whatever the operator's «Автоочередь» rule
+   * says — and the dashboard shows the rule locked. Turning it on only ALLOWS
+   * the rule; the rule itself starts off and is switched on by an operator.
+   */
+  autoQueueEnabled: envVar("AUTO_QUEUE_ENABLED", "scheduler", (n, raw) => readBoolean(n, raw, false)),
+  /** Pause between automatic-queue passes, ms (floor 10 s). */
+  autoQueueIntervalMs: envVar("AUTO_QUEUE_INTERVAL_MS", "scheduler", (n, raw) =>
+    Math.max(10_000, readPositiveInt(n, raw, 60_000))
+  ),
+  /** Grace after boot before the first pass: recovery done, telemetry fresh. */
+  autoQueueStartupDelayMs: envVar("AUTO_QUEUE_STARTUP_DELAY_MS", "scheduler", (n, raw) =>
+    readNonNegativeInt(n, raw, 120_000)
+  ),
+  /** Starts per pass, at most (never two on one printer); capped at 5. */
+  autoQueueMaxStartsPerTick: envVar("AUTO_QUEUE_MAX_STARTS_PER_TICK", "scheduler", (n, raw) =>
+    Math.min(5, readPositiveInt(n, raw, 1))
+  ),
+  /** How long a job the policy refused is left alone (unless the job changes), ms. */
+  autoQueueRetryCooldownMs: envVar("AUTO_QUEUE_RETRY_COOLDOWN_MS", "scheduler", (n, raw) =>
+    readNonNegativeInt(n, raw, 900_000)
   )
 };
 
@@ -44,6 +75,12 @@ export function buildSchedulerConfig(source: EnvSource) {
     nightWindow: VARS.nightWindow.read(source),
     nightEtaSafetyBuffer: VARS.nightEtaSafetyBuffer.read(source),
     farmTimezone: VARS.farmTimezone.read(source),
-    schedulerTelemetryStaleMs: VARS.schedulerTelemetryStaleMs.read(source)
+    schedulerTelemetryStaleMs: VARS.schedulerTelemetryStaleMs.read(source),
+    schedulerBedPrepMinutes: VARS.schedulerBedPrepMinutes.read(source),
+    autoQueueEnabled: VARS.autoQueueEnabled.read(source),
+    autoQueueIntervalMs: VARS.autoQueueIntervalMs.read(source),
+    autoQueueStartupDelayMs: VARS.autoQueueStartupDelayMs.read(source),
+    autoQueueMaxStartsPerTick: VARS.autoQueueMaxStartsPerTick.read(source),
+    autoQueueRetryCooldownMs: VARS.autoQueueRetryCooldownMs.read(source)
   };
 }

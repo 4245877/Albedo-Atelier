@@ -235,13 +235,16 @@ installActions({ getState: () => state, refresh });
    раздела грузится динамическим import() при ПЕРВОМ открытии вкладки — это
    же снимает его код с критического пути первой отрисовки. */
 const WORK_SETUP = {
+  newprint: () => import("./features/newprint/controller.js").then((m) => m.setupNewPrint()),
+  history: () => import("./features/history/controller.js").then((m) => m.setupHistory()),
   uploads: () => import("./features/uploads/controller.js").then((m) => m.setupUploads()),
   slicing: () => import("./features/slicing/controller.js").then((m) => m.setupSlicing()),
   scheduler: () => import("./features/scheduler/controller.js").then((m) => m.setupScheduler()),
   operations: () => import("./features/operations/controller.js").then((m) => m.setupOperations()),
   hardware: () => import("./features/printers/controller.js").then((m) => m.setupPrinterConfig()),
-  // Автоматизации рисуются из общего payload доски — своего контроллера нет.
-  automations: () => Promise.resolve(),
+  // Правила автоматизаций рисуются из общего payload доски; у автоочереди —
+  // свой блок со своим опросом (что она запустила бы сейчас и почему нет).
+  automations: () => import("./features/automations/autoQueue.js").then((m) => m.setupAutoQueue()),
 };
 
 function openWorkSection(id) {

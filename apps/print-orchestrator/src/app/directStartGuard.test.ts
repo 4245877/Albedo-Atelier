@@ -23,6 +23,8 @@ let dir: string;
 let file: string;
 let realFetch: typeof globalThis.fetch;
 let startCalls: string[];
+/** What Klipper reports — flipped to `printing <file>` by a start, like the firmware. */
+let printStats: { state: string; filename: string };
 
 const config = JSON.stringify([
   {
@@ -40,6 +42,7 @@ beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "atelier-direct-"));
   file = path.join(dir, "state.json");
   startCalls = [];
+  printStats = { state: "standby", filename: "" };
 
   process.env.PRINTERS_CONFIG_PATH = path.join(dir, "no-such-file.json");
   process.env.PRINTERS_CONFIG_JSON = config;
@@ -49,6 +52,7 @@ beforeEach(() => {
     const url = String(input);
     if (url.includes("/printer/print/start")) {
       startCalls.push(url);
+      printStats = { state: "printing", filename: new URL(url).searchParams.get("filename") ?? "" };
       return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
     }
     if (url.includes("/server/files/directory")) {
@@ -67,12 +71,22 @@ beforeEach(() => {
       return {
         ok: true,
         status: 200,
-        json: async () => ({ result: { status: { print_stats: { state: "standby" } } } })
+        json: async () => ({ result: { status: { print_stats: printStats } } })
       } as unknown as Response;
     }
     return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
   }) as typeof globalThis.fetch;
 });
+
+/**
+ * The print ends on the machine: Klipper reports `complete` for the file, and the
+ * next poll observes the ending — which closes the run and leaves the part on
+ * the plate (AWAITING_CLEARANCE), exactly as on the farm.
+ */
+async function finishPrint(store: FarmStore): Promise<void> {
+  printStats = { state: "complete", filename: printStats.filename };
+  await store.pollOnce();
+}
 
 afterEach(() => {
   globalThis.fetch = realFetch;
@@ -84,6 +98,8 @@ afterEach(() => {
 test("the file browser start goes through the canonical dispatch, not the driver", async () => {
   const store = new FarmStore(file);
   await store.start();
+  // The operator's «стол свободен» — the only evidence of a free plate.
+  store.commands.clearBed("k2", "part_removed", { actor: "operator-1" });
 
   const result = await store.commands.startPrinterFile("k2", "part.gcode");
   assert.equal(startCalls.length, 1, "the direct start reached the device");
@@ -122,6 +138,8 @@ test("the file browser start goes through the canonical dispatch, not the driver
 test("the file browser refuses a file that is not actually on the printer", async () => {
   const store = new FarmStore(file);
   await store.start();
+  // The operator's «стол свободен» — the only evidence of a free plate.
+  store.commands.clearBed("k2", "part_removed", { actor: "operator-1" });
 
   await assert.rejects(
     async () => store.commands.startPrinterFile("k2", "ghost.gcode"),
@@ -135,13 +153,15 @@ test("the file browser refuses a file that is not actually on the printer", asyn
 test("the file browser cannot start over a bed that still holds a finished part", async () => {
   const store = new FarmStore(file);
   await store.start();
+  // The operator's «стол свободен» — the only evidence of a free plate.
+  store.commands.clearBed("k2", "part_removed", { actor: "operator-1" });
 
   // Run one queue job to completion so the printer's bed cycle ends up
   // AWAITING_CLEARANCE — the state the whole night model hinges on.
   // One print run through the same file-browser path (which adopts and verifies
   // the on-device file), so the bed ends up holding a finished part.
-  const { runId } = await store.commands.startPrinterFile("k2", "part.gcode");
-  store.commands.resolveRun(runId, "SUCCEEDED");
+  await store.commands.startPrinterFile("k2", "part.gcode");
+  await finishPrint(store);
   assert.equal(startCalls.length, 1, "only the queued print has started so far");
 
   // The escape hatch must refuse just like the canonical dispatch does; without
@@ -159,11 +179,13 @@ test("the file browser cannot start over a bed that still holds a finished part"
 test("after an explicit clearance the file browser works again", async () => {
   const store = new FarmStore(file);
   await store.start();
+  // The operator's «стол свободен» — the only evidence of a free plate.
+  store.commands.clearBed("k2", "part_removed", { actor: "operator-1" });
 
   // One print run through the same file-browser path (which adopts and verifies
   // the on-device file), so the bed ends up holding a finished part.
-  const { runId } = await store.commands.startPrinterFile("k2", "part.gcode");
-  store.commands.resolveRun(runId, "SUCCEEDED");
+  await store.commands.startPrinterFile("k2", "part.gcode");
+  await finishPrint(store);
 
   const bed = store.commands.clearBed("k2", "part_removed", { actor: "operator-2" });
   assert.equal(bed.state, "CLEAR");
@@ -186,11 +208,13 @@ test("after an explicit clearance the file browser works again", async () => {
 test("clearBed refuses an auto_cleared claim for a printer with no verified mechanism", async () => {
   const store = new FarmStore(file);
   await store.start();
+  // The operator's «стол свободен» — the only evidence of a free plate.
+  store.commands.clearBed("k2", "part_removed", { actor: "operator-1" });
 
   // One print run through the same file-browser path (which adopts and verifies
   // the on-device file), so the bed ends up holding a finished part.
-  const { runId } = await store.commands.startPrinterFile("k2", "part.gcode");
-  store.commands.resolveRun(runId, "SUCCEEDED");
+  await store.commands.startPrinterFile("k2", "part.gcode");
+  await finishPrint(store);
 
   // The farm config declares no automatic continuation for this K2, so a driver
   // (or an operator picking the wrong option) cannot claim the plate cleared itself.

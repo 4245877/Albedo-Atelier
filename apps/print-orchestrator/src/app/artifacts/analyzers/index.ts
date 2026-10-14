@@ -6,7 +6,7 @@ import { analyzeStl } from "./stl";
 import { analyze3mf } from "./threemf";
 import { ANALYZER_VERSION, escalateToReview, finding, type AnalyzerLimits, type AnalyzerResult } from "./types";
 
-export { ANALYZER_VERSION } from "./types";
+export { ANALYZER_VERSION, isAnalysisCurrent } from "./types";
 export type { AnalyzerLimits, AnalyzerResult } from "./types";
 
 /** What the worker hands the analyzer: the committed blob path + upload identity. */

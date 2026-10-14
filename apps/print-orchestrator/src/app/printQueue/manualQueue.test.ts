@@ -119,3 +119,21 @@ test("the manual scheduler services never touch the legacy queue store or state.
     assert.doesNotMatch(src, legacyImport, `${file} must not import the legacy JSON queue/state`);
   }
 });
+
+test("a manual placement moves the task's soft printer hint; a hard pin is never rewritten", () => {
+  // The hint is written by every dispatch attempt and survives a rejected one.
+  // A job refused on «a» and then placed on «b» used to keep hint «a», and the
+  // dispatch refused its own placement as «расхождение назначения».
+  const svc = service();
+  const loose = svc.createTask({ title: "Loose", printer: "a" }).task;
+  assert.equal(loose.targetPrinter, "a");
+  svc.assignTask(loose.id, "b");
+  assert.equal(svc.getTask(loose.id).targetPrinter, "b", "the hint follows the decision");
+
+  const pinned = svc.addTask({ title: "Pinned", pinnedPrinterId: "a" }).task;
+  const before = svc.getTask(pinned.id);
+  svc.assignTask(pinned.id, "c");
+  const after = svc.getTask(pinned.id);
+  assert.equal(after.pinnedPrinterId, "a", "a pin is a binding, not a hint");
+  assert.equal(after.targetPrinter, before.targetPrinter);
+});

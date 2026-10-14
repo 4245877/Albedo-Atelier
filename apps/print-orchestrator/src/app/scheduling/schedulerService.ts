@@ -1,6 +1,6 @@
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { MaterialOverride, Plan, PrintTask } from "../../domain/print/types";
-import type { DispatchEligibility } from "../../domain/dispatch/eligibility";
+import type { DispatchEligibility, DispatchMode } from "../../domain/dispatch/eligibility";
 import { SchedulerContext } from "./context";
 import { EligibilityQueries, type EligibilityRequest } from "./eligibility";
 import { EvidenceResolver } from "./evidence";
@@ -105,15 +105,22 @@ export class SchedulerService {
    */
   launchPreflight(
     task: PrintTask,
-    options: { automaticContinuationAllowed?: (printerId: string) => boolean } = {}
+    options: {
+      automaticContinuationAllowed?: (printerId: string) => boolean;
+      /** Operator's filament-source choice, per printer: job filament index → tray id. */
+      feedChoice?: (printerId: string) => Readonly<Record<number, number>> | null;
+      /** Who is behind the start: an operator (default) or the automatic queue. */
+      mode?: DispatchMode;
+    } = {}
   ): { printer: SchedulerPrinterRef; eligibility: DispatchEligibility }[] {
     return this.listPrinterRefs().map((printer) => ({
       printer,
       eligibility: this.eligibilityQueries.evaluateFor(task, printer, {
-        mode: "manual",
+        mode: options.mode ?? "manual",
         stage: "preflight",
         automaticContinuationAllowed:
-          options.automaticContinuationAllowed?.(printer.id) ?? false
+          options.automaticContinuationAllowed?.(printer.id) ?? false,
+        feedChoice: options.feedChoice?.(printer.id) ?? null
       })
     }));
   }

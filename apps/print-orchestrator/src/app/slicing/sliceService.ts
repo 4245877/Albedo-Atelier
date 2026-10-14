@@ -3,12 +3,13 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 
-import { JobError, NotFoundError, ValidationError } from "../../core/errors";
+import { AppError, JobError, NotFoundError, ValidationError } from "../../core/errors";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
 import { recordAuditEvent } from "../audit";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import { assertTransition } from "../../domain/print/states";
-import type { ArtifactAnalysis, AuditEntityType, Metadata } from "../../domain/print/types";
+import type { Artifact, ArtifactAnalysis, AuditEntityType, Metadata, PrintTask } from "../../domain/print/types";
+import { newDraftTask } from "../../domain/print/draftTask";
 import { readModelScale, resolveSliceScale } from "../../domain/print/modelScale";
 import type { Dimensions } from "../../domain/scheduling/compatibility";
 import { computeCacheKey } from "../../domain/slicing/cacheKey";
@@ -24,6 +25,8 @@ import type { StoreLogger } from "../../shared/logger";
 import type { ArtifactService } from "../artifacts/artifactService";
 import { normalizeClass, setMembersOf, targetOf, type SlicerPrinterRef } from "./profileService";
 import { plateSizeRaw, resolvePlateForSlice, selectedPlateFor } from "./slicePlate";
+import { dimensionsOf, readSourceGeometry } from "./sourceGeometry";
+import { SLICE_SCALE_KEY, readPinnedSliceScale } from "../../domain/slicing/sliceScaleProvenance";
 import { BoundedWorkerPool } from "../../shared/boundedWorkerPool";
 
 export interface CreateSliceInput {
@@ -34,6 +37,35 @@ export interface CreateSliceInput {
   actor?: string;
   /** Skip the cache and force a fresh slice. */
   force?: boolean;
+  /** The batch this slice was requested in; stamped on the variant for tracing. */
+  batchId?: string | null;
+  /**
+   * The earlier print this preparation repeats («Подготовить заново» from
+   * history). Only a lineage hint for a NEW draft — honoured when that task
+   * really is a print of this source, ignored otherwise.
+   */
+  previousTaskId?: string | null;
+}
+
+/** Most models one batch may carry — a farm's afternoon, not a backlog. */
+export const MAX_SLICE_BATCH = 25;
+
+export interface CreateSliceBatchInput {
+  artifactIds: string[];
+  profileSetId: string;
+  targetPrinterId?: string | null;
+  targetPrinterClass?: string | null;
+  actor?: string;
+}
+
+/** One model's outcome in a batch: its variant, or why it was not sliced. */
+export type SliceBatchItem =
+  | { artifactId: string; ok: true; variant: SliceVariant }
+  | { artifactId: string; ok: false; code: string; error: string };
+
+export interface SliceBatch {
+  batchId: string;
+  items: SliceBatchItem[];
 }
 
 export interface SliceServiceOptions {
@@ -117,9 +149,6 @@ export class SliceService {
     const process = this.requireActive(set.processRevisionId);
     const filament = this.requireActive(set.filamentRevisionId);
 
-    const task = repos.tasks.findByArtifactId(artifact.id);
-    if (!task) throw new ValidationError("У артефакта нет связанного задания");
-
     // The OrcaSlicer version that will produce this output, folded into the cache
     // key so a result is never re-served across a slicer change. When the deployment
     // pins a version, that pin IS the key. When UNPINNED, the pin can't stand in —
@@ -137,9 +166,15 @@ export class SliceService {
     // project are two different prints from the same bytes, and without this the
     // second slice would be served the first plate's cached G-code.
     const plate = selectedPlateFor(artifact, analysis);
+    // The factor this slice will be cut with, decided NOW and pinned on the
+    // variant: the worker slices with exactly this, and the cache key carries
+    // it, so a confirmation changed between queueing and slicing can neither
+    // change what is cut nor poison the cache entry it is filed under.
+    const scale = resolveSliceScale(readSourceGeometry(analysis).fileDeclaresUnit, readModelScale(artifact));
     const cacheKey = computeCacheKey({
       plateIndex: plate?.index ?? null,
       plateSliceIndex: plate?.sliceIndex ?? null,
+      scaleFactor: scale.factor,
       sourceSha256: artifact.sha256 ?? artifact.id,
       machineResolvedSha256: machine.resolvedSha256 ?? machine.rawSha256,
       processResolvedSha256: process.resolvedSha256 ?? process.rawSha256,
@@ -174,64 +209,192 @@ export class SliceService {
     // Cache hit: a finished variant with this key whose output blob still exists
     // AND whose output analysis is still clean (schedulable, no blockers) — a stale
     // or since-invalidated result must never be re-served as ready.
+    let cached: SliceVariant | null = null;
     if (!input.force) {
-      const cached = repos.sliceVariants.findReadyByCacheKey(cacheKey);
-      if (cached?.outputArtifactId && this.cachedOutputStillReady(cached)) {
-        const out = repos.artifacts.getById(cached.outputArtifactId);
-        if (out?.source && (await this.storage.exists(out.source))) {
-          return this.createFromCache(
-            { artifact, task, set, cacheKey, orcaVersion, targetPrinterId, targetPrinterClass },
-            cached,
-            actor
-          );
-        }
+      const hit = repos.sliceVariants.findReadyByCacheKey(cacheKey);
+      if (hit?.outputArtifactId && this.cachedOutputStillReady(hit)) {
+        const out = repos.artifacts.getById(hit.outputArtifactId);
+        if (out?.source && (await this.storage.exists(out.source))) cached = hit;
       }
-      // Dedup a double-submit: if an identical slice (same cache key AND target) is
-      // already queued or running, return it instead of launching OrcaSlicer a
-      // second time. Reaching here without a cache hit, the path down to the insert
-      // below is synchronous (no `await`), so two rapid POSTs cannot both slip past.
-      const inFlight = repos.sliceVariants
-        .listInFlightByCacheKey(cacheKey)
-        .find(
-          (v) => v.targetPrinterId === targetPrinterId && v.targetPrinterClass === targetPrinterClass
-        );
-      if (inFlight) return inFlight;
     }
 
-    const iso = this.nowIso();
-    const variant: SliceVariant = {
-      id: newId(ID_PREFIX.sliceVariant),
-      taskId: task.id,
-      sourceArtifactId: artifact.id,
-      profileSetId: set.id,
-      targetPrinterId,
-      targetPrinterClass,
-      state: "pending",
-      cacheKey,
-      orcaVersion,
-      workerVersion: this.runner.workerVersion,
-      outputArtifactId: null,
-      outputAnalysisId: null,
-      orcaEtaS: null,
-      filamentG: null,
-      filamentMm: null,
-      dimensions: null,
-      warnings: [],
-      blockers: [],
-      error: null,
-      startedAt: null,
-      endedAt: null,
-      createdAt: iso,
-      updatedAt: iso,
-      version: 1,
-      metadata: {}
-    };
-    this.store.transaction(() => {
+    // ── From here to the insert: synchronous (no `await`), one transaction ──
+    //
+    // The print instance this slice prepares is resolved HERE — after every check
+    // and every `await` above, and in the same transaction as the variant — so a
+    // request refused on the way, or answered by an identical slice already in
+    // flight, leaves no empty draft behind, and two rapid POSTs cannot both open
+    // one. Once the upload's draft has been promoted onto a slice, its executable
+    // is the G-code and it no longer belongs to this source: slicing the same model
+    // again opens a NEW draft (a new print) instead of failing with "no task" (as it
+    // did) or re-pointing a task that is queued, printing or already history.
+    const batchId = input.batchId?.trim() || null;
+    const created = this.store.transaction(() => {
+      const preparing = repos.tasks.findPreparableBySource(artifact.id);
+      const request = { artifact, set, cacheKey, orcaVersion, targetPrinterId, targetPrinterClass, scale, batchId };
+      if (cached) {
+        const task = preparing ?? this.openPreparation(artifact, actor, input.previousTaskId ?? null);
+        return { variant: this.createFromCache({ ...request, task }, cached, actor), queued: false };
+      }
+      // Dedup a double-submit: an identical slice (same cache key AND target)
+      // already queued or running for THIS preparation is returned instead of
+      // launching OrcaSlicer a second time. One made for another task — another
+      // upload of the same bytes, or a print since promoted onto a different
+      // slice — is not this request's: handing it back would give the operator a
+      // variant whose promotion lands on somebody else's task.
+      if (!input.force && preparing) {
+        const inFlight = repos.sliceVariants
+          .listInFlightByCacheKey(cacheKey)
+          .find(
+            (v) =>
+              v.taskId === preparing.id &&
+              v.targetPrinterId === targetPrinterId &&
+              v.targetPrinterClass === targetPrinterClass
+          );
+        if (inFlight) return { variant: inFlight, queued: false };
+      }
+
+      const task = preparing ?? this.openPreparation(artifact, actor, input.previousTaskId ?? null);
+      const iso = this.nowIso();
+      const variant: SliceVariant = {
+        id: newId(ID_PREFIX.sliceVariant),
+        taskId: task.id,
+        sourceArtifactId: artifact.id,
+        profileSetId: set.id,
+        targetPrinterId,
+        targetPrinterClass,
+        state: "pending",
+        cacheKey,
+        orcaVersion,
+        workerVersion: this.runner.workerVersion,
+        outputArtifactId: null,
+        outputAnalysisId: null,
+        orcaEtaS: null,
+        filamentG: null,
+        filamentMm: null,
+        dimensions: null,
+        warnings: [],
+        blockers: [],
+        error: null,
+        startedAt: null,
+        endedAt: null,
+        createdAt: iso,
+        updatedAt: iso,
+        version: 1,
+        metadata: {
+          [SLICE_SCALE_KEY]: { factor: scale.factor, reason: scale.reason },
+          ...(batchId ? { batchId } : {})
+        }
+      };
       repos.sliceVariants.insert(variant);
-      this.recordAudit(actor, { entityId: variant.id, action: "created", to: "pending", detail: { cacheKey } });
+      this.recordAudit(actor, {
+        entityId: variant.id,
+        action: "created",
+        to: "pending",
+        detail: { cacheKey, ...(batchId ? { batchId } : {}) }
+      });
+      return { variant, queued: true };
     });
-    this.worker.enqueue(variant.id);
-    return variant;
+    if (created.queued) this.worker.enqueue(created.variant.id);
+    return created.variant;
+  }
+
+  /**
+   * **Пакетная подготовка**: several models, one recipe, one target.
+   *
+   * Every model goes through {@link createSlice} unchanged — the same
+   * preconditions, the same cache, the same one-preparation-per-model rule — so
+   * a batch is never a second, looser way to slice. What the batch adds is only
+   * the request shape: the recipe is checked once up front (an unknown or
+   * un-approved set refuses the whole request, since it would refuse every
+   * model alike), and a model that cannot be sliced (units unconfirmed, analysis
+   * pending, not a model) is reported in its own row instead of failing the
+   * others. Each slice is its own transaction: the models are independent
+   * prints, and one bad file must not undo the rest.
+   */
+  async createBatch(input: CreateSliceBatchInput): Promise<SliceBatch> {
+    const ids = [...new Set((input.artifactIds ?? []).map((id) => (typeof id === "string" ? id.trim() : "")))].filter(
+      (id) => id.length > 0
+    );
+    if (ids.length === 0) throw new ValidationError("Пакет пуст — выберите хотя бы одну модель");
+    if (ids.length > MAX_SLICE_BATCH) {
+      throw new ValidationError(`В одном пакете не больше ${MAX_SLICE_BATCH} моделей (выбрано ${ids.length})`);
+    }
+    const set = this.store.repositories.profileSets.getById(input.profileSetId);
+    if (!set) throw new NotFoundError(`Набор профилей «${input.profileSetId}»`);
+    if (!set.approved) throw new JobError("Набор профилей не утверждён — сначала утвердите его");
+
+    const batchId = newId(ID_PREFIX.sliceBatch);
+    const items: SliceBatchItem[] = [];
+    for (const artifactId of ids) {
+      try {
+        const variant = await this.createSlice({
+          artifactId,
+          profileSetId: input.profileSetId,
+          targetPrinterId: input.targetPrinterId ?? null,
+          targetPrinterClass: input.targetPrinterClass ?? null,
+          actor: input.actor,
+          batchId
+        });
+        items.push({ artifactId, ok: true, variant });
+      } catch (error) {
+        items.push({
+          artifactId,
+          ok: false,
+          code: errorCode(error),
+          error: errorMessage(error)
+        });
+      }
+    }
+    recordAuditEvent(this.store, () => this.nowIso(), this.defaultActor, {
+      entityType: "slice_batch",
+      entityId: batchId,
+      action: "requested",
+      actor: input.actor ?? this.defaultActor,
+      detail: {
+        profileSetId: set.id,
+        targetPrinterId: input.targetPrinterId ?? null,
+        artifactIds: ids,
+        variants: items.filter((i) => i.ok).map((i) => (i.ok ? i.variant.id : null)),
+        refused: items.filter((i) => !i.ok).length
+      }
+    });
+    return { batchId, items };
+  }
+
+  /**
+   * A fresh DRAFT preparation for a source whose earlier ones were promoted or
+   * closed. Runs inside `createSlice`'s transaction, so it commits only together
+   * with the variant it was opened for. The previous print is linked, never
+   * touched: its task, binding and history stay exactly as they were.
+   */
+  private openPreparation(source: Artifact, actor: string, previousTaskId: string | null = null): PrintTask {
+    return this.store.transaction(() => {
+      const repos = this.store.repositories;
+      // An explicit «prepare again from THIS print» names its print — but only
+      // a print of this very model counts; anything else is ignored rather than
+      // written into the lineage as a false link.
+      const named = previousTaskId ? repos.tasks.getById(previousTaskId) : null;
+      const previous =
+        named && (named.artifactId === source.id || named.sourceArtifactId === source.id)
+          ? named
+          : repos.tasks.findLatestReferencing(source.id);
+      const task = newDraftTask({
+        artifact: source,
+        iso: this.nowIso(),
+        title: previous?.title ?? source.name,
+        metadata: { source: "reprepare", ...(previous ? { previousTaskId: previous.id } : {}) }
+      });
+      repos.tasks.insert(task);
+      recordAuditEvent(this.store, () => this.nowIso(), actor, {
+        entityType: "print_task",
+        entityId: task.id,
+        action: "created",
+        to: task.state,
+        detail: { via: "reprepare", sourceArtifactId: source.id, previousTaskId: previous?.id ?? null }
+      });
+      return task;
+    });
   }
 
   private createFromCache(
@@ -243,6 +406,8 @@ export class SliceService {
       orcaVersion: string;
       targetPrinterId: string | null;
       targetPrinterClass: string | null;
+      scale: { factor: number; reason: string };
+      batchId?: string | null;
     },
     cached: SliceVariant,
     actor: string
@@ -273,7 +438,14 @@ export class SliceService {
       createdAt: iso,
       updatedAt: iso,
       version: 1,
-      metadata: { cacheHitFrom: cached.id }
+      // Same factor (it is in the key), but THIS request's provenance: a cached
+      // output cut while the unit was unconfirmed is proven for a request whose
+      // unit has since been confirmed at that same factor.
+      metadata: {
+        cacheHitFrom: cached.id,
+        [SLICE_SCALE_KEY]: { factor: ctx.scale.factor, reason: ctx.scale.reason },
+        ...(ctx.batchId ? { batchId: ctx.batchId } : {})
+      }
     };
     this.store.transaction(() => {
       this.store.repositories.sliceVariants.insert(variant);
@@ -290,6 +462,20 @@ export class SliceService {
     const variant = repos.sliceVariants.getById(variantId);
     if (!variant) throw new NotFoundError(`Вариант слайсинга «${variantId}»`);
     if (variant.state === "pending" || variant.state === "running") return variant;
+
+    // A variant a task was promoted onto — or an assignment was planned from — is
+    // that print's record of what it runs. Re-slicing it in place would swap the
+    // output under a queued, printing or finished job whose `artifactId` still
+    // names the old file. A new slice of the model is a new variant (and, for a
+    // promoted source, a new preparation) — never a rewrite of this one.
+    const boundTask = repos.tasks.listBySliceVariant(variant.id)[0];
+    if (boundTask || repos.assignments.listBySliceVariant(variant.id).length > 0) {
+      throw new JobError(
+        boundTask
+          ? `Вариант уже стал заданием «${boundTask.title}» (${boundTask.state}) — перезапуск изменил бы его историю. Нарежьте модель заново: появится новый вариант`
+          : "Вариант уже использован в назначении — перезапуск изменил бы его историю. Нарежьте модель заново: появится новый вариант"
+      );
+    }
 
     // Clear the *entire* result of the previous attempt — not just error/findings
     // but the output link and every OrcaSlicer estimate — before re-queuing. Left
@@ -503,7 +689,20 @@ export class SliceService {
     }
     const plate = plateGate.plate;
 
-    const scale = resolveSliceScale(sourceGeometry.fileDeclaresUnit, readModelScale(artifact));
+    const current = resolveSliceScale(sourceGeometry.fileDeclaresUnit, readModelScale(artifact));
+    // Cut with the factor pinned when the slice was requested — it is what the
+    // cache key promises. A confirmation changed in between does not silently
+    // re-scale this run: the variant refuses and a new slice is requested.
+    const pinned = readPinnedSliceScale(variant);
+    if (pinned && Math.abs(pinned.factor - current.factor) > 1e-9 * Math.max(1, current.factor)) {
+      this.block(
+        variant.id,
+        "scale_changed",
+        `Единицы модели изменились после постановки нарезки (×${pinned.factor} → ×${current.factor}) — запустите нарезку заново`
+      );
+      return;
+    }
+    const scale = pinned ? { factor: pinned.factor, reason: current.reason } : current;
     // What the size checks were run against, and therefore what the produced
     // slice is verified against: the chosen plate's box, not the package's.
     const sourceSize = plate ? plateSizeRaw(plate, sourceGeometry.fileDeclaresUnit) : sourceGeometry.sizeRaw;
@@ -798,51 +997,6 @@ function numberOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-/** Lifts the analyzer's bbox payload into the variant's dimensions object. */
-/**
- * The source model's geometry as the checks read it: whether the file declared
- * its own unit, and its raw box.
- *
- * Deliberately reads the same `geometry` block the scheduler's evidence resolver
- * does, so "the size that was checked" and "the size that was sliced" come from
- * one statement about the file rather than two readings of it.
- */
-function readSourceGeometry(analysis: ArtifactAnalysis | null): {
-  fileDeclaresUnit: boolean;
-  sizeRaw: Dimensions | null;
-  /** How many plates the package holds; 1 for an ordinary model, 0 when unknown. */
-  plateCount: number;
-} {
-  const geometry = analysis?.data?.geometry;
-  if (!geometry || typeof geometry !== "object" || Array.isArray(geometry)) {
-    return { fileDeclaresUnit: false, sizeRaw: null, plateCount: 0 };
-  }
-  const record = geometry as Record<string, unknown>;
-  const plateCount = typeof record.plateCount === "number" ? record.plateCount : 0;
-  return {
-    plateCount: record.multiPlate === true ? Math.max(plateCount, 2) : plateCount,
-    fileDeclaresUnit: record.scaleKnown === true,
-    // When the file declared its unit the analyzer already produced millimetres,
-    // and that is the box the checks use; otherwise the raw numbers are what the
-    // confirmed factor multiplies.
-    sizeRaw: dimensionsOf(record.scaleKnown === true ? record.sizeMm : record.sizeRaw)
-  };
-}
-
-/** `[x,y,z]` (or `{x,y,z}`) of positive finite numbers, else null. */
-function dimensionsOf(value: unknown): Dimensions | null {
-  const triple = Array.isArray(value)
-    ? value
-    : value && typeof value === "object"
-      ? [(value as Record<string, unknown>).x, (value as Record<string, unknown>).y, (value as Record<string, unknown>).z]
-      : null;
-  if (!triple || triple.length < 3) return null;
-  const [x, y, z] = triple;
-  if (typeof x !== "number" || typeof y !== "number" || typeof z !== "number") return null;
-  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
-  return x > 0 && y > 0 && z > 0 ? { x, y, z } : null;
-}
-
 /** The expected millimetre size: the source box times the factor the slicer got. */
 function scaleDimensions(size: Dimensions | null, factor: number): Dimensions | null {
   if (!size || !Number.isFinite(factor) || factor <= 0) return null;
@@ -867,4 +1021,13 @@ function readBbox(data: Metadata): Metadata | null {
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   return "Ошибка слайсинга";
+}
+
+/** A refusal's stable key: the domain code it carries, else the error class's code. */
+function errorCode(error: unknown): string {
+  if (error instanceof AppError) {
+    const detail = error.details?.code;
+    return typeof detail === "string" && detail.length > 0 ? detail : error.code;
+  }
+  return "error";
 }

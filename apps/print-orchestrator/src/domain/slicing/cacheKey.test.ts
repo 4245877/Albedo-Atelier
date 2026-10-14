@@ -6,6 +6,7 @@ import { computeCacheKey, type CacheKeyParts } from "./cacheKey";
 function parts(over: Partial<CacheKeyParts> = {}): CacheKeyParts {
   return {
     sourceSha256: "a".repeat(64),
+    scaleFactor: 1,
     machineResolvedSha256: "b".repeat(64),
     processResolvedSha256: "c".repeat(64),
     filamentResolvedSha256: "d".repeat(64),
@@ -29,6 +30,7 @@ test("property order in the parts object does not change the key", () => {
   // named fields, so JS property order must be irrelevant.
   const a: CacheKeyParts = {
     sourceSha256: "1".repeat(64),
+    scaleFactor: 25.4,
     machineResolvedSha256: "2".repeat(64),
     processResolvedSha256: "3".repeat(64),
     filamentResolvedSha256: "4".repeat(64),
@@ -41,6 +43,7 @@ test("property order in the parts object does not change the key", () => {
     filamentResolvedSha256: "4".repeat(64),
     processResolvedSha256: "3".repeat(64),
     machineResolvedSha256: "2".repeat(64),
+    scaleFactor: 25.4,
     sourceSha256: "1".repeat(64)
   };
   assert.equal(computeCacheKey(a), computeCacheKey(b));
@@ -106,4 +109,23 @@ test("the same plate NUMBER at a different position is a different key", () => {
   const before = computeCacheKey(parts({ plateIndex: 2, plateSliceIndex: 2 }));
   const after = computeCacheKey(parts({ plateIndex: 2, plateSliceIndex: 1 }));
   assert.notEqual(before, after);
+});
+
+// ── HIGH-06: the scale the model is cut at ──────────────────────────────────
+
+test("the same STL bytes at a different confirmed scale are a different key", () => {
+  const mm = computeCacheKey(parts({ scaleFactor: 1 }));
+  const inch = computeCacheKey(parts({ scaleFactor: 25.4 }));
+  const cm = computeCacheKey(parts({ scaleFactor: 10 }));
+  assert.notEqual(mm, inch, "a 2-inch cube is not a 2 mm cube");
+  assert.notEqual(mm, cm);
+  assert.notEqual(inch, cm);
+});
+
+test("equal factors key identically however they were computed", () => {
+  assert.equal(
+    computeCacheKey(parts({ scaleFactor: 25.4 * 1 })),
+    computeCacheKey(parts({ scaleFactor: Number("25.40") }))
+  );
+  assert.equal(computeCacheKey(parts({ scaleFactor: 0.1 + 0.2 })), computeCacheKey(parts({ scaleFactor: 0.3 })));
 });

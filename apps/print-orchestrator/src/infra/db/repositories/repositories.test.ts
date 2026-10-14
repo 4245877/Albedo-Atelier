@@ -133,6 +133,27 @@ test("findByLegacyRef looks up an imported id; the partial unique index blocks d
   store.close();
 });
 
+test("findPreparableBySource: the newest task still preparing the model, never a promoted, busy or closed one", () => {
+  const store = freshStore();
+  const repos = store.repositories;
+  repos.artifacts.insert(artifact("stl", { kind: "model", name: "cube.stl" }));
+  repos.artifacts.insert(artifact("out"));
+  // Same clock tick for every row: "newest" must come from insertion order, not
+  // from the random ids.
+  repos.tasks.insert(task("z-promoted", { artifactId: "out", sourceArtifactId: "stl", state: "QUEUED" }));
+  repos.tasks.insert(task("y-closed", { artifactId: "stl", sourceArtifactId: "stl", state: "CANCELLED" }));
+  repos.tasks.insert(task("x-printing", { artifactId: "stl", sourceArtifactId: "stl", state: "PRINTING" }));
+  assert.equal(repos.tasks.findPreparableBySource("stl"), null, "nothing there can take a slice");
+
+  repos.tasks.insert(task("b-draft", { artifactId: "stl", sourceArtifactId: "stl", state: "DRAFT" }));
+  repos.tasks.insert(task("a-review", { artifactId: "stl", sourceArtifactId: "stl", state: "NEEDS_REVIEW" }));
+  assert.equal(repos.tasks.findPreparableBySource("stl")?.id, "a-review", "newest by insertion");
+
+  assert.equal(repos.tasks.findLatestReferencing("stl")?.id, "a-review");
+  assert.equal(repos.tasks.findLatestReferencing("out")?.id, "z-promoted");
+  store.close();
+});
+
 test("queue listOpen orders by position and excludes released; maxPosition tracks the tail", () => {
   const store = freshStore();
   const q = store.repositories.queue;

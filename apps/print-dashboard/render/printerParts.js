@@ -36,7 +36,9 @@ export function materialBlock(p) {
   const nozzle = fmtNozzle(p.nozzleDiameter);
   // A config-sourced diameter must not look like live telemetry: mute it and
   // label it, mirroring the «из конфигурации» tag on the material itself.
-  const nozzleFromConfig = p.nozzleDiameterSource === "config";
+  // Сервер называет источник `manual` (введено оператором) или `catalog`
+  // (справочник модели); `config` — прежнее имя. Ни один из них не телеметрия.
+  const nozzleFromConfig = ["manual", "config", "catalog"].includes(p.nozzleDiameterSource);
   const nozzleChip = nozzle
     ? `<span class="nozzle-chip${nozzleFromConfig ? " nozzle-chip-config" : ""}"${
         nozzleFromConfig ? ' title="из конфигурации"' : ""

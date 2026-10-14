@@ -4,7 +4,11 @@ import { NotFoundError } from "../core/errors";
 import type { AmsTraySnapshot } from "../infra/printers/status/types";
 import type { PrintQueueStore } from "../domain/print/repositories";
 import type { PrintRun } from "../domain/print/types";
-import type { PrinterBedView } from "../domain/printers/types";
+import { isExternalCycle, resolveBedOccupancy } from "../domain/print/bedOccupancy";
+import { toFeedTray } from "../infra/printers/status/bambuStart";
+import type { PrinterBedView, PrinterView } from "../domain/printers/types";
+import { describePrinterReadiness, type PrinterReadinessView } from "../domain/printers/readiness";
+import { OPERATION_LABELS } from "../domain/operations/states";
 import { env, slicing, uploads } from "../shared/env";
 import type { StoreLogger } from "../shared/logger";
 import { importLegacyQueue } from "../infra/db/legacyImport";
@@ -21,7 +25,8 @@ import {
 import { deletePrinterFile, fetchPrinterFiles, uploadPrinterFile } from "../infra/printers/files";
 import type {
   DeviceFileIdentity,
-  DispatchEligibility
+  DispatchEligibility,
+  DispatchMode
 } from "../domain/dispatch/eligibility";
 import { OrcaCatalogSource } from "../infra/slicing/catalogSource";
 import { OrcaCliRunner } from "../infra/slicing/orcaCliRunner";
@@ -36,6 +41,8 @@ import { DeviceArtifactService } from "../app/dispatch/deviceArtifactService";
 import { DispatchService } from "../app/dispatch/dispatchService";
 import { RunLifecycleService } from "../app/dispatch/runLifecycle";
 import { LaunchService } from "../app/launch/launchService";
+import { PrintHistory } from "../app/printQueue/history";
+import { AUTO_QUEUE_ACTOR, AUTO_QUEUE_RULE_ID, AutoQueueExecutor } from "../app/automation/autoQueue";
 import { EventFeed } from "../app/eventFeed";
 import { FilamentConsumption } from "../app/filamentConsumption";
 import { FilamentStock } from "../app/filamentStock";
@@ -124,6 +131,8 @@ export interface PrintServices {
   readonly dispatchService: DispatchService | null;
   /** The operator-facing launch workflow (choose → deliver → confirm → start). */
   readonly launch: LaunchService;
+  /** Finished prints, the settings they were made with, and printing them again. */
+  readonly history: PrintHistory;
   readonly slicing: {
     presets: PresetImportService;
     profiles: ProfileService;
@@ -161,6 +170,12 @@ export class FarmRuntime implements PrintServices {
   /** Cached read of fulfillment's filament warehouse (balances + reel bindings). */
   readonly filamentStock: FilamentStock;
   readonly automations: AutomationStore;
+  /**
+   * The automatic queue executor. Built always (its status and dry run answer
+   * even when it is off); it starts anything only when AUTO_QUEUE_ENABLED is on
+   * AND the operator armed the «Автоочередь» rule. Started by the lifecycle.
+   */
+  readonly autoQueue: AutoQueueExecutor;
   /** "Operator is watching" lease renewed by the dashboard; in-memory only. */
   readonly monitoring = new MonitoringLease();
   readonly poller: PrinterPoller;
@@ -227,7 +242,29 @@ export class FarmRuntime implements PrintServices {
     this.snapshots = new SnapshotStore(snapshotsDir, persisted.snapshots, persist, {
       retainPerPrinter: env.snapshotRetainPerPrinter
     });
-    this.automations = new AutomationStore(persisted.automations, this.events, persist);
+    this.automations = new AutomationStore(persisted.automations, this.events, persist, (id) =>
+      id === AUTO_QUEUE_RULE_ID && !env.autoQueueEnabled
+        ? "автоочередь выключена при развёртывании (AUTO_QUEUE_ENABLED=false)"
+        : null
+    );
+    this.autoQueue = new AutoQueueExecutor({
+      config: {
+        enabled: env.autoQueueEnabled,
+        intervalMs: env.autoQueueIntervalMs,
+        startupDelayMs: env.autoQueueStartupDelayMs,
+        maxStartsPerTick: env.autoQueueMaxStartsPerTick,
+        retryCooldownMs: env.autoQueueRetryCooldownMs
+      },
+      store: () => this.printQueueStoreRef,
+      openQueue: () => this.printQueue.listOpenQueue(),
+      launch: () => this.launch,
+      isArmed: () => this.automations.isEnabled(AUTO_QUEUE_RULE_ID),
+      disarm: (reason) => this.automations.disarm(AUTO_QUEUE_RULE_ID, reason),
+      serialize: (task) => this.runQueueDispatch(task),
+      withdrawPlacement: (assignmentId, reason) =>
+        void this.printQueue.invalidateAssignment(assignmentId, reason, AUTO_QUEUE_ACTOR),
+      notify: (kind, text) => this.events.push(kind === "ok" ? "▶" : kind === "err" ? "✕" : "·", text, kind)
+    });
     // Deductions fulfillment never confirmed are reloaded into the retry queue,
     // so a restart cannot lose them (delivery stays deduped by idempotencyKey);
     // the sub-gram carry survives restarts the same way.
@@ -351,7 +388,8 @@ export class FarmRuntime implements PrintServices {
       // failures are swallowed by a logging try/catch, so a dead queue.db used
       // to leave /ready answering 200 while dispatch was completely broken.
       () => this.printQueueStoreRef?.probe() ?? { ok: false, error: "queue store not open" },
-      (printerId) => this.bedCycleFor(printerId)
+      (printerId) => this.bedCycleFor(printerId),
+      (printerId, view) => this.readinessFor(printerId, view)
     );
 
     // Snapshot the whole durable state on every save. The queue section is no
@@ -444,6 +482,20 @@ export class FarmRuntime implements PrintServices {
 
   // ── Lazy SQLite-backed services (opened on first access) ───────────────────
 
+  /**
+   * Serialises the queue dispatches — start-next, the night start and the
+   * automatic queue: two of them choosing from the same queue at once could pick
+   * the same job, see the same idle printer and both send. The second waits for
+   * the first and re-reads the queue. One chain per runtime, shared by everyone
+   * who dispatches from the queue.
+   */
+  runQueueDispatch<T>(task: () => Promise<T>): Promise<T> {
+    const next = this.queueDispatchChain.catch(() => undefined).then(task);
+    this.queueDispatchChain = next.catch(() => undefined);
+    return next;
+  }
+  private queueDispatchChain: Promise<unknown> = Promise.resolve();
+
   /** The open queue store, or null before {@link ensureQueue} has run. */
   get printQueueStore(): PrintQueueStore | null {
     return this.printQueueStoreRef;
@@ -496,6 +548,22 @@ export class FarmRuntime implements PrintServices {
       manualOperations: this.manualOperations,
       resolvePrinter: (id) => this.enabledConfigs().find((p) => p.id === id),
       automaticContinuationAllowed: (id) => this.automaticContinuationAllowed(id)
+    });
+  }
+
+  /**
+   * Print history and the reprint command, built per access like {@link launch}:
+   * it holds nothing of its own, and the printer names it shows must follow the
+   * inventory as it is edited.
+   */
+  get history(): PrintHistory {
+    this.ensureQueue();
+    const storage = this.artifactStorageRef as ArtifactStorage;
+    return new PrintHistory({
+      store: this.printQueueStoreRef as PrintQueueStore,
+      printQueue: this.printQueue,
+      blobExists: (key) => storage.exists(key),
+      printerName: (id) => this.configs.find((p) => p.id === id)?.name ?? null
     });
   }
 
@@ -557,12 +625,21 @@ export class FarmRuntime implements PrintServices {
       farmTimeZone: env.farmTimezone,
       compatibility: { telemetryStaleMs: env.schedulerTelemetryStaleMs },
       unknownEtaAssumptionS: 4 * 60 * 60,
+      bedPrepMinutes: env.schedulerBedPrepMinutes,
       // The two inputs that make "when is this printer really free?" answerable:
       // the interventions still owed on it, and whether a human is awake. Both are
       // read live, and both fail closed — an unresolvable schedule leaves the
       // release unknown rather than defaulting the printer to available.
       manualOperations: (printerId) => operations.openFor(printerId),
-      operatorAvailabilityAt: (at) => schedule.availability(at)
+      operatorAvailabilityAt: (at) => schedule.availability(at),
+      // What a Bambu could feed from right now — the same report the start
+      // command re-checks its pinned tray against just before publishing.
+      feedStateOf: (printerId) => {
+        const status = this.poller.getStatus(printerId);
+        if (!status || !status.online) return null;
+        const trays = (status.amsTrays ?? []).map(toFeedTray);
+        return { hasAms: trays.some((t) => !t.external), trays };
+      }
     });
   }
 
@@ -577,10 +654,11 @@ export class FarmRuntime implements PrintServices {
   evaluateDispatchEligibility(input: {
     taskId: string;
     printerId: string;
-    mode: "manual" | "night";
+    mode: DispatchMode;
     deviceFileIdentity?: DeviceFileIdentity;
     file?: string | null;
     filePathValid?: boolean;
+    feedChoice?: Readonly<Record<number, number>> | null;
   }): DispatchEligibility {
     return this.scheduler.dispatchEligibility({
       ...input,
@@ -706,15 +784,70 @@ export class FarmRuntime implements PrintServices {
   private bedCycleFor(printerId: string): PrinterBedView | null {
     const store = this.printQueueStoreRef;
     if (!store) return null;
-    const cycle = store.repositories.bedCycles.findOpenByPrinter(printerId);
-    const state = cycle?.state ?? "CLEAR";
+    // The farm's one occupancy rule — the same the dispatch gate and the planner
+    // apply. This used to default to `CLEAR` when no open row existed, which is
+    // how a never-confirmed plate (or one an external print just used) showed
+    // «стол свободен» on the card while the gate, correctly, refused it.
+    const latest = store.repositories.bedCycles.latestByPrinter(printerId);
+    const status = this.poller.getStatus(printerId);
+    const occupancy = resolveBedOccupancy({
+      latestCycle: latest,
+      liveStatus: status?.status ?? null,
+      online: status?.online ?? false,
+      activeRunState: this.activeRunForPrinter(printerId)?.state ?? null
+    });
+    const state = occupancy.state;
     const awaiting = state === "AWAITING_CLEARANCE";
     const operation = awaiting
       ? (this.manualOperationServiceRef
           ?.openBlockingFor(printerId)
           .find((op) => op.type === "PART_REMOVAL" || op.type === "PLATE_SERVICE") ?? null)
       : null;
-    return { state, awaitingClearance: awaiting, operationId: operation?.id ?? null };
+    return {
+      state,
+      awaitingClearance: awaiting,
+      operationId: operation?.id ?? null,
+      tracked: latest !== null,
+      external: isExternalCycle(latest) && latest?.state !== "CLEAR",
+      // An unknown plate is resolved exactly like a finished part: a person looks
+      // at it and says so. Offered whenever no live print is using the bed.
+      confirmable: state === "AWAITING_CLEARANCE" || state === "UNKNOWN"
+    };
+  }
+
+  /**
+   * Whether this printer can take the next job, as one sentence the card can
+   * show instead of the device's `idle` — computed from the same bed, run and
+   * operation facts the dispatch gate reads. Null without a store: a view that
+   * knows nothing about the plate must not claim anything about it.
+   */
+  private readinessFor(printerId: string, view: PrinterView): PrinterReadinessView | null {
+    if (!this.printQueueStoreRef) return null;
+    const run = this.activeRunForPrinter(printerId);
+    const operations = (this.manualOperationServiceRef?.openBlockingFor(printerId) ?? [])
+      // The bed line already speaks for a part removal / plate service.
+      .filter((op) => op.type !== "PART_REMOVAL" && op.type !== "PLATE_SERVICE")
+      .map((op) => OPERATION_LABELS[op.type] ?? op.type);
+    const updatedMs = view.updatedAt ? Date.parse(view.updatedAt) : Number.NaN;
+    return describePrinterReadiness({
+      setupRequired: view.setupRequired,
+      online: view.online,
+      status: view.status,
+      error: view.error ?? null,
+      bedState: view.bedCycle?.state ?? null,
+      bedExternal: view.bedCycle?.external === true,
+      activeRun: run
+        ? {
+            state: run.state,
+            startedAt: run.startedAt,
+            dispatchPhase: typeof run.metadata.dispatchPhase === "string" ? run.metadata.dispatchPhase : null,
+            cancelRequested: Boolean(run.metadata.cancelRequestedAt)
+          }
+        : null,
+      blockingOperations: operations,
+      telemetryAgeMs: Number.isFinite(updatedMs) ? Math.max(0, Date.now() - updatedMs) : null,
+      telemetryStaleMs: env.schedulerTelemetryStaleMs
+    });
   }
 
   /** The explicit inputs the night-gate read model needs (no globals). */
@@ -786,6 +919,7 @@ export class FarmRuntime implements PrintServices {
     this.runLifecycleRef = new RunLifecycleService(store, {
       logger,
       operations: this.manualOperationServiceRef,
+      getStatus: (printerId) => this.poller.getStatus(printerId),
       // Housekeeping, never a dependency of closing the run: a printer that is
       // unreachable simply keeps its file until the next sweep.
       reclaimStorage: (printerId) => {
@@ -803,8 +937,14 @@ export class FarmRuntime implements PrintServices {
         );
       },
       getStatus: (id) => this.poller.getStatus(id),
-      startPhysical: async (printerId, file, runId) => {
-        await this.deviceCommands.startPrint(printerId, file, runId, { runId });
+      startPhysical: async (printerId, file, runId, options) => {
+        const result = await this.deviceCommands.startPrintObserved(printerId, file, runId, {
+          runId,
+          beforeSend: options?.beforeSend,
+          feed: options?.feed ?? null,
+          plateGcodePath: options?.plateGcodePath ?? null
+        });
+        return { confirmed: result.confirmed };
       },
       classifyError: classifyDispatchError,
       evaluateEligibility: (input) => this.evaluateDispatchEligibility(input),

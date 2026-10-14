@@ -13,6 +13,7 @@ import type {
   QueueEntry
 } from "../../domain/print/types";
 import { openPrintQueueStore } from "../../infra/db/store";
+import { establishClearBed } from "../dispatch/testkit/bed";
 import { ManualOperationService } from "../operations/manualOperationService";
 import { OperatorScheduleService } from "../operations/operatorScheduleService";
 import {
@@ -81,9 +82,18 @@ function printer(id: string, over: Partial<SchedulerPrinterRef> = {}): Scheduler
   };
 }
 
-function makeHarness(options: { dbPath?: string; printers?: SchedulerPrinterRef[] } = {}): Harness {
+function makeHarness(
+  options: { dbPath?: string; printers?: SchedulerPrinterRef[]; bedPrepMinutes?: number } = {}
+): Harness {
   const store = openPrintQueueStore(options.dbPath ?? ":memory:");
   const clock = { now: NIGHT };
+  // Each printer's plate was confirmed empty by an operator — the only evidence
+  // of a free bed (an untracked plate is UNKNOWN and its release unknowable).
+  for (const p of options.printers ?? [printer("p1")]) {
+    if (!store.repositories.bedCycles.latestByPrinter(p.id)) {
+      establishClearBed(store, p.id, new Date(NIGHT.getTime() - 60_000));
+    }
+  }
   const now = (): Date => clock.now;
   const schedule = new OperatorScheduleService(store, { now });
   const operations = new ManualOperationService(store, schedule, { now });
@@ -98,7 +108,8 @@ function makeHarness(options: { dbPath?: string; printers?: SchedulerPrinterRef[
     compatibility: { telemetryStaleMs: 120_000 },
     unknownEtaAssumptionS: 4 * 3600,
     manualOperations: (printerId) => operations.openFor(printerId),
-    operatorAvailabilityAt: (at) => schedule.availability(at)
+    operatorAvailabilityAt: (at) => schedule.availability(at),
+    ...(options.bedPrepMinutes === undefined ? {} : { bedPrepMinutes: options.bedPrepMinutes })
   });
 
   return {
@@ -450,6 +461,113 @@ test("8b. подтверждённая работа за горизонтом з
   );
 });
 
+test("8c. HIGH-14: подтверждение пересчёта переносит ближайшее подтверждённое задание, а не отменяет его", () => {
+  const h = makeHarness({ printers: [printer("p1"), printer("p2")] });
+  withSchedule(h);
+  h.clock.now = MORNING;
+  addTask(h.store, "confirmed", { position: 1 });
+  const v1 = h.scheduler().confirmPlan(h.scheduler().buildDraftPlan().plan.id);
+  const near = v1.assignments[0].assignment;
+
+  addTask(h.store, "fresh", { position: 2 });
+  const v2 = h.scheduler().recomputeRecommendations("task_added");
+  assert.deepEqual(v2.frozen.map((f) => f.assignment.id), [near.id]);
+
+  // Accepting the recalculation used to cancel `near` along with plan v1, while
+  // v2 had deliberately not re-planned it: the operator's nearest confirmed job
+  // fell out of every plan.
+  h.scheduler().confirmPlan(v2.plan.id);
+  const repos = h.store.repositories;
+  const carried = repos.assignments.getById(near.id)!;
+  assert.equal(carried.state, "PROPOSED", "still a live, executable placement");
+  assert.equal(carried.planId, v2.plan.id, "now under the plan of record");
+  assert.equal(carried.invalidatedAt, null);
+  assert.deepEqual(carried.binding, near.binding, "with the binding it was confirmed with");
+  assert.equal(repos.plans.getById(v1.plan.id)?.state, "CANCELLED");
+  assert.equal(repos.plans.getById(v2.plan.id)?.state, "ACTIVE");
+  assert.ok(repos.audit.listByEntity("assignment", near.id).some((e) => e.action === "carried_over"));
+  // The re-planned part is v2's own.
+  const fresh = repos.assignments.listByTask("fresh").filter((a) => a.state === "PROPOSED");
+  assert.deepEqual(fresh.map((a) => a.planId), [v2.plan.id]);
+});
+
+test("8d. HIGH-14: если ближайшее задание сняли после пересчёта, черновик не подтверждается", () => {
+  const h = makeHarness({ printers: [printer("p1"), printer("p2")] });
+  withSchedule(h);
+  h.clock.now = MORNING;
+  addTask(h.store, "confirmed", { position: 1 });
+  const v1 = h.scheduler().confirmPlan(h.scheduler().buildDraftPlan().plan.id);
+  const near = v1.assignments[0].assignment;
+  addTask(h.store, "fresh", { position: 2 });
+  const v2 = h.scheduler().recomputeRecommendations("task_added");
+
+  // The queue changed under the frozen placement (what `invalidatePlacementsFor` writes).
+  const stored = h.store.repositories.assignments.getById(near.id)!;
+  h.store.repositories.assignments.update({
+    ...stored,
+    invalidatedAt: MORNING.toISOString(),
+    invalidatedReason: "задание отложено на проверку"
+  });
+
+  assert.throws(() => h.scheduler().confirmPlan(v2.plan.id), /ближайшее подтверждённое назначение снято/);
+  assert.equal(h.store.repositories.plans.getById(v1.plan.id)?.state, "ACTIVE", "nothing was superseded");
+});
+
+// ── HIGH-15: a finished print does not free its printer ─────────────────────
+
+test("15a. HIGH-15: следующая печать на принтере — только после снятия детали и подготовки стола", () => {
+  const h = makeHarness({ printers: [printer("p1")] });
+  withSchedule(h);
+  h.clock.now = MORNING;
+  addTask(h.store, "a", { position: 1, durationS: 3600 });
+  addTask(h.store, "b", { position: 2, durationS: 3600 });
+
+  const plan = h.scheduler().buildDraftPlan();
+  const a = placementFor(plan, "a")!.explanation!;
+  const b = placementFor(plan, "b")!.explanation!;
+  assert.equal(a.startMs, MORNING.getTime());
+  assert.equal(a.endMs, MORNING.getTime() + H);
+  // 09:00 end → operator on shift → 5 min removal + 5 min plate preparation.
+  assert.equal(b.startMs, MORNING.getTime() + H + 10 * MIN);
+  assert.equal(a.bedReleaseMs, b.startMs, "the plan's 'plate free again' and its next start agree");
+});
+
+test("15b. HIGH-15: печать, закончившаяся ночью, освобождает принтер, когда оператор пришёл", () => {
+  const h = makeHarness({ printers: [printer("p1")] });
+  withSchedule(h);
+  h.clock.now = NIGHT; // 03:00, operator asleep until 07:00 and on shift from 08:00
+  addTask(h.store, "a", { position: 1, durationS: 3600 });
+  addTask(h.store, "b", { position: 2, durationS: 3600 });
+
+  const plan = h.scheduler().buildDraftPlan();
+  const b = placementFor(plan, "b")!.explanation!;
+  assert.equal(b.startMs, MORNING.getTime() + 10 * MIN, "not at 04:00, when the first print ends");
+});
+
+test("15c. HIGH-15: время подготовки стола настраивается", () => {
+  const h = makeHarness({ printers: [printer("p1")], bedPrepMinutes: 0 });
+  withSchedule(h);
+  h.clock.now = MORNING;
+  addTask(h.store, "a", { position: 1, durationS: 3600 });
+  addTask(h.store, "b", { position: 2, durationS: 3600 });
+  const b = placementFor(h.scheduler().buildDraftPlan(), "b")!.explanation!;
+  assert.equal(b.startMs, MORNING.getTime() + H + 5 * MIN, "removal only");
+});
+
+test("15d. HIGH-15: без расписания оператора вторую печать на принтер план не обещает", () => {
+  const h = makeHarness({ printers: [printer("p1")] });
+  // No schedule: nobody is known to take the first part off.
+  h.clock.now = MORNING;
+  addTask(h.store, "a", { position: 1, durationS: 3600 });
+  addTask(h.store, "b", { position: 2, durationS: 3600 });
+
+  const plan = h.scheduler().buildDraftPlan();
+  assert.ok(placementFor(plan, "a"), "the free printer still takes the first print");
+  const unplaced = plan.unplaced.find((u) => u.taskId === "b");
+  assert.equal(unplaced?.code, "PRINTER_RELEASE_UNKNOWN");
+  assert.match(unplaced?.reason ?? "", /деталь снять некому/);
+});
+
 // ── 9. Determinism ─────────────────────────────────────────────────────────
 
 test("9. повторный расчёт с одинаковыми входными данными детерминирован", () => {
@@ -529,8 +647,9 @@ test("11b. каждое размещение называет операцию �
   const explanation = placementFor(h.scheduler().buildDraftPlan(), "t1")!.explanation!;
   const removal = explanation.manualOperations.find((op) => op.type === "PART_REMOVAL");
   assert.equal(removal?.when, "after");
-  // 09:00 print end + 5-minute removal, and flagged as a projection.
-  assert.equal(explanation.bedReleaseMs, MORNING.getTime() + H + 5 * MIN);
+  // 09:00 print end + 5-minute removal + 5-minute plate preparation (the
+  // default), and flagged as a projection.
+  assert.equal(explanation.bedReleaseMs, MORNING.getTime() + H + 10 * MIN);
   assert.equal(explanation.bedReleaseEstimated, true);
   assert.equal(explanation.requiresUpload, true, "no device file is tracked yet");
 });

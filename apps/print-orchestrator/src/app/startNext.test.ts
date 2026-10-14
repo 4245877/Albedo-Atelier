@@ -19,6 +19,8 @@ let file: string;
 let realFetch: typeof globalThis.fetch;
 let startCalls: string[];
 let printState: string;
+/** The file Klipper reports in `print_stats.filename` — set by a start, like the real firmware. */
+let printFile: string;
 
 const config = JSON.stringify([
   {
@@ -37,6 +39,7 @@ beforeEach(() => {
   file = path.join(dir, "state.json");
   startCalls = [];
   printState = "standby"; // → idle
+  printFile = "";
 
   process.env.PRINTERS_CONFIG_PATH = path.join(dir, "no-such-file.json");
   process.env.PRINTERS_CONFIG_JSON = config;
@@ -46,13 +49,19 @@ beforeEach(() => {
     const url = String(input);
     if (url.includes("/printer/print/start")) {
       startCalls.push(url);
+      // Like Klipper: once the file is opened the job state is `printing` and
+      // `print_stats.filename` names it — what lets a start be CONFIRMED.
+      printState = "printing";
+      printFile = new URL(url).searchParams.get("filename") ?? "";
       return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
     }
     if (url.includes("/printer/objects/query")) {
       return {
         ok: true,
         status: 200,
-        json: async () => ({ result: { status: { print_stats: { state: printState } } } })
+        json: async () => ({
+          result: { status: { print_stats: { state: printState, filename: printFile } } }
+        })
       } as unknown as Response;
     }
     if (url.includes("/server/files/directory")) {
@@ -85,6 +94,15 @@ afterEach(async () => {
 });
 
 /**
+ * Starts the farm and records the operator's «стол свободен» for the K2 — the
+ * only evidence of a free plate (a never-confirmed bed is UNKNOWN and refused).
+ */
+async function startWithClearBed(store: FarmStore): Promise<void> {
+  await store.start();
+  store.commands.clearBed("k2", "part_removed", { actor: "operator-1" });
+}
+
+/**
  * The delivery step for a job whose file is *already* on the printer: an
  * operator places it and confirms the transfer under their own name. A start
  * requires a `VERIFIED` device file, and "the operator typed a path that happens
@@ -99,7 +117,7 @@ async function adoptOnDeviceFile(store: FarmStore, taskId: string, printerId = "
 
 test("starts the next ready job on its Moonraker printer and drops it from the queue", async () => {
   const store = new FarmStore(file);
-  await store.start();
+  await startWithClearBed(store);
   const job = store.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
   await adoptOnDeviceFile(store, job.id);
 
@@ -115,7 +133,7 @@ test("starts the next ready job on its Moonraker printer and drops it from the q
 
 test("refuses a job with no print file (honest, not a fake start)", async () => {
   const store = new FarmStore(file);
-  await store.start();
+  await startWithClearBed(store);
   store.addQueueJob({ title: "Base", printer: "k2" });
 
   await assert.rejects(() => store.startNext(), (err: unknown) => {
@@ -131,7 +149,7 @@ test("refuses a job with no print file (honest, not a fake start)", async () => 
 
 test("refuses a job whose printer is not in the farm config", async () => {
   const store = new FarmStore(file);
-  await store.start();
+  await startWithClearBed(store);
   store.addQueueJob({ title: "Orphan", printer: "ghost-printer", file: "x.gcode" });
 
   await assert.rejects(() => store.startNext(), /не найден/);
@@ -142,7 +160,7 @@ test("refuses a job whose printer is not in the farm config", async () => {
 
 test("an empty ready queue is an honest error", async () => {
   const store = new FarmStore(file);
-  await store.start();
+  await startWithClearBed(store);
 
   await assert.rejects(() => store.startNext(), /нет заданий/);
 
@@ -151,7 +169,7 @@ test("an empty ready queue is an honest error", async () => {
 
 test("two concurrent start-next requests dispatch the single ready job exactly once", async () => {
   const store = new FarmStore(file);
-  await store.start();
+  await startWithClearBed(store);
   const job = store.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
   await adoptOnDeviceFile(store, job.id);
 
@@ -187,7 +205,7 @@ test("a printer's DECLARED material list never becomes the reason a start is ref
   // is asserted where it is observable: `launch/executablePath.test.ts`,
   // «material unknown: no false mismatch, a confirmable question instead».
   const store = new FarmStore(file);
-  await store.start();
+  await startWithClearBed(store);
   store.addQueueJob({ title: "Vase", printer: "k2", material: "PETG", file: "vase.gcode" });
 
   await assert.rejects(
@@ -216,7 +234,7 @@ test("a printer's DECLARED material list never becomes the reason a start is ref
 
 test("adding a queue job with an unsafe or non-G-code file is refused", async () => {
   const store = new FarmStore(file);
-  await store.start();
+  await startWithClearBed(store);
 
   for (const bad of ["../../etc/shadow.gcode", "/abs/path.gcode", "part.stl"]) {
     assert.throws(
@@ -234,7 +252,7 @@ test("a wedged first job can be removed so the rest of the queue runs", async ()
   // A first `ready` job that can never start (no file) fails every start-next
   // and stays first — the operator must be able to drop it and move on.
   const store = new FarmStore(file);
-  await store.start();
+  await startWithClearBed(store);
   const wedged = store.addQueueJob({ title: "Base", printer: "k2" }); // no file → wedges
   const next = store.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
   await adoptOnDeviceFile(store, next.id);
@@ -254,7 +272,7 @@ test("a wedged first job can be removed so the rest of the queue runs", async ()
 
 test("a wedged first job can be parked in review instead of deleted", async () => {
   const store = new FarmStore(file);
-  await store.start();
+  await startWithClearBed(store);
   const wedged = store.addQueueJob({ title: "Orphan", printer: "ghost-printer", file: "x.gcode" });
   const next = store.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
   await adoptOnDeviceFile(store, next.id);
@@ -273,7 +291,7 @@ test("a wedged first job can be parked in review instead of deleted", async () =
 
 test("removing or reviewing an unknown job id is a NotFoundError", async () => {
   const store = new FarmStore(file);
-  await store.start();
+  await startWithClearBed(store);
   assert.throws(() => store.removeQueueJob("nope"), /not found|очереди/);
   assert.throws(() => store.reviewQueueJob("nope"), /not found|очереди/);
   await store.stop();
@@ -306,7 +324,7 @@ test("a legacy persisted job with an unsafe path is refused at dispatch, not sen
   );
 
   const store = new FarmStore(file);
-  await store.start();
+  await startWithClearBed(store);
 
   await assert.rejects(
     () => store.startNext(),
@@ -316,4 +334,43 @@ test("a legacy persisted job with an unsafe path is refused at dispatch, not sen
   assert.equal(store.reads.getQueue().length, 1);
 
   await store.stop();
+});
+
+// ── HIGH-17: an accepted command is held across a restart, never re-sent ──────
+
+test("a start Klipper ACCEPTS but never begins stays held — through a restart — and is never sent twice", async () => {
+  // This Klipper answers 200 to print/start and then just sits there.
+  const stuckFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes("/printer/print/start")) {
+      startCalls.push(url);
+      return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+    }
+    return stuckFetch(input);
+  }) as typeof globalThis.fetch;
+  printState = "standby";
+
+  const first = new FarmStore(file);
+  await startWithClearBed(first);
+  const job = first.addQueueJob({ title: "Chalice", printer: "k2", material: "PLA", file: "chalice.gcode" });
+  await adoptOnDeviceFile(first, job.id);
+  const { runId } = await first.startNext();
+  assert.equal(startCalls.length, 1);
+
+  const run = first.printQueue.getTaskDetail(job.id).printRuns.find((r) => r.id === runId)!;
+  assert.equal(run.state, "PENDING", "accepted is not running");
+  assert.equal(run.metadata.dispatchPhase, "accepted");
+  await first.stop();
+
+  // The orchestrator restarts in that window.
+  const second = new FarmStore(file);
+  await second.start();
+  const after = second.printQueue.getTaskDetail(job.id).printRuns.find((r) => r.id === runId)!;
+  assert.equal(after.state, "PENDING", "the accepted start was NOT unwound as 'never sent'");
+  assert.equal(second.printQueue.getTaskDetail(job.id).task.state, "DISPATCHING");
+
+  await assert.rejects(() => second.startNext(), JobError);
+  assert.equal(startCalls.length, 1, "no second start command reached the printer");
+  await second.stop();
 });

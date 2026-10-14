@@ -9,6 +9,7 @@ import {
 import { ID_PREFIX, newId } from "../../domain/print/ids";
 import type { Artifact, ArtifactAnalysis, ArtifactKind, Metadata, PrintTask } from "../../domain/print/types";
 import { keyFor, type CommittedBlob, type StagedBlob } from "../../infra/storage/artifactStorage";
+import { newDraftTask } from "../../domain/print/draftTask";
 import type { AnalysisRunner } from "./analysisRunner";
 import type { ArtifactContext } from "./context";
 
@@ -116,35 +117,7 @@ export class ArtifactIngest {
           repos.artifacts.insert(artifact);
           this.ctx.recordAudit({ entityType: "artifact", entityId: artifact.id, action: "uploaded", actor });
 
-          const task: PrintTask = {
-            id: newId(ID_PREFIX.printTask),
-            artifactId: artifact.id,
-            // The upload IS the source here; nothing has been sliced yet.
-            sliceVariantId: null,
-            sourceArtifactId: artifact.id,
-            onDeviceFile: null,
-            title: fileName,
-            material: null,
-            targetPrinter: null,
-            priority: 0,
-            // Uploaded work is a DRAFT — deliberately NOT enqueued (no QueueEntry).
-            state: "DRAFT",
-            reason: null,
-            // "When" has one source of truth — the preference — and `night` is
-            // its projection. An upload states neither, so both are the neutral
-            // default until the operator says otherwise.
-            dayNightPreference: "any",
-            night: false,
-            notBefore: null,
-            deadline: null,
-            pinnedPrinterId: null,
-            unattendedAllowed: false,
-            createdAt: iso,
-            updatedAt: iso,
-            version: 1,
-            legacyRef: null,
-            metadata: { source: "upload" }
-          };
+          const task: PrintTask = newDraftTask({ artifact, iso, metadata: { source: "upload" } });
           repos.tasks.insert(task);
           this.ctx.recordAudit({
             entityType: "print_task",

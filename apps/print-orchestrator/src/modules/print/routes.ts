@@ -9,7 +9,7 @@ import type {
 } from "../../app/printQueue/printQueueService";
 import type { PrintServices } from "../../bootstrap/createRuntime";
 import { ValidationError } from "../../core/errors";
-import type { DayNightPreference } from "../../domain/print/types";
+import type { DayNightPreference, PrintTaskState } from "../../domain/print/types";
 import { uploads } from "../../shared/env";
 import { registerAssignmentRoutes } from "./assignmentRoutes";
 import { registerLaunchRoutes } from "./launchRoutes";
@@ -19,7 +19,7 @@ import { registerSlicingRoutes } from "./slicingRoutes";
 /** The services + commands the print / scheduler / artifact routes need, passed explicitly. */
 export interface PrintRoutesOptions {
   services: PrintServices;
-  commands: Pick<FarmCommands, "resolveRun">;
+  commands: Pick<FarmCommands, "resolveRun" | "stopTask">;
 }
 
 /**
@@ -37,6 +37,9 @@ export interface PrintRoutesOptions {
  *   GET  /tasks/:id     one task with its full chain (assignments → runs) + audit
  *   GET  /queue         the open queue projected into the legacy job shape
  *   GET  /audit         recent audit events
+ *   GET  /history       finished prints, newest first, with their settings and
+ *                       what can be done again (?limit, ?cursor, ?state, ?printer)
+ *   GET  /history/:id   one finished print's history entry
  *
  * Actions (guarded by the shared CSRF/token middleware like every mutation):
  *   POST /tasks              create a task (DEPRECATED — no artifact/analysis; upload instead)
@@ -45,6 +48,7 @@ export interface PrintRoutesOptions {
  *   POST /tasks/:id/cancel   cancel (kept as history) body: { reason? }
  *   POST /tasks/:id/assign   bind to a printer        body: { printer }
  *   POST /tasks/:id/enqueue  queue an already-executable upload (G-code / sliced 3MF)
+ *   POST /tasks/:id/reprint  a NEW print of a finished task's verified file  body: { requestId? }
  *
  * Uploads (the new SQLite-only file-analysis surface; see modules/print):
  *   GET  /artifacts              list uploaded artifacts (+ latest analysis, draft task)
@@ -93,6 +97,38 @@ export async function registerPrintQueueRoutes(
     const limit = Number.parseInt(request.query.limit ?? "", 10);
     return { events: services.printQueue.listAudit(Number.isFinite(limit) ? limit : undefined) };
   });
+
+  // ── History: finished prints, their settings, and what can be done again ──
+  app.get<{ Querystring: { limit?: string; cursor?: string; state?: string; printer?: string } }>(
+    "/history",
+    async (request) => {
+      const limit = Number.parseInt(request.query.limit ?? "", 10);
+      return services.history.list({
+        limit: Number.isFinite(limit) ? limit : undefined,
+        cursor: optionalString(request.query.cursor) ?? null,
+        state: historyState(request.query.state),
+        printerId: optionalString(request.query.printer) ?? null
+      });
+    }
+  );
+
+  app.get<{ Params: { id: string } }>("/history/:id", async (request) => ({
+    entry: await services.history.entry(request.params.id)
+  }));
+
+  // «Напечатать ещё раз»: a NEW print of a finished task's own verified file. The
+  // finished task is not reopened; it gains a `reprinted` audit line. Retry-safe
+  // with `requestId`. (A FAILED print can also be retried as the same job with
+  // POST /tasks/:id/release.)
+  app.post<{ Params: { id: string }; Body: { requestId?: unknown } }>(
+    "/tasks/:id/reprint",
+    async (request) => {
+      const result = await services.history.reprintTask(request.params.id, {
+        requestId: optionalString(request.body?.requestId) ?? null
+      });
+      return { ok: true, task: result.detail, route: result.route, deduplicated: result.deduplicated };
+    }
+  );
 
   /**
    * **Deprecated**, for the same reason as `POST /api/queue`: it can mint a task
@@ -154,13 +190,23 @@ export async function registerPrintQueueRoutes(
     };
   });
 
+  // Cancels a task as far as is physically safe: a queued task is cancelled; a
+  // start still in flight gets a recorded cancel request (honoured if the command
+  // has not left); a running print is refused — that is /tasks/:id/stop.
   app.post<{ Params: { id: string }; Body: { reason?: unknown } }>(
     "/tasks/:id/cancel",
-    async (request) => ({
-      ok: true,
-      task: services.printQueue.cancelTask(request.params.id, optionalString(request.body?.reason))
-    })
+    async (request) => {
+      const result = services.printQueue.cancel(request.params.id, optionalString(request.body?.reason));
+      return { ok: true, task: result.task, outcome: result.outcome, message: result.message };
+    }
   );
+
+  // Stops the print the task is running — a physical cancel with run + file
+  // identity checks. The task/run/bed follow from what the printer then reports.
+  app.post<{ Params: { id: string } }>("/tasks/:id/stop", async (request) => ({
+    ok: true,
+    ...(await commands.stopTask(request.params.id))
+  }));
 
   // Manual placement: creates an EXECUTABLE assignment (see QueueCommands.assignTask).
   // The follow-up steps live under /assignments/:id — prepare-file, then start.
@@ -622,6 +668,14 @@ function shapeMaterialOverride(body: unknown): {
 /** A trimmed non-empty string, or undefined — the shape the service expects. */
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/** The history `state` filter: one of the finished states, or none. */
+function historyState(value: unknown): PrintTaskState | null {
+  const state = optionalString(value)?.toUpperCase();
+  if (!state) return null;
+  if (state === "COMPLETED" || state === "FAILED" || state === "CANCELLED") return state;
+  throw new ValidationError("Фильтр «state» принимает только COMPLETED, FAILED или CANCELLED");
 }
 
 function toDayNight(value: unknown): DayNightPreference | undefined {

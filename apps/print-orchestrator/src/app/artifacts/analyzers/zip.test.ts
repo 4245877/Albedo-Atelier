@@ -158,3 +158,48 @@ test("resolve() matches OPC part names case-insensitively and returns the real s
   assert.equal(zip.resolve("3d/3dmodel.model"), "3D/3Dmodel.model");
   assert.equal(zip.resolve("3D/missing.model"), null);
 });
+
+// ── stream(): the same entry, without holding it whole ──────────────────────
+
+async function collect(chunks: AsyncIterable<Buffer>): Promise<Buffer> {
+  const parts: Buffer[] = [];
+  for await (const chunk of chunks) parts.push(chunk);
+  return Buffer.concat(parts);
+}
+
+test("stream() yields exactly what read() returns, stored or deflated, in small chunks", async () => {
+  const text = "G1 X10 Y10 E0.5\n".repeat(200);
+  const zip = await open(
+    makeZip([
+      { name: "stored.gcode", data: text },
+      { name: "deflated.gcode", data: text, method: "deflate" }
+    ]),
+    { maxEntryBytes: 64 * 1024, maxTotalBytes: 128 * 1024 }
+  );
+  for (const name of ["stored.gcode", "deflated.gcode"]) {
+    const whole = await zip.read(name, 64 * 1024);
+    const streamed = await collect(zip.stream(name, 64 * 1024, 7));
+    assert.equal(streamed.toString(), text, name);
+    assert.deepEqual(streamed, whole, name);
+  }
+});
+
+test("stream() stops an entry that inflates past its declared size, at the cap", async () => {
+  // The header claims 100 bytes; the data inflates to 2000.
+  const zip = await open(
+    makeZip([{ name: "liar.gcode", data: "x".repeat(2000), method: "deflate", uncompressedSizeOverride: 100 }]),
+    { maxEntryBytes: 64 * 1024, maxTotalBytes: 128 * 1024 }
+  );
+  await assert.rejects(
+    () => collect(zip.stream("liar.gcode", 64 * 1024)),
+    (e: ZipSafetyError) => e instanceof ZipSafetyError && e.code === "zip_entry_too_large"
+  );
+});
+
+test("stream() refuses an entry declared larger than the requested max before reading it", async () => {
+  const zip = await open(makeZip([{ name: "big.gcode", data: "y".repeat(800) }]));
+  await assert.rejects(
+    () => collect(zip.stream("big.gcode", 100)),
+    (e: ZipSafetyError) => e instanceof ZipSafetyError && e.code === "zip_entry_too_large"
+  );
+});

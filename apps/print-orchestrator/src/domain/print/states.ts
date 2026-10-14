@@ -44,11 +44,16 @@ export const PRINT_TASK_TRANSITIONS: TransitionMap<PrintTaskState> = {
   CANCELLED: []
 };
 
-/** QueueEntry lifecycle: waiting ⇄ held, then released (task leaves the queue). */
+/**
+ * QueueEntry lifecycle: waiting ⇄ held, then released (the task left the queue
+ * for a printer). `RELEASED → WAITING` exists for one move only — retrying a
+ * FAILED task (`FAILED → QUEUED` above): a task has exactly one entry (unique
+ * `task_id`), so a retried task can be back in the queue only by reopening it.
+ */
 export const QUEUE_ENTRY_TRANSITIONS: TransitionMap<QueueEntryState> = {
   WAITING: ["HELD", "RELEASED"],
   HELD: ["WAITING", "RELEASED"],
-  RELEASED: []
+  RELEASED: ["WAITING"]
 };
 
 /** Plan lifecycle. */

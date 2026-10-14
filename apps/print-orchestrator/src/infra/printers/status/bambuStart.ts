@@ -3,6 +3,9 @@ import type { PrinterConfig } from "../config";
 import { BAMBU_PLATE_GCODE_PATH } from "../files/bambuPackage";
 import { anyNamesJob, jobNameStem } from "../files/jobIdentity";
 import { getBambuRawPrint, publishBambuRequest, requestBambuFullReport } from "./bambu";
+import { EXTERNAL_SPOOL_TRAY, parseAmsTrays } from "./bambuUsage";
+import { verifyPinnedFeed, type FeedPlan, type FeedTray } from "../../../domain/printers/feedPlan";
+import type { AmsTraySnapshot } from "./types";
 import { parseBambuFaults, parseBambuMediaPresent, startBlockingFaults } from "./bambuFaults";
 import { firstText } from "./mapper";
 import { PrinterCommandError, type PrinterFault } from "./types";
@@ -89,7 +92,11 @@ export class BambuStartUnconfirmedError extends PrinterCommandError {
  * `remotePath` is relative to the SD-card root — the same path the FTPS upload
  * wrote and the listing verified.
  */
-export async function sendBambuStart(printer: PrinterConfig, remotePath: string): Promise<void> {
+export async function sendBambuStart(
+  printer: PrinterConfig,
+  remotePath: string,
+  options: { feed?: Record<string, unknown> | null; plateGcodePath?: string | null } = {}
+): Promise<void> {
   requireReady(printer);
 
   // Pre-flight: refuse before publishing when the device is already saying it
@@ -99,7 +106,14 @@ export async function sendBambuStart(printer: PrinterConfig, remotePath: string)
   // second one.
   assertBambuCanStart(printer);
 
-  const { payload, subtaskName } = buildBambuStartPayload(printer, remotePath);
+  // The filament source was decided and pinned when the start was reserved.
+  // Re-checked here against the report as it is NOW: a spool swapped in the
+  // seconds between the decision and the send is a refusal with nothing sent,
+  // never a quiet switch to whatever happens to be loaded.
+  const plan = asFeedPlan(options.feed);
+  assertFeedStillValid(printer, plan);
+
+  const { payload, subtaskName } = buildBambuStartPayload(printer, remotePath, plan, options.plateGcodePath ?? null);
   await publishBambuRequest(printer, { print: payload });
 
   // Ask for a full report immediately so confirmation does not depend on the
@@ -149,37 +163,65 @@ function describeFault(printer: PrinterConfig, fault: PrinterFault): string {
  */
 export function buildBambuStartPayload(
   printer: PrinterConfig,
-  remotePath: string
+  remotePath: string,
+  plan: FeedPlan | null = null,
+  plateGcodePath: string | null = null
 ): { payload: Record<string, unknown>; subtaskName: string } {
   // The same normalization the confirmation compares by — derived once, so the
   // name we announce and the name we look for can never drift apart.
   const subtaskName = jobNameStem(remotePath);
-  const payload = /\.3mf$/i.test(remotePath)
-    ? projectFilePayload(printer, remotePath, subtaskName)
-    : gcodeFilePayload(remotePath);
-  return { payload, subtaskName };
+  if (plan?.kind === "unresolved") {
+    throw new PrinterCommandError(`Источник филамента не определён: ${plan.message}`, true);
+  }
+  if (!/\.3mf$/i.test(remotePath)) {
+    // `gcode_file` carries no mapping at all; with the AMS involved the firmware
+    // would pick a spool on its own, which is the defect this module removes.
+    if (plan?.kind === "ams") {
+      throw new PrinterCommandError(
+        "Голый .gcode нельзя запустить через AMS с выбранным лотком — отправьте пакет .gcode.3mf",
+        true
+      );
+    }
+    return { payload: gcodeFilePayload(remotePath), subtaskName };
+  }
+  // The entry the package actually carries. A package this farm built has
+  // `plate_1`; an operator's export of plate 2 has `plate_2`, and naming
+  // `plate_1` there would start a plate that is not in the file. Only the
+  // plate-entry shape is accepted — the name ends up inside a device command.
+  const param = plateGcodePath ?? BAMBU_PLATE_GCODE_PATH;
+  if (!PLATE_GCODE_ENTRY.test(param)) {
+    throw new PrinterCommandError(`Недопустимая запись G-code в пакете: «${param}»`, true);
+  }
+  return { payload: projectFilePayload(printer, remotePath, subtaskName, plan, param), subtaskName };
 }
 
 /**
  * The `project_file` payload for a plate package.
  *
- * `use_ams` is driven by what the device *currently reports*, not by what the
- * model number implies: this farm's A1 Combo reports zero AMS units and feeds
- * from the external spool, and telling the firmware to use a non-existent AMS is
- * a refusal (or worse, a load attempt against an empty slot). When an AMS is
- * present the mapping is the documented five-slot reverse-indexed array with the
- * single active tray in the last position, `-1` meaning unused.
+ * The filament source comes from the pinned {@link FeedPlan} and from nothing
+ * else. `ams_mapping` follows the vendor's own client (Bambu Studio): one entry
+ * per filament *of the job*, in the job's filament order, each the global tray
+ * id (`ams_id × 4 + slot`), `-1` for a filament the plate does not use; it is
+ * sent together with `ams_mapping2` (`{ams_id, slot_id}` pairs, 255 unused). The
+ * older five-element right-aligned form that used to be sent here put a
+ * single-filament job's tray in position 4, i.e. it mapped the job's *fifth*
+ * filament and left the one it actually uses unmapped.
+ *
+ * No plan at all (a caller that predates pinning) is only accepted when the
+ * printer reports no AMS — then the external spool is the only path there is.
  */
 function projectFilePayload(
   printer: PrinterConfig,
   remotePath: string,
-  subtaskName: string
+  subtaskName: string,
+  plan: FeedPlan | null,
+  plateGcodePath: string
 ): Record<string, unknown> {
-  const ams = resolveAmsUse(printer);
+  const useAms = plan?.kind === "ams";
   return {
     sequence_id: String(Date.now()),
     command: "project_file",
-    param: BAMBU_PLATE_GCODE_PATH,
+    param: plateGcodePath,
     // Always "0" for a local print — these identify a cloud job, which this is not.
     project_id: "0",
     profile_id: "0",
@@ -198,10 +240,13 @@ function projectFilePayload(
     flow_cali: false,
     vibration_cali: false,
     layer_inspect: false,
-    use_ams: ams.use,
-    ...(ams.use ? { ams_mapping: ams.mapping } : {})
+    use_ams: useAms,
+    ...(plan?.kind === "ams" ? { ams_mapping: plan.mapping, ams_mapping2: plan.mapping2 } : {})
   };
 }
+
+/** A plate payload entry as Bambu packages lay it out: `Metadata/plate_<n>.gcode`. */
+const PLATE_GCODE_ENTRY = /^Metadata\/plate_[1-9][0-9]{0,2}\.gcode$/;
 
 /** The simpler payload for a bare `.gcode` already on the card. */
 function gcodeFilePayload(remotePath: string): Record<string, unknown> {
@@ -213,27 +258,89 @@ function gcodeFilePayload(remotePath: string): Record<string, unknown> {
 }
 
 /**
- * Whether to print through the AMS, and the slot mapping if so — read from live
- * telemetry, never assumed from the printer's model name.
+ * The printer's feeding options as it reports them now: whether an AMS unit is
+ * present and every spool it could draw from (AMS slots and the external
+ * holder). `null` trays when the device has sent no report at all — which is not
+ * "no AMS", it is "unknown".
  */
-export function resolveAmsUse(printer: PrinterConfig): { use: boolean; mapping: number[] } {
+export function liveFeedState(printer: PrinterConfig): { hasAms: boolean | null; trays: FeedTray[] | null } {
   const print = getBambuRawPrint(printer.id);
-  const units = print && isRecord(print.ams) && Array.isArray(print.ams.ams) ? print.ams.ams : [];
-  if (units.length === 0) return { use: false, mapping: [] };
+  if (!print) return { hasAms: null, trays: null };
+  return feedStateFromReport(print);
+}
 
-  // First loaded tray wins; a multi-material mapping is a scheduling decision this
-  // farm does not make yet, and inventing one would silently print in the wrong
-  // filament.
-  let slot = 0;
-  for (const unit of units) {
-    if (!isRecord(unit) || !Array.isArray(unit.tray)) continue;
-    const index = unit.tray.findIndex((t) => isRecord(t) && firstText(t.tray_type).length > 0);
-    if (index >= 0) {
-      slot = index;
-      break;
+/** The same, from a raw report — pure, for the status mapping and tests. */
+export function feedStateFromReport(print: Record<string, unknown>): {
+  hasAms: boolean;
+  trays: FeedTray[];
+} {
+  const trays = (parseAmsTrays(print) ?? []).map(toFeedTray);
+  return { hasAms: trays.some((t) => !t.external), trays };
+}
+
+/** An AMS/external tray snapshot as the feed planner reads it. */
+export function toFeedTray(tray: AmsTraySnapshot): FeedTray {
+  return {
+    trayId: tray.tray,
+    external: tray.tray === EXTERNAL_SPOOL_TRAY,
+    material: tray.material,
+    color: tray.color,
+    active: tray.active
+  };
+}
+
+/**
+ * Refuses — with nothing published — a start whose pinned feed no longer
+ * matches the device, or a start with no pinned feed on a printer that reports
+ * an AMS (whose spool would otherwise be picked by nobody).
+ */
+function assertFeedStillValid(printer: PrinterConfig, plan: FeedPlan | null): void {
+  const live = liveFeedState(printer);
+  if (!plan) {
+    if (live.hasAms === true) {
+      throw new PrinterCommandError(
+        `«${printer.name}»: источник филамента не выбран — запуск через AMS без сопоставления лотков с материалом задания запрещён`,
+        true
+      );
     }
+    return;
   }
-  return { use: true, mapping: [-1, -1, -1, -1, slot] };
+  if (plan.kind === "unresolved") {
+    throw new PrinterCommandError(`«${printer.name}»: ${plan.message}`, true);
+  }
+  if (live.hasAms === null) {
+    // No report at all — the AMS slots cannot be confirmed. The external spool
+    // needs no confirmation of its own here (the material rule covered it).
+    if (plan.kind === "ams") {
+      throw new PrinterCommandError(
+        `«${printer.name}» не сообщает состояние AMS — выбранные лотки нельзя подтвердить, запуск отменён`,
+        true
+      );
+    }
+    return;
+  }
+  const problem = verifyPinnedFeed(plan, live.trays, live.hasAms);
+  if (problem) {
+    throw new PrinterCommandError(`«${printer.name}»: ${problem} — запуск отменён, команда не отправлялась`, true);
+  }
+}
+
+/** The pinned plan as it travels through run metadata, validated on the way out. */
+function asFeedPlan(raw: Record<string, unknown> | null | undefined): FeedPlan | null {
+  if (!raw || typeof raw !== "object") return null;
+  const kind = raw.kind;
+  if (kind === "external") return raw as unknown as FeedPlan;
+  if (kind === "unresolved") return raw as unknown as FeedPlan;
+  if (
+    kind === "ams" &&
+    Array.isArray(raw.mapping) &&
+    raw.mapping.every((v) => Number.isInteger(v)) &&
+    Array.isArray(raw.mapping2) &&
+    Array.isArray(raw.assignments)
+  ) {
+    return raw as unknown as FeedPlan;
+  }
+  throw new PrinterCommandError("Закреплённый источник филамента повреждён — запуск отменён", true);
 }
 
 /**

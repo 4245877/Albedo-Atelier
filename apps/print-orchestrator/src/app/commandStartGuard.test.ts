@@ -274,3 +274,52 @@ test("clearStartGuard lifts a held guard when idle, but refuses while the printe
   await idle.clearStartGuard("k2");
   assert.equal(store.get("k2"), null);
 });
+
+// ── CRITICAL-01 / HIGH-17 at the command layer ──────────────────────────────
+
+test("beforeSend runs inside the lock BEFORE the guard is written — a cancel there leaves no trace and sends nothing", async () => {
+  const { store } = tempGuardStore();
+  const dispatch = mockStart(() => ({ ok: true, status: 200, json: async () => ({}) }) as unknown as Response);
+  const service = makeService(store, () => makeStatus({ status: "idle" }));
+
+  await assert.rejects(
+    service.startPrintObserved("k2", "model.gcode", "run-1", {
+      runId: "run-1",
+      beforeSend: () => {
+        throw new JobError("отменено оператором до отправки");
+      }
+    }),
+    /до отправки/
+  );
+  assert.equal(dispatch.count(), 0, "no start command left the orchestrator");
+  assert.equal(store.get("k2"), null, "no start guard was ever written");
+});
+
+test("an HTTP-accepted Moonraker start is NOT confirmed until the device is seen printing it", async () => {
+  const { store } = tempGuardStore();
+  mockStart(() => ({ ok: true, status: 200, json: async () => ({}) }) as unknown as Response);
+  // The device keeps answering idle after the 200.
+  const accepted = await makeService(store, () => makeStatus({ status: "idle" })).startPrintObserved(
+    "k2",
+    "model.gcode",
+    "run-1",
+    { runId: "run-1" }
+  );
+  assert.equal(accepted.confirmed, false, "a 200 is acceptance, not a running print");
+  assert.equal(store.get("k2")?.state, "ACKED", "the guard stays until the start is seen or resolved");
+
+  const { store: store2 } = tempGuardStore();
+  // This time the follow-up poll already shows the job running.
+  let printing = false;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    if (String(input).includes("/printer/print/start")) {
+      printing = true;
+      return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+    }
+    throw new Error(`unexpected fetch: ${String(input)}`);
+  }) as typeof globalThis.fetch;
+  const seen = await makeService(store2, () =>
+    printing ? makeStatus({ status: "printing", currentFile: "model.gcode" }) : makeStatus({ status: "idle" })
+  ).startPrintObserved("k2", "model.gcode", "run-2", { runId: "run-2" });
+  assert.equal(seen.confirmed, true, "seeing the printer run the job IS the confirmation");
+});

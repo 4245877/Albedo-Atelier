@@ -16,6 +16,7 @@ import {
   QUEUE_ENTRY_TRANSITIONS
 } from "../../domain/print/states";
 import type {
+  Artifact,
   Assignment,
   AuditEntityType,
   BedCycle,
@@ -34,7 +35,11 @@ import {
 } from "../../infra/printers/files";
 import { supportsPrinterStart, type PrinterLiveStatus } from "../../infra/printers/status";
 import type { StoreLogger } from "../../shared/logger";
-import type { DeviceFileIdentity, DispatchEligibility } from "../../domain/dispatch/eligibility";
+import {
+  isUnattendedMode,
+  type DeviceFileIdentity,
+  type DispatchEligibility
+} from "../../domain/dispatch/eligibility";
 import { REASON } from "../../domain/dispatch/reasons";
 import {
   blockersOf,
@@ -44,6 +49,7 @@ import {
   type DispatchMode
 } from "./dispatchGate";
 import { bindingMatchesTask, profileRevisionsIntact, resolveTaskBinding } from "./binding";
+import { confirmRunStarted } from "./runLifecycle";
 
 /**
  * An explicit, audited operator decision to proceed despite non-hard warnings.
@@ -76,6 +82,11 @@ export interface DispatchRequest {
   idempotencyKey?: string;
   /** Explicit operator override of overridable warnings (manual mode only). */
   override?: DispatchOverride;
+  /**
+   * The operator's filament-source choice (Bambu AMS): job filament index → tray
+   * id. Admitted by the same policy and pinned on the run exactly as resolved.
+   */
+  feedChoice?: Readonly<Record<number, number>> | null;
   actor?: string;
 }
 
@@ -89,6 +100,37 @@ export interface DispatchResult {
   file: string;
   /** True when the idempotency key matched an existing run — nothing new was sent. */
   deduplicated: boolean;
+  /**
+   * How far the start got, as far as the *printer* has shown — never inferred
+   * from the transport:
+   *
+   *  - `started`  — the device was observed running this job (telemetry, or a
+   *    start call that itself waits for the device to report it);
+   *  - `accepted` — the device took the command, and nobody has yet seen it
+   *    print. The printer stays held and the run `PENDING` until telemetry
+   *    shows the job or a person says what happened.
+   */
+  phase: "started" | "accepted";
+}
+
+/** What the physical send learned about the start, beyond "it did not throw". */
+export interface StartEvidence {
+  /** True when the device itself was observed running the job. */
+  confirmed: boolean;
+}
+
+/**
+ * The start was withdrawn by an operator's cancel before the command left.
+ *
+ * Raised from the `beforeSend` hook, i.e. inside the printer's command lock and
+ * before the durable start guard is written: nothing reached the device, so the
+ * dispatch unwinds as a definitive non-start and closes the task.
+ */
+export class DispatchCancelledError extends JobError {
+  constructor(message: string) {
+    super(message, { code: "DISPATCH_CANCELLED" });
+    this.name = "DispatchCancelledError";
+  }
 }
 
 export interface DispatchDeps {
@@ -108,6 +150,7 @@ export interface DispatchDeps {
     deviceFileIdentity: DeviceFileIdentity;
     file: string | null;
     filePathValid: boolean;
+    feedChoice?: Readonly<Record<number, number>> | null;
   }): DispatchEligibility;
   /** Poll-cache live status (the physical layer re-reads fresh before sending). */
   getStatus(printerId: string): PrinterLiveStatus | undefined;
@@ -115,8 +158,19 @@ export interface DispatchDeps {
    * Sends the physical start through the per-printer serialized command path
    * (guard reconciliation, fresh idle re-check, durable start guard). Throws on
    * refusal/failure; {@link classifyDispatchError} decides rejected vs unknown.
+   *
+   * `beforeSend` must be called inside the printer's command lock, immediately
+   * before the durable guard is written — the last moment at which "the command
+   * has not left" is still a fact. Resolves with what the device was seen to do;
+   * a bare resolution (an adapter that cannot tell) counts as *accepted*, never
+   * as *started*.
    */
-  startPhysical(printerId: string, file: string, runId: string): Promise<void>;
+  startPhysical(
+    printerId: string,
+    file: string,
+    runId: string,
+    options?: { beforeSend?: () => void; feed?: Metadata | null; plateGcodePath?: string | null }
+  ): Promise<StartEvidence | void>;
   /** Classifier for a failed startPhysical (injected so tests need no drivers). */
   classifyError(error: unknown): "rejected" | "unknown";
   /** On-device file listing (identity pre-flight); defaults to the Moonraker adapter. */
@@ -173,6 +227,33 @@ export class DispatchService {
    * exactly one place that reaches a printer and exactly one eligibility check in
    * front of it.
    */
+  /**
+   * The G-code entry to start inside an operator-uploaded `.gcode.3mf` — the
+   * payload its analysis named (`threemfPayload`). Null for everything else: our
+   * own slices are bare G-code, wrapped at delivery into a package whose entry
+   * the adapter already knows; and a file that only exists on the printer (a
+   * task made for a name on the card, never uploaded here) has no content we
+   * read, so it keeps the adapter's default as it always did.
+   *
+   * A package whose content WAS analysed and named no single entry is refused
+   * here, before anything is reserved: starting it would name an entry nobody
+   * has read.
+   */
+  private payloadEntryFor(artifact: Artifact | null): string | null {
+    if (!artifact || !artifact.name.trim().toLowerCase().endsWith(".3mf")) return null;
+    const analysis = this.deps.store.repositories.artifactAnalyses.latestForArtifact(artifact.id);
+    if (!analysis) return null;
+    const payload = analysis.data?.payload;
+    const entry =
+      payload !== null && typeof payload === "object" && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>).entry
+        : null;
+    if (typeof entry === "string" && entry.length > 0) return entry;
+    throw new JobError(
+      `В пакете «${artifact.name}» не определён G-code для запуска — повторите анализ файла`
+    );
+  }
+
   async startAssignment(
     assignmentId: string,
     options: Omit<DispatchRequest, "taskId" | "assignmentId" | "mode"> & { mode?: DispatchMode } = {}
@@ -242,6 +323,9 @@ export class DispatchService {
       sizeBytes: delivered ? delivered.sizeBytes : (artifact?.sizeBytes ?? null)
     };
     const identity = await this.verifyOnDeviceFile(printer, target, expected, request.mode);
+    // For an uploaded sliced package: the plate entry its analysis read and
+    // judged — the start must name that one, not the adapter's default.
+    const plateGcodePath = this.payloadEntryFor(artifact);
 
     // ── Reserve transaction ──────────────────────────────────────────────────
     const reserved = this.deps.store.transaction(() =>
@@ -249,16 +333,28 @@ export class DispatchService {
     );
 
     // ── Physical send (per-printer serialized; durable guard inside) ────────
+    let evidence: StartEvidence | void;
     try {
-      await this.deps.startPhysical(printer.id, target, reserved.run.id);
+      evidence = await this.deps.startPhysical(printer.id, target, reserved.run.id, {
+        // The cancel race: an operator may withdraw the task between the reserve
+        // above and the send below. Checked under the printer's command lock,
+        // right before the guard is written, so "not sent yet" is still true
+        // when it is honoured.
+        beforeSend: () => this.assertNotCancelled(reserved.run.id),
+        feed: (reserved.run.metadata.feed as Metadata | undefined) ?? null,
+        plateGcodePath
+      });
     } catch (error) {
-      const outcome = this.deps.classifyError(error);
+      const outcome =
+        error instanceof DispatchCancelledError ? "rejected" : this.deps.classifyError(error);
       this.deps.store.transaction(() => this.finalizeFailure(reserved, outcome, error, request.actor));
       throw error;
     }
 
-    // ── Finalize (durable) — only then release the guard via the caller ─────
-    this.deps.store.transaction(() => this.finalizeSuccess(reserved, request.actor));
+    // ── Finalize (durable). The start guard stays until the start is SEEN ───
+    const phase = this.deps.store.transaction(() =>
+      this.finalizeAccepted(reserved, evidence ? evidence.confirmed === true : false, request.actor)
+    );
     return {
       runId: reserved.run.id,
       taskId: reserved.task.id,
@@ -267,8 +363,22 @@ export class DispatchService {
       printerId: printer.id,
       printerName: printer.name,
       file: target,
-      deduplicated: false
+      deduplicated: false,
+      phase
     };
+  }
+
+  /**
+   * Refuses to send a start an operator has withdrawn. Reads the run fresh: the
+   * cancel request is written by another transaction while this dispatch waits.
+   */
+  private assertNotCancelled(runId: string): void {
+    const run = this.deps.store.repositories.printRuns.getById(runId);
+    if (run?.metadata.cancelRequestedAt) {
+      throw new DispatchCancelledError(
+        "Запуск отменён оператором до отправки команды на принтер — команда не отправлялась"
+      );
+    }
   }
 
   // ── Phase helpers ──────────────────────────────────────────────────────────
@@ -531,9 +641,20 @@ export class DispatchService {
       mode: request.mode,
       deviceFileIdentity: identity.level,
       file: target,
-      filePathValid: true
+      filePathValid: true,
+      feedChoice: request.feedChoice ?? null
     });
     this.enforceEligibility(task, eligibility, request);
+
+    // The filament source, decided HERE — by the same policy that just admitted
+    // the start — and pinned on the run. The adapter re-checks exactly this plan
+    // against a fresh report before publishing; it never picks a spool itself.
+    const feed = eligibility.feed ?? null;
+    if (feed && feed.kind === "unresolved") {
+      throw new JobError(`Нельзя запустить «${task.title}»: ${feed.message}`, {
+        blockers: [{ code: feed.code, message: feed.message }]
+      });
+    }
 
     // One active run per task / per printer, one live assignment — checked here
     // for an honest message; the 008 partial unique indexes are the backstop.
@@ -551,9 +672,11 @@ export class DispatchService {
     }
     // The confirmed plan's (or the operator's) own assignment for THIS task is the
     // reservation this dispatch is executing (resolved above) — it is consumed
-    // below, not treated as a rival. Any *other* live assignment still blocks.
-    const openAssignment = repos.assignments.findOpenByPrinter(printer.id);
-    if (openAssignment && openAssignment.id !== reserved?.id) {
+    // below, not treated as a rival. Any *other* assignment that holds the printer
+    // still blocks; a draft plan's proposal or a withdrawn placement does not —
+    // neither is a claim anybody made (HIGH-12/13).
+    const openAssignment = repos.assignments.listHoldingByPrinter(printer.id).find((a) => a.id !== reserved?.id);
+    if (openAssignment) {
       throw new JobError(
         `На «${printer.name}» уже есть живое назначение (${openAssignment.id}, ${openAssignment.state})`
       );
@@ -576,7 +699,30 @@ export class DispatchService {
     // permission to continue the queue onto an occupied bed. The eligibility
     // check above already refuses this case; the throw here is the last-resort
     // backstop in case a caller is ever wired with a laxer evaluator.
-    const openBed = repos.bedCycles.findOpenByPrinter(printer.id);
+    //
+    // "Nothing tracked" is not "clear" either. A printer whose plate no operator
+    // has ever confirmed — never printed under this model, or printing something
+    // started from its own screen — used to sail through here because there was
+    // no *open* row to refuse on. Only a recorded CLEAR cycle is evidence.
+    const latestBed = repos.bedCycles.latestByPrinter(printer.id);
+    if (latestBed === null) {
+      throw new JobError(
+        `Стол принтера «${printer.name}» ни разу не подтверждён свободным — проверьте стол и подтвердите, что он пуст`,
+        {
+          blockers: [
+            { code: REASON.BED_STATE_UNKNOWN, message: "bed never tracked" }
+          ]
+        }
+      );
+    }
+    const live = this.deps.getStatus(printer.id);
+    if (live && live.online && (live.status === "printing" || live.status === "paused")) {
+      throw new JobError(
+        `«${printer.name}» сейчас печатает${live.currentFile ? ` «${live.currentFile}»` : ""} — стол занят`,
+        { blockers: [{ code: REASON.PRINTER_BUSY, message: `live status ${live.status}` }] }
+      );
+    }
+    const openBed = latestBed.state === "CLEAR" ? null : latestBed;
     if (openBed) {
       throw new JobError(
         openBed.state === "AWAITING_CLEARANCE"
@@ -606,7 +752,9 @@ export class DispatchService {
       updatedAt: iso,
       clearedAt: null,
       version: 1,
-      metadata: {}
+      // The job this plate is about to hold — what a later "the device reports a
+      // finished «X»" is matched against before calling it an external print.
+      metadata: { file: target }
     };
     repos.bedCycles.insert(bed);
 
@@ -709,7 +857,8 @@ export class DispatchService {
         identityLevel: identity.level,
         ...(identity.note ? { identityNote: identity.note } : {}),
         decidedTaskVersion: task.version,
-        decidedAnalysisId: analysis?.id ?? null
+        decidedAnalysisId: analysis?.id ?? null,
+        ...(feed ? { feed: feed as unknown as Metadata } : {})
       }
     };
     repos.printRuns.insert(run);
@@ -733,7 +882,28 @@ export class DispatchService {
     return { task: dispatching, entry: entry as QueueEntry, assignment, attempt, run };
   }
 
-  private finalizeSuccess(reserved: ReservedDispatch, actor?: string): void {
+  /**
+   * The command left and the device took it. What that proves depends on what
+   * was *seen*:
+   *
+   *  - **confirmed** — the device reported running this job (a Bambu start
+   *    returns only after its own report says so; a Klipper start whose
+   *    follow-up poll already shows it printing): the run is `RUNNING`, through
+   *    the same cascade the poll observation uses.
+   *  - **accepted only** — an HTTP `200` to `print/start`. The run stays
+   *    `PENDING` (phase `accepted`), the bed stays `RESERVED`, the task
+   *    `DISPATCHING`, and the durable start guard stays in place: the print is
+   *    attached when telemetry shows it, and a restart in between finds a held
+   *    printer, never "a command that was never sent".
+   *
+   * Either way the attempt is `ACKED` — the device acknowledged the command —
+   * which is what that state has always meant. Returns the phase reached.
+   */
+  private finalizeAccepted(
+    reserved: ReservedDispatch,
+    confirmed: boolean,
+    actor?: string
+  ): "started" | "accepted" {
     const repos = this.deps.store.repositories;
     const iso = this.nowIso();
     const who = actor ?? "operator";
@@ -747,38 +917,32 @@ export class DispatchService {
     }
 
     const run = repos.printRuns.getById(reserved.run.id);
-    if (run && run.state === "PENDING") {
-      assertTransition("печать", PRINT_RUN_TRANSITIONS, run.state, "RUNNING");
-      repos.printRuns.update({ ...run, state: "RUNNING", startedAt: iso, progress: 0, updatedAt: iso });
-      this.audit("print_run", run.id, "started", who, { from: "PENDING", to: "RUNNING" });
+    if (!run) return "accepted";
+    // The poll that follows a send may already have attached the run.
+    if (run.state === "RUNNING" || run.state === "PAUSED") return "started";
+    if (run.state !== "PENDING") return "accepted";
+
+    if (confirmed) {
+      confirmRunStarted(this.deps.store, run.id, {
+        why: "принтер подтвердил запуск этого задания",
+        now: this.now(),
+        actor: who,
+        action: "started"
+      });
+      return "started";
     }
 
-    const task = repos.tasks.getById(reserved.task.id);
-    if (task && task.state === "DISPATCHING") {
-      assertTransition("задание", PRINT_TASK_TRANSITIONS, task.state, "PRINTING");
-      repos.tasks.update({ ...task, state: "PRINTING", updatedAt: iso });
-      this.audit("print_task", task.id, "printing", who, { from: "DISPATCHING", to: "PRINTING" });
-    }
-
-    const entry = repos.queue.findByTaskId(reserved.task.id);
-    if (entry && entry.state !== "RELEASED") {
-      assertTransition("запись очереди", QUEUE_ENTRY_TRANSITIONS, entry.state, "RELEASED");
-      repos.queue.update({ ...entry, state: "RELEASED", updatedAt: iso });
-    }
-
-    const assignment = repos.assignments.getById(reserved.assignment.id);
-    if (assignment && assignment.state === "RESERVED") {
-      assertTransition("назначение", ASSIGNMENT_TRANSITIONS, assignment.state, "ACTIVE");
-      repos.assignments.update({ ...assignment, state: "ACTIVE", updatedAt: iso });
-    }
-
-    if (reserved.run.bedCycleId) {
-      const bed = repos.bedCycles.getById(reserved.run.bedCycleId);
-      if (bed && bed.state === "RESERVED") {
-        assertTransition("цикл стола", BED_CYCLE_TRANSITIONS, bed.state, "RUNNING");
-        repos.bedCycles.update({ ...bed, state: "RUNNING", updatedAt: iso });
-      }
-    }
+    repos.printRuns.update({
+      ...run,
+      updatedAt: iso,
+      metadata: { ...run.metadata, dispatchPhase: "accepted", acceptedAt: iso }
+    });
+    this.audit("print_run", run.id, "start_accepted", who, {
+      from: "PENDING",
+      to: "PENDING",
+      detail: { note: "команда принята принтером; начало печати ещё не подтверждено телеметрией" }
+    });
+    return "accepted";
   }
 
   private finalizeFailure(
@@ -798,7 +962,8 @@ export class DispatchService {
 
     if (outcome === "rejected") {
       // The device provably never started: unwind everything so a corrected
-      // retry can go through; the task returns to the queue with the reason.
+      // retry can go through; the task returns to the queue with the reason —
+      // unless the operator withdrew it, in which case it is closed.
       if (attempt && attempt.state === "PENDING") {
         repos.dispatchAttempts.update({
           ...attempt,
@@ -828,7 +993,23 @@ export class DispatchService {
           repos.bedCycles.update({ ...bed, state: "CLEAR", clearedAt: iso, updatedAt: iso });
         }
       }
-      if (task && task.state === "DISPATCHING") {
+      if (task && task.state === "DISPATCHING" && (run?.metadata.cancelRequestedAt || error instanceof DispatchCancelledError)) {
+        repos.tasks.update({
+          ...task,
+          state: "CANCELLED",
+          reason: typeof run?.metadata.cancelReason === "string" ? run.metadata.cancelReason : "отменено оператором до отправки команды",
+          updatedAt: iso
+        });
+        const entry = repos.queue.findByTaskId(task.id);
+        if (entry && entry.state !== "RELEASED") {
+          repos.queue.update({ ...entry, state: "RELEASED", updatedAt: iso });
+        }
+        this.audit("print_task", task.id, "cancelled", who, {
+          from: "DISPATCHING",
+          to: "CANCELLED",
+          detail: { note: "команда запуска не отправлялась" }
+        });
+      } else if (task && task.state === "DISPATCHING") {
         const failed = repos.tasks.update({
           ...task,
           state: "FAILED",
@@ -890,7 +1071,7 @@ export class DispatchService {
     mode: DispatchMode
   ): Promise<{ level: DeviceFileIdentity; note: string | null }> {
     if (!supportsPrinterFiles(printer)) {
-      if (mode === "night") {
+      if (isUnattendedMode(mode)) {
         throw new JobError(
           `Протокол «${printer.protocol}» не позволяет проверить файл на устройстве — ночной запуск запрещён`,
           { blockers: [{ code: REASON.DEVICE_FILE_NOT_VERIFIED, message: "listing unsupported" }] }
@@ -909,7 +1090,7 @@ export class DispatchService {
     } catch (error) {
       // The listing endpoint failing is not proof of absence; the start itself
       // re-validates against the device. For unattended mode it IS a refusal.
-      if (mode === "night") {
+      if (isUnattendedMode(mode)) {
         throw new JobError(
           `Не удалось проверить файл на «${printer.name}» перед ночным запуском — запуск запрещён`,
           { blockers: [{ code: REASON.DEVICE_FILE_NOT_VERIFIED, message: "listing failed" }] }
@@ -936,7 +1117,7 @@ export class DispatchService {
         note: "хеш недоступен через API принтера — идентичность подтверждена именем и размером"
       };
     }
-    if (mode === "night" && expected) {
+    if (isUnattendedMode(mode) && expected) {
       // Night dispatch demands the strongest identity we can get; a registered
       // artifact with no recorded size cannot be matched beyond its name.
       throw new JobError(
@@ -958,7 +1139,8 @@ export class DispatchService {
       printerId: run.printerId,
       printerName: printer?.name ?? run.printerId,
       file: run.file ?? "",
-      deduplicated: true
+      deduplicated: true,
+      phase: run.startedAt ? "started" : "accepted"
     };
   }
 

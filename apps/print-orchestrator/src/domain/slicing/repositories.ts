@@ -10,12 +10,12 @@ import type { ProfileRevision, ProfileSet, ProfileType, SliceVariant } from "./t
  */
 
 export interface ProfileRevisionRepository extends WritableRepository<ProfileRevision> {
-  /** The revision with this exact raw content hash, if already imported (dedup). */
-  findByRawSha256(rawSha256: string): ProfileRevision | null;
-  /** The single `active` revision for a logical id, if any (what a set may bind). */
-  findActiveByLogicalId(logicalId: string): ProfileRevision | null;
-  /** Newest revision (any status) for a logical id. */
-  latestByLogicalId(logicalId: string): ProfileRevision | null;
+  /**
+   * Every revision of these exact raw bytes, oldest first. Usually one; several
+   * when the same bytes resolved to different effective settings over time —
+   * each resolution is its own immutable revision (migration 017).
+   */
+  listByRawSha256(rawSha256: string): ProfileRevision[];
   list(type?: ProfileType): ProfileRevision[];
 }
 

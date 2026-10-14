@@ -240,11 +240,22 @@ function wireDelegates() {
     const id = btn.dataset.id;
     if (action === "import") void run(btn, () => apiPost("/api/print/slicing/presets/import"), "Пресеты импортированы, Владыка");
     else if (action === "approve") void run(btn, () => apiPost(`/api/print/slicing/profile-sets/${id}/approve`), "Набор утверждён — воля ваша исполнена");
+    // Каталог перерешил профили набора: создаём НОВЫЙ неутверждённый набор на
+    // актуальных ревизиях. Прежний остаётся как есть и режет прежними настройками,
+    // пока оператор не утвердит обновлённый.
+    else if (action === "successor")
+      void run(btn, () => apiPost(`/api/print/slicing/profile-sets/${id}/successor`), "Обновлённый набор создан — проверьте и утвердите его");
     else if (action === "rerun") void run(btn, () => apiPost(`/api/print/slicing/variants/${id}/rerun`), "Слайсинг перезапущен — на этот раз всё будет безупречно");
     // Слайс → очередь. Повторное нажатие безопасно: сервер идемпотентен и не
     // создаёт второе задание, поэтому кнопку не нужно «защищать» на клиенте.
     else if (action === "promote")
       void run(btn, () => apiPost(`/api/print/slicing/variants/${id}/promote`), "Вариант поставлен в очередь, Владыка");
+    // Повтор проверенного G-code: НОВАЯ печать тех же байт (сервер проверяет
+    // файл и анализ), затем — общее окно запуска для неё.
+    else if (action === "reprint-task")
+      void run(btn, () => reprintAndLaunch(`/api/print/tasks/${encodeURIComponent(id)}/reprint`), "Печать снова в очереди — тот же проверенный файл");
+    else if (action === "reprint-variant")
+      void run(btn, () => reprintAndLaunch(`/api/print/slicing/variants/${encodeURIComponent(id)}/reprint`), "Новая печать по варианту — в очереди");
     else if (action === "prepare-file")
       void run(btn, () => apiPost(`/api/print/assignments/${id}/prepare-file`), "Файл подготовлен на принтере");
     else if (action === "confirm-file")
@@ -336,6 +347,27 @@ function confirmFile(assignmentId) {
     return Promise.reject(new Error("подтверждение переноса должно быть именным"));
   }
   return apiPost(`/api/print/assignments/${assignmentId}/confirm-file`, { operator: operator.trim() });
+}
+
+/* Неотвеченный повтор печати, по запросу: клик после потерянного ответа
+   отправляет ТОТ ЖЕ requestId, и сервер возвращает уже созданную печать, а не
+   делает вторую. Ключ забывается, как только сервер ответил — успехом или отказом. */
+const pendingReprint = new Map();
+
+async function reprintAndLaunch(path) {
+  const rand = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  const requestId = pendingReprint.get(path) || `reprint:${rand}`;
+  pendingReprint.set(path, requestId);
+  let res;
+  try {
+    res = await apiPost(path, { requestId });
+  } catch (err) {
+    if (err && err.status) pendingReprint.delete(path);
+    throw err;
+  }
+  pendingReprint.delete(path);
+  const taskId = res.task && res.task.task && res.task.task.id;
+  if (taskId) openLaunchModal(taskId);
 }
 
 async function run(btn, fn, okMsg) {
