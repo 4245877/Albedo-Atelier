@@ -158,6 +158,16 @@ services:
       BAMBU_A1_ACCESS_CODE: ${BAMBU_A1_ACCESS_CODE:-}
       # Legacy fixed night window; the scheduler migrates it into LIGHT_* mode.
       NIGHT_PRINT_WINDOW: ${NIGHT_PRINT_WINDOW:-}
+      # The zone NIGHT_PRINT_WINDOW is expressed in for night-start decisions.
+      # The orchestrator does NOT read TZ for this, and its built-in default is
+      # Europe/Moscow — wrong for this farm from the end of October to the end
+      # of March (Kyiv is UTC+2 then, Moscow UTC+3), so the window would open
+      # and close an hour early. Falls back to TZ, so one setting moves both.
+      FARM_TIMEZONE: ${FARM_TIMEZONE:-${TZ:-Europe/Kyiv}}
+      # Night ETA buffer (fraction) and scheduler telemetry staleness, ms
+      # (empty → the built-in 0.2 and 120000; see .env.example).
+      NIGHT_ETA_SAFETY_BUFFER: ${NIGHT_ETA_SAFETY_BUFFER:-}
+      SCHEDULER_TELEMETRY_STALE_MS: ${SCHEDULER_TELEMETRY_STALE_MS:-}
       # Operator minutes to ready a plate between two planned prints (empty →
       # the built-in 5).
       SCHEDULER_BED_PREP_MINUTES: ${SCHEDULER_BED_PREP_MINUTES:-}

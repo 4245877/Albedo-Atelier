@@ -158,7 +158,10 @@ if [ "$MODE" = "full" ] && [ -f "${REPO_ROOT}/.env" ]; then
   chmod 0600 "${INCOMPLETE}/secrets/atelier.env"
   ok "secrets: .env captured (0600, values never logged)"
 fi
-for f in go2rtc.yaml config/printers.json; do
+# The printers.json seed (git-ignored) and the go2rtc config live under the
+# orchestrator's config dir. These were once listed relative to the repo root,
+# where neither file exists, so full sets silently went without them.
+for f in apps/print-orchestrator/config/go2rtc.yaml apps/print-orchestrator/config/printers.json; do
   if [ "$MODE" = "full" ] && [ -f "${REPO_ROOT}/${f}" ]; then
     mkdir -p "${INCOMPLETE}/repo/$(dirname "$f")"
     cp -p "${REPO_ROOT}/${f}" "${INCOMPLETE}/repo/${f}"
