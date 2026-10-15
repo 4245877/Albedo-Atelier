@@ -102,6 +102,8 @@ interface Knobs {
   loaded: Record<string, string | null>;
   nozzle: Record<string, number | null>;
   failStart: string | null;
+  /** Uploads to these printers fail (the printer dropped off mid-transfer). */
+  failUpload: Set<string>;
 }
 
 interface Harness {
@@ -150,7 +152,8 @@ async function makeHarness(tmp: string): Promise<Harness> {
     status: { "bambu-a1": "idle", k2: "idle", ender3: "idle" },
     loaded: { "bambu-a1": "PETG", k2: "PETG", ender3: "PETG" },
     nozzle: { "bambu-a1": 0.4, k2: 0.4, ender3: 0.4 },
-    failStart: null
+    failStart: null,
+    failUpload: new Set<string>()
   };
 
   const queue = new PrintQueueService(store, {
@@ -192,6 +195,7 @@ async function makeHarness(tmp: string): Promise<Harness> {
     resolvePrinter: (id) => PRINTERS.find((p) => p.id === id),
     listFiles,
     uploadFile: async (printer, remotePath, bytes) => {
+      if (knobs.failUpload.has(printer.id)) throw new Error("связь с принтером оборвалась во время загрузки");
       uploads.push({ printerId: printer.id, remotePath, bytes });
       const files = onDevice.get(printer.id) ?? [];
       onDevice.set(printer.id, [
@@ -268,9 +272,11 @@ async function makeHarness(tmp: string): Promise<Harness> {
   };
 
   const dispatch = new DispatchService(deps);
-  const lifecycle = new RunLifecycleService(store, { now: () => new Date(ISO) });
   const schedule = new OperatorScheduleService(store, { now: () => new Date(ISO) });
   const manualOperations = new ManualOperationService(store, schedule, { now: () => new Date(ISO) });
+  // Wired as `createRuntime` wires it: a finished print opens the part-removal
+  // operation, and a bed clearance closes it.
+  const lifecycle = new RunLifecycleService(store, { now: () => new Date(ISO), operations: manualOperations });
 
   const launch = new LaunchService({
     store,
@@ -989,6 +995,99 @@ test("HIGH-13: a confirmed or manual placement still holds the printer — only 
   const second = queuedGcodeTask();
   assert.throws(() => h.queue.assignTask(second.id, "bambu-a1"), /уже занят назначением/);
   assert.throws(() => h.queue.assignTask(first.id, "bambu-a1"), /уже назначено/);
+});
+
+test("a launch whose delivery failed withdraws the placement it made: neither the job nor the printer stays held", async () => {
+  // The placement used to stay. The job was then tied to that printer, the
+  // printer refused every other job («уже занят назначением») — and nothing on
+  // the screen could withdraw it.
+  const task = queuedGcodeTask();
+  bedClear("bambu-a1");
+  h.knobs.failUpload.add("bambu-a1");
+  await assert.rejects(() => h.launch.launch(task.id, { printerId: "bambu-a1" }));
+  assert.equal(h.startCalls.length, 0, "nothing was started");
+  const [own] = assignmentsOf(task.id);
+  assert.ok(own?.invalidatedAt, "the attempt's own placement is withdrawn");
+  assert.match(own.invalidatedReason ?? "", /запуск не состоялся/);
+
+  // The printer takes another job, and the job itself launches once the link is back.
+  h.knobs.failUpload.clear();
+  const other = queuedGcodeTask();
+  await h.launch.launch(other.id, { printerId: "bambu-a1" });
+  h.lifecycle.completeRun(h.store.repositories.printRuns.findActiveByTask(other.id)!.id, "SUCCEEDED");
+  bedClear("bambu-a1");
+  await h.launch.launch(task.id, { printerId: "bambu-a1" });
+  assert.deepEqual(
+    h.startCalls.map((c) => c.printerId),
+    ["bambu-a1", "bambu-a1"]
+  );
+});
+
+test("a placement made before the attempt is a decision: a failed delivery leaves it in place", async () => {
+  const task = queuedGcodeTask();
+  const placed = h.queue.assignTask(task.id, "bambu-a1", { reason: "оператор" });
+  bedClear("bambu-a1");
+  h.knobs.failUpload.add("bambu-a1");
+  await assert.rejects(() => h.launch.launch(task.id, { printerId: "bambu-a1" }));
+  assert.equal(h.store.repositories.assignments.getById(placed.id)?.invalidatedAt, null);
+});
+
+test("a printer held by another job's placement is refused in the preview, not one step into the launch", async () => {
+  // The preview used to be green here and the launch then failed at the
+  // placement step with «уже занят назначением asg_…» — a refusal the preview
+  // could have known about, which is exactly what the one policy forbids.
+  const first = queuedGcodeTask();
+  h.queue.assignTask(first.id, "bambu-a1", { reason: "оператор" });
+  bedClear("bambu-a1");
+  const second = queuedGcodeTask();
+  const preview = h.launch.preview(second.id, "bambu-a1");
+  const a1 = preview.candidates.find((c) => c.printerId === "bambu-a1")!;
+  assert.equal(a1.eligible, false);
+  assert.ok(a1.blockers.some((b) => b.code === "PRINTER_RESERVED"), JSON.stringify(a1.blockers));
+  assert.equal(preview.primaryProblem?.code, "PRINTER_RESERVED");
+  assert.equal(h.launch.readinessForTaskId(second.id).canLaunch, false, "the queue row says so too");
+  await assert.rejects(() => h.launch.launch(second.id, { printerId: "bambu-a1" }), /занят/);
+  assert.equal(h.uploads.length, 0, "nothing was delivered for a start that could not happen");
+});
+
+test("after a finished print, «Стол свободен» in the launch window is enough: the part-removal operation closes with it", async () => {
+  // Found end to end (ops/verify): a finished print leaves the bed
+  // AWAITING_CLEARANCE *and* an open PART_REMOVAL operation — one fact, two
+  // records. The launch window offered the «Стол свободен» tick for the bed, but
+  // the operation's own blocker made the printer ineligible first, so the tick —
+  // which closes that very operation — was never applied and every repeat print
+  // on the same printer was refused.
+  const first = queuedGcodeTask();
+  bedClear("bambu-a1");
+  await h.launch.launch(first.id, { printerId: "bambu-a1" });
+  h.lifecycle.completeRun(h.store.repositories.printRuns.findActiveByTask(first.id)!.id, "SUCCEEDED");
+  const removal = h.store.repositories.manualOperations
+    .listByPrinter("bambu-a1")
+    .find((op) => op.type === "PART_REMOVAL" && op.state !== "COMPLETED");
+  assert.ok(removal, "the finished print opened the part-removal operation");
+
+  const next = queuedGcodeTask();
+  const preview = h.launch.preview(next.id, "bambu-a1");
+  const a1 = preview.candidates.find((c) => c.printerId === "bambu-a1")!;
+  assert.equal(a1.eligible, true, `only questions a person answers remain: ${JSON.stringify(a1.blockers)}`);
+  assert.deepEqual(preview.confirmations.filter((c) => c.required).map((c) => c.code), ["bed_clear"]);
+  assert.equal(preview.state, "needs_confirmation");
+
+  await assert.rejects(() => h.launch.launch(next.id, { printerId: "bambu-a1" }), /Стол свободен/, "without the tick: refused");
+  await h.launch.launch(next.id, { printerId: "bambu-a1", confirmations: ["bed_clear"] });
+  assert.equal(h.startCalls.length, 2, "with it: started");
+  assert.equal(h.store.repositories.manualOperations.getById(removal.id)?.state, "COMPLETED", "and the operation is closed, by the same confirmation");
+});
+
+test("the automatic queue is not given that tick: a part on the plate still refuses an auto start", async () => {
+  const first = queuedGcodeTask();
+  bedClear("bambu-a1");
+  await h.launch.launch(first.id, { printerId: "bambu-a1" });
+  h.lifecycle.completeRun(h.store.repositories.printRuns.findActiveByTask(first.id)!.id, "SUCCEEDED");
+  const next = queuedGcodeTask();
+  const a1 = h.launch.preview(next.id, "bambu-a1", { mode: "auto" }).candidates.find((c) => c.printerId === "bambu-a1")!;
+  assert.equal(a1.eligible, false);
+  assert.ok(a1.blockers.some((b) => b.code === "MANUAL_OPERATION_REQUIRED"), JSON.stringify(a1.blockers));
 });
 
 test("HIGH-16: a FAILED print retried goes back INTO the queue, at the tail, and can be launched again", async () => {

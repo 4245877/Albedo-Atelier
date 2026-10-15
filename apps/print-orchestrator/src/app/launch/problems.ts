@@ -363,8 +363,17 @@ const TRANSLATIONS: Record<string, Translation> = {
     action: "Подтвердите план или назначьте принтер вручную."
   },
   ASSIGNMENT_PRINTER_MISMATCH: {
-    title: "Принтер расходится с планом",
-    action: "Подтверждённый план называет другой принтер. Перепланируйте или снимите назначение."
+    title: "Задание закреплено за другим принтером",
+    action:
+      "Запустите его на том принтере. Если это был ваш прежний выбор — выберите этот принтер в окне запуска явно; если подтверждённый план — перепланируйте."
+  },
+  PRINTER_RESERVED: {
+    title: "Принтер занят другим заданием",
+    action: "На принтере размещено другое задание (его запуск или подтверждённый план). Запустите его или выберите другой принтер."
+  },
+  ASSIGNMENT_REPLACED: {
+    title: "Задание будет перенесено сюда",
+    action: "Прежнее размещение на другом принтере снимется при запуске — это записывается в журнал."
   },
   PROFILE_REVISION_MISMATCH: {
     title: "Профили изменились после подтверждения",
@@ -688,6 +697,9 @@ const CAUSE_RANK: Record<string, number> = {
   ENTRY_STATE: 2,
   ASSIGNMENT_STALE: 2,
   ASSIGNMENT_PRINTER_MISMATCH: 2,
+  // Another job's decision holds the machine: the cause of the refusal, ahead
+  // of any device state it explains.
+  PRINTER_RESERVED: 1,
   PROFILE_REVISION_MISMATCH: 2,
   ACTIVE_RUN_EXISTS: 1,
   UNRESOLVED_DISPATCH: 1,

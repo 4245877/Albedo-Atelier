@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -59,7 +60,21 @@ after(async () => {
   fs.rmSync(TMP, { recursive: true, force: true });
 });
 
-test("POST /slicing/presets/import imports the real catalog (20 active, 1 quarantined)", async () => {
+/*
+ * The catalog these numbers describe is the one versioned in
+ * config/slicers/orca since 5243262 (2026-09-05): the operator's explicit
+ * selection from their Orca Cloud folder (user-dir-selection.json, 15 presets)
+ * plus two machine corrections (corrections/selection.json) — 17 presets, every
+ * one resolving through vendor/. The August catalog these tests were written
+ * for had 21 revisions, one of them quarantined (a K2 export declaring a 0.4 mm
+ * nozzle on a 0.2 printer_variant); the re-curation corrected that preset, and
+ * these four tests kept failing on every checkout since — not an environment
+ * difference, a stale expectation. Kept in step with presetImportService.test.ts,
+ * which pins the same catalog by name.
+ */
+const CATALOG_PRESETS = 17;
+
+test("POST /slicing/presets/import imports the real catalog (17 active, none quarantined)", async () => {
   const res = await app.inject({
     method: "POST",
     url: "/api/print/slicing/presets/import",
@@ -67,13 +82,10 @@ test("POST /slicing/presets/import imports the real catalog (20 active, 1 quaran
   });
   assert.equal(res.statusCode, 200);
   const { result } = res.json();
-  // The vendor/ closure resolves every Bambu A1 chain and the whole Creality K2 one.
-  assert.equal(result.counts.active, 20);
-  // One preset stays quarantined, and not for a missing dependency: the operator's
-  // `Creality K2 PETG 0.4 FAST` export declares a 0.4 mm nozzle on a "0.2"
-  // printer_variant. That contradiction is the profile's own, so no installed parent
-  // can clear it.
-  assert.equal(result.counts.quarantined, 1);
+  // The vendor/ closure resolves every Bambu A1 chain, the Creality K2 one and the
+  // Ender-3 V3 KE one — everything the operator selected is usable.
+  assert.equal(result.counts.active, CATALOG_PRESETS);
+  assert.equal(result.counts.quarantined, 0);
   assert.equal(result.counts.invalid, 0);
   assert.equal(result.sourceIntegrity.ok, true);
   assert.deepEqual(result.missingParents, []);
@@ -85,18 +97,20 @@ test("GET /slicing/runtime honestly reports no runtime + the profile counts", as
   const body = res.json();
   assert.equal(body.runtime.available, false);
   assert.ok(body.runtime.error, "expected an honest diagnostic");
-  assert.equal(body.profileCounts.active, 20);
-  assert.equal(body.profileCounts.quarantined, 1);
+  assert.equal(body.profileCounts.active, CATALOG_PRESETS);
+  assert.equal(body.profileCounts.quarantined, 0);
   assert.ok(Array.isArray(body.coverage));
   assert.deepEqual(body.missingParents, []);
 });
 
-test("GET /slicing/profiles lists all 21 revisions; ?type filters", async () => {
+test("GET /slicing/profiles lists all 17 revisions; ?type filters", async () => {
   const all = await app.inject({ method: "GET", url: "/api/print/slicing/profiles" });
-  assert.equal(all.json().profiles.length, 21);
+  assert.equal(all.json().profiles.length, CATALOG_PRESETS);
   const filament = await app.inject({ method: "GET", url: "/api/print/slicing/profiles?type=filament" });
-  const names = filament.json().profiles.map((p: { name: string }) => p.name);
-  assert.ok(names.includes("Creality"));
+  const profiles = filament.json().profiles as Array<{ name: string; type: string }>;
+  assert.equal(profiles.length, 6);
+  assert.ok(profiles.every((p) => p.type === "filament"), "the filter returns only filaments");
+  assert.ok(profiles.some((p) => p.name === "PETG @K2"));
 });
 
 test("the Bambu A1 0.4 machine profile is served active, with its resolved BBL chain", async () => {
@@ -123,14 +137,20 @@ test("the Bambu A1 0.4 machine profile is served active, with its resolved BBL c
 });
 
 test("creating a set with a quarantined member is blocked, and approval is refused (409)", async () => {
+  // The shipped catalog quarantines nothing any more, so the offending member is
+  // recorded here exactly as the importer records one it cannot resolve: status
+  // `quarantined`, a `missing_parent` blocker, no resolved settings. Detecting a
+  // defective preset is the importer's job and is covered there
+  // (presetImportService.test.ts); this test is about the HTTP rule that a set
+  // with such a member can neither be valid nor be approved.
+  await quarantineMachineRevision("K2 defective export");
   const profiles = (await app.inject({ method: "GET", url: "/api/print/slicing/profiles" })).json().profiles as Array<{
     id: string;
     type: string;
     name: string;
     status: string;
   }>;
-  // The catalog's only quarantined revision is a machine, so that is the offending
-  // member here; the other two are active. One bad member is all the rule needs.
+  // One bad member is all the rule needs; the other two are active.
   const machine = profiles.find((p) => p.type === "machine" && p.status === "quarantined");
   const process = profiles.find((p) => p.type === "process" && p.status === "active");
   const filament = profiles.find((p) => p.type === "filament" && p.status === "active");
@@ -174,3 +194,40 @@ test("slicing endpoints never expose the legacy queue (it stays empty)", async (
   const q = await app.inject({ method: "GET", url: "/api/print/queue" });
   assert.deepEqual(q.json().queue, []);
 });
+
+/**
+ * Writes a quarantined machine revision into this test's own queue.db (a second
+ * connection). Imported lazily, like everything else here: env freezes on first
+ * import, and a hoisted static import would freeze it before the paths above are set.
+ */
+async function quarantineMachineRevision(name: string): Promise<void> {
+  const { ID_PREFIX, newId } = await import("../../domain/print/ids");
+  const { openPrintQueueStore } = await import("../../infra/db/store");
+  const store = openPrintQueueStore(path.join(TMP, "queue.db"));
+  try {
+    const raw = JSON.stringify({ name, type: "machine", inherits: "Creality K2 0.4 nozzle (missing)" });
+    const iso = new Date().toISOString();
+    store.repositories.profileRevisions.insert({
+      id: newId(ID_PREFIX.profileRevision),
+      logicalId: `machine:${name}`,
+      type: "machine",
+      name,
+      inherits: "Creality K2 0.4 nozzle (missing)",
+      status: "quarantined",
+      rawJson: raw,
+      rawSha256: createHash("sha256").update(raw).digest("hex"),
+      resolvedJson: null,
+      resolvedSha256: null,
+      orcaVersion: "2.3.0",
+      source: null,
+      warnings: [],
+      blockers: [{ code: "missing_parent", message: "родитель «Creality K2 0.4 nozzle (missing)» не найден" }],
+      createdAt: iso,
+      updatedAt: iso,
+      version: 1,
+      metadata: {}
+    });
+  } finally {
+    store.close();
+  }
+}

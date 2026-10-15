@@ -225,10 +225,15 @@ export function installActions({ getState, refresh }) {
       const printerId = el.dataset.printer;
       const operationId = el.dataset.operation;
       if (!printerId) return;
+      // Стол, который никто не проверял, — не «деталь снята»: спрашиваем ровно то,
+      // что человек может увидеть.
+      const unknownBed = el.dataset.bedState === "UNKNOWN";
       void confirmAction({
-        title: "Освободить стол",
+        title: unknownBed ? "Подтвердить пустой стол" : "Освободить стол",
         object: printerNameOf(getState(), printerId),
-        body: "Подтвердите, что готовая модель снята с площадки и стол пуст.",
+        body: unknownBed
+          ? "Система не знает, что сейчас на столе этого принтера. Подтвердите, что площадка пуста."
+          : "Подтвердите, что готовая модель снята с площадки и стол пуст.",
         points: [
           "Подтверждение записывается в журнал вместе с вашим именем",
           "Пока стол не освобождён, следующее задание на этот принтер не пойдёт",
@@ -249,12 +254,6 @@ export function installActions({ getState, refresh }) {
         if (!ok) return;
         toast("Стол свободен — очередь может продолжаться, Владыка", "toast-ok");
         void refresh({ silent: false });
-      });
-      return;
-    }
-    if (act === "start-next") {
-      runAction("/api/queue/start-next", null, null, "toast-ok", "start-next", el, "Запускаю…").then((res) => {
-        if (res?.job) toast(`Задание «${esc(res.job.title)}» вверено «${esc(res.job.printer)}» — всё будет исполнено безупречно, Владыка`, "toast-ok");
       });
       return;
     }

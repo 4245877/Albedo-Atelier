@@ -26,7 +26,7 @@ let wired = false;
 let timer = null;
 let loadSeq = 0;
 let selection = readSelection();
-let data = { items: [], coverage: [], sets: [], variants: [], outputs: [] };
+let data = { items: [], coverage: [], sets: [], variants: [], outputs: [], live: [] };
 const ui = { busy: false, error: null, uploading: false };
 
 export function setupNewPrint() {
@@ -64,10 +64,12 @@ async function load() {
     apiGet("/api/print/artifacts"),
     apiGet("/api/print/slicing/runtime"),
     apiGet("/api/print/slicing/profile-sets"),
-    apiGet("/api/print/slicing/variants")
+    apiGet("/api/print/slicing/variants"),
+    // Что принтеры делают сейчас — пометка рядом с каждым на шаге «Принтер».
+    apiGet("/api/printers")
   ]);
   if (seq !== loadSeq) return; // ответ устарел — свежий запрос уже в пути
-  const [artifacts, runtime, sets, variants] = results;
+  const [artifacts, runtime, sets, variants, printers] = results;
   if (artifacts.status === "fulfilled") {
     const all = artifacts.value.artifacts || [];
     data.items = all;
@@ -76,7 +78,12 @@ async function load() {
   if (runtime.status === "fulfilled") data.coverage = runtime.value.coverage || [];
   if (sets.status === "fulfilled") data.sets = sets.value.sets || [];
   if (variants.status === "fulfilled") data.variants = variants.value.variants || [];
-  const failed = results.filter((r) => r.status === "rejected").length;
+  if (printers.status === "fulfilled") {
+    data.live = Array.isArray(printers.value) ? printers.value : printers.value?.printers || [];
+  }
+  // Живое состояние принтеров лишь дополняет список выбора: без него путь
+  // работает как прежде, поэтому баннер «не загрузилось» оно не поднимает.
+  const failed = [artifacts, runtime, sets, variants].filter((r) => r.status === "rejected").length;
   ui.error = failed > 0 ? "Часть данных не загрузилась — показываю последнее известное, повторю сам." : null;
 
   autoAdvance();

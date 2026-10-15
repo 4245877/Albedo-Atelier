@@ -127,6 +127,13 @@ export interface DispatchReservation {
   /** True when the binding stopped matching its task (re-sliced, re-queued, withdrawn). */
   stale: boolean;
   staleReason: string | null;
+  /**
+   * A person's own placement (no plan behind it) that nothing physical holds
+   * yet (`PROPOSED`): an operator may move the job by explicitly choosing
+   * another printer — see {@link DispatchFacts.explicitPrinterChoice}. Absent =
+   * not replaceable.
+   */
+  replaceable?: boolean;
 }
 
 /** The tracked state of the file on the target device, as the caller resolved it. */
@@ -265,6 +272,13 @@ export interface DispatchFacts {
   activeRun: { id: string; state: string } | null;
   /** An unresolved durable start guard on this printer, or null. */
   startGuard: { file: string; state: string } | null;
+  /**
+   * Another task's live decision that holds this printer before anything
+   * physical exists — a person's placement, or one under the confirmed plan
+   * (`assignmentHolds`, state `PROPOSED`). A start in flight or a print is the
+   * run's and the bed's business, not repeated here. Absent/null = none.
+   */
+  printerHold?: { assignmentId: string; taskId: string; taskTitle: string | null; planned: boolean } | null;
   /** Live bed cycle state, or null when nothing is tracked (→ unknown). */
   bedState: string | null;
   /**
@@ -303,6 +317,12 @@ export interface DispatchFacts {
   reservation: DispatchReservation | null;
   /** The printer this dispatch is actually about to start on. */
   targetPrinterId: string;
+  /**
+   * The operator named {@link targetPrinterId} for this start themselves (the
+   * launch window's printer choice), as opposed to a recommendation, a plan or
+   * an automatic pick. Absent = not an explicit choice.
+   */
+  explicitPrinterChoice?: boolean;
   /** The slice variant this dispatch would send, when the work is sliced. */
   sliceVariantId: string | null;
   /** Profile revisions the task's *current* executable resolves to (vs. the reservation's). */
@@ -1076,6 +1096,22 @@ function pushDeviceState(f: DispatchFacts, push: (r: EligibilityReason) => void)
       )
     );
   }
+  // A decision about another job holds the printer (HIGH-12/13: a person's
+  // placement or the confirmed plan's). Placing this job here would be refused
+  // a step later, before any byte moves — say it where the printer is chosen.
+  if (f.printerHold) {
+    const other = f.printerHold.taskTitle ? `«${f.printerHold.taskTitle}»` : f.printerHold.taskId;
+    push(
+      reason(
+        REASON.PRINTER_RESERVED,
+        "blocker",
+        f.printerHold.planned
+          ? `принтер закреплён подтверждённым планом за заданием ${other}`
+          : `принтер занят: на нём размещено задание ${other} (идёт его запуск или оно размещено вручную)`,
+        f.printerHold
+      )
+    );
+  }
 }
 
 /**
@@ -1219,6 +1255,33 @@ function pushReservation(f: DispatchFacts, push: (r: EligibilityReason) => void)
   const r = f.reservation;
   if (!r) return;
 
+  // A person's own placement — no plan behind it, nothing physical holding it
+  // yet — and an operator now explicitly starting the job on ANOTHER printer:
+  // a newer decision of the same authority. The launch withdraws the old
+  // placement (audited) before placing the job here, so none of the checks
+  // below describe this start. Only at the preflight of a manual start: an
+  // unattended start is bound by a placement (there or nowhere), the dispatch
+  // gate runs against the placement the launch has just made, and a confirmed
+  // plan's placement is moved by replanning, never from the launch window.
+  if (
+    r.replaceable === true &&
+    r.planId === null &&
+    r.printerId !== f.targetPrinterId &&
+    f.explicitPrinterChoice === true &&
+    f.mode === "manual" &&
+    f.stage === "preflight"
+  ) {
+    push(
+      reason(
+        REASON.ASSIGNMENT_REPLACED,
+        "warning",
+        `задание было размещено на «${r.printerId}» — запуск здесь снимет то размещение`,
+        { replaced: r.assignmentId, from: r.printerId, to: f.targetPrinterId }
+      )
+    );
+    return;
+  }
+
   if (r.stale) {
     push(
       reason(
@@ -1253,7 +1316,9 @@ function pushReservation(f: DispatchFacts, push: (r: EligibilityReason) => void)
       reason(
         REASON.ASSIGNMENT_PRINTER_MISMATCH,
         "blocker",
-        `подтверждённый план назначает принтер «${r.printerId}», а запуск идёт на «${f.targetPrinterId}»`,
+        r.planId
+          ? `подтверждённый план назначает принтер «${r.printerId}», а запуск идёт на «${f.targetPrinterId}»`
+          : `задание размещено на «${r.printerId}», а запуск идёт на «${f.targetPrinterId}»`,
         { assigned: r.printerId, actual: f.targetPrinterId, assignmentId: r.assignmentId }
       )
     );

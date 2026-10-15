@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 
+import { JobError } from "../../core/errors";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { Artifact, ArtifactAnalysis, DayNightPreference, PrintTask } from "../../domain/print/types";
@@ -28,6 +29,7 @@ import { EvidenceResolver } from "../scheduling/evidence";
 import { SchedulerService } from "../scheduling/schedulerService";
 import type { SchedulerPrinterRef } from "../scheduling/types";
 import { declareSourceUnits } from "../slicing/testkit/source";
+import { classifyDispatchError, refusedBeforeSend } from "../startGuard";
 import { AUTO_QUEUE_ACTOR, AutoQueueExecutor, type AutoQueueConfig } from "./autoQueue";
 
 /*
@@ -60,6 +62,10 @@ interface Knobs {
   status: Record<string, SchedulerPrinterRef["status"]>;
   failStart: string | null;
   classify: "unknown" | "rejected";
+  /** Uploads to these printers wait for the promise — a start held mid-delivery. */
+  uploadGate: Record<string, Promise<void>>;
+  /** The command layer refuses before anything is sent (the printer went offline during the upload). */
+  refuseBeforeSend: string | null;
 }
 
 interface Harness {
@@ -101,7 +107,14 @@ async function makeHarness(tmp: string): Promise<Harness> {
 
   const onDevice = new Map<string, { path: string; size: number }[]>();
   const startCalls: Harness["startCalls"] = [];
-  const knobs: Knobs = { material: { k2: "PETG", k2b: "PETG" }, status: { k2: "idle", k2b: "idle" }, failStart: null, classify: "unknown" };
+  const knobs: Knobs = {
+    material: { k2: "PETG", k2b: "PETG" },
+    status: { k2: "idle", k2b: "idle" },
+    failStart: null,
+    classify: "unknown",
+    uploadGate: {},
+    refuseBeforeSend: null
+  };
 
   const queue = new PrintQueueService(store, {
     now,
@@ -124,6 +137,7 @@ async function makeHarness(tmp: string): Promise<Harness> {
     resolvePrinter: (id) => PRINTERS.find((p) => p.id === id),
     listFiles,
     uploadFile: async (printer, remotePath, bytes) => {
+      await knobs.uploadGate[printer.id];
       const files = onDevice.get(printer.id) ?? [];
       onDevice.set(printer.id, [...files.filter((f) => f.path !== remotePath), { path: remotePath, size: bytes.byteLength }]);
       return { remotePath, sizeBytes: bytes.byteLength };
@@ -169,11 +183,14 @@ async function makeHarness(tmp: string): Promise<Harness> {
     resolvePrinter: (ref) => PRINTERS.find((p) => p.id === ref.trim().toLowerCase()),
     getStatus: () => undefined,
     startPhysical: async (printerId, file) => {
+      if (knobs.refuseBeforeSend) throw refusedBeforeSend(new JobError(knobs.refuseBeforeSend));
       if (knobs.failStart) throw new Error(knobs.failStart);
       startCalls.push({ printerId, file });
       return { confirmed: false };
     },
-    classifyError: () => knobs.classify,
+    // The real classifier decides what it can know for certain (a refusal before
+    // the send); the knob plays the device's ambiguous answers.
+    classifyError: (error) => (classifyDispatchError(error) === "rejected" ? "rejected" : knobs.classify),
     listFiles,
     evaluateEligibility: (input) => eligibility().evaluate(input),
     now
@@ -408,6 +425,30 @@ function clearBeds(...ids: string[]): void {
   for (const id of ids) establishClearBed(h.store, id, new Date(h.clock.ms - 60_000));
 }
 
+/** A latch for {@link Knobs.uploadGate}: the upload waits until `open()`. */
+function gate(): { promise: Promise<void>; open: () => void } {
+  let open!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { promise, open };
+}
+
+/** Yields to the event loop until `cond` holds — a start reaching its upload, say. */
+async function until(cond: () => boolean, what: string): Promise<void> {
+  for (let i = 0; i < 500; i += 1) {
+    if (cond()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`timed out waiting for ${what}`);
+}
+
+function uploading(printerId: string): boolean {
+  return h.store.repositories.deviceArtifacts
+    .listByStates(["UPLOADING"])
+    .some((record) => record.printerId === printerId);
+}
+
 // ── Off by default ──────────────────────────────────────────────────────────
 
 test("not configured: nothing is examined, nothing starts — whatever the rule says", async () => {
@@ -559,6 +600,24 @@ test("an earlier automatic start the printer never confirmed halts the next tick
   assert.equal(h.armed.on, false);
 });
 
+test("a start refused before the send (printer gone offline mid-delivery) is a refusal, not a halt — nothing was sent", async () => {
+  // It used to read as an unknown outcome: a phantom UNKNOWN run with the bed
+  // RESERVED, and the executor stopping itself over a printer that merely
+  // dropped off the network during the upload.
+  clearBeds("k2");
+  h.knobs.status.k2b = "printing";
+  const job = queuedJob({ title: "dropped" });
+  h.knobs.refuseBeforeSend = "«Creality K2» не отвечает";
+  const executor = h.executor();
+  const result = await executor.tick();
+  assert.equal(result.decisions[0]?.outcome, "refused", JSON.stringify(result.decisions));
+  assert.equal(h.armed.on, true, "no halt: the outcome is known — nothing left");
+  assert.equal(h.store.repositories.printRuns.findActiveByTask(job.id), null, "no run is held");
+  assert.equal(h.store.repositories.tasks.getById(job.id)?.state, "QUEUED", "the job is back in the queue");
+  assert.equal(h.store.repositories.bedCycles.latestByPrinter("k2")?.state, "CLEAR", "the plate is free again");
+  assert.equal(executor.status().cooldowns.length, 1, "and rests before the next try");
+});
+
 test("a definitive refusal leaves the job alone for the cool-down, then it is tried again", async () => {
   clearBeds("k2", "k2b");
   queuedJob({ title: "refused" });
@@ -607,6 +666,120 @@ test("the dry run changes nothing and works while the executor is off", async ()
   assert.deepEqual(h.startCalls, []);
   assert.equal(h.store.repositories.tasks.getById(job.id)?.state, "QUEUED");
   assert.equal(h.store.repositories.assignments.listByTask(job.id).length, 0, "no placement was made");
+});
+
+test("the dry run, polled while an automatic start is mid-delivery, leaves that start's placement alone", async () => {
+  // The dashboard polls the dry run every 15 s, and a delivery can take longer
+  // than that. The dry run used to withdraw «the executor's own» placements —
+  // the one the start in flight was delivering under among them — and the
+  // final gate then refused that start as «назначение устарело».
+  clearBeds("k2");
+  h.knobs.status.k2b = "printing";
+  const job = queuedJob({ title: "in flight" });
+  const hold = gate();
+  h.knobs.uploadGate.k2 = hold.promise;
+  const executor = h.executor();
+  const ticking = executor.tick();
+  await until(() => uploading("k2"), "the automatic delivery to start");
+
+  executor.plan();
+  const own = h.store.repositories.assignments.listByTask(job.id).filter((a) => a.createdBy === AUTO_QUEUE_ACTOR);
+  assert.equal(own.length, 1, "the start in flight placed the job");
+  assert.equal(own[0].invalidatedAt, null, "the dry run withdrew nothing");
+
+  hold.open();
+  const result = await ticking;
+  assert.equal(result.started, 1, JSON.stringify(result.decisions));
+  assert.deepEqual(h.startCalls.map((c) => c.printerId), ["k2"]);
+});
+
+// ── A person and the executor at the same time (scenario I) ─────────────────
+
+test("a person and the executor start the same job on the same printer at once: one print, one command, no halt", async () => {
+  // Manual launches are not serialised with the executor's ticks; the device
+  // slot lock, the final gate and the «one active run per task» index are what
+  // keep the two from sending two starts.
+  clearBeds("k2");
+  h.knobs.status.k2b = "printing"; // only k2 can take it
+  const job = queuedJob({ title: "both at once" });
+  const hold = gate();
+  h.knobs.uploadGate.k2 = hold.promise;
+  const executor = h.executor();
+  const auto = executor.tick();
+  await until(() => uploading("k2"), "the automatic delivery to start");
+
+  const manual = h.launch().launch(job.id, { printerId: "k2", idempotencyKey: "operator-click" });
+  hold.open();
+  const [autoResult, manualResult] = await Promise.allSettled([auto, manual]);
+
+  assert.equal(h.startCalls.length, 1, "exactly one start command reached the printer");
+  assert.equal(h.armed.on, true, "a person's start is not the executor's unknown — no halt");
+  const run = h.store.repositories.printRuns.findActiveByTask(job.id);
+  assert.ok(run, "one active run holds the job");
+  assert.equal(autoResult.status, "fulfilled");
+  const decision = autoResult.status === "fulfilled" ? autoResult.value.decisions[0] : undefined;
+  if (manualResult.status === "fulfilled") {
+    assert.equal(run.idempotencyKey, "operator-click");
+    assert.equal(decision?.outcome, "waiting", JSON.stringify(decision));
+  } else {
+    assert.equal(run.metadata.mode, "auto");
+    assert.equal(decision?.outcome, "started");
+  }
+});
+
+test("a person moving the job to another printer while the executor delivers it: the person's start wins, the stale one is refused at the gate", async () => {
+  clearBeds("k2", "k2b");
+  h.knobs.status.k2b = "printing"; // the executor can only choose k2
+  const job = queuedJob({ title: "moved by hand" });
+  const hold = gate();
+  h.knobs.uploadGate.k2 = hold.promise;
+  const executor = h.executor();
+  const auto = executor.tick();
+  await until(() => uploading("k2"), "the automatic delivery to start");
+
+  h.knobs.status.k2b = "idle";
+  const manual = await h.launch().launch(job.id, { printerId: "k2b" });
+  assert.equal(manual.printerId, "k2b");
+  hold.open();
+  const result = await auto;
+
+  assert.equal(result.started, 0, JSON.stringify(result.decisions));
+  assert.equal(result.decisions[0]?.outcome, "waiting", "someone else's start got there first — not a halt");
+  assert.deepEqual(h.startCalls.map((c) => c.printerId), ["k2b"], "nothing was sent to the printer the executor had picked");
+  assert.equal(h.armed.on, true);
+});
+
+// ── A person's placement and the launch window (HIGH-13, completed) ─────────
+
+test("an operator explicitly choosing another printer moves their own placement — withdrawn, audited, one start", async () => {
+  // `LaunchService.ensureAssignment` always meant to do this («оператор выбрал
+  // другой принтер»), but the policy refused every printer but the placed one
+  // first, with a message about a «подтверждённый план» that did not exist.
+  clearBeds("k2", "k2b");
+  const job = queuedJob({ unattended: false });
+  const placed = h.queue.assignTask(job.id, "k2", { reason: "оператор" });
+
+  const k2b = h.launch().preview(job.id, "k2b").candidates.find((c) => c.printerId === "k2b")!;
+  assert.equal(k2b.eligible, true, JSON.stringify(k2b.blockers));
+  assert.ok(k2b.warnings.some((w) => w.code === "ASSIGNMENT_REPLACED"), "the screen says the placement will move");
+
+  const outcome = await h.launch().launch(job.id, { printerId: "k2b" });
+  assert.equal(outcome.printerId, "k2b");
+  assert.ok(outcome.steps.includes("assignment_replaced"));
+  assert.ok(h.store.repositories.assignments.getById(placed.id)?.invalidatedAt, "the old placement is withdrawn");
+  assert.deepEqual(h.startCalls.map((c) => c.printerId), ["k2b"]);
+});
+
+test("without that explicit choice a person's placement decides: the recommendation does not move it", () => {
+  clearBeds("k2", "k2b");
+  const job = queuedJob({ unattended: false });
+  h.queue.assignTask(job.id, "k2b", { reason: "оператор" });
+  const preview = h.launch().preview(job.id);
+  assert.equal(preview.recommendedPrinterId, "k2b");
+  const k2 = preview.candidates.find((c) => c.printerId === "k2")!;
+  assert.ok(k2.blockers.some((b) => b.code === "ASSIGNMENT_PRINTER_MISMATCH"), JSON.stringify(k2.blockers));
+  const auto = h.launch().preview(job.id, "k2", { mode: "auto" }).candidates.find((c) => c.printerId === "k2")!;
+  assert.equal(auto.eligible, false, "the automatic queue never moves a placed job, even asked about another printer");
 });
 
 test("stop() waits for the tick in flight and nothing runs after it", async () => {

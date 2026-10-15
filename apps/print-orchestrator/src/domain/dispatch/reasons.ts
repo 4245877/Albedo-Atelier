@@ -147,6 +147,20 @@ export const REASON = {
 
   // ── Plan / assignment binding ─────────────────────────────────────────────
   ASSIGNMENT_PRINTER_MISMATCH: "ASSIGNMENT_PRINTER_MISMATCH",
+  /**
+   * Another task's live decision holds this printer — a person's placement or
+   * one under the confirmed plan — although nothing physical is there yet. The
+   * dispatch has always refused it («уже есть живое назначение»); the policy
+   * now says so too, so a preview cannot be green for a start that will be
+   * refused before a byte moves.
+   */
+  PRINTER_RESERVED: "PRINTER_RESERVED",
+  /**
+   * Not a refusal: an operator explicitly chose this printer for a job a person
+   * had placed elsewhere (no plan, nothing physical yet). The launch withdraws
+   * that placement, audited, before placing the job here.
+   */
+  ASSIGNMENT_REPLACED: "ASSIGNMENT_REPLACED",
   ASSIGNMENT_NOT_CONFIRMED: "ASSIGNMENT_NOT_CONFIRMED",
   /** The assignment's binding no longer matches the task (re-queued, re-sliced, edited). */
   ASSIGNMENT_STALE: "ASSIGNMENT_STALE",
@@ -220,6 +234,9 @@ export const NON_OVERRIDABLE: ReadonlySet<ReasonCode> = new Set<ReasonCode>([
   REASON.UNRESOLVED_DISPATCH,
   REASON.SLICE_VARIANT_MISMATCH,
   REASON.ASSIGNMENT_PRINTER_MISMATCH,
+  // Waiving it would only move the refusal to the placement step: the other
+  // job's decision holds the printer until it is started or withdrawn.
+  REASON.PRINTER_RESERVED,
   REASON.PRINTER_BUSY,
   REASON.NO_FILE,
   REASON.BAD_FILE_PATH,

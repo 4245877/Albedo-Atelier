@@ -43,3 +43,8 @@ id_*.pub
 # .gitignore cannot catch it. That half is caught by CONTENT instead, by the
 # `secret-scan` job in .github/workflows/ci.yml, which fails the build on any
 # committed PEM private-key header.
+
+# Session transcripts dropped into the repo root for context (e.g. «прошлый
+# чат.md», auto-committed once by accident). Working notes, not project files —
+# the project's own record is ALBEDO_MODERNIZATION_PROGRESS.md.
+/прошлый чат*.md

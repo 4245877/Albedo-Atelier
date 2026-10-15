@@ -176,11 +176,18 @@ export function bedBlock(p) {
   // хуже всего, а «неизвестно» уже занято отслеживаемым UNKNOWN.
   if (!bed) return "";
   const label = BED_LABEL[bed.state] || { text: bed.state, cls: "warn" };
-  const action = bed.awaitingClearance
+  // Подтвердить можно и деталь на столе, и стол, который никто не проверял:
+  // сервер решает это сам (`confirmable`) — неизвестный стол закрывается так же,
+  // как снятая деталь: человек смотрит и говорит. Без кнопки для «неизвестно»
+  // записать свободный стол можно было только запуском задания, а автоочередь
+  // без записанной очистки не запускает ничего. Старый backend поля не знает —
+  // тогда прежнее правило.
+  const confirmable = bed.confirmable ?? bed.awaitingClearance;
+  const action = confirmable
     ? `<button type="button" class="btn btn-sm btn-primary"
-         data-act="clear-bed" data-printer="${esc(p.id)}"
+         data-act="clear-bed" data-printer="${esc(p.id)}" data-bed-state="${esc(bed.state)}"
          ${bed.operationId ? `data-operation="${esc(bed.operationId)}"` : ""}>
-         Снять модель и освободить стол
+         ${bed.awaitingClearance ? "Снять модель и освободить стол" : "Стол пуст — подтвердить"}
        </button>`
     : "";
   return `

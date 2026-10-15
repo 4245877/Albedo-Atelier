@@ -400,6 +400,70 @@ test("a confirmed assignment is only executable on the printer it names", () => 
   assert.ok(blockerCodes(result).includes(REASON.ASSIGNMENT_PRINTER_MISMATCH));
 });
 
+// ── A person's own placement vs. the printer they now choose ─────────────────
+
+const MANUAL_PLACEMENT = {
+  planId: null,
+  assignmentId: "as-manual",
+  printerId: "bambu-x1",
+  sliceVariantId: null,
+  artifactSha256: null,
+  profileRevisionIds: [],
+  stale: false,
+  staleReason: null,
+  expectedRemotePath: null,
+  replaceable: true
+};
+
+test("an operator explicitly choosing another printer moves their own placement: a note, not a refusal", () => {
+  // The launch window's printer choice is a newer decision of the same person;
+  // the launch withdraws the old placement (audited) before placing the job.
+  const result = evaluate("manual", {
+    facts: { stage: "preflight", targetPrinterId: "k2", explicitPrinterChoice: true, reservation: MANUAL_PLACEMENT }
+  });
+  assert.deepEqual(blockerCodes(result), []);
+  const note = result.reasons.find((r) => r.code === REASON.ASSIGNMENT_REPLACED);
+  assert.equal(note?.severity, "warning");
+});
+
+test("a placement still binds everything that is not that explicit choice", () => {
+  const mismatch = (over: Partial<DispatchFacts>, mode: DispatchMode = "manual") =>
+    blockerCodes(
+      evaluate(mode, {
+        facts: { stage: "preflight", targetPrinterId: "k2", explicitPrinterChoice: true, reservation: MANUAL_PLACEMENT, ...over }
+      })
+    ).includes(REASON.ASSIGNMENT_PRINTER_MISMATCH);
+
+  assert.ok(mismatch({ explicitPrinterChoice: false }), "a recommendation never moves a person's placement");
+  assert.ok(mismatch({}, "auto"), "the automatic queue goes where a person placed the job, or nowhere");
+  assert.ok(mismatch({}, "night"), "nor does a night start");
+  assert.ok(mismatch({ stage: "dispatch" }), "the final gate runs the placement the launch made, never moves one");
+  assert.ok(mismatch({ reservation: { ...MANUAL_PLACEMENT, planId: "plan1" } }), "a confirmed plan is moved by replanning");
+  assert.ok(mismatch({ reservation: { ...MANUAL_PLACEMENT, replaceable: false } }), "a start in flight is not a placement to move");
+  assert.ok(mismatch({ reservation: { ...MANUAL_PLACEMENT, replaceable: undefined } }), "absent means not replaceable");
+});
+
+test("another job's live decision on this printer is a refusal nobody can override", () => {
+  const held = (planned: boolean) =>
+    evaluate("manual", {
+      facts: {
+        stage: "preflight",
+        printerHold: { assignmentId: "as-other", taskId: "t-other", taskTitle: "Кронштейн", planned }
+      }
+    });
+  for (const planned of [false, true]) {
+    const result = held(planned);
+    assert.equal(result.status, "blocked");
+    assert.ok(blockerCodes(result).includes(REASON.PRINTER_RESERVED));
+    assert.ok(hardBlockers(result).some((r) => r.code === REASON.PRINTER_RESERVED), "not overridable");
+    assert.match(result.reasons.find((r) => r.code === REASON.PRINTER_RESERVED)?.message ?? "", /Кронштейн/);
+  }
+  assert.equal(
+    blockerCodes(evaluate("manual", { facts: { printerHold: null } })).includes(REASON.PRINTER_RESERVED),
+    false
+  );
+});
+
 test("content drift from the confirmed plan blocks the start", () => {
   const result = evaluate("manual", {
     facts: {

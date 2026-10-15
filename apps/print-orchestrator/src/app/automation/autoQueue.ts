@@ -333,6 +333,12 @@ export class AutoQueueExecutor {
       if (!task.unattendedAllowed) continue;
       if (this.coolingFor(task, nowMs)) continue;
 
+      // Leftovers of an earlier attempt of ours that never started (a delivery
+      // that did not verify, a restart mid-attempt) are withdrawn first: they are
+      // not a person's decision and must not tie the job to that printer. Only
+      // the tick does this — never the dry run, which is polled while a start of
+      // ours may be mid-delivery and must not pull its placement from under it.
+      this.withdrawOwnPlacements(store, task, "автоочередь: прежняя попытка не запустилась — размещение снято");
       const launch = this.deps.launch();
       const choice = this.choose(launch, store, task, used);
       if (!choice.printerId || choice.message) {
@@ -367,6 +373,8 @@ export class AutoQueueExecutor {
    * in the way (`message`). A job already placed (a manual placement or one under
    * the confirmed plan) goes to that printer or nowhere: the executor never
    * re-plans what a person decided.
+   *
+   * Read-only: shared by the tick and the dry run, so it must never write.
    */
   private choose(
     launch: LaunchService,
@@ -374,10 +382,6 @@ export class AutoQueueExecutor {
     task: PrintTask,
     used: ReadonlySet<string>
   ): { printerId: string | null; printerName: string | null; message: string | null; code: string | null } {
-    // Leftovers of an earlier attempt of ours that never started (a delivery
-    // that did not verify, a restart mid-attempt) are withdrawn first: they are
-    // not a person's decision and must not tie the job to that printer.
-    this.withdrawOwnPlacements(store, task, "автоочередь: прежняя попытка не запустилась — размещение снято");
     const placed = this.placedPrinter(store, task);
     const preview = launch.preview(task.id, placed ?? undefined, { mode: "auto" });
     const targetId = placed ?? preview.recommendedPrinterId;

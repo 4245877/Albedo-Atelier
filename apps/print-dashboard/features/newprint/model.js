@@ -96,6 +96,28 @@ export function printerChoices(coverage, sets, kind) {
   });
 }
 
+/**
+ * Что принтер делает сейчас — одной пометкой рядом с ним в списке выбора.
+ *
+ * Пометка, а не запрет: нарезать под занятый принтер можно (печатать — потом),
+ * а окно запуска всё равно проверит принтер перед отправкой. Но выбирать
+ * принтер, не видя, что он печатает, молчит или ждёт снятия детали, — значит
+ * узнать об этом только в самом конце пути. Источник — то же представление
+ * принтера, что у карточки в Зале (`/api/printers`), включая серверную
+ * `readiness`; без неё — только статус устройства.
+ */
+export function printerStateNote(view) {
+  if (!view) return null;
+  if (view.status === "offline") return { text: "нет связи", tone: "warn" };
+  if (view.status === "error") return { text: "ошибка на принтере", tone: "error" };
+  if (view.status === "printing") return { text: "печатает", tone: "info" };
+  if (view.status === "paused") return { text: "на паузе", tone: "info" };
+  const readiness = view.readiness;
+  if (readiness && readiness.canAcceptJob === false && readiness.label) return { text: readiness.label, tone: "warn" };
+  if (view.status === "idle") return { text: "свободен", tone: "ok" };
+  return null;
+}
+
 const VARIANT_RUNNING = new Set(["pending", "running"]);
 
 /**

@@ -6,6 +6,7 @@ import {
   type LaunchCandidateInput,
   type LaunchReason
 } from "../../domain/launch/selection";
+import { BED_CLEARING_TYPES } from "../../domain/operations/states";
 import { assignmentHolds } from "../../domain/print/assignmentAuthority";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
 import type { Assignment, PrintTask } from "../../domain/print/types";
@@ -676,7 +677,8 @@ export class LaunchService {
       mode,
       stage: "preflight",
       automaticContinuationAllowed: this.deps.automaticContinuationAllowed(printer.id),
-      feedChoice: request.feedChoice ?? null
+      feedChoice: request.feedChoice ?? null,
+      explicitPrinterChoice: mode === "manual" && request.printerId === printer.id
     });
     const remaining = remainingBlockers(gate, request.override?.codes ?? []);
     if (remaining.length > 0) {
@@ -696,7 +698,30 @@ export class LaunchService {
     //      pointing elsewhere is withdrawn rather than silently redirected, so
     //      the ledger never shows a placement that did not happen.
     const assignment = this.ensureAssignment(task, printer.id, actor, steps);
+    try {
+      return await this.deliverAndStart(dispatch, task, printer, assignment, request, mode, actor, steps);
+    } catch (error) {
+      // A placement THIS attempt made belongs to the attempt. Left behind by a
+      // start that never reached the printer (a delivery that did not verify, a
+      // refusal at the final gate), it would tie the job to that printer and hold
+      // the printer against every other job — and nothing on the screen can
+      // withdraw it. A placement that was already there is a decision; it stays.
+      if (steps.includes("assignment_created")) this.withdrawUnstarted(assignment.id, task.id, actor, error);
+      throw error;
+    }
+  }
 
+  /** Steps 5–6 of {@link launch}: deliver the file, then the final gate and the start. */
+  private async deliverAndStart(
+    dispatch: DispatchService,
+    task: PrintTask,
+    printer: PrinterConfig,
+    assignment: Assignment,
+    request: LaunchRequest,
+    mode: "manual" | "auto",
+    actor: string,
+    steps: string[]
+  ): Promise<LaunchOutcome> {
     //      `prepare` is idempotent and reconciles against the device: a VERIFIED
     //      copy is left alone, a stale or missing one is (re-)uploaded. This is
     //      the step the old UI made the operator do by hand in the printer's file
@@ -749,6 +774,27 @@ export class LaunchService {
   }
 
   // ── Internals ──────────────────────────────────────────────────────────────
+
+  /**
+   * Withdraws the placement an attempt made, when nothing physical came of it.
+   * Not when a run is active for the task (the command may have left — that run
+   * holds its placement until telemetry or a person settles it), and not once
+   * the dispatch consumed the placement (it is no longer `PROPOSED`: a definitive
+   * device refusal has already closed it).
+   */
+  private withdrawUnstarted(assignmentId: string, taskId: string, actor: string, error: unknown): void {
+    const repos = this.deps.store.repositories;
+    if (repos.printRuns.findActiveByTask(taskId)) return;
+    const current = repos.assignments.getById(assignmentId);
+    if (!current || current.state !== "PROPOSED" || current.invalidatedAt !== null) return;
+    const why = error instanceof Error && error.message ? error.message : "причина неизвестна";
+    try {
+      this.deps.printQueue.invalidateAssignment(assignmentId, `запуск не состоялся: ${why}`, actor);
+    } catch {
+      // The launch's own refusal is the answer the caller needs; a failure to
+      // tidy up must not replace it (the placement then stays, as it did before).
+    }
+  }
 
   /** One audit line, through the store the whole service already writes to. */
   private recordAudit(
@@ -907,7 +953,11 @@ export class LaunchService {
       mode,
       automaticContinuationAllowed: (id) => this.deps.automaticContinuationAllowed(id),
       // A tray choice is about ONE printer's AMS — never applied to another.
-      feedChoice: (id) => (feed?.choice && feed.printerId === id ? feed.choice : null)
+      feedChoice: (id) => (feed?.choice && feed.printerId === id ? feed.choice : null),
+      // The printer the operator named is their decision, which may move a job
+      // they placed elsewhere (the launch withdraws that placement). Only an
+      // operator chooses: the automatic queue never moves a placed job.
+      chosenPrinterId: mode === "manual" ? (feed?.printerId ?? null) : null
     });
   }
 
@@ -1079,7 +1129,7 @@ function splitReasons(
 
 function toLaunchReason(r: EligibilityReason): LaunchReason {
   const evidence = r.evidence as
-    | { stage?: string; code?: string; origin?: string; bedState?: unknown }
+    | { stage?: string; code?: string; origin?: string; bedState?: unknown; type?: unknown }
     | undefined;
   const fromPreflight = evidence?.stage === "preflight";
   const preflightCode =
@@ -1115,8 +1165,21 @@ function toLaunchReason(r: EligibilityReason): LaunchReason {
  */
 function confirmationFor(
   reason: EligibilityReason,
-  evidence: { code?: string; bedState?: unknown } | undefined
+  evidence: { code?: string; bedState?: unknown; type?: unknown } | undefined
 ): LaunchConfirmationKey | undefined {
+  // The part-removal (or plate-service) operation a finished print opens IS the
+  // bed clearance — one fact with two records, closed together by the same
+  // `clearBed` the `bed_clear` tick performs. Left a plain blocker, it made the
+  // candidate ineligible before the tick could be applied: the launch window
+  // offered «Стол свободен» and then refused the start for the very operation
+  // that tick closes. Any other open operation (a nozzle change, maintenance)
+  // stays a hard refusal.
+  if (reason.code === "MANUAL_OPERATION_REQUIRED") {
+    const type = evidence?.type;
+    return typeof type === "string" && (BED_CLEARING_TYPES as ReadonlySet<string>).has(type)
+      ? "bed_clear"
+      : undefined;
+  }
   const confirmation = CONFIRMATION_FOR_CODE[reason.code];
   if (!confirmation) return undefined;
   if (reason.code !== "BED_NOT_CLEAR") return confirmation;

@@ -56,6 +56,12 @@ export interface EligibilityRequest {
   deviceArtifact?: DeviceArtifactFacts | null;
   /** Operator's explicit filament-source choice: job filament index → tray id. */
   feedChoice?: Readonly<Record<number, number>> | null;
+  /**
+   * The operator chose this printer themselves in the launch window — not a
+   * recommendation, a plan or the automatic queue. See
+   * `DispatchFacts.explicitPrinterChoice`; absent = false.
+   */
+  explicitPrinterChoice?: boolean;
 }
 
 /**
@@ -174,6 +180,7 @@ export class EligibilityQueries {
       telemetryAgeMs: printer.telemetryAgeMs,
       activeRun,
       startGuard: request.startGuard ?? repos.startGuards.get(printer.id) ?? null,
+      printerHold: this.printerHoldFor(task.id, printer.id),
       bedState: resolved.evidence.bedCycle,
       automaticContinuationAllowed: request.automaticContinuationAllowed ?? false,
 
@@ -181,6 +188,7 @@ export class EligibilityQueries {
 
       reservation: this.confirmedReservation(task.id, resolved.variant?.id ?? null),
       targetPrinterId: printer.id,
+      explicitPrinterChoice: request.explicitPrinterChoice === true,
       sliceVariantId: resolved.variant?.id ?? null,
       currentProfileRevisionIds: profileRevisionIdsOf(resolveTaskBinding(repos, task).binding),
       adapterUploadSupported:
@@ -433,7 +441,33 @@ export class EligibilityQueries {
       ),
       expectedRemotePath: b.expectedRemotePath,
       stale: assignment.invalidatedAt !== null,
-      staleReason: assignment.invalidatedReason
+      staleReason: assignment.invalidatedReason,
+      // A person's placement with nothing physical behind it yet. A plan's is
+      // moved by replanning; a RESERVED/ACTIVE one is a start in flight or a print.
+      replaceable: planId === null && assignment.state === "PROPOSED"
+    };
+  }
+
+  /**
+   * A decision about ANOTHER task that holds this printer before anything
+   * physical exists (`assignmentHolds`, state `PROPOSED`): a person's placement
+   * or one under the confirmed plan. A start in flight or a print is answered
+   * by the run, guard and bed facts and is not repeated here.
+   */
+  private printerHoldFor(
+    taskId: string,
+    printerId: string
+  ): { assignmentId: string; taskId: string; taskTitle: string | null; planned: boolean } | null {
+    const repos = this.ctx.store.repositories;
+    const hold = repos.assignments
+      .listHoldingByPrinter(printerId)
+      .find((a) => a.taskId !== taskId && a.state === "PROPOSED");
+    if (!hold) return null;
+    return {
+      assignmentId: hold.id,
+      taskId: hold.taskId,
+      taskTitle: repos.tasks.getById(hold.taskId)?.title ?? null,
+      planned: hold.planId !== null
     };
   }
 }

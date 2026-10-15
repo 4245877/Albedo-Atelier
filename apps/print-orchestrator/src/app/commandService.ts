@@ -15,7 +15,7 @@ import {
 import type { CameraService } from "./cameraService";
 import { KeyedMutex } from "../shared/keyedMutex";
 import { runDriverOperation, toDriverError } from "./driverErrors";
-import { classifyDispatchError, reconcileStartGuard, type StartGuardStore } from "./startGuard";
+import { classifyDispatchError, reconcileStartGuard, refusedBeforeSend, type StartGuardStore } from "./startGuard";
 import type { EventFeed } from "./eventFeed";
 import type { LightScheduler } from "./lightScheduler";
 import type { PrinterPoller } from "./printerPoller";
@@ -225,97 +225,40 @@ export class PrinterCommandService {
     opts: StartPrintOptions = {}
   ): Promise<{ view: PrinterView; status: PrinterLiveStatus; confirmed: boolean }> {
     const runId = opts.runId ?? null;
-    // Printer first: `normalizeStartablePath` answers "can this be started?" from
-    // the target adapter's capability table, so validating before the config is
-    // resolved falls back to the Klipper G-code set and refuses a Bambu
-    // `.gcode.3mf` plate package at the last hop before the device.
-    const printer = this.getReachableConfig(id);
-    const target = normalizeStartablePath(file, printer);
-    if (!supportsPrinterStart(printer)) {
-      throw new JobError(
-        `Удалённый запуск печати для «${printer.name}» не поддерживается — запустите файл на самом принтере`
-      );
-    }
+    // Every refusal before the durable guard is written is a start that was never
+    // sent — it is marked so (`refusedBeforeSend`), and the dispatch unwinds it
+    // instead of holding an «unknown» run for a command that does not exist.
+    let printer: PrinterConfig;
+    let target: string;
+    try {
+      // Printer first: `normalizeStartablePath` answers "can this be started?" from
+      // the target adapter's capability table, so validating before the config is
+      // resolved falls back to the Klipper G-code set and refuses a Bambu
+      // `.gcode.3mf` plate package at the last hop before the device.
+      printer = this.getReachableConfig(id);
+      target = normalizeStartablePath(file, printer);
+      if (!supportsPrinterStart(printer)) {
+        throw new JobError(
+          `Удалённый запуск печати для «${printer.name}» не поддерживается — запустите файл на самом принтере`
+        );
+      }
 
-    // Fast honest failure from the poll cache before taking the lock; the
-    // authoritative check below is against a fresh device read.
-    const cached = this.poller.getStatus(id);
-    if (cached && isBusyStatus(cached.status)) {
-      throw new JobError(`«${printer.name}» уже занят печатью — дождитесь завершения`);
+      // Fast honest failure from the poll cache before taking the lock; the
+      // authoritative check below is against a fresh device read.
+      const cached = this.poller.getStatus(id);
+      if (cached && isBusyStatus(cached.status)) {
+        throw new JobError(`«${printer.name}» уже занят печатью — дождитесь завершения`);
+      }
+    } catch (error) {
+      throw refusedBeforeSend(error);
     }
 
     return this.runExclusive(id, async () => {
-      const holdUntil = this.recentStarts.get(printer.id) ?? 0;
-      if (holdUntil > Date.now()) {
-        throw new JobError(
-          `На «${printer.name}» только что отправлена команда запуска — дождитесь, пока принтер подтвердит состояние`
-        );
-      }
-      this.recentStarts.delete(printer.id);
-
-      const status = await this.poller.refreshStatus(printer, this.liveStatus);
-
-      // Reconcile any durable start intent BEFORE anything is (re)sent. This is
-      // what survives a lost Moonraker response, a retry and a process restart:
-      // an earlier start is never re-dispatched without checking the real device.
-      const guards = this.guards();
-      const existing = guards?.get(printer.id) ?? null;
-      if (existing) {
-        const decision = reconcileStartGuard(existing, status, target);
-        if (decision === "already-running") {
-          // The earlier start took — the device is printing it. Confirm the
-          // guard and report success WITHOUT dispatching again; the caller
-          // (queue flow) removes the job as launched.
-          if (guards && existing.state !== "ACKED") {
-            guards.upsert({ ...existing, state: "ACKED", updatedAt: nowIso() });
-          }
-          return {
-            view: buildPrinterView(printer, status, this.cameras.getEntry(printer.id), null, this.specsOf(printer)),
-            status,
-            confirmed: true
-          };
-        }
-        if (decision === "busy-other") {
-          // Something else is printing; our guarded start never ran. Drop the
-          // stale guard and refuse — the printer is genuinely busy.
-          guards?.delete(printer.id);
-          throw new JobError(`«${printer.name}» уже занят печатью — дождитесь завершения`);
-        }
-        // held — outcome cannot be confirmed. Fail-closed: never auto-dispatch.
-        throw new JobError(
-          `На «${printer.name}» есть неподтверждённый запуск печати «${existing.file}» — проверьте принтер и снимите блокировку, прежде чем запускать снова`
-        );
-      }
-
-      if (!status.online) {
-        throw new PrinterOfflineError(id);
-      }
-      if (isBusyStatus(status.status)) {
-        throw new JobError(`«${printer.name}» уже занят печатью — дождитесь завершения`);
-      }
-      if (status.status !== "idle") {
-        throw new JobError(
-          `«${printer.name}» не готов к запуску (состояние: ${status.status}) — запуск разрешён только из подтверждённого idle`
-        );
-      }
-
-      // The last moment at which "nothing has been sent" is a fact: an operator's
-      // cancel, a changed feed source — anything the caller must re-check under
-      // this printer's lock — refuses here, before any trace of a send exists.
-      opts.beforeSend?.();
-
-      // Record the intent durably BEFORE dispatch. A failed persist here aborts
-      // the start (fail-closed): a command we cannot account for is never fired.
-      // This write is intentionally synchronous and its failure is not swallowed.
-      guards?.upsert({
-        printerId: printer.id,
-        file: target,
-        state: "SENT",
-        jobRef: jobRef ?? null,
-        runId,
-        requestedAt: nowIso(),
-        updatedAt: nowIso()
+      const prepared = await this.prepareSend(printer, target, jobRef, runId, opts).catch((error: unknown) => {
+        throw refusedBeforeSend(error);
       });
+      if (prepared.kind === "already-running") return prepared.result;
+      const { guards } = prepared;
 
       this.recentStarts.set(printer.id, Date.now() + RECENT_START_HOLD_MS);
       let sent: { confirmed: boolean };
@@ -347,45 +290,150 @@ export class PrinterCommandService {
         }
         throw toDriverError(printer.id, error);
       }
-
-      // Dispatch accepted. A direct operator start (no queue job) has nothing
-      // that could re-dispatch it, so the guard is cleared now. A queue start
-      // keeps its guard ACKED until the caller has *durably* removed the job
-      // (see FarmStore.startNext/startNight), closing the crash-before-removal
-      // window that would otherwise re-launch it.
-      if (guards) {
-        if (jobRef) {
-          guards.upsert({
-            printerId: printer.id,
-            file: target,
-            state: "ACKED",
-            jobRef,
-            runId,
-            requestedAt: nowIso(),
-            updatedAt: nowIso()
-          });
-        } else {
-          guards.delete(printer.id);
-        }
-      }
-
-      const fresh = await this.poller.refreshStatus(printer, this.liveStatus);
-      const observed =
-        isBusyStatus(fresh.status) && sameJobFile(fresh.currentFile, target);
-      const confirmed = sent.confirmed || observed;
-      this.events.push(
-        "▶",
-        confirmed
-          ? `Печать «${target}» на <b>${printer.name}</b> началась`
-          : `Команда запуска «${target}» принята <b>${printer.name}</b> — ждём, когда принтер подтвердит начало печати`,
-        confirmed ? "ok" : "info"
-      );
-      return {
-        view: buildPrinterView(printer, fresh, this.cameras.getEntry(printer.id), null, this.specsOf(printer)),
-        status: fresh,
-        confirmed
-      };
+      return this.afterSend(printer, target, jobRef, runId, guards, sent);
     });
+  }
+
+  /**
+   * Everything a start does before anything is on the wire, under the printer's
+   * command lock: the post-start hold, a fresh device read, reconciliation of an
+   * earlier durable intent, the idle check, the caller's last-moment veto and,
+   * last, the durable guard itself. A throw from here means nothing was sent.
+   */
+  private async prepareSend(
+    printer: PrinterConfig,
+    target: string,
+    jobRef: string | undefined,
+    runId: string | null,
+    opts: StartPrintOptions
+  ): Promise<
+    | { kind: "already-running"; result: { view: PrinterView; status: PrinterLiveStatus; confirmed: boolean } }
+    | { kind: "send"; guards: StartGuardStore | null }
+  > {
+    const id = printer.id;
+    const holdUntil = this.recentStarts.get(printer.id) ?? 0;
+    if (holdUntil > Date.now()) {
+      throw new JobError(
+        `На «${printer.name}» только что отправлена команда запуска — дождитесь, пока принтер подтвердит состояние`
+      );
+    }
+    this.recentStarts.delete(printer.id);
+
+    const status = await this.poller.refreshStatus(printer, this.liveStatus);
+
+    // Reconcile any durable start intent BEFORE anything is (re)sent. This is
+    // what survives a lost Moonraker response, a retry and a process restart:
+    // an earlier start is never re-dispatched without checking the real device.
+    const guards = this.guards();
+    const existing = guards?.get(printer.id) ?? null;
+    if (existing) {
+      const decision = reconcileStartGuard(existing, status, target);
+      if (decision === "already-running") {
+        // The earlier start took — the device is printing it. Confirm the
+        // guard and report success WITHOUT dispatching again; the caller
+        // (queue flow) removes the job as launched.
+        if (guards && existing.state !== "ACKED") {
+          guards.upsert({ ...existing, state: "ACKED", updatedAt: nowIso() });
+        }
+        return {
+          kind: "already-running",
+          result: {
+            view: buildPrinterView(printer, status, this.cameras.getEntry(printer.id), null, this.specsOf(printer)),
+            status,
+            confirmed: true
+          }
+        };
+      }
+      if (decision === "busy-other") {
+        // Something else is printing; our guarded start never ran. Drop the
+        // stale guard and refuse — the printer is genuinely busy.
+        guards?.delete(printer.id);
+        throw new JobError(`«${printer.name}» уже занят печатью — дождитесь завершения`);
+      }
+      // held — outcome cannot be confirmed. Fail-closed: never auto-dispatch.
+      throw new JobError(
+        `На «${printer.name}» есть неподтверждённый запуск печати «${existing.file}» — проверьте принтер и снимите блокировку, прежде чем запускать снова`
+      );
+    }
+
+    if (!status.online) {
+      throw new PrinterOfflineError(id);
+    }
+    if (isBusyStatus(status.status)) {
+      throw new JobError(`«${printer.name}» уже занят печатью — дождитесь завершения`);
+    }
+    if (status.status !== "idle") {
+      throw new JobError(
+        `«${printer.name}» не готов к запуску (состояние: ${status.status}) — запуск разрешён только из подтверждённого idle`
+      );
+    }
+
+    // The last moment at which "nothing has been sent" is a fact: an operator's
+    // cancel, a changed feed source — anything the caller must re-check under
+    // this printer's lock — refuses here, before any trace of a send exists.
+    opts.beforeSend?.();
+
+    // Record the intent durably BEFORE dispatch. A failed persist here aborts
+    // the start (fail-closed): a command we cannot account for is never fired.
+    // This write is intentionally synchronous and its failure is not swallowed.
+    guards?.upsert({
+      printerId: printer.id,
+      file: target,
+      state: "SENT",
+      jobRef: jobRef ?? null,
+      runId,
+      requestedAt: nowIso(),
+      updatedAt: nowIso()
+    });
+    return { kind: "send", guards };
+  }
+
+  /** The device accepted the start: settle the guard and report what was seen. */
+  private async afterSend(
+    printer: PrinterConfig,
+    target: string,
+    jobRef: string | undefined,
+    runId: string | null,
+    guards: StartGuardStore | null,
+    sent: { confirmed: boolean }
+  ): Promise<{ view: PrinterView; status: PrinterLiveStatus; confirmed: boolean }> {
+    // Dispatch accepted. A direct operator start (no queue job) has nothing
+    // that could re-dispatch it, so the guard is cleared now. A queue start
+    // keeps its guard ACKED until the caller has *durably* removed the job
+    // (see FarmStore.startNext/startNight), closing the crash-before-removal
+    // window that would otherwise re-launch it.
+    if (guards) {
+      if (jobRef) {
+        guards.upsert({
+          printerId: printer.id,
+          file: target,
+          state: "ACKED",
+          jobRef,
+          runId,
+          requestedAt: nowIso(),
+          updatedAt: nowIso()
+        });
+      } else {
+        guards.delete(printer.id);
+      }
+    }
+
+    const fresh = await this.poller.refreshStatus(printer, this.liveStatus);
+    const observed =
+      isBusyStatus(fresh.status) && sameJobFile(fresh.currentFile, target);
+    const confirmed = sent.confirmed || observed;
+    this.events.push(
+      "▶",
+      confirmed
+        ? `Печать «${target}» на <b>${printer.name}</b> началась`
+        : `Команда запуска «${target}» принята <b>${printer.name}</b> — ждём, когда принтер подтвердит начало печати`,
+      confirmed ? "ok" : "info"
+    );
+    return {
+      view: buildPrinterView(printer, fresh, this.cameras.getEntry(printer.id), null, this.specsOf(printer)),
+      status: fresh,
+      confirmed
+    };
   }
 
   /**

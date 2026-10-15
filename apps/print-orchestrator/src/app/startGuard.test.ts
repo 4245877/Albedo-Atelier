@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { JobError } from "../core/errors";
+
 import { PrinterCommandError, type PrinterLiveStatus } from "../infra/printers/status";
 import type { StartGuard } from "../domain/print/types";
-import { classifyDispatchError, reconcileStartGuard } from "./startGuard";
+import { classifyDispatchError, reconcileStartGuard, refusedBeforeSend } from "./startGuard";
 
 function status(over: Partial<PrinterLiveStatus>): PrinterLiveStatus {
   return {
@@ -68,6 +70,16 @@ test("an ambiguous device error (HTTP 5xx) is 'unknown', not 'rejected'", () => 
 test("a pre-connection network error (refused/DNS) never reached the device → 'rejected'", () => {
   assert.equal(classifyDispatchError({ cause: { code: "ECONNREFUSED" } }), "rejected");
   assert.equal(classifyDispatchError(Object.assign(new Error("dns"), { code: "ENOTFOUND" })), "rejected");
+});
+
+test("a start refused before anything was sent is 'rejected', whatever its class", () => {
+  // Busy, offline, not idle, the post-start hold: no guard, nothing on the wire.
+  // Unmarked, the same errors stay 'unknown' — the mark is the evidence, not the class.
+  assert.equal(classifyDispatchError(refusedBeforeSend(new JobError("уже занят печатью"))), "rejected");
+  assert.equal(classifyDispatchError(refusedBeforeSend(new PrinterCommandError("Moonraker HTTP 500"))), "rejected");
+  assert.equal(classifyDispatchError(new JobError("уже занят печатью")), "unknown");
+  const frozen = Object.freeze(new Error("frozen"));
+  assert.equal(classifyDispatchError(refusedBeforeSend(frozen)), "unknown", "an unmarkable error stays fail-closed");
 });
 
 test("an unclassifiable error is treated 'unknown' (fail-closed)", () => {

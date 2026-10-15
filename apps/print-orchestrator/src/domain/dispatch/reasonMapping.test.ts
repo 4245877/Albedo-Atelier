@@ -167,7 +167,8 @@ test("every dispatch reason code has an explicit override policy decision", () =
     REASON.LAUNCH_UNCONFIRMED,
     REASON.PREFLIGHT_REASON_UNMAPPED,
     REASON.DEVICE_FILE_STALE,
-    REASON.ARTIFACT_HASH_MISMATCH
+    REASON.ARTIFACT_HASH_MISMATCH,
+    REASON.PRINTER_RESERVED
   ]) {
     assert.ok(NON_OVERRIDABLE.has(code), `«${code}» must not be overridable`);
   }

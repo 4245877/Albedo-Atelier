@@ -25,6 +25,36 @@ export type DispatchOutcome = "rejected" | "unknown";
 /** Node system error codes that mean the request never reached the device. */
 const NEVER_REACHED_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ECONNABORTED"]);
 
+const REFUSED_BEFORE_SEND = Symbol.for("atelier.start.refusedBeforeSend");
+
+/**
+ * Marks a start refused before the command existed anywhere — before the durable
+ * guard was written and before a byte went to the device: the printer was busy,
+ * offline, not idle, still in its post-start hold, or the caller withdrew.
+ * {@link classifyDispatchError} then answers `rejected` with certainty.
+ *
+ * Without it such a refusal fell through to `unknown`: the dispatch held the run
+ * UNKNOWN with the bed RESERVED for a command that was provably never sent, a
+ * person had to «resolve» a print that never existed, and the automatic queue —
+ * which stops on any unknown of its own — halted on a printer that merely went
+ * offline during an upload. The error keeps its class and message (and thus its
+ * HTTP answer for every other caller); only the classification learns the fact.
+ */
+export function refusedBeforeSend<T>(error: T): T {
+  if (error !== null && typeof error === "object" && !Object.isFrozen(error)) {
+    Object.defineProperty(error, REFUSED_BEFORE_SEND, { value: true, enumerable: false });
+  }
+  return error;
+}
+
+function wasRefusedBeforeSend(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    (error as Record<symbol, unknown>)[REFUSED_BEFORE_SEND] === true
+  );
+}
+
 /**
  * Classifies a failed `sendPrinterStart`. A timeout is the dangerous case —
  * the command left the orchestrator and the response was lost, so the print
@@ -34,6 +64,7 @@ const NEVER_REACHED_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "
  * (HTTP 5xx, mid-exchange reset) is `unknown`.
  */
 export function classifyDispatchError(error: unknown): DispatchOutcome {
+  if (wasRefusedBeforeSend(error)) return "rejected";
   if (isTimeoutError(error)) return "unknown";
   if (error instanceof PrinterCommandError) {
     return error.definitivelyRejected ? "rejected" : "unknown";

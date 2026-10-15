@@ -111,6 +111,8 @@ export class SchedulerService {
       feedChoice?: (printerId: string) => Readonly<Record<number, number>> | null;
       /** Who is behind the start: an operator (default) or the automatic queue. */
       mode?: DispatchMode;
+      /** The printer the operator chose themselves in the launch window, if any. */
+      chosenPrinterId?: string | null;
     } = {}
   ): { printer: SchedulerPrinterRef; eligibility: DispatchEligibility }[] {
     return this.listPrinterRefs().map((printer) => ({
@@ -120,7 +122,8 @@ export class SchedulerService {
         stage: "preflight",
         automaticContinuationAllowed:
           options.automaticContinuationAllowed?.(printer.id) ?? false,
-        feedChoice: options.feedChoice?.(printer.id) ?? null
+        feedChoice: options.feedChoice?.(printer.id) ?? null,
+        explicitPrinterChoice: Boolean(options.chosenPrinterId) && options.chosenPrinterId === printer.id
       })
     }));
   }

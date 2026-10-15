@@ -158,6 +158,19 @@ services:
       BAMBU_A1_ACCESS_CODE: ${BAMBU_A1_ACCESS_CODE:-}
       # Legacy fixed night window; the scheduler migrates it into LIGHT_* mode.
       NIGHT_PRINT_WINDOW: ${NIGHT_PRINT_WINDOW:-}
+      # Operator minutes to ready a plate between two planned prints (empty →
+      # the built-in 5).
+      SCHEDULER_BED_PREP_MINUTES: ${SCHEDULER_BED_PREP_MINUTES:-}
+      # The automatic queue's DEPLOYMENT switch — off unless .env says otherwise,
+      # spelled out so `docker compose config` shows it. Even when on, nothing
+      # starts until the operator also switches the «Автоочередь» rule on in
+      # «Автоматизации». The tuning knobs below fall back to the built-in
+      # defaults when empty (see .env.example).
+      AUTO_QUEUE_ENABLED: ${AUTO_QUEUE_ENABLED:-false}
+      AUTO_QUEUE_INTERVAL_MS: ${AUTO_QUEUE_INTERVAL_MS:-}
+      AUTO_QUEUE_STARTUP_DELAY_MS: ${AUTO_QUEUE_STARTUP_DELAY_MS:-}
+      AUTO_QUEUE_MAX_STARTS_PER_TICK: ${AUTO_QUEUE_MAX_STARTS_PER_TICK:-}
+      AUTO_QUEUE_RETRY_COOLDOWN_MS: ${AUTO_QUEUE_RETRY_COOLDOWN_MS:-}
     volumes:
       # Slicer profiles + the printers.json SEED. Printers themselves are edited
       # in the dashboard and stored in the database on the volume below; this

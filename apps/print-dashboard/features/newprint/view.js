@@ -7,7 +7,7 @@ import { chip } from "../../shared/chips.js";
 import { icon } from "../../shared/icons.js";
 import { fmtDuration } from "../../shared/format.js";
 import { UNIT_CHOICES } from "../uploads/units.js";
-import { STEPS, isSlicing, lastRecipeFor, printerChoices, variantPromotable } from "./model.js";
+import { STEPS, isSlicing, lastRecipeFor, printerChoices, printerStateNote, variantPromotable } from "./model.js";
 
 const RECENT_FILES = 12;
 
@@ -163,6 +163,7 @@ export function printerStepHtml(vm, current) {
   if (choices.length === 0) {
     return `<div class="slice-empty">Принтеров в ферме нет — добавьте их в разделе <button type="button" class="np-link" data-goto="hardware">«Оборудование»</button>.</div>`;
   }
+  const live = new Map((vm.data.live || []).map((view) => [view.id, view]));
   const rows = choices
     .map((p) => {
       const selected = flow.printer && flow.printer.printerId === p.printerId;
@@ -172,12 +173,15 @@ export function printerStepHtml(vm, current) {
             ? chip(`рецептов: ${p.recipes}`, "ok")
             : chip("нет утверждённого рецепта", "warn")
           : "";
+      const state = printerStateNote(live.get(p.printerId));
+      const stateChip = state ? chip(esc(state.text), state.tone) : "";
       const button = p.usable
         ? `<button type="button" class="btn btn-sm${selected ? " btn-primary" : ""}" data-np-action="pick-printer" data-id="${esc(p.printerId)}">${selected ? "Выбран" : "Выбрать"}</button>`
         : `<button type="button" class="btn btn-sm" data-goto="slicing">Создать рецепт</button>`;
       return `<li class="slice-item"><div class="slice-item-head">
           <span class="slice-name">${esc(p.name)}</span>
           ${p.model ? `<span class="slice-tag">${esc(p.model)}</span>` : ""}
+          ${stateChip}
           ${note}
           <span class="row-actions">${button}</span>
         </div></li>`;

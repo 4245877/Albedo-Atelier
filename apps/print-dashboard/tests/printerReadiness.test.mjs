@@ -70,3 +70,27 @@ test("сопло, введённое вручную (source=manual), помеч�
   const live = materialBlock({ ...base, nozzleDiameter: 0.4, nozzleDiameterSource: "printer", material: "PLA" });
   assert.doesNotMatch(live, /nozzle-chip-config/);
 });
+
+test("строка стола: подтвердить можно и деталь на столе, и стол, который никто не проверял", async () => {
+  // Сразу после развёртывания у принтеров нет истории стола («Стол не
+  // подтверждён»). Кнопка рисовалась только для детали на столе, и записать
+  // свободный стол можно было лишь запуском задания — а автоочередь без
+  // записанной очистки не запускает ничего.
+  const { bedBlock } = await import("../render/printers.js");
+  const awaiting = bedBlock({ id: "k2", bedCycle: { state: "AWAITING_CLEARANCE", awaitingClearance: true, confirmable: true, operationId: "op1" } });
+  assert.match(awaiting, /data-act="clear-bed"/);
+  assert.match(awaiting, /Снять модель и освободить стол/);
+  assert.match(awaiting, /data-operation="op1"/);
+
+  const unknown = bedBlock({ id: "k2", bedCycle: { state: "UNKNOWN", awaitingClearance: false, confirmable: true, operationId: null } });
+  assert.match(unknown, /data-act="clear-bed"/);
+  assert.match(unknown, /data-bed-state="UNKNOWN"/);
+  assert.match(unknown, /Стол пуст — подтвердить/);
+
+  for (const state of ["RUNNING", "RESERVED", "CLEAR"]) {
+    assert.doesNotMatch(bedBlock({ id: "k2", bedCycle: { state, awaitingClearance: false, confirmable: false } }), /clear-bed/, state);
+  }
+  // Старый backend без `confirmable` — прежнее правило.
+  assert.match(bedBlock({ id: "k2", bedCycle: { state: "AWAITING_CLEARANCE", awaitingClearance: true } }), /clear-bed/);
+  assert.doesNotMatch(bedBlock({ id: "k2", bedCycle: { state: "UNKNOWN", awaitingClearance: false } }), /clear-bed/);
+});

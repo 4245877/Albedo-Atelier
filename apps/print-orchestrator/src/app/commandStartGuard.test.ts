@@ -15,7 +15,7 @@ import type { EventFeed } from "./eventFeed";
 import type { LightScheduler } from "./lightScheduler";
 import type { PrinterPoller } from "./printerPoller";
 import type { SnapshotStore } from "../infra/persistence/snapshotStore";
-import type { StartGuardStore } from "./startGuard";
+import { classifyDispatchError, type StartGuardStore } from "./startGuard";
 
 /*
  * The durable double-start guarantee: one operator/queue command must never
@@ -293,6 +293,36 @@ test("beforeSend runs inside the lock BEFORE the guard is written — a cancel t
   );
   assert.equal(dispatch.count(), 0, "no start command left the orchestrator");
   assert.equal(store.get("k2"), null, "no start guard was ever written");
+});
+
+test("refusals before the guard is written are marked as never sent — the dispatch unwinds them instead of holding an unknown", async () => {
+  // Found end to end (ops/verify): a start refused here — the post-start hold,
+  // a printer that turned busy or went offline during the upload — fell
+  // through to 'unknown', and the dispatch held a phantom UNKNOWN run with the
+  // bed RESERVED for a command that never existed.
+  const { store } = tempGuardStore();
+  const dispatch = mockStart(() => ({ ok: true, status: 200, json: async () => ({}) }) as unknown as Response);
+  let live = makeStatus({ status: "printing", currentFile: "other.gcode" });
+  const service = makeService(store, () => live);
+
+  const busy = await service.startPrintObserved("k2", "model.gcode", "run-1", { runId: "run-1" }).catch((e: unknown) => e);
+  assert.equal(classifyDispatchError(busy), "rejected", "busy at the last moment: never sent");
+  live = makeStatus({ online: false, status: "offline" });
+  const offline = await service.startPrintObserved("k2", "model.gcode", "run-1", { runId: "run-1" }).catch((e: unknown) => e);
+  assert.equal(classifyDispatchError(offline), "rejected", "offline at the last moment: never sent");
+  assert.equal(dispatch.count(), 0);
+  assert.equal(store.get("k2"), null, "and no guard was written");
+
+  // After the guard is written the mark is never applied: a lost response is still unknown.
+  live = makeStatus({ status: "idle" });
+  globalThis.fetch = (async () => timeoutError()) as typeof globalThis.fetch;
+  const lost = await service.startPrintObserved("k2", "model.gcode", "run-2", { runId: "run-2" }).catch((e: unknown) => e);
+  assert.equal(classifyDispatchError(lost), "unknown", "a command that may have left stays unknown");
+  assert.equal(store.get("k2")?.state, "UNKNOWN");
+
+  // The post-start hold itself (a second start right after the first) is a refusal before sending.
+  const held = await service.startPrintObserved("k2", "model.gcode", "run-3", { runId: "run-3" }).catch((e: unknown) => e);
+  assert.equal(classifyDispatchError(held), "rejected");
 });
 
 test("an HTTP-accepted Moonraker start is NOT confirmed until the device is seen printing it", async () => {

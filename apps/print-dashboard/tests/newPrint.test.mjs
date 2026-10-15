@@ -126,3 +126,18 @@ test("after the job is queued, earlier steps cannot be edited — a second print
   assert.match(html, /Начать новую печать/);
   assert.match(stepsHtml(flow), /aria-current="step"/);
 });
+
+test("шаг «Принтер»: рядом с каждым принтером — что он делает сейчас", async () => {
+  const { printerStateNote } = await import("../features/newprint/model.js");
+  assert.equal(printerStateNote(null), null);
+  assert.deepEqual(printerStateNote({ status: "printing" }), { text: "печатает", tone: "info" });
+  assert.deepEqual(printerStateNote({ status: "offline" }), { text: "нет связи", tone: "warn" });
+  assert.deepEqual(printerStateNote({ status: "error" }), { text: "ошибка на принтере", tone: "error" });
+  // `idle` — не «свободен», когда сервер говорит, что деталь ещё на столе.
+  assert.deepEqual(
+    printerStateNote({ status: "idle", readiness: { state: "needs_clearance", canAcceptJob: false, label: "Ждёт снятия детали" } }),
+    { text: "Ждёт снятия детали", tone: "warn" }
+  );
+  assert.deepEqual(printerStateNote({ status: "idle", readiness: { state: "ready", canAcceptJob: true, label: "Готов" } }), { text: "свободен", tone: "ok" });
+  assert.deepEqual(printerStateNote({ status: "idle" }), { text: "свободен", tone: "ok" }, "старый backend без readiness");
+});
