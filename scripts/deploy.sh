@@ -2517,7 +2517,11 @@ case "$COMMAND" in
       printf '\n%s✓ DEPLOY SUCCESS%s in %ss (%s warning(s))\n' \
         "$C_GREEN$C_BOLD" "$C_RESET" "$((SECONDS - START_TS))" "$WARNINGS"
     fi
-    printf '  BUILT     : %s\n' "${GIT_COMMIT:0:12}${GIT_DIRTY:+ (dirty tree)}"
+    # GIT_DIRTY is always set ("0" or "1"), so `${GIT_DIRTY:+…}` — "non-empty" —
+    # used to print "(dirty tree)" after every clean build too.
+    dirty_note=""
+    if [ "${GIT_DIRTY:-0}" = "1" ]; then dirty_note=" (dirty tree)"; fi
+    printf '  BUILT     : %s\n' "${GIT_COMMIT:0:12}${dirty_note}"
     printf '  APPLIED   : %s of %s changed service(s) applied and verified\n' \
       "$APPLIED_CHANGED" "$CHANGED_COUNT"
     if [ "${#DEFERRED_SERVICES[@]}" -gt 0 ]; then

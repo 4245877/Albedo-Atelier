@@ -179,6 +179,8 @@ if case_ "1 · idle farm: both services change and both are applied"; then
   # Nothing held back means the plain `up -d` form, so compose applies its own
   # dependency ordering exactly as it always has.
   assert_not_out "--no-deps"
+  # GIT_DIRTY is "0" here, not empty: the summary once flagged every build dirty.
+  assert_not_out "(dirty tree)"
   done_
 fi
 
