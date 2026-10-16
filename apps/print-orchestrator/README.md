@@ -12,8 +12,9 @@ Live telemetry is polled from the devices —
 Moonraker over HTTP, Bambu over local MQTT, Creality over WebSocket (see
 `src/infra/printers/status/`, adapted from `apps/fulfillment`); camera frames are
 real snapshots (`src/infra/printers/camera/`). Anything the farm genuinely does
-not know (material stock, maintenance history, schedule) is returned empty/null
-and the dashboard shows it as unavailable rather than inventing numbers.
+not know (maintenance history, the long-range plan, material stock while the
+fulfillment warehouse is not connected) is returned empty/null and the dashboard
+shows it as unavailable rather than inventing numbers.
 
 The **print queue lives in SQLite** — it is the single source of truth (see
 [the next section](#persistent-print-queue-model-sqlite)). The remaining durable
@@ -36,9 +37,16 @@ hook in `src/http/security.ts`.
 
 Live telemetry is deliberately **not** persisted — printer statuses and the
 manual light override are re-derived on the next poll, and persisting statuses
-would make a restart re-announce pre-existing conditions. Material stock,
-maintenance history and automations are still honest stubs with no runtime state
-yet; the persistence layer is structured to hold them once they are implemented.
+would make a restart re-announce pre-existing conditions. Maintenance history and
+the long-range plan (`/api/maintenance`, `/api/plan`) are still honest stubs with
+no runtime state — the dashboard hides those sections. Material stock is read
+from fulfillment and only cached in memory (see
+[Filament warehouse](#filament-warehouse-fulfillment)); the automation rules
+(`night-lights`, `night-queue`, `auto-queue`) are persisted in `state.json`.
+
+How to run the service and its tests: [Local development](#local-development).
+How a launch is decided — the rules every start path shares — is summarised in
+[Launch path: rules that hold everywhere](#launch-path-rules-that-hold-everywhere).
 
 ## Printer inventory (configured from the dashboard)
 
@@ -251,6 +259,71 @@ the reasons the start would refuse. `src/app/scheduling/`'s night report is the
 slices/approved sets/material overrides), not a competing dispatch rule.
 Cross-interface consistency is pinned by `src/app/queueConsistency.test.ts`.
 
+## Launch path: rules that hold everywhere
+
+The path from "file" to "print running" rests on a few rules. Each lives in one
+place, and every start path — the launch window, the night start, `start-next`,
+the automatic queue — goes through it. Most were introduced or tightened by the
+2026-10 modernization; its journal,
+[ALBEDO_MODERNIZATION_PROGRESS.md](../../ALBEDO_MODERNIZATION_PROGRESS.md),
+records the rationale and the defects each one closed.
+
+- **One admission policy, two stages.** `evaluateDispatchEligibility`
+  (`src/domain/dispatch/eligibility.ts`) runs at `preflight` (the launch preview,
+  queue readiness, the top of `LaunchService.launch`) and at `dispatch` (inside
+  `DispatchService.reserve`, adding only the device-file rules). A preview that
+  says «можно» followed by a launch that refuses is a bug: extend the policy with
+  a fact or a reason, never add a lighter check beside it.
+- **Three modes of that one policy: `manual | night | auto`.** `auto` is at least
+  as strict as `night`: every `review` is a blocker, nothing is confirmed on a
+  person's behalf (an unrecorded bed or unreported material stays a blocker), and
+  the task must allow unattended printing (`unattendedAllowed`). The automatic
+  queue (`src/app/automation/autoQueue.ts`) starts jobs only through
+  `LaunchService.launch(…, { mode: "auto" })`; it is off twice
+  (`AUTO_QUEUE_ENABLED`, default `false`, and the persisted `auto-queue` rule) and
+  disarms itself when the outcome of its own start is unknown.
+- **Accepted ≠ started.** A start the device accepted is phase `accepted` (run
+  `PENDING`, bed `RESERVED`, start guard kept); it becomes `started` only when
+  telemetry sees the print or the device confirms it. Accepted but not printing
+  after 3 minutes → run `UNKNOWN`, the printer is held, nothing is re-sent. A
+  launch carries an idempotency key, and the durable start guard refuses a second
+  dispatch.
+- **`idle` is not a clear bed.** `resolveBedOccupancy`
+  (`src/domain/print/bedOccupancy.ts`): `CLEAR` only from a recorded clearance,
+  nothing tracked → `UNKNOWN`, an observed print beats a `CLEAR` record. A
+  finished run opens the part-removal operation; a named human confirming it (or
+  ticking «Стол свободен» in the launch window, never in `auto`) is what clears
+  the bed. Prints started outside Albedo open an external bed cycle too.
+- **Cancelling never frees a bed with a part on it.** Pending work is cancelled
+  logically; a print in flight is stopped only physically
+  (`POST /api/print/tasks/:id/stop`, identity-checked), and the bed then waits for
+  clearance.
+- **Bambu AMS trays are planned, not guessed.** `src/domain/printers/feedPlan.ts`
+  maps each filament of the job to a tray (type, then colour); ambiguity is
+  `AMS_SLOT_AMBIGUOUS` with choices for the operator, and the plan is pinned on
+  the run and re-checked against a fresh report right before publishing.
+- **A reprint is a new print of the same verified bytes.** Finished tasks are
+  history and are never reopened (`src/domain/print/reprint.ts`,
+  `src/app/printQueue/history.ts`): a reprint gets its own copy of the slice
+  variant, or queues the file as an upload, never re-slices, and is idempotent by
+  `requestId`. A FAILED task keeps its own retry (`/release`).
+- **An approved profile revision is immutable.** The same bytes resolved
+  differently become a new revision (migration 017); a set approved on a
+  superseded revision keeps slicing with exactly the approved settings and offers
+  a successor set.
+- **Restart safety has one owner.** Whether the orchestrator may be recreated now
+  is answered by `src/app/restartSafety.ts` (`GET /restart-safety`); `deploy.sh`
+  only renders the verdict
+  ([docs/operations.md](../../docs/operations.md#deploying-during-a-print)).
+- **Two columns, one fact.** `day_night_preference` decides *when* a task may run
+  and `night` is its persisted projection — any path that writes a task sets both.
+  `unattendedAllowed` answers a different question: *whether* it may run with
+  nobody present.
+- **Configured material ≠ loaded spool.** A printer's configured `material` is
+  what it *can* print (`supportedMaterials`); the loaded filament comes only from
+  live telemetry, and unknown loaded material is a `review` the operator confirms
+  in the launch window (a blocker in `auto`).
+
 ## File upload & analysis (`/api/print/artifacts`)
 
 Operators upload sliceable models and G-code straight into the SQLite model —
@@ -372,8 +445,8 @@ off if it says off. Two caveats:
   PRINTER_POLL_INTERVAL_MS` (default 10 s).
 - The override lives **in memory only**. Restarting the orchestrator drops it,
   and the schedule may reassert the scheduled state on the first poll after
-  restart. This is intentional (there is no database); persist it only if that
-  ever becomes a requirement.
+  restart. This is intentional — a five-minute hold is not worth persisting;
+  persist it only if that ever becomes a requirement.
 
 If a scheduled light command is sent but the reported state never converges to
 the target (wrong `pin`, `SET_PIN` accepted but nothing physically changes, or
@@ -484,8 +557,9 @@ act on:
     POST /api/monitoring/filament-debts/:id/settle      post the deduction now
     POST /api/monitoring/filament-debts/:id/acknowledge settled outside the system
 
-Three ways a debt appears: a print nobody tracked (a restart mid-print), a print
-nothing could measure (an external spool with no `tray_weight`), and a
+Three ways a debt appears: a print nobody tracked (started on the printer itself,
+or otherwise not re-adoptable after a restart), a print nothing could measure (an
+external spool with no `tray_weight`), and a
 **measured** deduction the warehouse refused or that was finally dropped from
 the retry queue.
 
@@ -539,11 +613,13 @@ what is actually on the shelf and saves the binding:
 The consumed amount comes from whatever the device actually knows:
 
 - **Moonraker / K2** reports extruded length (`print_stats.filament_used`), sent
-  as `lengthMm` for the single loaded reel. A print with no tracked run — one
-  already printing when the orchestrator started, or revived across a restart —
-  has no reliable idempotency anchor (its reported length spans the whole job),
-  so its completion **skips** auto-deduction and feeds one soft warning to deduct
-  by hand, rather than guessing a key that two same-day prints could collide on.
+  as `lengthMm` for the single loaded reel. A dispatched print still running
+  across an orchestrator restart is re-adopted with its run id
+  (`hydrateRunFromCanonical`) and deducts normally. A print with no canonical run
+  — started on the printer itself — has no reliable idempotency anchor (its
+  reported length spans the whole job), so its completion **skips**
+  auto-deduction, records an unreconciled debt (below) and warns to deduct by
+  hand, rather than guessing a key that two same-day prints could collide on.
 - **Bambu A1 Combo / AMS Lite** MQTT does **not** report grams or length (that
   lives in slicer metadata). Instead each AMS tray reports `remain` — the
   printer's own 0–100 % estimate of filament left — and a nominal spool weight.
@@ -556,11 +632,13 @@ The consumed amount comes from whatever the device actually knows:
   Caveats, handled honestly rather than papered over: `remain` is quantised to
   1 % (≈10 g on a 1 kg spool, ≈2.5 g on a 250 g AMS-Lite spool), so very small
   prints can round to zero; an **uncalibrated** tray (`remain = -1`) or a print
-  that was already running before the orchestrator started (no start snapshot,
-  it is in-memory only) yields no data — nothing is deducted and one soft
-  warning is fed. For exact per-filament grams the upgrade path is the sliced
-  3MF `Metadata/slice_info.config` (`used_g`/`used_m`) fetched over the
-  printer's FTPS, pluggable behind the same completion → consume-items seam.
+  the farm never saw start (no start snapshot) yields no data — nothing is
+  deducted, an unreconciled debt is recorded and a warning is fed. The start
+  snapshot of a dispatched print is persisted with its run (`amsStart`), so a
+  restart mid-print does not lose it. For exact per-filament grams the upgrade
+  path is the sliced 3MF `Metadata/slice_info.config` (`used_g`/`used_m`)
+  fetched over the printer's FTPS, pluggable behind the same completion →
+  consume-items seam.
 
 ## Hardware discovery: what a printer says about itself
 
@@ -741,23 +819,33 @@ Bambu adapter reports the printer as not configured and nothing is live.
 
 ## Local development
 
-Uses **pnpm** (via `corepack enable`).
+Uses **pnpm** (via `corepack enable`, or `corepack pnpm …` when `pnpm` is not on
+`PATH`).
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 pnpm run dev        # tsx watch
-pnpm run typecheck  # tsc --noEmit
-pnpm run build      # emit dist/
+pnpm run typecheck  # tsc --noEmit, sources and tests
+pnpm run build      # emit dist/ (tests excluded)
 ```
+
+Without explicit environment, `pnpm run dev` and the test scripts fall back to
+`config/printers.json` and `data/` next to the code — and on the farm host that
+file is the real printer inventory. A dev server started there would become a
+second poller of the live printers (a second Bambu MQTT client, light commands):
+on the farm host point `PRINTERS_CONFIG_PATH`/`STATE_FILE_PATH` elsewhere first,
+and run the suite only in the isolated form described in
+[docs/testing.md](../../docs/testing.md).
 
 ## Docker
 
 The service listens on `0.0.0.0:3100` inside the container but is **not** published
 to the host — the dashboard reaches it over the compose network.
 
-```bash
-docker compose up -d --build print-orchestrator
-```
+Build and deploy it **only** with `./scripts/deploy.sh` from the repository root —
+never a hand-run `docker compose up -d --build print-orchestrator`, which skips the
+restart-safety gate and can recreate the orchestrator under a print in flight. See
+[docs/operations.md](../../docs/operations.md).
 
 ## API
 
@@ -766,22 +854,38 @@ Responses are JSON in the exact shape the dashboard renders (see
 with a stable `code` (`PRINTER_OFFLINE`, `PRINTER_CONNECTION`, `CAMERA_ERROR`,
 `MATERIAL_ERROR`, `JOB_ERROR`, `VALIDATION`, `NOT_FOUND`).
 
+The lists below cover the dashboard reads and the core actions; they are **not
+exhaustive**. The launch window (`/api/print/launch/:taskId`), slicing and profile
+sets (`/api/print/slicing/…`), the scheduler (`/api/print/scheduler/…`), history
+and reprint (`/api/print/history`, `…/reprint`), assignments, operations and the
+automatic queue (`/api/automations/auto-queue`) are registered in
+`src/modules/` — read the route files there for the authoritative list; most
+carry a route table in their header comment.
+
 ### Observability
 
 - `GET /health` — liveness + uptime
 - `GET /ready` — real readiness: `503` until the first poll completes and again
-  if the poll loop goes stale; a merely degraded farm (some printers offline)
-  still returns `200`
+  if the poll loop goes stale or the database does not answer; a merely degraded
+  farm (some printers offline) still returns `200`
 - `GET /metrics` — Prometheus counters drawn from the live farm state
   (`print_orchestrator_printers_online`, `_degraded`, `_queue_jobs`, …)
+- `GET /version` — the commit, build time and dirty flag of the running image
+- `GET /restart-safety?window=<s>` — may the orchestrator be recreated right now
+  without losing what the database cannot give back; `deploy.sh` asks it before
+  every swap
 
 ### Security
 
-State-changing requests (everything below "Actions") are gated by an optional
-shared secret. Set `ORCHESTRATOR_API_TOKEN` and send it as
-`Authorization: Bearer <token>` (or `X-Api-Token`); reads stay open. When unset,
-the guard is disabled and a startup warning is logged. CORS is closed by default
-(no wildcard) — allow cross-origin callers via `CORS_ALLOW_ORIGINS`.
+State-changing requests (everything below "Actions") require the shared secret
+`ORCHESTRATOR_API_TOKEN`, sent as `Authorization: Bearer <token>` (or
+`X-Api-Token`); reads stay open. **With no token configured, mutations are
+refused with `503`** — unless the deployment explicitly opts in with
+`ALLOW_UNAUTHENTICATED_MUTATIONS=1` for an isolated network; either way a startup
+warning is logged (`src/http/security.ts`). Foreign `Origin`s are refused (CSRF),
+and CORS is closed by default (no wildcard) — allow cross-origin callers via
+`CORS_ALLOW_ORIGINS`. The model and the operator checklist:
+[SECURITY.md](../../SECURITY.md).
 
 ### Dashboard reads
 
@@ -816,9 +920,11 @@ been **removed** — they now return 404.
 ### Actions
 
 Printer actions dispatch **real** commands to the device (Moonraker HTTP,
-Bambu local MQTT); unsupported combinations fail honestly rather than pretending.
-Queue/night/automation features that have no engine yet return a clear error
-instead of fabricating a result.
+Bambu local MQTT); unsupported combinations fail honestly rather than pretending,
+and anything without an engine behind it returns a clear error instead of
+fabricating a result. Every start, whichever route it comes from, passes the
+admission policy described in
+[Launch path](#launch-path-rules-that-hold-everywhere).
 
 - `POST /api/printers/config` — add a printer · `PATCH /api/printers/config/:id` — change settings and/or credentials (a field you omit keeps its stored value; `null` clears it; `id` is immutable) · `DELETE /api/printers/config/:id`
 - `POST /api/printers/config/:id/enabled` — body `{ "enabled": boolean }` · `POST /api/printers/config/reorder` — body `{ "ids": [...] }`

@@ -39,10 +39,11 @@
 
 ## Где что живёт
 
-- тосты и подтверждения: `actions.js`, `render/modals.js`, `render/slicing.js`,
-  `render/scheduler.js`, `render/uploads.js`, `theme.js`, `app.js`
+- тосты и подтверждения: `actions.js`, `render/modals.js`, `shared/dialog.js`,
+  `features/*/controller.js` (и `features/automations/autoQueue.js`), `theme.js`,
+  `app.js`
 - пустые состояния и меты секций: `render/sections.js`, `render/printers.js`,
-  `render/scheduler.js`
-- статусы принтера: `util.js` (STATUS), `render/printerView.js` (jobLine —
+  `features/*/view.js`
+- статусы принтера: `shared/chips.js` (STATUS), `render/printerView.js` (jobLine —
   строки закреплены тестами `tests/printerView.test.mjs`)
 - статические тексты: `index.html` (hero, footer, заголовки секций)

@@ -67,10 +67,10 @@
 **Консистентность queue.db ↔ artifacts — доказана по коду, а не заявлена.**
 Порядок: **снимок БД → потом artifacts → потом проверка**. Обоснование:
 * blob'ы content-addressed и **иммутабельны** — `commit()` при существующем ключе
-  дедуплицирует и никогда не перезаписывает ([artifactStorage.ts:129-159](apps/print-orchestrator/src/infra/storage/artifactStorage.ts#L129-L159));
-* blob фиксируется **до** вставки строки ([ingest.ts:84](apps/print-orchestrator/src/app/artifacts/ingest.ts#L84) против [:112](apps/print-orchestrator/src/app/artifacts/ingest.ts#L112));
+  дедуплицирует и никогда не перезаписывает ([artifactStorage.ts:129-159](../../apps/print-orchestrator/src/infra/storage/artifactStorage.ts#L129-L159));
+* blob фиксируется **до** вставки строки ([ingest.ts:84](../../apps/print-orchestrator/src/app/artifacts/ingest.ts#L84) против [:112](../../apps/print-orchestrator/src/app/artifacts/ingest.ts#L112));
 * удаление blob'ов достижимо **только** явными API-вызовами, фонового sweep нет
-  ([routes.ts:232](apps/print-orchestrator/src/modules/print/routes.ts#L232), [routes.ts:270](apps/print-orchestrator/src/modules/print/routes.ts#L270)).
+  ([routes.ts:232](../../apps/print-orchestrator/src/modules/print/routes.ts#L232), [routes.ts:270](../../apps/print-orchestrator/src/modules/print/routes.ts#L270)).
 
 Отсюда: копия artifacts, снятая **после** снимка, — надмножество нужного. Обратный порядок
 допускал бы ссылку на blob, скопированный слишком рано. Остаточное окно (оператор удаляет
@@ -181,15 +181,15 @@ process-group продолжал есть диск **без защиты**, `tee
 удерживал `flock` (fd 9 без close-on-exec), блокируя все последующие деплои.
 
 ### Исправлено
-[scripts/deploy.sh:141-211](scripts/deploy.sh#L141-L211) — единый путь teardown:
-* `stop_build()` ([:141](scripts/deploy.sh#L141)) — `kill -TERM` по **process group**, ожидание, эскалация до `KILL`, `wait`;
-* `cleanup()` ([:164](scripts/deploy.sh#L164)) — снимает watchdog, останавливает сборку, чистит temp и `state.env.tmp`;
+[scripts/deploy.sh:141-211](../../scripts/deploy.sh#L141-L211) — единый путь teardown:
+* `stop_build()` ([:141](../../scripts/deploy.sh#L141)) — `kill -TERM` по **process group**, ожидание, эскалация до `KILL`, `wait`;
+* `cleanup()` ([:164](../../scripts/deploy.sh#L164)) — снимает watchdog, останавливает сборку, чистит temp и `state.env.tmp`;
 * однократность через `CLEANUP_DONE` — гонки ERR/EXIT/INT нет;
 * **guard `BASHPID == $$`** — трапы наследуются подоболочками при `set -E`, и teardown в
   `$(...)` снёс бы живой деплой (эта ошибка реально произошла при разработке backup.sh и была
   поймана);
-* `trap on_signal INT 130` / `TERM 143` / `trap cleanup EXIT` ([:210-212](scripts/deploy.sh#L210-L212));
-* **`9>&-`** на фоновой сборке ([:850](scripts/deploy.sh#L850)) и watchdog ([:877](scripts/deploy.sh#L877)) — lock больше не наследуется.
+* `trap on_signal INT 130` / `TERM 143` / `trap cleanup EXIT` ([:210-212](../../scripts/deploy.sh#L210-L212));
+* **`9>&-`** на фоновой сборке ([:850](../../scripts/deploy.sh#L850)) и watchdog ([:877](../../scripts/deploy.sh#L877)) — lock больше не наследуется.
 
 ### Проверка
 Гарнесс **подключает настоящий `scripts/deploy.sh`** (вырезан только блок разбора аргументов),
@@ -221,16 +221,16 @@ process-group продолжал есть диск **без защиты**, `tee
 версию; no-op деплой уничтожал таргет навсегда.
 
 ### Исправлено
-Три состояния теперь разделены явно ([deploy.sh:660-760](scripts/deploy.sh#L660-L760)):
+Три состояния теперь разделены явно ([deploy.sh:660-760](../../scripts/deploy.sh#L660-L760)):
 `candidate` (`:latest` после сборки) · `currently-running` (пишется в стадии 2) ·
 `last-known-good` (`:last-known-good` + записанный image ID).
 
-* `adopt_last_known_good()` ([:724](scripts/deploy.sh#L724)) вызывается **только после** прохождения health **и** HTTP-проверок — в самом конце успешного деплоя;
+* `adopt_last_known_good()` ([:724](../../scripts/deploy.sh#L724)) вызывается **только после** прохождения health **и** HTTP-проверок — в самом конце успешного деплоя;
 * неудачный деплой таргет не трогает вовсе ⇒ второй неудачный не может продвинуть первый;
 * no-op деплой (`IMAGES_CHANGED == 0`) таргет не сдвигает;
 * bootstrap: если LKG ещё нет, а стек жив и healthy — он усыновляется однократно и явно (иначе на этом хосте отката не было бы вообще до первого деплоя);
 * `SNAPSHOT_GIT_COMMIT` с ложной семантикой заменён на `LKG_GIT_COMMIT` / `DEPLOYED_GIT_COMMIT`;
-* `do_rollback` сверяет `image_id(tag)` с записанным `LKG_IMAGE_ID_*` и **отказывается** при расхождении ([:1240](scripts/deploy.sh#L1240)).
+* `do_rollback` сверяет `image_id(tag)` с записанным `LKG_IMAGE_ID_*` и **отказывается** при расхождении ([:1240](../../scripts/deploy.sh#L1240)).
 
 ### Проверка
 `bash -n`, `shellcheck -x -S style` чисто; логика разделения проверена чтением и
@@ -248,7 +248,7 @@ process-group продолжал есть диск **без защиты**, `tee
 
 ### Исправлено
 Защита больше не зависит от флага. При «id изменился, rootfs идентичен»
-([deploy.sh:1049-1065](scripts/deploy.sh#L1049-L1065)) тег `:latest` **возвращается на реально работающий образ**:
+([deploy.sh:1049-1065](../../scripts/deploy.sh#L1049-L1065)) тег `:latest` **возвращается на реально работающий образ**:
 `docker tag "${RUNNING_IMAGE_ID[$svc]}" "${img_name}:latest"`. После этого compose видит
 буквально тот же образ и пересоздать контейнер не может ни при каких настройках provenance.
 Сообщение поднято с `detail` до `warn`.
@@ -262,7 +262,7 @@ process-group продолжал есть диск **без защиты**, `tee
 `ARG GIT_COMMIT` в начале стадии, и rootfs менялся при каждом коммите — `ARG` инвалидирует
 кэш для всех последующих инструкций, то есть пересобирался и 564-МБ apt-слой. Это молча
 отключило бы всю защиту AT-004/AT-005. Блок идентичности перенесён в **конец** стадий
-([Dockerfile:86-94](apps/print-orchestrator/Dockerfile#L86-L94)); проверено:
+([Dockerfile:86-94](../../apps/print-orchestrator/Dockerfile#L86-L94)); проверено:
 ```
 commit ccc111 -> image=382ba208a90e rootfs=8e3aff4919d6
 commit ddd222 -> image=cbdd58801491 rootfs=8e3aff4919d6
@@ -281,10 +281,10 @@ commit ddd222 -> image=cbdd58801491 rootfs=8e3aff4919d6
 **любой** ошибке возвращал 0 — fail-open ровно тогда, когда ферме хуже всего.
 
 ### Исправлено
-* `count_active_prints()` ([deploy.sh:560](scripts/deploy.sh#L560)) возвращает число **или строку `unknown`** — «не смог узнать» больше не равно «печатей нет»;
+* `count_active_prints()` ([deploy.sh:560](../../scripts/deploy.sh#L560)) возвращает число **или строку `unknown`** — «не смог узнать» больше не равно «печатей нет»;
 * `count_active_prints_live()` спрашивает оркестратор **напрямую** через `docker exec` по compose-сети; дашборд-прокси остался лишь запасным путём, и там JSON парсится через `jq`, а не подсчётом подстрок;
 * `count_active_runs_db()` — канонические `PrintRun` в состоянии `RUNNING/PAUSED` из SQLite; они переживают уход принтера в offline, чего live-телеметрия не умеет. Берётся максимум из двух источников;
-* `enforce_active_print_gate()` ([:605](scripts/deploy.sh#L605)) — **один** механизм для деплоя и отката, вызывается **непосредственно перед `up -d`** со свежими данными;
+* `enforce_active_print_gate()` ([:605](../../scripts/deploy.sh#L605)) — **один** механизм для деплоя и отката, вызывается **непосредственно перед `up -d`** со свежими данными;
 * при `unknown` — **fail-closed**, обход только явным `--allow-active-prints`.
 
 ### Проверка
@@ -314,10 +314,10 @@ in-memory идентичность (`printId`, `startedAtMs`, `amsStart`) — н
 длительность терялась. Долг оставался только строкой в ленте событий.
 
 ### Исправлено — устранена первопричина
-* `hydrateRunFromCanonical()` ([printerPoller.ts:385](apps/print-orchestrator/src/app/printerPoller.ts#L385)), вызывается в начале каждого poll ([:241](apps/print-orchestrator/src/app/printerPoller.ts#L241)): если принтер печатает, а in-memory run отсутствует — он восстанавливается из канонического;
+* `hydrateRunFromCanonical()` ([printerPoller.ts:385](../../apps/print-orchestrator/src/app/printerPoller.ts#L385)), вызывается в начале каждого poll ([:241](../../apps/print-orchestrator/src/app/printerPoller.ts#L241)): если принтер печатает, а in-memory run отсутствует — он восстанавливается из канонического;
 * `printId` = **канонический `PrintRun.id`** ⇒ ключ идемпотентности переживает рестарт, двойное списание невозможно;
 * `startedAtMs` из durable `PrintRun.startedAt` ⇒ длительность не теряется;
-* `amsStart` **персистится** в `PrintRun.metadata` ([createRuntime.ts](apps/print-orchestrator/src/bootstrap/createRuntime.ts)) при минте и при backfill ([:448](apps/print-orchestrator/src/app/printerPoller.ts#L448)); для Bambu `remain` абсолютен, поэтому сохранённый старт делает расход восстановимым;
+* `amsStart` **персистится** в `PrintRun.metadata` ([createRuntime.ts](../../apps/print-orchestrator/src/bootstrap/createRuntime.ts)) при минте и при backfill ([:448](../../apps/print-orchestrator/src/app/printerPoller.ts#L448)); для Bambu `remain` абсолютен, поэтому сохранённый старт делает расход восстановимым;
 * когда run восстановить нельзя — заводится **durable** `UnreconciledConsume` в `state.json` (с id, принтером, файлом, временем и причиной; ограничен 200 записями), вместо разового события ленты. Есть `listUnreconciled()` / `clearUnreconciled()`.
 
 Метаданные, а не новая колонка: несколько сотен байт на run, читаются только путём
@@ -351,7 +351,7 @@ in-memory идентичность (`printId`, `startedAtMs`, `amsStart`) — н
 советовало `reclaim` **первым пунктом** — худший из возможных советов в этот момент.
 
 ### Исправлено
-`do_reclaim()` ([deploy.sh:1306](scripts/deploy.sh#L1306)) разделён:
+`do_reclaim()` ([deploy.sh:1306](../../scripts/deploy.sh#L1306)) разделён:
 `reclaim --safe` (по умолчанию) — только `image prune -f`, кэш сохраняется;
 `reclaim --cache` — дополнительно `builder prune -a -f`, с явным предупреждением, что
 следующая сборка станет холодной и потребует ~4096 МБ. `--cleanup` после деплоя теперь тоже
@@ -376,8 +376,8 @@ ok "previous images are running again"     # ← печаталось до лю�
 Откат на неподнимающийся образ рапортовал успех и выходил 0.
 
 ### Исправлено
-`do_rollback` ([deploy.sh:1229](scripts/deploy.sh#L1229)) после `up -d` вызывает
-`rollback_verify()` ([:1282](scripts/deploy.sh#L1282)) — те же `wait_for_health` и `verify_http`, что и в
+`do_rollback` ([deploy.sh:1229](../../scripts/deploy.sh#L1229)) после `up -d` вызывает
+`rollback_verify()` ([:1282](../../scripts/deploy.sh#L1282)) — те же `wait_for_health` и `verify_http`, что и в
 деплое. `ROLLBACK VERIFIED` печатается **только** после их прохождения; иначе —
 `ROLLBACK FAILED`, диагностика (`dump_failure`), указание на pre-deploy снимки и
 `ops/backup/restore.sh`, и **ненулевой код возврата**. Флаг `ROLLBACK_IN_PROGRESS`
@@ -399,7 +399,7 @@ ok "previous images are running again"     # ← печаталось до лю�
 и может залипнуть на мёртвом IP.
 
 ### Исправлено
-[nginx.conf:56](apps/print-dashboard/nginx.conf#L56) — `resolver 127.0.0.11 valid=10s ipv6=off;` + переменные upstream.
+[nginx.conf:56](../../apps/print-dashboard/nginx.conf#L56) — `resolver 127.0.0.11 valid=10s ipv6=off;` + переменные upstream.
 
 **Ключевая тонкость семантики URI:** при переменной в `proxy_pass` nginx перестаёт заменять
 префикс location и отправил бы URI директивы буквально — то есть `proxy_pass http://$up:3100/;`
@@ -439,8 +439,8 @@ new  HTTP 200  PATH=/health            RECOVERED ✓
 `NOT NULL` в рантайме, либо тихо расходился с фактической схемой. Восстановить нечем (AT-001).
 
 ### Исправлено
-1. **Guard совместимости** ([migrations/index.ts:93](apps/print-orchestrator/src/infra/db/migrations/index.ts#L93)): `KNOWN_MAX_SCHEMA_VERSION` выводится из реестра (дрейфовать не может); при `MAX(schema_migrations.version) > known_max` бросается `SchemaTooNewError` ([:62](apps/print-orchestrator/src/infra/db/migrations/index.ts#L62)) с явным текстом «database schema is newer than this application image» и указанием на restore. Вызывается **до** применения чего-либо ([:134](apps/print-orchestrator/src/infra/db/migrations/index.ts#L134)). Тихое повреждение превращается в честный crash-loop, который `wait_for_health` видит.
-2. **Pre-deploy снимок БД** — `snapshot_database()` ([deploy.sh:762](scripts/deploy.sh#L762)) делает `VACUUM INTO` перед swap в `.deploy/db-snapshots/` (не в `/tmp`), хранит последние 10, права `0600`. Это «undo» именно этого деплоя, **не замена** `ops/backup`.
+1. **Guard совместимости** ([migrations/index.ts:93](../../apps/print-orchestrator/src/infra/db/migrations/index.ts#L93)): `KNOWN_MAX_SCHEMA_VERSION` выводится из реестра (дрейфовать не может); при `MAX(schema_migrations.version) > known_max` бросается `SchemaTooNewError` ([:62](../../apps/print-orchestrator/src/infra/db/migrations/index.ts#L62)) с явным текстом «database schema is newer than this application image» и указанием на restore. Вызывается **до** применения чего-либо ([:134](../../apps/print-orchestrator/src/infra/db/migrations/index.ts#L134)). Тихое повреждение превращается в честный crash-loop, который `wait_for_health` видит.
+2. **Pre-deploy снимок БД** — `snapshot_database()` ([deploy.sh:762](../../scripts/deploy.sh#L762)) делает `VACUUM INTO` перед swap в `.deploy/db-snapshots/` (не в `/tmp`), хранит последние 10, права `0600`. Это «undo» именно этого деплоя, **не замена** `ops/backup`.
 3. **Авто-откат через миграцию запрещён**: `deploy_applied_migrations()` грепает логи оркестратора, и при обнаружении миграции `--rollback-on-failure` **блокируется** с инструкцией по осознанному восстановлению.
 
 ### Проверка
@@ -465,9 +465,9 @@ $ node --test src/infra/db/migrations/migrations.test.ts
 
 **Исправлено:**
 `org.opencontainers.image.revision` / `.created` / `.title` в обоих Dockerfile;
-`GET /version` у оркестратора ([version.ts](apps/print-orchestrator/src/infra/observability/version.ts)) — commit, build time, dirty, uptime;
+`GET /version` у оркестратора ([version.ts](../../apps/print-orchestrator/src/infra/observability/version.ts)) — commit, build time, dirty, uptime;
 `deploy.sh status` печатает фактический revision **запущенного** контейнера, читая лейбл
-образа, с которого он стартовал (`running_revision()`, [deploy.sh:1334](scripts/deploy.sh#L1334));
+образа, с которого он стартовал (`running_revision()`, [deploy.sh:1334](../../scripts/deploy.sh#L1334));
 семантика исправлена на `LKG_GIT_COMMIT` / `DEPLOYED_GIT_COMMIT`.
 
 `BUILD_TIME` — это временная метка **коммита**, а не «сейчас»: wall-clock менялся бы при
@@ -488,15 +488,15 @@ $ ./scripts/deploy.sh status
 крутиться (ошибки только логируются), `/ready` = 200, Docker healthy, деплой зелёный — при
 мёртвой очереди.
 
-**Исправлено:** `probeDatabase()` ([database.ts:92](apps/print-orchestrator/src/infra/db/database.ts#L92)) — дешёвый `SELECT COUNT(*) FROM schema_migrations`,
+**Исправлено:** `probeDatabase()` ([database.ts:92](../../apps/print-orchestrator/src/infra/db/database.ts#L92)) — дешёвый `SELECT COUNT(*) FROM schema_migrations`,
 проброшен в `getReadiness()` и проверяется **первым**: при отказе `status:"db_unavailable"`,
 `ready:false` → **HTTP 503**. Однократный `PRAGMA integrity_check` при старте
-([:66](apps/print-orchestrator/src/infra/db/database.ts#L66)) — громкий лог при `!= ok`, **не** фатальный (в отличие от схемы из будущего,
+([:66](../../apps/print-orchestrator/src/infra/db/database.ts#L66)) — громкий лог при `!= ok`, **не** фатальный (в отличие от схемы из будущего,
 которая фатальна) и **не** на каждый `/ready`. Метрика `print_orchestrator_db_ok`.
 
 ## AT-014 · Watchdog: ложное срабатывание и отсутствие проверки перед `up -d` · **FIXED**
 
-**Исправлено:** повторный `kill -0 "$BUILD_PID"` **после** `sleep` ([deploy.sh:868](scripts/deploy.sh#L868)) — сборка,
+**Исправлено:** повторный `kill -0 "$BUILD_PID"` **после** `sleep` ([deploy.sh:868](../../scripts/deploy.sh#L868)) — сборка,
 завершившаяся во время сна, больше не даёт пугающего «cancelling the build» и сигнала в
 возможно переиспользованный pgid; флаг-файл `.deploy/watchdog.tripped` различает «отменено
 ради диска» (**отдельный код возврата 3**) от «не скомпилировалось»; если watchdog сработал,
@@ -555,7 +555,7 @@ cost» переписан под фактическое поведение по�
 **Проверка:** `code=[000]` (было `[000000]`).
 
 ## AT-019 · Нет валидации числовых флагов · **FIXED**
-`assert_positive_int` ([deploy.sh:1370](scripts/deploy.sh#L1370)) проверяет **при разборе аргументов**, до любых
+`assert_positive_int` ([deploy.sh:1370](../../scripts/deploy.sh#L1370)) проверяет **при разборе аргументов**, до любых
 побочных эффектов (раньше `--health-timeout abc` падал арифметикой уже после preflight,
 snapshot и полной сборки). Валидация выполняется в главной оболочке, а не в `$(...)`, иначе
 `die` убил бы только подоболочку и оператор увидел бы обобщённый ERR вместо внятного текста.
