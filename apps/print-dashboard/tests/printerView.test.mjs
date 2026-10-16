@@ -5,7 +5,9 @@ import {
   actionAvailability,
   isBusy,
   jobLine,
+  layerText,
   lightPolicyLine,
+  printersMetaText,
   normalizeProgress,
   progressBarHtml,
   progressPercentText
@@ -257,4 +259,60 @@ test("lightPolicyLine: желаемое состояние, причина, вр
     }),
     "Подсветка: включить · открыта панель мониторинга"
   );
+});
+
+test("layerText: слой идущей печати, когда принтер его сообщает; иначе ничего", () => {
+  assert.equal(layerText(printer({ status: "printing", layer: [12, 340] })), "слой 12 из 340");
+  assert.equal(layerText(printer({ status: "paused", layer: [12, null] })), "слой 12", "всего неизвестно");
+  assert.equal(layerText(printer({ status: "printing" })), null, "адаптер слои не сообщает");
+  assert.equal(layerText(printer({ status: "idle", layer: [340, 340] })), null, "не печатает — слой не показывается");
+  assert.equal(layerText(printer({ status: "printing", layer: ["12", 340] })), null, "только целые числа");
+});
+
+test("Anycubic в режиме наблюдения: ни паузы, ни отмены, ни подсветки — только просмотр", () => {
+  const p = printer({
+    id: "kobra-x",
+    status: "printing",
+    printControlSupported: false,
+    lightSupported: false,
+    snapshotAvailable: false,
+    filesSupported: false,
+    remoteStartSupported: false
+  });
+  const can = actionAvailability(p);
+  assert.equal(can.canPause, false);
+  assert.equal(can.canCancel, false);
+  assert.equal(can.canLightOn, false);
+  assert.equal(can.canSnapshot, false);
+});
+
+test("jobLine: «Только наблюдение» вместо «Свободен» у принтера без приёма заданий", () => {
+  const line = jobLine(
+    printer({
+      status: "idle",
+      readiness: {
+        state: "monitoring",
+        label: "Только наблюдение",
+        detail: "принтер подключён для мониторинга — задания на него не назначаются и не запускаются",
+        canAcceptJob: false
+      }
+    })
+  );
+  assert.match(line, /Только наблюдение/);
+  assert.doesNotMatch(line, /Свободен/);
+});
+
+test("printersMetaText: принтер только для наблюдения не «ждёт вмешательства»", () => {
+  const r = (state, canAcceptJob = false) => ({ state, label: state, detail: null, canAcceptJob });
+  const farm = [
+    printer({ id: "k2", status: "printing" }),
+    printer({ id: "a1", status: "idle", readiness: r("ready", true) }),
+    printer({ id: "ke", status: "idle", readiness: r("needs_clearance") }),
+    printer({ id: "kobra", status: "idle", readiness: r("monitoring") })
+  ];
+  assert.equal(
+    printersMetaText(farm),
+    "1 печатают · 1 готовы · 1 ждут вмешательства · 1 только наблюдение · 4 всего"
+  );
+  assert.equal(printersMetaText(farm.slice(0, 2)), "1 печатают · 1 готовы · 2 всего", "прежняя подпись без них");
 });

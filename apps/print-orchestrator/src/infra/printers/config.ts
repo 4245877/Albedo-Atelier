@@ -3,8 +3,10 @@ import path from "node:path";
 
 import {
   DEFAULT_LIGHT_SETTINGS,
+  isPrinterProtocol,
   NO_AUTOMATIC_CONTINUATION,
   PRINTER_ID_RE,
+  PRINTER_PROTOCOLS,
   type AutomaticContinuationConfig,
   type PrinterLightSettings,
   type PrinterProtocol,
@@ -171,11 +173,17 @@ function asRaw(value: unknown): string {
   return String(value ?? "").trim();
 }
 
-function normalizeProtocol(value: unknown): PrinterProtocol {
+/**
+ * The entry's protocol, or null when it names none this build implements.
+ *
+ * Absent and unknown are refused alike. Both used to fall through to
+ * `moonraker`, which drove whatever was at that address as a Klipper printer —
+ * including, for a printer added with a dialect this build does not speak, the
+ * Moonraker print and light commands.
+ */
+function normalizeProtocol(value: unknown): PrinterProtocol | null {
   const protocol = asRaw(value).toLowerCase();
-  if (protocol === "bambu") return "bambu";
-  if (protocol === "creality") return "creality";
-  return "moonraker";
+  return isPrinterProtocol(protocol) ? protocol : null;
 }
 
 /**
@@ -252,6 +260,8 @@ export function normalizePrinterRecord(value: unknown, position = 0): PrinterRec
   if (!id || !name || !host) return null;
   // An unsafe id would become a traversable snapshot path / URL segment.
   if (!PRINTER_ID_RE.test(id)) return null;
+  const protocol = normalizeProtocol(value.protocol);
+  if (!protocol) return null;
 
   const portValue = Number(value.port);
   const nozzleDiameterValue = Number(value.nozzleDiameterMm);
@@ -264,7 +274,7 @@ export function normalizePrinterRecord(value: unknown, position = 0): PrinterRec
     type: normalizeType(value.type),
     printerClass: asRaw(value.printerClass ?? value.class),
 
-    protocol: normalizeProtocol(value.protocol),
+    protocol,
     host,
     port: Number.isFinite(portValue) && portValue > 0 ? portValue : null,
 
@@ -314,7 +324,15 @@ function parsePrinters(raw: unknown): { records: PrinterRecord[]; warning?: stri
   const seen = new Set<string>();
   const records: PrinterRecord[] = [];
   const duplicates = new Set<string>();
+  const unsupported: string[] = [];
   for (const entry of raw) {
+    // Named in the warning rather than dropped silently: a printer that simply
+    // never appears is the one failure an operator cannot diagnose.
+    if (isObject(entry) && !normalizeProtocol(entry.protocol)) {
+      const shown = asRaw(entry.protocol) || "не указан";
+      unsupported.push(`${asRaw(entry.id) || "без id"} (протокол: ${shown})`);
+      continue;
+    }
     const record = normalizePrinterRecord(entry, (records.length + 1) * 10);
     if (!record) continue;
     if (seen.has(record.id)) {
@@ -325,11 +343,15 @@ function parsePrinters(raw: unknown): { records: PrinterRecord[]; warning?: stri
     records.push(record);
   }
 
-  const warning =
+  const warnings = [
     duplicates.size > 0
       ? `Повторяющиеся id принтеров пропущены (первый выигрывает): ${[...duplicates].join(", ")}`
-      : undefined;
-  return { records, warning };
+      : null,
+    unsupported.length > 0
+      ? `Принтеры с неподдерживаемым протоколом пропущены (допустимы: ${PRINTER_PROTOCOLS.join(", ")}): ${unsupported.join(", ")}`
+      : null
+  ].filter((w): w is string => w !== null);
+  return { records, warning: warnings.length > 0 ? warnings.join("; ") : undefined };
 }
 
 function readFromEnv(): PrinterRecordsResult {
@@ -390,7 +412,9 @@ export async function loadPrinterRecords(): Promise<PrinterRecordsResult> {
       ...fallback,
       source: {
         ...fallback.source,
-        warning: `Файл ${configPath}: ни одна запись не валидна (нужны id, name, host; id — [A-Za-z0-9_-])`
+        warning:
+          `Файл ${configPath}: ни одна запись не валидна (нужны id, name, host и протокол ` +
+          `${PRINTER_PROTOCOLS.join("/")}; id — [A-Za-z0-9_-])${warning ? `; ${warning}` : ""}`
       }
     };
   }

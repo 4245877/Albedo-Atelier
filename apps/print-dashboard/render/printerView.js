@@ -233,6 +233,38 @@ export function progressPercentText(value) {
   return pct === null ? "—" : `${Math.round(pct)}%`;
 }
 
+/**
+ * Подпись раздела «Принтеры»: печатают · готовы · ждут вмешательства · всего.
+ * «Готовы» считаются по готовности сервера, а не по `idle`. Простаивающий
+ * принтер «только для наблюдения» не готов, но и вмешательства не ждёт — ему
+ * ничего не нужно, он просто не берёт задания; он назван отдельно.
+ */
+export function printersMetaText(printers) {
+  const printing = printers.filter((x) => x.status === "printing").length;
+  const ready = printers.filter((x) => (x.readiness ? x.readiness.canAcceptJob : x.status === "idle")).length;
+  const idleHeld = printers.filter((x) => x.status === "idle" && x.readiness && !x.readiness.canAcceptJob);
+  const monitoring = idleHeld.filter((x) => x.readiness.state === "monitoring").length;
+  const waiting = idleHeld.length - monitoring;
+  return (
+    `${printing} печатают · ${ready} готовы` +
+    (waiting ? ` · ${waiting} ждут вмешательства` : "") +
+    (monitoring ? ` · ${monitoring} только наблюдение` : "") +
+    ` · ${printers.length} всего`
+  );
+}
+
+/**
+ * «слой 12 из 340» — номер слоя идущей печати, когда принтер его сообщает
+ * (сейчас — Anycubic LAN: поле `layer` = [текущий, всего]); null, когда не
+ * сообщает. Всего может быть неизвестно — тогда только текущий.
+ */
+export function layerText(p) {
+  if (!isBusy(p) || !Array.isArray(p.layer)) return null;
+  const [current, total] = p.layer;
+  if (!Number.isInteger(current) || current < 0) return null;
+  return Number.isInteger(total) && total > 0 ? `слой ${current} из ${total}` : `слой ${current}`;
+}
+
 /* ── Политика подсветки (payload state.lights) ─────────────────
    Причины решения приходят машинно-читаемыми (reason); здесь — единственная
    таблица их отображения. Причина описывает РЕШЕНИЕ автоматики, а не факт:

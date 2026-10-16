@@ -1,5 +1,6 @@
 import type { PrinterProtocol } from "../../../domain/printers/config";
 import type { EditableSpecField } from "../../../domain/printers/specs";
+import { discoverAnycubicFacts } from "../anycubic";
 import type { PrinterConfig } from "../config";
 import { discoverBambuFacts } from "./bambu";
 import { discoverCrealityFacts } from "./creality";
@@ -20,7 +21,8 @@ export async function discoverPrinterSpecs(printer: PrinterConfig): Promise<Disc
   if (printer.protocol === "moonraker") return discoverMoonrakerFacts(printer);
   if (printer.protocol === "bambu") return discoverBambuFacts(printer);
   if (printer.protocol === "creality") return discoverCrealityFacts(printer);
-  return failedDiscovery("Неподдерживаемый протокол принтера");
+  if (printer.protocol === "anycubic-lan") return discoverAnycubicFacts(printer);
+  return failedDiscovery(`Неподдерживаемый протокол принтера «${String(printer.protocol)}»`);
 }
 
 /**
@@ -44,7 +46,10 @@ const AUTO_FIELDS: Record<PrinterProtocol, readonly EditableSpecField[]> = {
   // that model resolves to.
   bambu: ["model", "buildVolume", "nozzleDiameterMm", "nozzleType", "material"],
   // A status heartbeat, not a description API — some firmwares name themselves.
-  creality: ["model"]
+  creality: ["model"],
+  // `/info` names the model; the Kobra X bed comes from the catalogue entry its
+  // model id resolves to (the protocol does not carry it).
+  "anycubic-lan": ["model", "buildVolume"]
 };
 
 export function autoDiscoveredFields(protocol: PrinterProtocol): readonly EditableSpecField[] {

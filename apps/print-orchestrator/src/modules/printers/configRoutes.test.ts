@@ -187,7 +187,7 @@ test("GET /options serves the protocol vocabulary the form is built from", async
   const protocols = body(res).protocols as { id: string; credentials: string[] }[];
   assert.deepEqual(
     protocols.map((p) => p.id),
-    ["moonraker", "bambu", "creality"]
+    ["moonraker", "bambu", "creality", "anycubic-lan"]
   );
   assert.deepEqual(protocols.find((p) => p.id === "bambu")?.credentials, ["serial", "accessCode"]);
 });
@@ -284,4 +284,86 @@ test("DELETE removes the printer from the farm", async () => {
   const list = await app.inject({ method: "GET", url: "/api/printers/config" });
   const printers = body(list).printers as { id: string }[];
   assert.ok(!printers.some((p) => p.id === "k2-test"));
+});
+
+// ── Anycubic LAN: added by IP, monitoring only ─────────────────────────────
+
+test("GET /options offers Anycubic LAN with its own words and no credential fields", async () => {
+  const res = await app.inject({ method: "GET", url: "/api/printers/config/options" });
+  const anycubic = (body(res).protocols as {
+    id: string;
+    label: string;
+    hint: string;
+    credentials: string[];
+    autoFields: string[];
+  }[]).find((p) => p.id === "anycubic-lan");
+  assert.ok(anycubic);
+  assert.match(anycubic.label, /Anycubic/);
+  assert.match(anycubic.label, /только наблюдение/);
+  assert.match(anycubic.hint, /IP-адрес/);
+  assert.match(anycubic.hint, /TLS без проверки сертификата/);
+  assert.deepEqual(anycubic.credentials, [], "the broker login comes from the printer, not the form");
+  assert.deepEqual(anycubic.autoFields, ["model", "buildVolume"]);
+});
+
+test("an Anycubic printer is added by its IP alone and listed with nothing secret", async () => {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/printers/config",
+    headers: auth,
+    payload: { id: "kobra-x", name: "Anycubic Kobra X", protocol: "anycubic-lan", host: "192.0.2.60" }
+  });
+  assert.equal(res.statusCode, 201, res.body);
+  const printer = body(res).printer as Record<string, unknown>;
+  assert.equal(printer.protocol, "anycubic-lan");
+  assert.equal(printer.host, "192.0.2.60");
+  assert.equal(printer.allowInsecureTls, false, "TLS verification is not waived by default");
+  for (const secret of ["apiKey", "serial", "accessCode"]) assert.ok(!(secret in printer), secret);
+
+  const list = await app.inject({ method: "GET", url: "/api/printers/config" });
+  assert.ok((body(list).printers as { id: string }[]).some((p) => p.id === "kobra-x"));
+});
+
+test("an Anycubic address with a scheme, a port or a path is a 400 on host", async () => {
+  for (const host of ["http://192.0.2.60", "192.0.2.60:18910", "192.0.2.60/info", "user@192.0.2.60", "999.0.2.60"]) {
+    const res = await app.inject({
+      method: "PATCH",
+      url: "/api/printers/config/kobra-x",
+      headers: auth,
+      payload: { host }
+    });
+    assert.equal(res.statusCode, 400, host);
+    assert.match(errorMessage(res), /IP-адрес/, host);
+  }
+});
+
+test("a protocol nobody implements is a 400 naming the ones that exist", async () => {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/printers/config",
+    headers: auth,
+    payload: { id: "kobra-typo", name: "Typo", protocol: "anycubic", host: "192.0.2.61" }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match(errorMessage(res), /anycubic-lan/);
+  const list = await app.inject({ method: "GET", url: "/api/printers/config" });
+  assert.ok(!(body(list).printers as { id: string }[]).some((p) => p.id === "kobra-typo"));
+});
+
+test("without the TLS opt-in, «Проверить связь» answers at once and contacts nothing", async () => {
+  const started = Date.now();
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/printers/config/kobra-x/test",
+    headers: auth,
+    payload: { operator: "миха" }
+  });
+  assert.equal(res.statusCode, 200);
+  const result = body(res).result as { online: boolean; error: string };
+  assert.equal(result.online, false);
+  assert.match(result.error, /самоподписанный сертификат/);
+  assert.ok(Date.now() - started < 3000, "no handshake was attempted");
+
+  const removed = await app.inject({ method: "DELETE", url: "/api/printers/config/kobra-x", headers: auth });
+  assert.equal(removed.statusCode, 200);
 });

@@ -1,6 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
 
-import type { PrinterProtocol } from "../../../domain/printers/config";
 import {
   parseDiscoveredFacts,
   type PrinterDiscoveryRecord,
@@ -25,10 +24,6 @@ import {
  * `domain/printers/discovery.ts`.
  */
 
-function toProtocol(value: unknown): PrinterProtocol {
-  return value === "bambu" || value === "creality" ? value : "moonraker";
-}
-
 const discoveryMapper: RowMapper<PrinterDiscoveryRecord> = {
   table: "printer_discovery",
   entity: "результат опроса принтера",
@@ -47,7 +42,9 @@ const discoveryMapper: RowMapper<PrinterDiscoveryRecord> = {
   fromRow(row: Row): PrinterDiscoveryRecord {
     return {
       id: asString(row.id),
-      protocol: toProtocol(row.protocol),
+      // Verbatim: an unknown value only means another adapter probed last; the
+      // next probe rewrites it. It is never read as a protocol to talk to.
+      protocol: asString(row.protocol),
       facts: parseDiscoveredFacts(row.facts),
       probedAt: asString(row.probed_at),
       succeeded: asBool(row.succeeded),

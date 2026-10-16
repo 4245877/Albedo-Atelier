@@ -7,8 +7,10 @@ import { actionBar, materialBlock, telemetryTempRows } from "./printerParts.js";
 import {
   actionAvailability,
   jobLine,
+  layerText,
   lightPolicyLine,
   normalizeProgress,
+  printersMetaText,
   progressBarHtml,
   progressPercentText
 } from "./printerView.js";
@@ -120,10 +122,11 @@ function printerCard(p, lightEntry) {
   // состояния лампы, которое показывает переключатель света и подсветка камеры.
   const lightLine = lightEntry ? `<div class="printer-light">${esc(lightPolicyLine(lightEntry))}</div>` : "";
 
+  const layer = layerText(p);
   const progressBlock = !can.busy ? "" : normalizeProgress(p.progress) != null ? `
     <div class="printer-progress">
       ${progressBarHtml(p.progress, { paused: p.status === "paused" })}
-      <div class="progress-caption"><b>${progressPercentText(p.progress)}</b><span>осталось ${fmtLeft(p.minutesLeft)}</span></div>
+      <div class="progress-caption"><b>${progressPercentText(p.progress)}</b><span>${layer ? `${esc(layer)} · ` : ""}осталось ${fmtLeft(p.minutesLeft)}</span></div>
     </div>` : `
     <div class="printer-progress">
       <div class="progress-caption"><b>—%</b><span>прогресс не сообщается принтером</span></div>
@@ -202,12 +205,7 @@ export function renderPrinters(state) {
   const lightsById = new Map((state.lights || []).map((l) => [l.id, l]));
   // «Свободны» считаются по готовности, а не по `idle`: простаивающий принтер с
   // деталью на столе или неподтверждённым запуском следующую печать не примет.
-  const ready = p.filter((x) => (x.readiness ? x.readiness.canAcceptJob : x.status === "idle")).length;
-  const waiting = p.filter((x) => x.status === "idle" && x.readiness && !x.readiness.canAcceptJob).length;
-  $("#printers-meta").textContent =
-    `${p.filter((x) => x.status === "printing").length} печатают · ${ready} готовы` +
-    (waiting ? ` · ${waiting} ждут вмешательства` : "") +
-    ` · ${p.length} всего`;
+  $("#printers-meta").textContent = printersMetaText(p);
   $("#printer-grid").innerHTML = p.map((x) => printerCard(x, lightsById.get(x.id))).join("") ||
     emptyState(
       "В зале ещё нет ни одного принтера, Владыка. Примите первого — и я тотчас возьму его под надзор.",

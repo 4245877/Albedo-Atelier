@@ -171,6 +171,12 @@ const TRANSLATIONS: Record<string, Translation> = {
     title: "Удалённый запуск не поддержан",
     action: "Этот принтер запускается только с его собственного экрана."
   },
+  monitoring_only: {
+    title: "Принтер только для наблюдения",
+    action:
+      "Интеграция этого принтера пока умеет только читать его состояние: задания на него не назначаются и не запускаются. " +
+      "Выберите другой принтер."
+  },
   maintenance: {
     title: "Принтер на обслуживании",
     action: "Завершите обслуживание, чтобы вернуть принтер в работу."
@@ -249,6 +255,12 @@ const TRANSLATIONS: Record<string, Translation> = {
   TARGET_PRINTER_UNKNOWN: {
     title: "Не с чем сверить целевой принтер",
     action: "Файл называет целевую машину, а у принтера не заполнена модель. Укажите модель в настройках принтера."
+  },
+  PRINTER_MONITORING_ONLY: {
+    title: "Принтер только для наблюдения",
+    action:
+      "Интеграция этого принтера пока умеет только читать его состояние: задания на него не назначаются и не запускаются. " +
+      "Выберите другой принтер."
   },
   REMOTE_START_UNSUPPORTED: {
     title: "Удалённый запуск не поддерживается",
@@ -651,6 +663,10 @@ export function explainReason(
  * every reason in the system.
  */
 const CAUSE_RANK: Record<string, number> = {
+  // The integration itself takes no job on this printer: every other reason
+  // describes a start that cannot exist.
+  monitoring_only: -1,
+  PRINTER_MONITORING_ONLY: -1,
   // The device naming its own failure — nothing outranks the printer's screen.
   printer_fault: 0,
   printer_media_missing: 0,

@@ -1,6 +1,11 @@
 import { PayloadTooLargeError } from "../../../core/errors";
 import { fetchWithTimeout } from "../../../shared/fetchWithTimeout";
-import { capabilitiesOfProtocol, requireCapability, requireReady } from "../capabilities";
+import {
+  capabilitiesOfProtocol,
+  PrinterCapabilityError,
+  requireCapability,
+  requireReady
+} from "../capabilities";
 import type { PrinterConfig } from "../config";
 import { moonrakerBaseUrl, moonrakerHeaders } from "../status/moonraker";
 import { PrinterCommandError } from "../status/types";
@@ -78,6 +83,11 @@ export async function uploadPrinterFile(
   if (printer.protocol === "bambu") {
     return uploadBambuFile(printer, normalizeStartablePath(remotePath, printer), bytes);
   }
+  // Only Moonraker's multipart endpoint is below. Any other protocol arriving
+  // here is refused, never sent Moonraker's request.
+  if (printer.protocol !== "moonraker") {
+    throw new PrinterCapabilityError(printer, "supportsUpload", "перенесите файл вручную и подтвердите перенос");
+  }
 
   const target = normalizeStartablePath(remotePath, printer);
   const slash = target.lastIndexOf("/");
@@ -128,7 +138,10 @@ export async function deletePrinterFile(printer: PrinterConfig, remotePath: stri
   if (printer.protocol === "bambu") {
     return deleteBambuFile(printer, normalizeStartablePath(remotePath, printer));
   }
-  return deleteMoonrakerFile(printer, normalizeStartablePath(remotePath, printer));
+  if (printer.protocol === "moonraker") {
+    return deleteMoonrakerFile(printer, normalizeStartablePath(remotePath, printer));
+  }
+  throw new PrinterCapabilityError(printer, "supportsFileDelete", "удалите файл на самом принтере");
 }
 
 /**

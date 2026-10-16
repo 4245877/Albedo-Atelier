@@ -1,4 +1,4 @@
-import { capabilitiesOf, requireCapability } from "../capabilities";
+import { capabilitiesOf, PrinterCapabilityError, requireCapability } from "../capabilities";
 import type { PrinterConfig } from "../config";
 import { listBambuFiles } from "./bambu";
 import { listMoonrakerFiles } from "./moonraker";
@@ -55,5 +55,8 @@ export async function fetchPrinterFiles(
 ): Promise<PrinterFilesListing> {
   requireCapability(printer, "supportsFileListing", "проверьте файл на самом принтере");
   if (printer.protocol === "bambu") return listBambuFiles(printer, path);
-  return listMoonrakerFiles(printer, path);
+  if (printer.protocol === "moonraker") return listMoonrakerFiles(printer, path);
+  // Never a fall-through to Moonraker: a protocol reaching this line declared a
+  // capability it has no implementation for, and must not be spoken to as Klipper.
+  throw new PrinterCapabilityError(printer, "supportsFileListing", "проверьте файл на самом принтере");
 }

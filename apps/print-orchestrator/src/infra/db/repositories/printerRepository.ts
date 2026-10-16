@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 import {
+  isPrinterProtocol,
   NO_AUTOMATIC_CONTINUATION,
   type PrinterProtocol,
   type PrinterRecord
@@ -27,8 +28,19 @@ import {
  * `infra/printers/materialize.ts`, so a row round-trips unchanged.
  */
 
-function toProtocol(value: unknown): PrinterProtocol {
-  return value === "bambu" || value === "creality" ? value : "moonraker";
+/**
+ * The stored protocol, exactly as written. The CHECK constraint (migrations
+ * 012/018) keeps every other value out of the table, so one arriving here means
+ * a database written by something other than this build. It is refused loudly:
+ * the old `: "moonraker"` fallback drove such a printer as a Klipper machine,
+ * Moonraker commands included.
+ */
+function toProtocol(value: unknown, id: unknown): PrinterProtocol {
+  if (isPrinterProtocol(value)) return value;
+  throw new Error(
+    `Принтер «${String(id)}» хранит неподдерживаемый протокол «${String(value)}» — ` +
+      "запись создана другой версией сервиса или повреждена"
+  );
 }
 
 function toTechnology(value: unknown): PrinterTechnology {
@@ -142,7 +154,7 @@ const printerMapper: RowMapper<PrinterRecord> = {
       model: asString(row.model),
       type: toTechnology(row.type),
       printerClass: asString(row.printer_class),
-      protocol: toProtocol(row.protocol),
+      protocol: toProtocol(row.protocol, row.id),
       host: asString(row.host),
       port: asNumberOrNull(row.port),
       material: asString(row.material),

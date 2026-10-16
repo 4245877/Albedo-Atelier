@@ -114,6 +114,13 @@ export interface PrinterView {
    */
   activeRunId?: string | null;
   progress: number | null;
+  /**
+   * `[current, total]` layer of the running job; total is null when the device
+   * gives only the current one. Present only when an adapter reads layers at all
+   * (Anycubic LAN today) and the device reported one — absent everywhere else,
+   * which keeps the published contract unchanged for the other adapters.
+   */
+  layer?: [number, number | null];
   /** `[current, target]` °C; target is null when the device does not report it. */
   nozzle: [number, number | null] | null;
   /** `[current, target]` °C; target is null when the device does not report it. */

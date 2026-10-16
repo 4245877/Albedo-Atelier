@@ -981,6 +981,8 @@ test("an adapter that cannot upload is never asked to — its declared capabilit
   const capabilities = (printer: PrinterConfig): PrinterCapabilities => {
     calls.push(printer.id);
     return {
+      // A manual-transfer adapter (Creality WS): it takes jobs, cannot upload.
+      supportsJobs: true,
       supportsUpload: false,
       supportsFileListing: false,
       supportsRemoteStart: false,

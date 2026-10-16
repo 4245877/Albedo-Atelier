@@ -144,6 +144,9 @@ export function buildPrinterView(
     setupRequired: !printerReadiness(printer).ready,
     setupMissing: printerReadiness(printer).missing,
     interfaceUrl: printer.interfaceUrl || null,
+    ...(status?.online && typeof status.currentLayer === "number"
+      ? { layer: [status.currentLayer, status.totalLayers ?? null] as [number, number | null] }
+      : {}),
     ...(status?.error ? { error: status.error } : {})
   };
 }

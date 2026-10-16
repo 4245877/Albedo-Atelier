@@ -37,7 +37,7 @@ export interface SlicerPrinterRef {
   name: string;
   model: string | null;
   material: string | null;
-  /** Transport/firmware family: "moonraker" | "bambu" | "creality". */
+  /** Transport/firmware family: "moonraker" | "bambu" | "creality" | "anycubic-lan". */
   protocol: string | null;
   /** Configured nozzle Ø (mm) from PrinterConfig; null when unknown. */
   nozzleMm?: number | null;

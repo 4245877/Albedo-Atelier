@@ -18,6 +18,7 @@ FDM-принтеров: веб-панель оператора и сервис-�
 | Creality K2 | Moonraker HTTP (порт 4408); камера — WebRTC через go2rtc | загрузка файла, удалённый старт и управление печатью, свет, телеметрия |
 | Creality Ender-3 V3 KE | Creality WebSocket | только телеметрия: файл переносится вручную, печать запускается на экране принтера |
 | Bambu Lab A1 Combo | локальный MQTT (LAN Mode) + FTPS | загрузка, удалённый старт и управление печатью, свет, телеметрия; путь через AMS Lite на железе не проверен |
+| Anycubic Kobra X | режим LAN Anycubic: HTTP :18910 (handshake) + MQTT/TLS :9883 | **только наблюдение** (этап 1): состояние, температуры, прогресс, слой, оставшееся время; заданий и команд не получает. Код готов, на железе не проверен и не развёрнут |
 
 Принтеры добавляются и настраиваются в панели, раздел «Оборудование фермы»;
 технические характеристики сервис читает с самих устройств.
@@ -32,7 +33,7 @@ print-dashboard ─── nginx: статика + прокси /api/print-orches
 print-orchestrator ─ Fastify :3100, только внутри сети compose
    │   queue.db (SQLite) + state.json + artifacts/   ← том orchestrator-data
    │   OrcaSlicer 2.3.0 с хоста в /opt/orca          ← compose.orca.yml
-   ├──► принтеры: Moonraker HTTP · Bambu MQTT/FTPS · Creality WebSocket
+   ├──► принтеры: Moonraker HTTP · Bambu MQTT/FTPS · Creality WebSocket · Anycubic LAN MQTT
    ├──► go2rtc: камера K2, WebRTC-медиа на :8555
    └──◄► fulfillment (docker-сеть print-farm): склад филамента, уведомления
 ```
@@ -194,6 +195,12 @@ cd ../print-dashboard && node --test "tests/**/*.test.mjs"
   `3db702e` — восстановление бэкапа `2026-10-16T06-02-00Z` (теряется всё
   записанное после 06:02 UTC) или экспертный SQL-откат 017 —
   [процедура](ALBEDO_MODERNIZATION_PROGRESS.md#откат-после-успешного-деплоя).
+- **Anycubic Kobra X — этап 1 (только наблюдение) в коде, не развёрнут.**
+  Протокол `anycubic-lan`, миграция `018_anycubic_lan` (пересборка таблицы
+  `printers`; только вперёд) и адаптер проверены тестами на заглушках, но не на
+  самом принтере. Релиз — на простаивающей ферме после
+  [ops/verify](ops/verify/README.md); подключение к Kobra X — отдельным
+  разрешением ([как добавить](docs/operations.md#printer-config--secrets)).
 - **Бэкапы на том же физическом диске** (режим DEGRADED): второго носителя нет.
 - `queue.db` на томе с правами 644, хотя хранит учётные данные принтеров;
   рекомендуется `chmod 600` (изменение production, не выполнялось).

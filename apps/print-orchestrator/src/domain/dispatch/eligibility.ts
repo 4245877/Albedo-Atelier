@@ -262,7 +262,7 @@ export interface DispatchFacts {
   printerClass: string | null;
   /** The operator-facing name. Shown in refusals, never compared. */
   printerName: string | null;
-  /** Transport/firmware family (moonraker | bambu | creality); null when unknown. */
+  /** Transport/firmware family (moonraker | bambu | creality | anycubic-lan); null when unknown. */
   printerProtocol: string | null;
   remoteStartSupported: boolean;
   /** Live status; `undefined` when no telemetry exists at all. */
@@ -425,7 +425,8 @@ const PREFLIGHT_CODE_MAP: Record<PreflightReasonCode, ReasonCode> = {
   printer_media_missing: REASON.PRINTER_MEDIA_MISSING,
   launch_unconfirmed: REASON.LAUNCH_UNCONFIRMED,
   ams_mapping_ambiguous: REASON.AMS_MAPPING_AMBIGUOUS,
-  model_off_bed: REASON.MODEL_OFF_BED
+  model_off_bed: REASON.MODEL_OFF_BED,
+  monitoring_only: REASON.PRINTER_MONITORING_ONLY
 };
 
 /**

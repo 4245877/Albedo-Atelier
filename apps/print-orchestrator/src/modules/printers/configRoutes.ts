@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 
 import { ValidationError } from "../../core/errors";
-import { PRINTER_PROTOCOLS } from "../../domain/printers/config";
+import { PRINTER_PROTOCOLS, type PrinterProtocol } from "../../domain/printers/config";
 import { autoDiscoveredFields } from "../../infra/printers/discovery";
 import type { PrinterConfigService } from "../../app/printers/printerConfigService";
 
@@ -144,22 +144,31 @@ export async function registerPrinterConfigRoutes(
   });
 }
 
-const PROTOCOL_LABELS: Record<string, string> = {
+// Typed by the vocabulary, so a protocol added to PRINTER_PROTOCOLS without its
+// form texts does not compile — the form must never offer a bare id.
+const PROTOCOL_LABELS: Record<PrinterProtocol, string> = {
   moonraker: "Moonraker (Klipper: K2, Fluidd, Mainsail)",
   bambu: "Bambu Lab (локальный MQTT, режим LAN)",
-  creality: "Creality (WebSocket, Ender 3 V3 KE)"
+  creality: "Creality (WebSocket, Ender 3 V3 KE)",
+  "anycubic-lan": "Anycubic (режим LAN, Kobra X) — только наблюдение"
 };
 
-const PROTOCOL_HINTS: Record<string, string> = {
+const PROTOCOL_HINTS: Record<PrinterProtocol, string> = {
   moonraker: "Адрес и порт веб-интерфейса Klipper (обычно 7125 или 4408). Управление печатью и загрузка файлов поддерживаются полностью.",
   bambu: "Нужны серийный номер и код доступа с экрана принтера: настройки → сеть → LAN. Код меняется при сбросе — обновите его здесь, без пересборки.",
-  creality: "Только чтение телеметрии по WebSocket: удалённый запуск и пауза этим протоколом не поддерживаются."
+  creality: "Только чтение телеметрии по WebSocket: удалённый запуск и пауза этим протоколом не поддерживаются.",
+  "anycubic-lan":
+    "Достаточно IP-адреса: на принтере должен быть включён режим LAN, порт указывать не нужно. " +
+    "Сертификат принтера самоподписанный — подключение начнётся только после отметки «Разрешить TLS без проверки сертификата». " +
+    "Только телеметрия: задания, запуск, пауза, подсветка и файлы не поддерживаются."
 };
 
-const PROTOCOL_CREDENTIALS: Record<string, string[]> = {
+const PROTOCOL_CREDENTIALS: Record<PrinterProtocol, string[]> = {
   moonraker: ["apiKey"],
   bambu: ["serial", "accessCode"],
-  creality: []
+  creality: [],
+  // The broker login is obtained from the printer itself and kept in memory.
+  "anycubic-lan": []
 };
 
 /** The body as validation input; the actor field is not a printer setting. */

@@ -57,6 +57,14 @@ export class PrinterDiscoveryService {
    * a config change and the operator's own button can easily overlap.
    */
   private readonly inFlight = new Map<string, Promise<PrinterDiscoveryRecord | null>>();
+  /**
+   * When each printer was last probed by this process, successful, unchanged or
+   * failed. The stored `probedAt` cannot answer that: an unchanged probe skips the
+   * write on purpose, so after the first interval the row stayed "due" and every
+   * poll cycle (10 s) probed again — three HTTP requests per poll for a Klipper
+   * printer whose specification had not changed in weeks.
+   */
+  private readonly lastProbeAt = new Map<string, number>();
 
   constructor(
     private readonly store: PrintQueueStore,
@@ -103,7 +111,10 @@ export class PrinterDiscoveryService {
 
     const probe = this.probe(printer)
       .then((result) => this.persist(printer, result))
-      .finally(() => this.inFlight.delete(printer.id));
+      .finally(() => {
+        this.inFlight.delete(printer.id);
+        this.lastProbeAt.set(printer.id, this.nowFn().getTime());
+      });
 
     this.inFlight.set(printer.id, probe);
     return probe;
@@ -135,17 +146,22 @@ export class PrinterDiscoveryService {
   /** Forgets a removed printer's result (the FK cascade covers the row itself). */
   forget(printerId: string): void {
     this.inFlight.delete(printerId);
+    this.lastProbeAt.delete(printerId);
   }
 
   // ── Internals ──────────────────────────────────────────────────────────────
 
   private isDue(printerId: string): boolean {
+    const now = this.nowFn().getTime();
+    const probedHere = this.lastProbeAt.get(printerId);
+    if (probedHere !== undefined && now - probedHere < this.intervalMs) return false;
+
     const existing = this.get(printerId);
     if (!existing) return true;
 
     const probedAt = Date.parse(existing.probedAt);
     if (!Number.isFinite(probedAt)) return true;
-    return this.nowFn().getTime() - probedAt >= this.intervalMs;
+    return now - probedAt >= this.intervalMs;
   }
 
   /**

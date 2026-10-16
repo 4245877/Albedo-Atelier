@@ -72,3 +72,14 @@ test("a print started outside Albedo is printing — and named as such", () => {
   assert.equal(r.state, "printing");
   assert.match(r.detail ?? "", /не через Albedo/);
 });
+
+test("a monitoring-only printer is never «Готов к печати», even idle on a clear plate", () => {
+  const r = describePrinterReadiness({ ...base, jobsSupported: false });
+  assert.equal(r.state, "monitoring");
+  assert.equal(r.label, "Только наблюдение");
+  assert.equal(r.canAcceptJob, false);
+  // What it is doing still reads as itself.
+  assert.equal(describePrinterReadiness({ ...base, jobsSupported: false, status: "printing" }).state, "printing");
+  assert.equal(describePrinterReadiness({ ...base, jobsSupported: false, online: false }).state, "offline");
+  assert.equal(describePrinterReadiness({ ...base, jobsSupported: true }).state, "ready");
+});

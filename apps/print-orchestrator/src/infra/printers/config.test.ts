@@ -66,41 +66,42 @@ test("buildVolume is accepted only when x/y/z are all finite and positive", () =
     id: "k2",
     name: "X",
     host: "127.0.0.1",
+    protocol: "moonraker",
     buildVolume: { x: 300, y: 300, z: 300 }
   });
   assert.deepEqual(ok?.buildVolume, { x: 300, y: 300, z: 300 });
 
   // A partial / non-numeric / non-positive box is dropped to null (fall back to the profile).
   for (const bad of [{ x: 300, y: 300 }, { x: "abc", y: 300, z: 300 }, { x: 0, y: 300, z: 300 }, "300x300x300"]) {
-    const p = normalizePrinterConfig({ id: "k2", name: "X", host: "127.0.0.1", buildVolume: bad });
+    const p = normalizePrinterConfig({ id: "k2", name: "X", host: "127.0.0.1", protocol: "moonraker", buildVolume: bad });
     assert.equal(p?.buildVolume ?? null, null, `dropped: ${JSON.stringify(bad)}`);
   }
 });
 
 test("printerClass is normalised from printerClass or class, defaulting to empty", () => {
   assert.equal(
-    normalizePrinterConfig({ id: "k2", name: "X", host: "127.0.0.1", printerClass: "k2" })?.printerClass,
+    normalizePrinterConfig({ id: "k2", name: "X", host: "127.0.0.1", protocol: "moonraker", printerClass: "k2" })?.printerClass,
     "k2"
   );
   // Legacy/alias key `class` is accepted too.
   assert.equal(
-    normalizePrinterConfig({ id: "k2b", name: "X", host: "127.0.0.1", class: "k2" })?.printerClass,
+    normalizePrinterConfig({ id: "k2b", name: "X", host: "127.0.0.1", protocol: "moonraker", class: "k2" })?.printerClass,
     "k2"
   );
   // Unset → "" (no class); a loaded config never leaves it undefined.
-  assert.equal(normalizePrinterConfig({ id: "k2c", name: "X", host: "127.0.0.1" })?.printerClass, "");
+  assert.equal(normalizePrinterConfig({ id: "k2c", name: "X", host: "127.0.0.1", protocol: "moonraker" })?.printerClass, "");
 });
 
 test("an unsafe printer id (path traversal / separators) is rejected", () => {
   for (const id of ["../evil", "a/b", "a b", "..", "a.b", "a:b", ""]) {
     assert.equal(
-      normalizePrinterConfig({ id, name: "X", host: "127.0.0.1" }),
+      normalizePrinterConfig({ id, name: "X", host: "127.0.0.1", protocol: "moonraker" }),
       null,
       `id ${JSON.stringify(id)} must be rejected`
     );
   }
   // A safe id passes.
-  assert.ok(normalizePrinterConfig({ id: "creality-k2", name: "X", host: "127.0.0.1" }));
+  assert.ok(normalizePrinterConfig({ id: "creality-k2", name: "X", host: "127.0.0.1", protocol: "moonraker" }));
 });
 
 afterEach(() => {
@@ -126,19 +127,64 @@ test("loadPrintersConfig drops duplicate ids (first wins) and warns", async () =
   assert.match(String(source.warning), /Повторяющиеся id/);
 });
 
+// ── Protocol: an entry is driven only by the adapter it names ───────────────
+
+test("anycubic-lan is a protocol of its own, kept verbatim", () => {
+  const printer = normalizePrinterConfig({
+    id: "kobra-x",
+    name: "Kobra X",
+    host: "192.168.1.60",
+    protocol: "anycubic-lan",
+    allowInsecureTls: true
+  });
+  assert.equal(printer?.protocol, "anycubic-lan");
+  assert.equal(printer?.allowInsecureTls, true);
+  assert.equal(printer?.light.enabled, false, "no light default for an adapter with no light control");
+  assert.equal(normalizePrinterConfig({ id: "x", name: "X", host: "1.2.3.4", protocol: " Anycubic-LAN " })?.protocol, "anycubic-lan");
+});
+
+test("an unknown or absent protocol is refused — never driven as Moonraker", () => {
+  for (const protocol of ["anycubic", "octoprint", "prusalink", "moonraker2", "", undefined, null, 42]) {
+    assert.equal(
+      normalizePrinterConfig({ id: "p", name: "P", host: "10.0.0.9", protocol }),
+      null,
+      `protocol ${JSON.stringify(protocol)}`
+    );
+  }
+});
+
+test("loadPrintersConfig names the entries it refused for their protocol", async () => {
+  process.env.PRINTERS_CONFIG_PATH = "/nonexistent/printers.json";
+  process.env.PRINTERS_CONFIG_JSON = JSON.stringify([
+    { id: "k2", name: "K2", host: "10.0.0.1", protocol: "moonraker" },
+    { id: "kobra", name: "Kobra", host: "10.0.0.2", protocol: "anycubic" },
+    { id: "legacy", name: "Legacy", host: "10.0.0.3" },
+    { id: "kobra-x", name: "Kobra X", host: "10.0.0.4", protocol: "anycubic-lan" }
+  ]);
+
+  const { printers, source } = await loadPrintersConfig();
+  assert.deepEqual(printers.map((p) => [p.id, p.protocol]), [
+    ["k2", "moonraker"],
+    ["kobra-x", "anycubic-lan"]
+  ]);
+  assert.match(String(source.warning), /неподдерживаемым протоколом/);
+  assert.match(String(source.warning), /kobra \(протокол: anycubic\)/);
+  assert.match(String(source.warning), /legacy \(протокол: не указан\)/);
+});
+
 // ── Automatic continuation (bed self-clearing) capability ──────────────────
 
 test("an existing config with no automaticContinuation defaults to NOT allowed", () => {
   // Backward compatibility: every printers.json written before this field exists
   // must keep working, and must land on the safe side of the default.
-  const printer = normalizePrinterConfig({ id: "k2", name: "K2", host: "127.0.0.1" });
+  const printer = normalizePrinterConfig({ id: "k2", name: "K2", host: "127.0.0.1", protocol: "moonraker" });
   assert.ok(printer);
   assert.equal(printer.automaticContinuation?.allowed, false);
   assert.equal(automaticContinuationEnabled(printer), false);
 });
 
 test("automatic continuation needs an explicit opt-in AND a recorded verification", () => {
-  const base = { id: "k2", name: "K2", host: "127.0.0.1" };
+  const base = { id: "k2", name: "K2", host: "127.0.0.1", protocol: "moonraker" };
 
   // Opted in but never physically verified → still refused.
   const unverified = normalizePrinterConfig({
@@ -176,6 +222,7 @@ test("a truthy-but-not-true opt-in never enables automatic continuation", () => 
       id: "k2",
       name: "K2",
       host: "127.0.0.1",
+      protocol: "moonraker",
       automaticContinuation: { allowed, mechanism: "x", verifiedAt: "2026-07-01T00:00:00Z" }
     });
     assert.ok(printer);
@@ -188,6 +235,7 @@ test("an unparseable verifiedAt is discarded rather than trusted", () => {
     id: "k2",
     name: "K2",
     host: "127.0.0.1",
+    protocol: "moonraker",
     automaticContinuation: { allowed: true, mechanism: "belt", verifiedAt: "как-нибудь потом" }
   });
   assert.ok(printer);

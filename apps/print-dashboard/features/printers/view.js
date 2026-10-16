@@ -30,7 +30,8 @@ import { menuHtml } from "../../shared/menu.js";
 const FALLBACK_CREDENTIALS = {
   moonraker: ["apiKey"],
   bambu: ["serial", "accessCode"],
-  creality: []
+  creality: [],
+  "anycubic-lan": []
 };
 
 const CREDENTIAL_LABELS = {
@@ -181,6 +182,7 @@ function discoveryPanel(printer) {
     specRow("Модель", specs.model, (v) => v),
     specRow("Прошивка", specs.firmware, (v) => v),
     specRow("Имя устройства", specs.deviceName, (v) => v),
+    specRow("Серийный номер", specs.serialNumber, (v) => v),
     specRow("Рабочая область", specs.buildVolume, (v) => `${v.x} × ${v.y} × ${v.z} мм`),
     specRow("Диаметр сопла", specs.nozzleDiameterMm, (v) => `${v} мм`),
     specRow("Тип сопла", specs.nozzleType, (v) => v),
@@ -424,7 +426,7 @@ function printerForm(printer, state) {
 
       <label class="sch-check">
         <input type="checkbox" name="allowInsecureTls" ${printer.allowInsecureTls ? "checked" : ""} />
-        Разрешить TLS без проверки сертификата (Bambu LAN — только в доверенной сети)
+        Разрешить TLS без проверки сертификата (Bambu LAN, Anycubic LAN — только в доверенной сети)
       </label>
 
       <div class="sch-edit-actions">
@@ -551,14 +553,7 @@ export function addFormHtml(state) {
         <input type="checkbox" name="enabled" checked />
         Сразу включить в работу (опрос и очередь)
       </label>
-      ${
-        protocol === "bambu"
-          ? `<label class="sch-check">
-               <input type="checkbox" name="allowInsecureTls" checked />
-               Разрешить TLS без проверки сертификата — Bambu LAN иначе не подключается
-             </label>`
-          : ""
-      }
+      ${tlsOptIn(protocol)}
       <div class="sch-edit-actions">
         <button type="submit" class="btn btn-primary btn-sm" ${
           state.busy?.__create ? "disabled" : ""
@@ -567,6 +562,28 @@ export function addFormHtml(state) {
       </div>
     </form>`
   );
+}
+
+/* Согласие на TLS без проверки сертификата при добавлении принтера. Bambu без
+   него не подключается вовсе, поэтому галочка стоит сразу. У Anycubic она
+   намеренно НЕ стоит: проверка сертификата по умолчанию не отключается, и
+   оператор подтверждает это сам — до отметки принтер не подключается и
+   карточка говорит «Требуется настройка». */
+function tlsOptIn(protocol) {
+  if (protocol === "bambu") {
+    return `<label class="sch-check">
+      <input type="checkbox" name="allowInsecureTls" checked />
+      Разрешить TLS без проверки сертификата — Bambu LAN иначе не подключается
+    </label>`;
+  }
+  if (protocol === "anycubic-lan") {
+    return `<label class="sch-check">
+      <input type="checkbox" name="allowInsecureTls" />
+      Разрешить TLS без проверки сертификата — у Anycubic LAN самоподписанный сертификат;
+      без отметки принтер не подключается. Только в доверенной сети.
+    </label>`;
+  }
+  return "";
 }
 
 /* ── Подсказки полей, зависящие от источника ───────────────── */
@@ -632,7 +649,8 @@ function protocolOptions(state) {
   return [
     { id: "moonraker", label: "Moonraker" },
     { id: "bambu", label: "Bambu Lab" },
-    { id: "creality", label: "Creality" }
+    { id: "creality", label: "Creality" },
+    { id: "anycubic-lan", label: "Anycubic LAN" }
   ];
 }
 

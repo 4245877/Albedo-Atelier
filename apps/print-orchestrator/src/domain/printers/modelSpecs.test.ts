@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { deriveBambuModelCode, listModelSpecs, lookupModelSpec } from "./modelSpecs";
+import {
+  deriveBambuModelCode,
+  listModelSpecs,
+  lookupModelSpec,
+  anycubicModelCodeFor
+} from "./modelSpecs";
 
 /*
  * The catalogue's job is to fill the one gap the Bambu protocol leaves — the
@@ -70,5 +75,15 @@ test("every Bambu serial prefix maps onto a real catalogue entry", () => {
     const code = deriveBambuModelCode(serial);
     assert.ok(code, `${serial}: expected a catalogue code`);
     assert.ok(lookupModelSpec(code), `${serial}: «${code}» is not in the catalogue`);
+  }
+});
+
+test("an Anycubic model id identifies only the model confirmed on hardware", () => {
+  assert.equal(anycubicModelCodeFor("20030"), "anycubic-kobra-x");
+  assert.equal(anycubicModelCodeFor(20030), "anycubic-kobra-x");
+  assert.deepEqual(lookupModelSpec("anycubic-kobra-x")?.buildVolume, { x: 260, y: 260, z: 260 });
+  // Same protocol family, different machines: nothing is lent to them.
+  for (const other of ["20029", "20025", "20024", "20028", "20021", "", null, undefined]) {
+    assert.equal(anycubicModelCodeFor(other), null, String(other));
   }
 });

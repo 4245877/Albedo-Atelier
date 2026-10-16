@@ -100,6 +100,16 @@ const MODELS: readonly PrinterModelSpec[] = [
     technology: "FDM",
     buildVolume: { x: 220, y: 220, z: 240 },
     amsKind: null
+  },
+  {
+    code: "anycubic-kobra-x",
+    name: "Anycubic Kobra X",
+    technology: "FDM",
+    // Anycubic's published build volume. The LAN protocol does not report it.
+    buildVolume: { x: 260, y: 260, z: 260 },
+    // Its built-in four-colour changer is none of the kinds this vocabulary
+    // names, and multi-material is out of scope until it is verified.
+    amsKind: null
   }
 ];
 
@@ -185,4 +195,25 @@ export function deriveBambuModelCode(serial: string | null | undefined): string 
   const trimmed = (serial ?? "").trim().toUpperCase();
   if (trimmed.length < 3) return null;
   return BAMBU_SERIAL_PREFIXES[trimmed.slice(0, 3)] ?? null;
+}
+
+/**
+ * Anycubic LAN `modelId`s → catalogue codes.
+ *
+ * The printer states its `modelId` itself (`GET :18910/info` and the decrypted
+ * LAN bundle), so unlike Bambu's serial prefixes this is a reading, not an
+ * inference. Only models whose identifier has been confirmed on a real unit
+ * are listed: `20030` is the Kobra X (OrcaCubic's capture of firmware 2.0.1.9;
+ * the Home Assistant LAN integrations agree). Other Anycubic models share the
+ * protocol but not the hardware — an unlisted id resolves to `null`, never to
+ * the Kobra X, so its bed size is not lent to a different machine.
+ */
+const ANYCUBIC_MODEL_IDS: Readonly<Record<string, string>> = {
+  "20030": "anycubic-kobra-x"
+};
+
+/** The catalogue code for an Anycubic LAN `modelId`, or `null` when not catalogued. */
+export function anycubicModelCodeFor(modelId: string | number | null | undefined): string | null {
+  if (modelId === null || modelId === undefined) return null;
+  return ANYCUBIC_MODEL_IDS[String(modelId).trim()] ?? null;
 }

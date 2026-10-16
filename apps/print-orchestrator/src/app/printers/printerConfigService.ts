@@ -107,9 +107,16 @@ export interface PrinterDiscoveryPort {
   forget(printerId: string): void;
 }
 
-/** How long a Bambu probe waits for the first MQTT report before giving up. */
-const BAMBU_PROBE_TIMEOUT_MS = 8000;
-const BAMBU_PROBE_INTERVAL_MS = 400;
+/**
+ * How long a probe of a push-based (MQTT) adapter waits for the first report
+ * before giving up. Anycubic needs longer: its first answer follows an HTTP
+ * handshake, a TLS session and an `info` query.
+ */
+const PUSH_PROBE_TIMEOUT_MS: Partial<Record<string, number>> = {
+  bambu: 8000,
+  "anycubic-lan": 15000
+};
+const PUSH_PROBE_INTERVAL_MS = 400;
 
 /**
  * The printer configuration service: the farm's own hardware inventory, owned by
@@ -353,9 +360,9 @@ export class PrinterConfigService {
    * operator can see «код доступа принят» before trusting the farm with a print.
    *
    * The printer's connection is dropped first, so the probe can never be answered
-   * by a client authenticated with the previous credentials. Bambu is polled until
-   * its first MQTT report arrives (the protocol has no synchronous handshake);
-   * Moonraker and Creality answer in one request.
+   * by a client authenticated with the previous credentials. Bambu and Anycubic
+   * LAN are polled until their first MQTT report arrives (neither has a
+   * synchronous status request); Moonraker and Creality answer in one request.
    */
   async testConnection(id: string, actor?: string): Promise<PrinterConnectionTest> {
     const record = this.require(id);
@@ -424,16 +431,21 @@ export class PrinterConfigService {
     };
 
     let last = await read();
-    if (last.online || config.protocol !== "bambu") return last;
+    const timeoutMs = PUSH_PROBE_TIMEOUT_MS[config.protocol];
+    if (last.online || timeoutMs === undefined) return last;
 
-    // Bambu LAN is push-based: the first read only opens the MQTT client, so a
-    // single "offline" answer means "no report yet", not "bad credentials".
-    // Wait for the real answer — an auth failure surfaces here as an error too.
-    const deadline = Date.now() + BAMBU_PROBE_TIMEOUT_MS;
+    // Bambu and Anycubic LAN are push-based: the first read only opens the MQTT
+    // session, so a single "offline" answer means "no report yet", not "bad
+    // credentials". Wait for the real answer — an auth failure surfaces here as
+    // an error too.
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      await delay(BAMBU_PROBE_INTERVAL_MS);
+      await delay(PUSH_PROBE_INTERVAL_MS);
       last = await read();
       if (last.online) break;
+      // The Anycubic session reports `unknown` while still connecting and
+      // `offline` once an attempt has definitely failed — no point waiting on.
+      if (config.protocol === "anycubic-lan" && last.status === "offline") break;
     }
     return last;
   }

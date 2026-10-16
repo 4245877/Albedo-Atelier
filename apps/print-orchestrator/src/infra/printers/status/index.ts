@@ -1,3 +1,8 @@
+import {
+  dropAnycubicConnection,
+  getAnycubicStatus,
+  shutdownAnycubicConnections
+} from "../anycubic";
 import { capabilitiesOf, requireCapability } from "../capabilities";
 import type { PrinterConfig } from "../config";
 import {
@@ -20,8 +25,11 @@ import { PrinterCommandError, type PrinterCommand, type PrinterLiveStatus } from
 
 /**
  * Live printer telemetry and control, one adapter per protocol (Moonraker HTTP,
- * Bambu local MQTT, Creality WebSocket) over a shared status mapper. Ported from
- * apps/fulfillment.
+ * Bambu local MQTT, Creality WebSocket, Anycubic LAN MQTT) over a shared status
+ * mapper. Ported from apps/fulfillment.
+ *
+ * Every switch below names each protocol it serves; there is no default branch
+ * that hands an unrecognised printer to another adapter's code.
  */
 
 export { PrinterCommandError } from "./types";
@@ -31,13 +39,15 @@ export async function getPrinterLiveStatus(printer: PrinterConfig): Promise<Prin
   if (printer.protocol === "moonraker") return getMoonrakerStatus(printer);
   if (printer.protocol === "bambu") return getBambuStatus(printer);
   if (printer.protocol === "creality") return getCrealityStatus(printer);
-  return makeOfflineStatus(printer, "Неподдерживаемый протокол принтера");
+  if (printer.protocol === "anycubic-lan") return getAnycubicStatus(printer);
+  return makeOfflineStatus(printer, `Неподдерживаемый протокол принтера «${String(printer.protocol)}»`);
 }
 
 /**
  * Sends a real control command to the device. Supported: Moonraker HTTP
  * (`/printer/print/*`) and Bambu local MQTT (`print.command`). Creality's
- * WebSocket control protocol is not implemented — that is reported honestly.
+ * WebSocket control and Anycubic LAN control are not implemented — that is
+ * reported honestly, and nothing is sent.
  */
 export async function sendPrinterCommand(
   printer: PrinterConfig,
@@ -114,15 +124,17 @@ export async function sendPrinterLight(printer: PrinterConfig, on: boolean): Pro
 /**
  * Drops any persistent connection held for ONE printer, so the next poll
  * reconnects from the current configuration. Called after its settings or
- * credentials change and when it is removed from the farm. Only Bambu keeps a
- * long-lived client — Moonraker is request/response and Creality opens a fresh
- * WebSocket per poll, so for those this is correctly a no-op.
+ * credentials change and when it is removed from the farm. Bambu and Anycubic
+ * keep long-lived clients — Moonraker is request/response and Creality opens a
+ * fresh WebSocket per poll, so for those this is correctly a no-op.
  */
 export function disconnectPrinter(printerId: string): void {
   dropBambuConnection(printerId);
+  dropAnycubicConnection(printerId);
 }
 
-/** Closes all persistent device connections (Bambu MQTT clients, timers). */
+/** Closes all persistent device connections (Bambu and Anycubic MQTT sessions, timers). */
 export function shutdownPrinterConnections(): void {
   shutdownBambuConnections();
+  shutdownAnycubicConnections();
 }

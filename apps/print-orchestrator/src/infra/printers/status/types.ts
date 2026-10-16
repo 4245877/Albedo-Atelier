@@ -67,6 +67,13 @@ export interface PrinterLiveStatus {
   progressPct: number | null;
   remainingMinutes: number | null;
   /**
+   * The layer the device reports printing, and the job's layer count. Optional
+   * and absent for the adapters that do not read them (only Anycubic LAN does
+   * today); `null` when the device did not say.
+   */
+  currentLayer?: number | null;
+  totalLayers?: number | null;
+  /**
    * Filament extruded so far this print, in mm (Klipper `print_stats.filament_used`).
    * `null` when the device/adapter does not report it (Bambu, Creality, offline).
    */

@@ -42,6 +42,9 @@ export const READINESS = {
   maintenance: { label: "нужна операция", badge: "badge-paused" },
   stale: { label: "данные устарели", badge: "badge-offline" },
   setup: { label: "нужна настройка", badge: "badge-offline" },
+  // Принтер подключён только для мониторинга (Anycubic LAN, этап 1): он на связи
+  // и исправен, но заданий не принимает — нейтрально, не «готов служить».
+  monitoring: { label: "только наблюдение", badge: "badge-plain" },
 };
 
 /** Бейдж принтера с учётом готовности: печать/ошибка/связь — как есть, простой — по факту. */

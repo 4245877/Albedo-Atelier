@@ -1,6 +1,7 @@
 import { ValidationError } from "../../core/errors";
 import {
   DEFAULT_LIGHT_SETTINGS,
+  isPrinterProtocol,
   NO_AUTOMATIC_CONTINUATION,
   PRINTER_ID_RE,
   PRINTER_PROTOCOLS,
@@ -114,13 +115,49 @@ function httpUrlOrEmpty(value: unknown, field: string): string {
 
 function protocol(value: unknown): PrinterProtocol {
   const raw = String(value ?? "").trim().toLowerCase();
-  if (!(PRINTER_PROTOCOLS as readonly string[]).includes(raw)) {
+  if (!isPrinterProtocol(raw)) {
     throw new ValidationError(
       `Поле «protocol» должно быть одним из: ${PRINTER_PROTOCOLS.join(", ")}`,
       { field: "protocol" }
     );
   }
-  return raw as PrinterProtocol;
+  return raw;
+}
+
+const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+const HOSTNAME_RE =
+  /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i;
+
+/**
+ * A bare network address — an IPv4/IPv6 literal or a DNS name, and nothing else.
+ *
+ * Some adapters build URLs out of the stored host (Anycubic LAN:
+ * `http://<host>:18910/info`). A host carrying a scheme, a port, a path or
+ * `user@` would let the stored text steer where that request goes, and the
+ * address is the one part of such an exchange the farm chooses itself rather
+ * than taking from the device. Pure: no DNS lookup, no I/O.
+ */
+export function isBareNetworkHost(value: string): boolean {
+  const host = value.trim();
+  if (!host || host !== value) return false;
+
+  const v4 = IPV4_RE.exec(host);
+  if (v4) return v4.slice(1).every((octet) => Number(octet) <= 255);
+  // All-numeric labels that are not a valid IPv4 (999.1.1.1, 10.1) are a typo,
+  // not a hostname.
+  if (/^[\d.]+$/.test(host)) return false;
+
+  if (host.includes(":")) {
+    if (!/^[0-9a-f:.]+$/i.test(host) || (host.match(/:/g) ?? []).length < 2) return false;
+    try {
+      // The WHATWG parser is the arbiter of what an IPv6 literal is.
+      return new URL(`http://[${host}]/`).hostname.length > 2;
+    } catch {
+      return false;
+    }
+  }
+
+  return HOSTNAME_RE.test(host);
 }
 
 function technology(value: unknown): PrinterTechnology {
@@ -356,6 +393,12 @@ export function buildPrinterRecord(input: PrinterInput, options: BuildOptions): 
  * that is simply "offline" for no stated reason.
  */
 function assertProtocolRequirements(record: PrinterRecord): void {
+  if (record.protocol === "anycubic-lan" && !isBareNetworkHost(record.host)) {
+    throw new ValidationError(
+      "Для Anycubic LAN укажите только IP-адрес принтера (или его имя в сети) — без http://, порта и пути: например 192.168.1.60",
+      { field: "host" }
+    );
+  }
   if (record.protocol !== "bambu") return;
   // Only enforced for an enabled printer: a draft can be saved disabled and
   // completed later, which is exactly the "add a printer step by step" flow.

@@ -267,3 +267,51 @@ test("removing a printer takes its discovery row with it", async () => {
   store.repositories.printers.delete("bambu-a1");
   assert.equal(service.get("bambu-a1"), null);
 });
+
+test("an unchanged probe does not leave the printer due on every following poll", async () => {
+  const { store, now } = seeded();
+  let probes = 0;
+  const service = new PrinterDiscoveryService(store, {
+    now: () => new Date(now.value),
+    intervalMs: 300_000,
+    probe: async () => {
+      probes += 1;
+      return NOZZLE_FACTS;
+    }
+  });
+
+  await service.refreshDue([CONFIG]);
+  now.value += 300_000;
+  await service.refreshDue([CONFIG]);
+  assert.equal(probes, 2, "the interval elapsed → probed again (facts unchanged, nothing written)");
+
+  // The stored probedAt still says t0 — the unchanged probe skipped the write on
+  // purpose. The next poll, ten seconds later, must not read that as "due".
+  for (let poll = 0; poll < 5; poll += 1) {
+    now.value += 10_000;
+    await service.refreshDue([CONFIG]);
+  }
+  assert.equal(probes, 2, "no probe on every poll cycle while the profile is unchanged");
+
+  now.value += 300_000;
+  await service.refreshDue([CONFIG]);
+  assert.equal(probes, 3, "and the interval still applies after that");
+});
+
+test("a probe that throws is not retried on every poll either", async () => {
+  const { store, now } = seeded();
+  let probes = 0;
+  const service = new PrinterDiscoveryService(store, {
+    now: () => new Date(now.value),
+    intervalMs: 300_000,
+    probe: async () => {
+      probes += 1;
+      throw new Error("сеть недоступна");
+    }
+  });
+
+  await service.refreshDue([CONFIG]);
+  now.value += 10_000;
+  await service.refreshDue([CONFIG]);
+  assert.equal(probes, 1);
+});

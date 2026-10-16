@@ -94,3 +94,17 @@ test("строка стола: подтвердить можно и деталь
   assert.match(bedBlock({ id: "k2", bedCycle: { state: "AWAITING_CLEARANCE", awaitingClearance: true } }), /clear-bed/);
   assert.doesNotMatch(bedBlock({ id: "k2", bedCycle: { state: "UNKNOWN", awaitingClearance: false } }), /clear-bed/);
 });
+
+test("принтер только для наблюдения: нейтральный бейдж, а не «готов служить»", () => {
+  const p = {
+    ...base,
+    remoteStartSupported: false,
+    printControlSupported: false,
+    readiness: readiness("monitoring", "Только наблюдение", "задания на него не назначаются")
+  };
+  assert.match(printerBadge(p), /только наблюдение/);
+  assert.match(printerBadge(p), /badge-plain/);
+  assert.doesNotMatch(printerBadge(p), /готов служить/);
+  // Пока он печатает (не через Albedo), бейдж — по статусу устройства.
+  assert.equal(printerBadge({ ...p, status: "printing" }), badge("printing"));
+});

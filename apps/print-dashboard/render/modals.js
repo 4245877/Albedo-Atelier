@@ -25,6 +25,7 @@ import { createTaskController } from "../features/task/controller.js";
 import {
   isBusy,
   jobLine,
+  layerText,
   lightPolicyLine,
   normalizeProgress,
   progressBarHtml,
@@ -241,6 +242,8 @@ function teleRows(p) {
   }
   rows.push(["Осталось", fmtLeft(p.minutesLeft)]);
   rows.push(["Прогресс", normalizeProgress(p.progress) != null ? progressPercentText(p.progress) : "не сообщается"]);
+  const layer = layerText(p);
+  if (layer) rows.push(["Слой", layer.replace(/^слой /, "")]);
   return rows
     .map(([k, v]) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`)
     .join("");

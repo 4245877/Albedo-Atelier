@@ -15,7 +15,11 @@ import type {
   PrintRun
 } from "../../domain/print/types";
 import type { SliceVariant } from "../../domain/slicing/types";
-import { capabilitiesOf, type PrinterCapabilities } from "../../infra/printers/capabilities";
+import {
+  capabilitiesOf,
+  PrinterCapabilityError,
+  type PrinterCapabilities
+} from "../../infra/printers/capabilities";
 import type { PrinterConfig } from "../../infra/printers/config";
 import {
   bambuModelIdFor,
@@ -516,6 +520,13 @@ export class DeviceArtifactService {
     if (!printer) {
       throw new JobError(`Принтер «${assignment.printerId}» не найден в конфигурации фермы`);
     }
+    const capabilities = this.capabilitiesOf(printer);
+    // A monitoring-only printer takes no file — not uploaded, not confirmed as
+    // copied by hand. The admission policy refuses its start; this refuses the
+    // ledger entry that would describe a delivery that may not happen.
+    if (!capabilities.supportsJobs) {
+      throw new PrinterCapabilityError(printer, "supportsJobs", "принтер подключён только для наблюдения");
+    }
 
     const raw = assignment.binding.expectedRemotePath;
     if (!raw) {
@@ -530,7 +541,7 @@ export class DeviceArtifactService {
     return {
       assignment,
       printer,
-      capabilities: this.capabilitiesOf(printer),
+      capabilities,
       artifact,
       variant,
       remotePath,

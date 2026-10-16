@@ -100,6 +100,7 @@ export class EvidenceResolver {
       online: printer.online,
       status: printer.status,
       remoteStartSupported: printer.remoteStartSupported,
+      jobsSupported: printer.jobsSupported,
       ams: printer.ams,
       faults: printer.faults,
       mediaPresent: printer.mediaPresent

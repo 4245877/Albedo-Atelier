@@ -84,6 +84,7 @@ export interface ResolvedPrinterSpecs {
   model: ResolvedSpec<string>;
   firmware: ResolvedSpec<string>;
   deviceName: ResolvedSpec<string>;
+  serialNumber: ResolvedSpec<string>;
   technology: ResolvedSpec<PrinterTechnology>;
   buildVolume: ResolvedSpec<BuildVolumeFacts>;
   nozzleDiameterMm: ResolvedSpec<number>;
@@ -143,6 +144,7 @@ export function resolvePrinterSpecs(
     model: resolve(facts.model, orNull(record.model)),
     firmware: resolve(facts.firmware, null),
     deviceName: resolve(facts.deviceName, null),
+    serialNumber: resolve(facts.serialNumber, null),
     // `type` always holds a value (it defaults to FDM), so it is never absent —
     // the catalogue can only ever confirm it or be reported as a hint.
     technology: resolve(facts.technology, record.type),

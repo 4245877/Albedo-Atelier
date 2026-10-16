@@ -19,6 +19,8 @@ export type PrinterReadinessState =
   | "held"
   | "printing"
   | "paused"
+  /** The printer's adapter only reads telemetry: no job is ever taken. */
+  | "monitoring"
   | "needs_clearance"
   | "bed_unknown"
   | "maintenance"
@@ -38,6 +40,11 @@ export interface PrinterReadinessView {
 
 export interface PrinterReadinessInput {
   setupRequired: boolean;
+  /**
+   * False when the printer's adapter takes no jobs (capability `supportsJobs`).
+   * Absent = takes jobs, the answer for every adapter but a monitoring-only one.
+   */
+  jobsSupported?: boolean;
   online: boolean;
   status: string;
   error: string | null;
@@ -88,6 +95,16 @@ export function describePrinterReadiness(input: PrinterReadinessInput): PrinterR
     return no("printing", "Печатает", input.bedExternal ? "печать запущена не через Albedo" : null);
   }
   if (input.status === "paused") return no("paused", "Пауза", null);
+
+  // Ahead of the bed: the plate of a printer that never takes a job is not what
+  // stands between it and the next one. The integration is.
+  if (input.jobsSupported === false) {
+    return no(
+      "monitoring",
+      "Только наблюдение",
+      "принтер подключён для мониторинга — задания на него не назначаются и не запускаются"
+    );
+  }
 
   if (input.bedState === "AWAITING_CLEARANCE") {
     return no(

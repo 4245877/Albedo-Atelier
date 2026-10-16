@@ -90,6 +90,12 @@ export interface DiscoveredFacts {
   firmware?: Fact<string>;
   /** The device's own name for itself (Klipper hostname, Creality device name). */
   deviceName?: Fact<string>;
+  /**
+   * The serial number the device states about itself, where its protocol
+   * publishes one as identity rather than as a credential (Anycubic `/info` →
+   * `cn`). Bambu's serial is a LAN credential and is never a fact.
+   */
+  serialNumber?: Fact<string>;
   technology?: Fact<PrinterTechnology>;
   buildVolume?: Fact<BuildVolumeFacts>;
   nozzleDiameterMm?: Fact<number>;
@@ -112,6 +118,7 @@ export const DISCOVERED_FACT_KEYS = [
   "model",
   "firmware",
   "deviceName",
+  "serialNumber",
   "technology",
   "buildVolume",
   "nozzleDiameterMm",
@@ -129,7 +136,12 @@ export const DISCOVERED_FACT_KEYS = [
 export interface PrinterDiscoveryRecord {
   /** The printer's id; this table is a 1:1 extension of `printers`. */
   id: string;
-  protocol: PrinterProtocol;
+  /**
+   * The protocol whose adapter produced these facts, verbatim as stored. Only
+   * ever compared with the printer's current protocol (a change re-probes), so
+   * an unknown value is kept as text rather than coerced to a protocol.
+   */
+  protocol: PrinterProtocol | string;
   facts: DiscoveredFacts;
   /** When the last probe ran, successful or not. */
   probedAt: string;
@@ -174,6 +186,7 @@ export function parseDiscoveredFacts(value: unknown): DiscoveredFacts {
   assign(facts, raw, "model", readString);
   assign(facts, raw, "firmware", readString);
   assign(facts, raw, "deviceName", readString);
+  assign(facts, raw, "serialNumber", readString);
   assign(facts, raw, "technology", readTechnology);
   assign(facts, raw, "buildVolume", readBuildVolume);
   assign(facts, raw, "nozzleDiameterMm", readPositiveNumber);

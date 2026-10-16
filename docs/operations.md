@@ -461,6 +461,20 @@ is set and, for an env reference, which variable it names — never the value. A
 edit that omits a credential keeps the stored one, so the form can be submitted
 whole without the browser ever holding a secret.
 
+**Anycubic Kobra X (`anycubic-lan`) — monitoring only.** Add it with protocol
+«Anycubic (режим LAN, Kobra X)», the printer's bare IP address and no port; LAN
+mode must be on at the printer. It stays «Требуется настройка» and contacts
+nothing until «Разрешить TLS без проверки сертификата» is ticked on that printer
+(its broker certificate is self-signed — tick it only on a trusted network
+segment). Then «Проверить связь» runs the LAN handshake and shows the state. No
+credential is typed or stored: the broker login is fetched from the printer and
+kept in memory only. The printer reads «Только наблюдение»: it receives no jobs
+and no commands (pause, cancel, light, files) — see
+[Anycubic LAN](../apps/print-orchestrator/README.md#anycubic-lan-kobra-x-monitoring-only).
+The code needs schema 18 (migration `018_anycubic_lan` rebuilds the `printers`
+table; forward-only like every migration), so it is a release for an idle farm
+after [ops/verify](../ops/verify/README.md).
+
 ### Restart cost
 
 Recreating the orchestrator keeps the queue, event feed and today's counters

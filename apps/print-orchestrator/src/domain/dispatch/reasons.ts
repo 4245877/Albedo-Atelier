@@ -68,6 +68,12 @@ export const REASON = {
   TELEMETRY_STALE: "TELEMETRY_STALE",
   TELEMETRY_MISSING: "TELEMETRY_MISSING",
   REMOTE_START_UNSUPPORTED: "REMOTE_START_UNSUPPORTED",
+  /**
+   * The printer's adapter is monitoring-only: it reads telemetry and takes no
+   * job — not by upload, not by remote start, not by manual transfer. A fact
+   * about the integration, not a judgement call, so it is never overridable.
+   */
+  PRINTER_MONITORING_ONLY: "PRINTER_MONITORING_ONLY",
   ACTIVE_RUN_EXISTS: "ACTIVE_RUN_EXISTS",
   UNRESOLVED_DISPATCH: "UNRESOLVED_DISPATCH",
   MAINTENANCE_BLOCKED: "MAINTENANCE_BLOCKED",
@@ -262,7 +268,10 @@ export const NON_OVERRIDABLE: ReadonlySet<ReasonCode> = new Set<ReasonCode>([
   // the way out is slicing it again at the confirmed scale.
   REASON.SLICE_SCALE_MISMATCH,
   // A refusal nobody has taught this layer to read. Fail-closed by construction.
-  REASON.PREFLIGHT_REASON_UNMAPPED
+  REASON.PREFLIGHT_REASON_UNMAPPED,
+  // The adapter has no way to take the job at all; an override would only move
+  // the refusal to the device call that does not exist.
+  REASON.PRINTER_MONITORING_ONLY
 ]);
 
 export function reason(

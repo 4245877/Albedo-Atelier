@@ -36,6 +36,12 @@ export interface SchedulerPrinterRef {
   online: boolean;
   status: CompatibilityPrinterInput["status"];
   remoteStartSupported: boolean;
+  /**
+   * False for a monitoring-only adapter (capability `supportsJobs`): the
+   * compatibility rules then block every job on this printer. Absent = takes
+   * jobs — kept optional for hand-built refs; the farm always sets it.
+   */
+  jobsSupported?: boolean;
   /** AMS/multi-material support; null when unknown. */
   ams: boolean | null;
   /**

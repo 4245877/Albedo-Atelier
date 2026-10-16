@@ -22,6 +22,7 @@ import {
   type PrinterConfig,
   type PrinterConfigSource
 } from "../infra/printers/config";
+import { capabilitiesOf } from "../infra/printers/capabilities";
 import { deletePrinterFile, fetchPrinterFiles, uploadPrinterFile } from "../infra/printers/files";
 import type {
   DeviceFileIdentity,
@@ -829,8 +830,12 @@ export class FarmRuntime implements PrintServices {
       .filter((op) => op.type !== "PART_REMOVAL" && op.type !== "PLATE_SERVICE")
       .map((op) => OPERATION_LABELS[op.type] ?? op.type);
     const updatedMs = view.updatedAt ? Date.parse(view.updatedAt) : Number.NaN;
+    const config = this.configs.find((c) => c.id === printerId);
     return describePrinterReadiness({
       setupRequired: view.setupRequired,
+      // The same capability table the admission policy reads; no config is not a
+      // printer that takes jobs.
+      jobsSupported: config ? capabilitiesOf(config).supportsJobs : false,
       online: view.online,
       status: view.status,
       error: view.error ?? null,

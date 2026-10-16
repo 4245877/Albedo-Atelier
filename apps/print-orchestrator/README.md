@@ -10,7 +10,8 @@ dashboard** and stored in SQLite (see
 `config/printers.json` / `PRINTERS_CONFIG_JSON` is only the one-time seed.
 Live telemetry is polled from the devices —
 Moonraker over HTTP, Bambu over local MQTT, Creality over WebSocket (see
-`src/infra/printers/status/`, adapted from `apps/fulfillment`); camera frames are
+`src/infra/printers/status/`, adapted from `apps/fulfillment`), Anycubic over its
+LAN-mode MQTT, monitoring only (see [Anycubic LAN](#anycubic-lan-kobra-x-monitoring-only)); camera frames are
 real snapshots (`src/infra/printers/camera/`). Anything the farm genuinely does
 not know (maintenance history, the long-range plan, material stock while the
 fulfillment warehouse is not connected) is returned empty/null and the dashboard
@@ -61,9 +62,19 @@ the repository and redeploying.
 live runtime (`FarmRuntime.reloadPrinterConfig`) and **drops that printer's
 device connection**. The last part matters for Bambu: its MQTT client is
 long-lived and authenticated with the *old* access code, so leaving it open would
-keep reporting a plausible status for credentials that no longer work. Moonraker
-(request/response) and Creality (a fresh WebSocket per poll) hold nothing, so for
-them the disconnect is correctly a no-op.
+keep reporting a plausible status for credentials that no longer work. The
+Anycubic LAN session is long-lived too and is dropped the same way (with the
+broker login it held in memory). Moonraker (request/response) and Creality (a
+fresh WebSocket per poll) hold nothing, so for them the disconnect is correctly a
+no-op.
+
+**Protocols are a closed vocabulary**: `moonraker`, `bambu`, `creality`,
+`anycubic-lan` (`PRINTER_PROTOCOLS`, CHECK-constrained in SQLite since migration
+018). A value outside it is refused wherever it is read — a `400` from the form,
+a skipped row *with a named warning* from the seed file, an explicit error from a
+corrupted row — and every adapter switch names each protocol it serves. Before
+this, an unknown or absent protocol silently became `moonraker`, i.e. whatever was
+at that address was driven as a Klipper printer, commands included.
 
 **Credentials.** `apiKey`, `serial` and `accessCode` go **in but never out**:
 every read returns a status — `set` / not set / read from which `${ENV_VAR}` (and
@@ -104,6 +115,95 @@ supplied it. An empty form field means «take it from the printer», not «no
 value»; only what the protocol cannot report is typed by hand, and the form says
 which fields those are (`GET /options` → `autoFields`). See
 [Hardware discovery](#hardware-discovery-what-a-printer-says-about-itself).
+
+## Anycubic LAN (Kobra X): monitoring only
+
+Stage 1 of the Anycubic integration: the Kobra X is added from «Оборудование
+фермы» by its IP address and its state is watched like any other printer's. It
+takes **no jobs**: nothing is planned onto it, uploaded to it, started, paused,
+cancelled, lit or heated on it — by any route. Code in
+`src/infra/printers/anycubic/`.
+
+**The protocol** (not vendor-documented; the flow three independent open
+implementations converge on and OrcaCubic validated read-only on a Kobra X with
+firmware 2.0.1.9 — `modelId` `20030`):
+
+1. `GET http://<ip>:18910/info` → identity (`modelId`, `modelName`, `cn`) and a
+   one-time `token`;
+2. `POST http://<ip>:18910/ctrl?ts&nonce&sign&did`, `sign =
+   md5(md5(token[0:16]) + ts + nonce)`, `did` a stable per-printer id derived
+   from the farm's printer id;
+3. AES-128-CBC-decrypt the answer (key `token[16:32]`, IV the answer's own
+   `token`) → broker username/password and the `deviceId`;
+4. MQTT 3.1.1 over TLS on `<ip>:9883`; subscribe
+   `anycubic/anycubicCloud/v1/printer/public/{modelId}/{deviceId}/#`; publish
+   `{type:"info", action:"query", data:null}` on connect and every 20 s.
+
+The device never chooses where we connect: its `ctrlInfoUrl` and the bundle's
+`broker`/`ip` are ignored, redirects are refused, answers are size- and
+time-bounded, and the client certificate/key the bundle carries are discarded
+(the broker accepts the username/password login without them).
+
+**TLS.** The broker's certificate is self-signed with no CA, so it cannot be
+verified. Verification is not silently waived: without the per-printer
+`allowInsecureTls` opt-in (the same field Bambu uses; `BAMBU_ALLOW_INSECURE_TLS`
+does *not* apply) the adapter contacts nothing and the card reads «Требуется
+настройка». With it, the TLS handshake completes *before* the MQTT client exists,
+so the password is only ever written to a socket the policy accepted.
+
+**Read-only, enforced in code.** The session publishes exactly one message shape
+— the `info` query above — built in one place and re-checked by
+`isReadOnlyQuery()` before it leaves. There is no function that publishes
+anything else. In the capability table `anycubic-lan` declares every ability
+absent, including the new `supportsJobs`; the admission policy turns that into a
+non-overridable `PRINTER_MONITORING_ONLY` (preflight `monitoring_only`, headlined
+first), so the preview, the planner, a manual launch, the night start and the
+automatic queue all refuse it the same way; file preparation/confirmation refuses
+it with `PRINTER_CAPABILITY_UNSUPPORTED`; pause/resume/cancel/light/start are
+refused by the adapter switches. The printer card reads «Только наблюдение»
+instead of «Готов к печати».
+
+**What is read, and how far it is trusted.**
+
+| Field | Source | Notes |
+|---|---|---|
+| state | `info.data.state` (`free`/`busy`) + `project.state`, `project.pause` | the only lifecycle source; `print` pushes never start, pause or end a job |
+| progress, layer, layers, time left | `project` / `print` pushes (`progress`, `curr_layer`, `total_layers`, `remain_time` in minutes) | `print` only enriches the job `info` confirmed (same task id/file) |
+| nozzle/bed temperature and targets | `info.data.temp`, `tempature` pushes | own freshness: older than 60 s → unknown |
+| file | `project.filename` | staging directory dropped |
+| how the last job ended | `last_project.state` (`finished`, `stoped`) | becomes `stateText`, which the shared classifier reads |
+| model, serial, device name | `/info` (`modelName`, `cn`, `deviceName`) | serial is identity here, not a credential |
+| firmware | `info.data.version` | |
+| build volume | catalogue, only for `modelId` 20030 | 260×260×260 mm; never lent to other Anycubic models |
+
+Not read (stay `null`, nothing derived): filament consumed (`supplies_usage`
+exists, but its unit and per-slot attribution on a four-colour Kobra X are
+unverified — it must not become a deduction), loaded material and the built-in
+colour changer, nozzle diameter/type, chamber, light, camera, faults. The
+tokenized upload/camera URLs in the `info` report are never stored or shown.
+
+**Freshness.** `busy` with no job, `stopping`, a phase nobody has captured, or a
+`free` printer whose project still claims to print are `unknown` — the poller
+keeps the last real lifecycle state, so no start or completion is ever announced
+from them. A job state `info` has not re-confirmed for 60 s reads `offline`;
+losing the connection clears the job and the temperatures at once, so nothing
+from before a drop is shown as current. `updatedAt` is when the job state was
+observed, never when the cache was read.
+
+**Sessions.** One per printer, in memory (like the Bambu clients). Failures back
+off 5 s → 10 s → … → 5 min with jitter; a connected broker that stops answering
+`info` for 120 s is replaced. `status()` only reads memory, so a dead printer
+never delays the poll of the others. The broker login lives only in the session:
+re-learned by handshake after a restart, a config change, or a refused CONNACK;
+never persisted, logged, audited or returned by any API. Hardware discovery reads
+the session (no I/O) and succeeds only while it is connected.
+
+**Not yet verified on hardware.** Everything above is tested against fakes and a
+loopback TLS/MQTT/HTTP stand-in (`src/infra/printers/anycubic/*.test.ts`), not
+against a Kobra X. To be confirmed at the hardware acceptance: the handshake on
+this unit's firmware, the `info` field names and the state vocabulary during a
+real print (including pause and cancel), whether the broker certificate survives
+a printer reboot, and the cadence at which the printer answers `info`.
 
 ## Persistent print-queue model (SQLite)
 
@@ -700,6 +800,11 @@ than the fault. `print.sdcard` is the one structural pre-flight: a `false` there
 is the difference between "the file is on the card" and "the printer can open
 it".
 
+**Anycubic LAN** (see [its section](#anycubic-lan-kobra-x-monitoring-only)):
+model, serial and device name from `/info`, firmware from the `info` report, the
+build volume from the catalogue for `modelId` 20030 (Kobra X) only; no nozzle,
+material, AMS or consumption facts.
+
 **The model catalogue** (`src/domain/printers/modelSpecs.ts`) exists for one gap:
 Bambu's LAN MQTT never states the build volume. The model is identified from the
 serial the *device* reports (`ota.sn`), and the bed size and AMS kind come from
@@ -709,9 +814,12 @@ a credential and never leaves the service; only the model it identifies does.
 
 **Cost and cadence.** `PRINTER_DISCOVERY_INTERVAL_MS` (default 300000) governs a
 background pass on the poll loop — fire-and-forget and self-guarded, so a slow
-device can never delay telemetry. Bambu costs **no I/O at all** (both payloads
-already arrive on the subscribed topic; the client just stopped discarding the
-`info` one); Moonraker costs three small LAN requests. A probe is also forced on
+device can never delay telemetry. Bambu and Anycubic cost **no I/O at all** (they
+read what their sessions already received); Moonraker costs three small LAN
+requests. The pass remembers in memory when it last probed each printer: an
+unchanged probe deliberately writes nothing (so the stored `probedAt` does not
+move), and before that memory existed every poll after the first interval
+re-probed every printer. A probe is also forced on
 create, on a re-address/re-credential, after a successful `POST /:id/test`, and
 by `POST /api/printers/config/:id/discover` («Опросить принтер»). Discovery is
 strictly read-only — it asks a device to describe itself and sends no command —

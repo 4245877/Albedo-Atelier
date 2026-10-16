@@ -182,3 +182,40 @@ test("buildNightGateInfo reports the immutable identity + a hard blocker for an 
   );
   store.close();
 });
+
+test("buildSchedulerPrinters takes the job capability from the adapter table, by protocol", () => {
+  const view = (id: string) =>
+    ({
+      id,
+      name: id,
+      model: null,
+      status: "idle",
+      online: true,
+      updatedAt: null,
+      minutesLeft: null,
+      liveMaterial: null,
+      material: null,
+      nozzleDiameter: null,
+      remoteStartSupported: false
+    }) as unknown as PrinterView;
+
+  const refs = buildSchedulerPrinters({
+    printers: [view("k2"), view("ender"), view("kobra-x"), view("orphan")],
+    configs: [
+      config({ id: "k2", protocol: "moonraker" }),
+      config({ id: "ender", protocol: "creality" }),
+      config({ id: "kobra-x", protocol: "anycubic-lan" })
+    ],
+    activeRun: () => null
+  });
+  assert.deepEqual(
+    refs.map((r) => [r.id, r.jobsSupported]),
+    [
+      ["k2", true],
+      ["ender", true],
+      ["kobra-x", false],
+      ["orphan", false]
+    ],
+    "monitoring-only and config-less printers take no jobs"
+  );
+});

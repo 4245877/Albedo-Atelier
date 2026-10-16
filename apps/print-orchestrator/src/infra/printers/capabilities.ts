@@ -1,4 +1,5 @@
 import { AppError } from "../../core/errors";
+import { isBareNetworkHost } from "../../domain/printers/validation";
 import type { PrinterConfig, PrinterProtocol } from "./config";
 
 /**
@@ -27,6 +28,19 @@ import type { PrinterConfig, PrinterProtocol } from "./config";
 
 /** One adapter's declared abilities. Every field is explicit — no defaults, no inference. */
 export interface PrinterCapabilities {
+  /**
+   * The adapter takes part in the job pipeline at all: a task may be planned
+   * onto the printer, its file prepared and its start dispatched — including
+   * the manual-transfer flow, where the operator copies the file and starts it
+   * on the machine (Creality WS).
+   *
+   * `false` is a monitoring-only adapter: telemetry is read, nothing is ever
+   * planned, prepared or started on the printer, whatever its `enabled` flag
+   * says. It is refused by the shared admission policy (`monitoring_only`), not
+   * by a check of its own, so the preview, the planner, the manual launch, the
+   * night start and the automatic queue all give the same answer.
+   */
+  supportsJobs: boolean;
   /** The orchestrator can push file bytes to the device over the adapter's API. */
   supportsUpload: boolean;
   /** The adapter can enumerate on-device files (needed to verify a delivery). */
@@ -59,6 +73,7 @@ const CAPABILITIES: Readonly<Record<PrinterProtocol, PrinterCapabilities>> = {
   // (which reports `size`), `/printer/print/start`, `DELETE
   // /server/files/gcodes/<path>`.
   moonraker: {
+    supportsJobs: true,
     supportsUpload: true,
     supportsFileListing: true,
     supportsRemoteStart: true,
@@ -83,6 +98,7 @@ const CAPABILITIES: Readonly<Record<PrinterProtocol, PrinterCapabilities>> = {
   // same `name_and_size` Moonraker offers. Delete (`DELE`) is implemented, which
   // is what lets a superseded package be removed from a small SD card.
   bambu: {
+    supportsJobs: true,
     supportsUpload: true,
     supportsFileListing: true,
     supportsRemoteStart: true,
@@ -93,8 +109,11 @@ const CAPABILITIES: Readonly<Record<PrinterProtocol, PrinterCapabilities>> = {
     startableExtensions: [".gcode.3mf", ".3mf", ".gcode"],
     deviceFileExtension: ".gcode.3mf"
   },
-  // Creality's WebSocket protocol: telemetry only in this codebase.
+  // Creality's WebSocket protocol: telemetry only in this codebase. Jobs still
+  // reach it through the manual-transfer flow (the operator copies the file and
+  // starts it on the machine), which is why it takes part in the pipeline.
   creality: {
+    supportsJobs: true,
     supportsUpload: false,
     supportsFileListing: false,
     supportsRemoteStart: false,
@@ -102,11 +121,29 @@ const CAPABILITIES: Readonly<Record<PrinterProtocol, PrinterCapabilities>> = {
     fileVerification: "none",
     startableExtensions: [".gcode", ".gco", ".g"],
     deviceFileExtension: ".gcode"
+  },
+  // Anycubic LAN mode (Kobra X): monitoring only at this stage. The protocol
+  // has upload, start and control actions (`/gcode_upload`, MQTT `print/*`),
+  // but none is implemented or verified on hardware here, so every capability
+  // is declared absent — including the manual-transfer pipeline, which Creality
+  // WS keeps: no job is planned, prepared or started on this printer until a
+  // later stage proves each step. The extensions are inert while `supportsJobs`
+  // is false.
+  "anycubic-lan": {
+    supportsJobs: false,
+    supportsUpload: false,
+    supportsFileListing: false,
+    supportsRemoteStart: false,
+    supportsFileDelete: false,
+    fileVerification: "none",
+    startableExtensions: [".gcode"],
+    deviceFileExtension: ".gcode"
   }
 };
 
 /** Fail-closed capabilities for a protocol that is not in the table at all. */
 const NONE: PrinterCapabilities = {
+  supportsJobs: false,
   supportsUpload: false,
   supportsFileListing: false,
   supportsRemoteStart: false,
@@ -224,6 +261,27 @@ export function printerReadiness(printer: PrinterConfig): PrinterReadiness {
     });
   }
 
+  if (printer.protocol === "anycubic-lan") {
+    if (!isBareNetworkHost(printer.host ?? "")) {
+      missing.push({
+        field: "host",
+        label: "IP-адрес принтера",
+        hint: "только адрес, без http://, порта и пути — экран принтера: настройки → сеть"
+      });
+    }
+    // The broker's certificate is self-signed with no CA, so a verified TLS
+    // session cannot be established. Unverified TLS is never a silent default:
+    // without this per-printer opt-in the adapter does not connect at all. The
+    // global BAMBU_ALLOW_INSECURE_TLS deliberately does not apply here.
+    if (printer.allowInsecureTls !== true) {
+      missing.push({
+        field: "allowInsecureTls",
+        label: "подтверждение TLS без проверки сертификата",
+        hint: "у Anycubic LAN самоподписанный сертификат без CA — отметьте разрешение у этого принтера, только в доверенной сети"
+      });
+    }
+  }
+
   return { ready: missing.length === 0, missing };
 }
 
@@ -266,6 +324,7 @@ export type PrinterCapabilityName = Exclude<
 >;
 
 const CAPABILITY_LABEL: Record<PrinterCapabilityName, string> = {
+  supportsJobs: "приём заданий на печать",
   supportsUpload: "загрузка файлов",
   supportsFileListing: "просмотр файлов на устройстве",
   supportsRemoteStart: "удалённый запуск печати",

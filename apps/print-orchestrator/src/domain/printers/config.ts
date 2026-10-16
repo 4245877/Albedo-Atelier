@@ -20,9 +20,23 @@ import type { PrinterTechnology } from "./types";
  *    and always wins.
  */
 
-export const PRINTER_PROTOCOLS = ["moonraker", "bambu", "creality"] as const;
+export const PRINTER_PROTOCOLS = ["moonraker", "bambu", "creality", "anycubic-lan"] as const;
 
 export type PrinterProtocol = (typeof PRINTER_PROTOCOLS)[number];
+
+/**
+ * Whether a value names an implemented protocol, exactly as stored.
+ *
+ * The one membership test for the vocabulary. Every reader of a protocol string
+ * — the strict UI validation, the lenient seed loader, the SQLite rows — used to
+ * answer "not bambu, not creality" with `moonraker`, so a typo or a protocol
+ * this build does not implement was silently driven as a Klipper printer: HTTP
+ * requests and, worse, Moonraker *commands* sent to a device that speaks
+ * something else. An unknown protocol is now refused where it is read.
+ */
+export function isPrinterProtocol(value: unknown): value is PrinterProtocol {
+  return typeof value === "string" && (PRINTER_PROTOCOLS as readonly string[]).includes(value);
+}
 
 /**
  * Allowed printer id shape. The id is used verbatim as a filesystem path

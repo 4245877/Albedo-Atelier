@@ -80,7 +80,8 @@ export const PREFLIGHT_REASON = {
   MANUAL_START_ONLY: "manual_start_only",
   BED_AWAITING_CLEARANCE: "bed_awaiting_clearance",
   BED_UNKNOWN: "bed_unknown",
-  MODEL_OFF_BED: "model_off_bed"
+  MODEL_OFF_BED: "model_off_bed",
+  MONITORING_ONLY: "monitoring_only"
 } as const;
 
 export type PreflightReasonCode = (typeof PREFLIGHT_REASON)[keyof typeof PREFLIGHT_REASON];
@@ -159,7 +160,7 @@ export interface CompatibilityPrinterInput {
   id: string;
   name: string;
   model: string | null;
-  /** Transport/firmware family: moonraker | bambu | creality; null when unknown. */
+  /** Transport/firmware family: moonraker | bambu | creality | anycubic-lan; null when unknown. */
   protocol: string | null;
   /**
    * The material the printer is **physically loaded with right now**, or null
@@ -189,6 +190,14 @@ export interface CompatibilityPrinterInput {
   status: "offline" | "idle" | "printing" | "paused" | "error" | "unknown";
   /** Whether the backend can remote-start the printer (else the operator starts it). */
   remoteStartSupported: boolean;
+  /**
+   * Whether the printer's adapter takes jobs at all — `false` for a
+   * monitoring-only adapter (Anycubic LAN at this stage), which no job may be
+   * planned onto or started on, manual transfer included. Absent = takes jobs:
+   * every real printer is built with the value from the capability table, where
+   * an unknown protocol already answers `false`.
+   */
+  jobsSupported?: boolean;
   /** Whether the printer exposes AMS/multi-material; null when unknown. */
   ams: boolean | null;
   /**
@@ -364,6 +373,17 @@ export function evaluateCompatibility(
   const block = (code: PreflightReasonCode, message: string): void => void blockers.push({ code, message });
   const review = (code: PreflightReasonCode, message: string): void => void reviews.push({ code, message });
   const warn = (code: PreflightReasonCode, message: string): void => void warnings.push({ code, message });
+
+  // ── Monitoring-only adapter ─────────────────────────────────────────────────
+  // First, because it is the answer to "could this job ever run here?": the
+  // adapter only reads telemetry. Everything below would describe a start that
+  // cannot exist, so it is the one reason the operator must read first.
+  if (printer.jobsSupported === false) {
+    block(
+      "monitoring_only",
+      `«${printer.name}» подключён только для наблюдения — задания на этот принтер не назначаются и не запускаются`
+    );
+  }
 
   // ── Pin ─────────────────────────────────────────────────────────────────────
   if (task.pinnedPrinterId && task.pinnedPrinterId !== printer.id) {
@@ -563,7 +583,9 @@ export function evaluateCompatibility(
   }
 
   // ── Upload / start capability ─────────────────────────────────────────────────
-  if (!printer.remoteStartSupported) {
+  // Not said of a monitoring-only printer: nobody starts anything there, by hand
+  // or otherwise, and its own blocker above already says so.
+  if (!printer.remoteStartSupported && printer.jobsSupported !== false) {
     warn("manual_start_only", "Удалённый запуск не поддержан — оператор запускает вручную");
   }
 

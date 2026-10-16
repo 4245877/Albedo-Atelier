@@ -459,3 +459,32 @@ test("no placement and no build volume are each an honest silence, not a refusal
     "an unknown bed cannot judge a placement — other rules refuse the unknown"
   );
 });
+
+test("a monitoring-only printer is blocked for every job, and says so first", () => {
+  const r = evaluateCompatibility(
+    task(),
+    printer({ protocol: "anycubic-lan", remoteStartSupported: false, jobsSupported: false }),
+    evidence()
+  );
+  assert.equal(r.verdict, "blocked");
+  assert.equal(r.blockers[0]?.code, "monitoring_only", "the integration is the reason, not the bed or the material");
+  assert.ok(
+    !r.warnings.some((w) => w.code === "manual_start_only"),
+    "nobody starts anything there by hand either — no suggestion that they could"
+  );
+});
+
+test("an adapter that takes jobs is untouched by the monitoring rule", () => {
+  const remote = evaluateCompatibility(task(), printer({ jobsSupported: true }), evidence());
+  assert.equal(remote.verdict, "compatible");
+  // The manual-transfer path (Creality WS) keeps its existing soft note.
+  const manual = evaluateCompatibility(
+    task(),
+    printer({ protocol: "creality", remoteStartSupported: false, jobsSupported: true }),
+    evidence()
+  );
+  assert.ok(manual.warnings.some((w) => w.code === "manual_start_only"));
+  assert.ok(!manual.blockers.some((b) => b.code === "monitoring_only"));
+  // Absent means "takes jobs": hand-built inputs keep their old meaning.
+  assert.equal(evaluateCompatibility(task(), printer(), evidence()).verdict, "compatible");
+});

@@ -34,6 +34,7 @@ function printer(protocol: string, over: Record<string, unknown> = {}) {
 test("Moonraker declares upload + listing + start + delete, and name_and_size verification", () => {
   const caps = capabilitiesOf(printer("moonraker"));
   assert.deepEqual(caps, {
+    supportsJobs: true,
     supportsUpload: true,
     supportsFileListing: true,
     supportsRemoteStart: true,
@@ -54,6 +55,7 @@ test("Bambu declares upload + listing + start over its own FTPS/MQTT transports"
   // statement about this codebase, not about the hardware — the device serves
   // FTPS on 990 and accepts `print.project_file` over MQTT.
   assert.deepEqual(capabilitiesOf(printer("bambu")), {
+    supportsJobs: true,
     supportsUpload: true,
     supportsFileListing: true,
     supportsRemoteStart: true,
@@ -78,11 +80,45 @@ test("Creality declares NO file abilities — the manual path, honestly", () => 
   assert.equal(caps.supportsFileListing, false);
   assert.equal(caps.supportsRemoteStart, false);
   assert.equal(caps.fileVerification, "none");
+  assert.equal(caps.supportsJobs, true, "jobs still reach it by manual transfer");
+});
+
+test("Anycubic LAN is monitoring only: it takes no job, by any route", () => {
+  assert.deepEqual(capabilitiesOf(printer("anycubic-lan", { allowInsecureTls: true })), {
+    supportsJobs: false,
+    supportsUpload: false,
+    supportsFileListing: false,
+    supportsRemoteStart: false,
+    supportsFileDelete: false,
+    fileVerification: "none",
+    startableExtensions: [".gcode"],
+    deviceFileExtension: ".gcode"
+  });
+  assert.throws(
+    () => requireCapability(printer("anycubic-lan"), "supportsJobs"),
+    (error: unknown) => error instanceof PrinterCapabilityError && /приём заданий/.test(error.message)
+  );
+});
+
+test("an Anycubic printer needs a bare IP and the explicit TLS opt-in before it is contacted", () => {
+  const missing = (over: Record<string, unknown>) =>
+    printerReadiness(printer("anycubic-lan", over)).missing.map((m) => m.field);
+  assert.deepEqual(missing({ allowInsecureTls: true }), []);
+  assert.deepEqual(missing({ allowInsecureTls: false }), ["allowInsecureTls"]);
+  assert.deepEqual(missing({ allowInsecureTls: true, host: "http://192.168.1.60" }), ["host"]);
+  // The Bambu-wide escape hatch does not reach another vendor's adapter.
+  process.env.BAMBU_ALLOW_INSECURE_TLS = "1";
+  try {
+    assert.deepEqual(missing({ allowInsecureTls: false }), ["allowInsecureTls"]);
+  } finally {
+    delete process.env.BAMBU_ALLOW_INSECURE_TLS;
+  }
 });
 
 test("an unknown protocol can do nothing (fail-closed, not 'probably like Moonraker')", () => {
-  for (const unknown of ["prusalink", "octoprint", "", null, undefined]) {
+  for (const unknown of ["prusalink", "octoprint", "anycubic", "", null, undefined]) {
     assert.deepEqual(capabilitiesOfProtocol(unknown), {
+      supportsJobs: false,
       supportsUpload: false,
       supportsFileListing: false,
       supportsRemoteStart: false,

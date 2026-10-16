@@ -245,7 +245,7 @@ export interface SetMember<F> {
 export interface SetTarget {
   /** The loaded/allowed material(s) of the bound printer, e.g. "PLA / PETG". */
   printerMaterial?: string | null;
-  /** The bound printer's transport/firmware family: moonraker | bambu | creality. */
+  /** The bound printer's transport/firmware family: moonraker | bambu | creality | anycubic-lan. */
   printerProtocol?: string | null;
   /** The bound printer's model — hard-checked against the machine profile's model. */
   printerModel?: string | null;

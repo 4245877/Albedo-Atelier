@@ -1,5 +1,6 @@
 import type { PrintRun } from "../../domain/print/types";
 import type { PrinterView } from "../../domain/printers/types";
+import { capabilitiesOf } from "../../infra/printers/capabilities";
 import type { PrinterConfig } from "../../infra/printers/config";
 import type { SchedulerPrinterRef } from "../scheduling/schedulerService";
 
@@ -55,6 +56,9 @@ export function buildSchedulerPrinters(deps: SchedulerPrintersDeps): SchedulerPr
       online: view.online,
       status: view.status,
       remoteStartSupported: view.remoteStartSupported,
+      // From the one capability table: a monitoring-only adapter takes no job.
+      // No config at all is not a printer anything may be planned onto.
+      jobsSupported: config ? capabilitiesOf(config).supportsJobs : false,
       // Whether the printer has a multi-material unit, as discovered from the
       // device. Was hardcoded null — which made every AMS-requiring task resolve
       // to `ams_unknown` and land in review, even on the A1 Combo whose AMS the
