@@ -6,9 +6,11 @@ import {
   applyProgress,
   buildAnycubicStatus,
   displayFileName,
+  endsJob,
   JOB_STATE_MAX_AGE_MS,
   lifecycleOf,
   parseInfoReport,
+  parsePrintEnding,
   parsePrintReport,
   parseStatusReport,
   parseTemperatureReport,
@@ -17,6 +19,19 @@ import {
   type AnycubicJobReport,
   type AnycubicObservation
 } from "./reports";
+import {
+  KOBRA_X_INFO_COOLING,
+  KOBRA_X_INFO_FREE_AFTER_PRINT,
+  KOBRA_X_INFO_PRINTING,
+  KOBRA_X_INFO_STATISTICS,
+  KOBRA_X_PRINT_COOLING,
+  KOBRA_X_PRINT_FINISHED,
+  KOBRA_X_PRINT_PUSH,
+  KOBRA_X_PRINT_RESET,
+  KOBRA_X_RESPONSE_ACK,
+  KOBRA_X_STATUS_FREE,
+  KOBRA_X_TEMPERATURE_PUSH
+} from "./testkit/kobraXCaptures";
 
 /*
  * Reading Anycubic LAN reports. The payload shapes follow the captures cited in
@@ -258,6 +273,103 @@ test("a target of 0 is a reading (heater off), not an absence", () => {
   const temps = parseTemperatureReport({ type: "tempature", data: { curr_nozzle_temp: 25, target_nozzle_temp: 0 } });
   assert.equal(temps?.nozzleTarget, 0);
   assert.equal(temps?.bed, null, "an omitted field is unknown");
+});
+
+// ── Captured on a real Kobra X (firmware 2.0.2.2) ─────────────────────────────
+
+test("a Kobra X info report captured mid-print maps onto the live status", () => {
+  const report = parseInfoReport(KOBRA_X_INFO_PRINTING)!;
+  assert.deepEqual(report.identity, { printerName: "Anycubic Kobra X", model: "Anycubic Kobra X", firmware: "2.0.2.2" });
+  assert.equal(report.job?.taskId, null, 'task_id "-1" is the firmware\'s "no task", not an id');
+  assert.equal(report.job?.lastPhase, null, "an empty last_project names no ending");
+
+  const status = buildAnycubicStatus(PRINTER, observe(KOBRA_X_INFO_PRINTING), T0);
+  assert.equal(status.online, true);
+  assert.equal(status.status, "printing");
+  assert.equal(status.stateText, "printing");
+  assert.equal(status.currentFile, "Sample+Part+Set_plate(07)_PETG_0.2_2h10m.gcode");
+  assert.equal(status.progressPct, 74);
+  assert.equal(status.remainingMinutes, 33);
+  assert.deepEqual([status.currentLayer, status.totalLayers], [12, 15]);
+  assert.deepEqual(
+    [status.nozzleTemp, status.nozzleTarget, status.bedTemp, status.bedTarget],
+    [240, 240, 75, 75]
+  );
+  assert.equal(status.error, null);
+  for (const leak of ["gcode_upload", ":18088", "192.0.2.10"]) {
+    assert.ok(!JSON.stringify(status).includes(leak), `${leak} stays out of the status`);
+  }
+});
+
+test("a captured mid-print push (action \"start\", taskid \"-1\") enriches the job and starts nothing", () => {
+  const job = parseInfoReport(KOBRA_X_INFO_PRINTING)!.job!;
+  const push = parsePrintReport(KOBRA_X_PRINT_PUSH)!;
+  assert.equal(push.taskId, null);
+
+  const enriched = applyProgress(job, push);
+  assert.equal(enriched.remainingMinutes, 32);
+  assert.equal(enriched.phase, "printing", "the push's action/state do not touch the lifecycle");
+  assert.equal(lifecycleOf(enriched), "printing");
+
+  // Every print started on the screen reports "-1": matched as an id, another
+  // local job's progress would be folded into this one. The file decides instead.
+  const otherLocalJob = parsePrintReport({
+    ...KOBRA_X_PRINT_PUSH,
+    data: { ...KOBRA_X_PRINT_PUSH.data, filename: "other_plate.gcode", progress: 5, remain_time: 120 }
+  })!;
+  assert.equal(applyProgress(job, otherLocalJob), job);
+
+  assert.equal(parsePrintReport(KOBRA_X_RESPONSE_ACK), null, "the bare ack carries no progress");
+});
+
+test("the captured end of a print: cool-down confirms nothing, the push names the ending, info frees the machine", () => {
+  const cooling = parseInfoReport(KOBRA_X_INFO_COOLING)!.job!;
+  assert.equal(cooling.phase, "nozzle_cooling_off");
+  assert.equal(lifecycleOf(cooling), "unknown", "over, but busy: neither a start nor an end");
+  assert.equal(parsePrintReport(KOBRA_X_PRINT_COOLING), null, "a cool-down push carries no progress");
+  assert.equal(parsePrintEnding(KOBRA_X_PRINT_COOLING), null, "cooling down is not an ending");
+  assert.equal(parsePrintEnding(KOBRA_X_PRINT_RESET), null);
+  assert.equal(parsePrintEnding(KOBRA_X_PRINT_PUSH), null, "mid-print");
+
+  const ending = parsePrintEnding(KOBRA_X_PRINT_FINISHED)!;
+  assert.deepEqual(ending, { phase: "finished", file: cooling.file, taskId: null });
+  assert.ok(endsJob(cooling, ending), "the job in hand, by file — its task id is the sentinel");
+  assert.ok(!endsJob({ ...cooling, file: "other_plate.gcode" }, ending), "not another job's ending");
+  const free = parseInfoReport(KOBRA_X_INFO_FREE_AFTER_PRINT)!.job!;
+  assert.ok(!endsJob(free, ending), "a free machine holds no job to end");
+
+  // last_project stays empty on this firmware: info alone cannot say how it ended.
+  assert.equal(free.lastPhase, null);
+  const unannounced = buildAnycubicStatus(PRINTER, observe(KOBRA_X_INFO_FREE_AFTER_PRINT), T0);
+  assert.equal(unannounced.status, "idle");
+  assert.equal(unannounced.stateText, "free", "the shared classifier reads this as an ambiguous ending");
+
+  const announced = buildAnycubicStatus(PRINTER, { ...observe(KOBRA_X_INFO_FREE_AFTER_PRINT), ending: "finished" }, T0);
+  assert.equal(announced.status, "idle");
+  assert.equal(announced.stateText, "finished", "the shared classifier reads this as completed");
+  assert.equal(announced.currentFile, null);
+  assert.deepEqual(
+    [announced.nozzleTemp, announced.nozzleTarget, announced.bedTemp, announced.bedTarget],
+    [171, 0, 73, 0]
+  );
+  // The info report's own words still win when it has them.
+  const said = observe(info({ state: "free", last_project: { state: "stoped" } }));
+  assert.equal(buildAnycubicStatus(PRINTER, { ...said, ending: "finished" }, T0).stateText, "stoped");
+});
+
+test("captured side traffic: statistics on the info topic, temperature and status pushes", () => {
+  const statistics = parseInfoReport(KOBRA_X_INFO_STATISTICS);
+  assert.equal(statistics?.job, null, "lifetime counters are not a machine state");
+  assert.equal(statistics?.temperatures, null);
+  assert.deepEqual(statistics?.identity, { printerName: null, model: null, firmware: null });
+
+  assert.deepEqual(parseTemperatureReport(KOBRA_X_TEMPERATURE_PUSH), {
+    nozzle: 240,
+    nozzleTarget: 0,
+    bed: 75,
+    bedTarget: 0
+  });
+  assert.equal(parseStatusReport(KOBRA_X_STATUS_FREE), "free");
 });
 
 test("stateText and display names", () => {

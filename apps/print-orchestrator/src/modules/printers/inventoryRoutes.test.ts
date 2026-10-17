@@ -41,6 +41,7 @@ function record(overrides: Partial<PrinterRecord> = {}): PrinterRecord {
     serial: "serial-value",
     accessCode: "access-code-value",
     allowInsecureTls: false,
+    tlsFingerprint: "",
     automaticContinuation: { allowed: false, mechanism: "", verifiedAt: null },
     light: {
       enabled: null,

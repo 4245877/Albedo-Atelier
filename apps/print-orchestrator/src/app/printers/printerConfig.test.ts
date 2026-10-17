@@ -9,6 +9,8 @@ import { importPrintersConfig, PRINTERS_IMPORT_MARKER } from "../../infra/db/pri
 import type { PrintQueueStore } from "../../domain/print/repositories";
 import type { PrinterConfigSource } from "../../infra/printers/config";
 import { normalizePrinterRecord } from "../../infra/printers/config";
+import type { AnycubicBrokerCertificate } from "../../infra/printers/anycubic";
+import { TlsConnectError } from "../../infra/printers/anycubic/tls";
 import { PrinterConfigService } from "./printerConfigService";
 
 /*
@@ -32,6 +34,8 @@ let service: PrinterConfigService;
 let changes: (string | null)[];
 /** Printers whose live device connection the service dropped, in order. */
 let disconnected: string[];
+/** What the (fake) broker presents when its certificate is read. */
+let presented: () => Promise<AnycubicBrokerCertificate>;
 let dbIndex = 0;
 
 beforeEach(() => {
@@ -40,9 +44,12 @@ beforeEach(() => {
   store = openPrintQueueStore(path.join(TMP, `queue-${dbIndex}.db`));
   changes = [];
   disconnected = [];
+  presented = async () => certificate(PIN);
   service = new PrinterConfigService(store, {
     onChanged: (id) => changes.push(id),
     disconnect: (id) => disconnected.push(id),
+    // Never a TLS connection: what the broker "presents" is set per test.
+    readCertificate: () => presented(),
     // A probe that never touches a device: connection tests are about wiring
     // here, and a real one would need a printer on the LAN.
     probe: async (printer) => ({
@@ -365,4 +372,89 @@ test("the imported config keeps ${VAR} references verbatim", async () => {
   } finally {
     delete process.env.TEST_SEED_CODE;
   }
+});
+
+// ── Anycubic LAN: the broker certificate an operator confirms ───────────────
+
+const PIN = "0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0:0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0";
+const OTHER = "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89";
+
+function certificate(fingerprint256: string): AnycubicBrokerCertificate {
+  return {
+    fingerprint256,
+    subject: "O=AnyCubic",
+    issuer: "O=AnyCubic",
+    validFrom: "Sep 24 19:07:41 2026 GMT",
+    validTo: "Sep 21 19:07:41 2036 GMT",
+    selfSigned: true
+  };
+}
+
+const kobra = { id: "kobra-x", name: "Anycubic Kobra X", protocol: "anycubic-lan", host: "192.0.2.10" };
+
+test("reading the certificate confirms nothing; only a PATCH of the fingerprint the operator saw does", async () => {
+  assert.equal(service.create(kobra).tlsFingerprint, "", "a new printer has nothing confirmed");
+
+  const first = await service.readTlsCertificate("kobra-x");
+  assert.equal(first.certificate?.fingerprint256, PIN);
+  assert.equal(first.confirmed, null);
+  assert.equal(first.matches, null);
+  assert.equal(first.error, null);
+  assert.equal(service.get("kobra-x").tlsFingerprint, "", "seeing a certificate is not accepting it");
+
+  disconnected = [];
+  // Pasted the way openssl prints it, lower-case without colons — stored canonical.
+  const confirmed = service.update("kobra-x", { tlsFingerprint: PIN.toLowerCase().replaceAll(":", "") });
+  assert.equal(confirmed.tlsFingerprint, PIN);
+  assert.deepEqual(disconnected, ["kobra-x"], "the session rebuilds on the new pin");
+  assert.equal(service.materialize().find((p) => p.id === "kobra-x")?.tlsFingerprint, PIN);
+  assert.equal((await service.readTlsCertificate("kobra-x")).matches, true);
+
+  // The printer now presents something else: reported, never adopted.
+  presented = async () => certificate(OTHER);
+  const changed = await service.readTlsCertificate("kobra-x");
+  assert.equal(changed.matches, false);
+  assert.equal(changed.confirmed, PIN);
+  assert.equal(changed.certificate?.fingerprint256, OTHER);
+  assert.equal(service.get("kobra-x").tlsFingerprint, PIN, "the confirmed pin stays until an operator replaces it");
+
+  const audit = store.repositories.audit.listByEntity("printer", "kobra-x").map((e) => e.action);
+  assert.ok(audit.includes("tls_certificate_read"));
+});
+
+test("an unreachable broker is answered in words, not thrown", async () => {
+  service.create(kobra);
+  presented = async () => {
+    throw new TlsConnectError("TLS-соединение с портом 9883 не установлено (ECONNREFUSED)");
+  };
+  const result = await service.readTlsCertificate("kobra-x");
+  assert.equal(result.certificate, null);
+  assert.match(result.error ?? "", /отклонено/);
+  assert.equal(result.matches, null);
+});
+
+test("Anycubic LAN never connects unverified, and a pin is refused where it does not belong", async () => {
+  assert.throws(
+    () => service.create({ ...kobra, allowInsecureTls: true }),
+    (error: unknown) => (error as { details?: { field?: string } }).details?.field === "allowInsecureTls"
+  );
+  service.create(kobra);
+  assert.throws(() => service.update("kobra-x", { allowInsecureTls: true }), /без проверки сертификата/);
+  assert.throws(
+    () => service.update("kobra-x", { tlsFingerprint: "0F:1E:2D" }),
+    (error: unknown) => (error as { details?: { field?: string } }).details?.field === "tlsFingerprint"
+  );
+  assert.equal(service.update("kobra-x", { tlsFingerprint: "" }).tlsFingerprint, "", "clearing is allowed");
+
+  // Other printers are untouched: Bambu keeps its opt-in and takes no pin.
+  const a1 = service.create(bambu);
+  assert.equal(a1.allowInsecureTls, true);
+  assert.equal(a1.tlsFingerprint, "");
+  assert.throws(() => service.update("bambu-a1", { tlsFingerprint: PIN }), /только для Anycubic LAN/);
+  await assert.rejects(service.readTlsCertificate("bambu-a1"), /только у принтеров Anycubic LAN/);
+
+  // A pin left over from a protocol change is dropped, not kept looking configured.
+  service.update("kobra-x", { tlsFingerprint: PIN });
+  const moved = service.update("kobra-x", { protocol: "moonraker", port: 7125 });
+  assert.equal(moved.tlsFingerprint, "");
 });

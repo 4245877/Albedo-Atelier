@@ -53,6 +53,7 @@ function printerRecord(): PrinterRecord {
     serial: "0309CA470100001",
     accessCode: "12345678",
     allowInsecureTls: true,
+    tlsFingerprint: "",
     automaticContinuation: { ...NO_AUTOMATIC_CONTINUATION },
     light: { ...DEFAULT_LIGHT_SETTINGS },
     position: 10,

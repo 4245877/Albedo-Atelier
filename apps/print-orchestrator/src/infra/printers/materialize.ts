@@ -82,6 +82,7 @@ export function materializePrinter(record: PrinterRecord): PrinterConfig {
     serial: expand(record.serial),
     accessCode: expand(record.accessCode),
     allowInsecureTls: record.allowInsecureTls,
+    tlsFingerprint: record.tlsFingerprint,
     automaticContinuation: record.automaticContinuation,
     light: deriveLightConfig(record.light, record.protocol, expand)
   };

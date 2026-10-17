@@ -106,6 +106,7 @@ function printerRow(printer, state) {
     chip(esc(hostLabel(printer)), "mute"),
     printer.enabled ? chip("в работе", "ok") : chip("отключён", "warn"),
     ...credentialChips(printer, state),
+    certificateChip(printer),
     testChip(test, busy)
   ]
     .filter(Boolean)
@@ -130,6 +131,7 @@ function printerRow(printer, state) {
             ${busy === "discover" ? "disabled" : ""}>
             ${busy === "discover" ? `${spinner()}<span>Опрашиваю…</span>` : `${icon("refresh")}<span>Опросить</span>`}
           </button>
+          ${certificateButton(printer, busy)}
           ${menuHtml([
             {
               act: "toggle",
@@ -156,6 +158,7 @@ function printerRow(printer, state) {
       </div>
       <div class="sch-tags">${facts}</div>
       ${testDetail(test)}
+      ${certificateDetail(printer, state.certificates?.[printer.id], busy)}
       ${discoveryPanel(printer)}
       <details class="ops-details prn-details">
         <summary>Настройки и учётные данные</summary>
@@ -364,6 +367,96 @@ function testDetail(test) {
   }</div>`;
 }
 
+/* ── Сертификат Anycubic LAN ────────────────────────────────
+   Сертификат брокера самоподписанный, проверить его некому, кроме оператора:
+   сервис подключается ТОЛЬКО к брокеру, предъявившему сертификат с
+   подтверждённым отпечатком SHA-256, и никогда — «без проверки». Поэтому здесь
+   два раздельных шага: «Сертификат» лишь показывает, что предъявляет принтер
+   (ничего не сохраняя), а подтверждение — отдельное явное действие с тем
+   самым отпечатком, который оператор видел. Новый сертификат не принимается
+   сам — даже если старый перестал совпадать. */
+
+function certificateChip(printer) {
+  if (printer.protocol !== "anycubic-lan") return "";
+  return printer.tlsFingerprint
+    ? chip("сертификат подтверждён", "ok")
+    : chip("сертификат не подтверждён", "warn");
+}
+
+function certificateButton(printer, busy) {
+  if (printer.protocol !== "anycubic-lan") return "";
+  return `<button type="button" class="btn btn-sm" data-prn-action="tls-read" data-id="${esc(printer.id)}"
+            ${busy === "tls-read" ? "disabled" : ""}>
+            ${busy === "tls-read" ? `${spinner()}<span>Читаю…</span>` : `${icon("lock")}<span>Сертификат</span>`}
+          </button>`;
+}
+
+/** Что предъявил принтер — и, если это не подтверждённый сертификат, кнопка подтверждения. */
+function certificateDetail(printer, check, busy) {
+  if (printer.protocol !== "anycubic-lan" || !check) return "";
+  const when = check.checkedAt ? ` · ${esc(fmtDate(check.checkedAt))}` : "";
+  if (!check.certificate) {
+    return `<div class="slice-warn">${icon("warn")}Сертификат прочитать не удалось${when}${
+      check.error ? `: ${esc(check.error)}` : ""
+    }</div>`;
+  }
+  const cert = check.certificate;
+  // Вердикт — против подтверждённого СЕЙЧАС, а не на момент чтения: отпечаток
+  // могли сменить или стереть в настройках уже после того, как сертификат прочитали.
+  const confirmed = printer.tlsFingerprint || null;
+  const matches = confirmed ? confirmed === cert.fingerprint256 : null;
+  const facts = `<div class="slice-meta"><span>Принтер предъявляет сертификат${when}:
+      <code class="prn-fingerprint">${esc(cert.fingerprint256)}</code>
+      · ${esc(cert.subject)}${cert.selfSigned ? " · самоподписанный" : ` · выдан: ${esc(cert.issuer)}`}
+      · действует ${esc(cert.validFrom)} — ${esc(cert.validTo)}</span></div>`;
+
+  if (matches === true) {
+    return `${facts}<div class="slice-meta">${icon("check")}Совпадает с подтверждённым — подключение разрешено.</div>`;
+  }
+  const replacing = matches === false;
+  const verdict = replacing
+    ? // Один <span> на весь текст: .slice-warn — flex, и без него текст и <code>
+      // с отпечатком разъезжались бы в отдельные колонки.
+      `<div class="slice-warn">${icon("warn")}<span>Не совпадает с подтверждённым
+        <code class="prn-fingerprint">${esc(confirmed)}</code> — подключение заблокировано.
+        Заменяйте, только если знаете, почему сертификат сменился (сброс принтера, обновление прошивки):
+        иначе по этому адресу отвечает другое устройство.</span></div>`
+    : `<div class="slice-hint">Сертификат ещё не подтверждён — сервис к принтеру не подключается.
+        Подтверждайте, если это ваш принтер в вашей сети.</div>`;
+  return `${facts}${verdict}
+    <div class="sch-edit-actions">
+      <button type="button" class="btn btn-sm ${replacing ? "" : "btn-primary"}" data-prn-action="tls-confirm"
+        data-id="${esc(printer.id)}" data-fingerprint="${esc(cert.fingerprint256)}"
+        ${busy === "tls-confirm" ? "disabled" : ""}>
+        ${replacing ? "Заменить на этот сертификат" : "Подтвердить этот сертификат"}
+      </button>
+    </div>`;
+}
+
+/* В настройках — то же значение, что подтверждено: его можно вставить вручную
+   (например, из `openssl s_client`) или стереть, сняв подтверждение. */
+function certificateFieldset(printer) {
+  return `<fieldset class="slice-target prn-secrets">
+      <legend>Сертификат принтера (TLS)</legend>
+      <div class="slice-grid">
+        ${textField("tlsFingerprint", "Отпечаток SHA-256 подтверждённого сертификата", printer.tlsFingerprint, {
+          wide: true,
+          placeholder: "не подтверждён — сервис к принтеру не подключается",
+          hint: "Проще подтвердить кнопкой «Сертификат» в строке принтера. Пустое поле снимает подтверждение."
+        })}
+      </div>
+    </fieldset>`;
+}
+
+/* Согласие на TLS без проверки — только для протоколов, которым оно нужно
+   (Bambu LAN). У Anycubic LAN его нет вовсе: там подтверждают сертификат. */
+function insecureTlsOptIn(printer) {
+  return `<label class="sch-check">
+        <input type="checkbox" name="allowInsecureTls" ${printer.allowInsecureTls ? "checked" : ""} />
+        Разрешить TLS без проверки сертификата (Bambu LAN — только в доверенной сети)
+      </label>`;
+}
+
 /* ── Форма настроек одного принтера ────────────────────────── */
 
 function printerForm(printer, state) {
@@ -424,10 +517,7 @@ function printerForm(printer, state) {
       ${credentialsFieldset(printer, fields)}
       ${lightFieldset(printer)}
 
-      <label class="sch-check">
-        <input type="checkbox" name="allowInsecureTls" ${printer.allowInsecureTls ? "checked" : ""} />
-        Разрешить TLS без проверки сертификата (Bambu LAN, Anycubic LAN — только в доверенной сети)
-      </label>
+      ${printer.protocol === "anycubic-lan" ? certificateFieldset(printer) : insecureTlsOptIn(printer)}
 
       <div class="sch-edit-actions">
         <button type="submit" class="btn btn-primary btn-sm" ${
@@ -565,10 +655,9 @@ export function addFormHtml(state) {
 }
 
 /* Согласие на TLS без проверки сертификата при добавлении принтера. Bambu без
-   него не подключается вовсе, поэтому галочка стоит сразу. У Anycubic она
-   намеренно НЕ стоит: проверка сертификата по умолчанию не отключается, и
-   оператор подтверждает это сам — до отметки принтер не подключается и
-   карточка говорит «Требуется настройка». */
+   него не подключается вовсе, поэтому галочка стоит сразу. У Anycubic такого
+   согласия нет: после добавления оператор подтверждает сертификат принтера, а
+   до этого принтер не подключается и карточка говорит «Требуется настройка». */
 function tlsOptIn(protocol) {
   if (protocol === "bambu") {
     return `<label class="sch-check">
@@ -577,11 +666,8 @@ function tlsOptIn(protocol) {
     </label>`;
   }
   if (protocol === "anycubic-lan") {
-    return `<label class="sch-check">
-      <input type="checkbox" name="allowInsecureTls" />
-      Разрешить TLS без проверки сертификата — у Anycubic LAN самоподписанный сертификат;
-      без отметки принтер не подключается. Только в доверенной сети.
-    </label>`;
+    return `<div class="slice-hint">После добавления нажмите «Сертификат» в строке принтера и
+      подтвердите его отпечаток SHA-256 — до этого сервис к принтеру не подключается.</div>`;
   }
   return "";
 }

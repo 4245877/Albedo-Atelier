@@ -25,9 +25,14 @@ import {
  * printer — and about a protocol nobody implements. `fetch` (Moonraker,
  * cameras) and `mqtt.connect` (Bambu) are replaced by tripwires: reaching either
  * fails the test, which is the proof that no other adapter's code is ever run
- * for these printers. The Anycubic printer has no TLS opt-in here, so its own
- * adapter contacts nothing either.
+ * for these printers. The Anycubic printer has no confirmed certificate here, so
+ * its own adapter contacts nothing either; where one is confirmed (`CONFIGURED`),
+ * the refusals below are the capability's, not a missing setting's.
  */
+
+const CONFIGURED = {
+  tlsFingerprint: "0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0:0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0"
+};
 
 const fetchCalls: string[] = [];
 
@@ -63,11 +68,11 @@ function kobra(over: Record<string, unknown> = {}): PrinterConfig {
 /** A protocol this build does not implement, as a corrupted runtime value would carry it. */
 const ALIEN = { ...kobra(), id: "alien", protocol: "octoprint" } as unknown as PrinterConfig;
 
-test("telemetry is the Anycubic adapter's, and without the TLS opt-in it contacts nothing", async () => {
+test("telemetry is the Anycubic adapter's, and without a confirmed certificate it contacts nothing", async () => {
   const status = await getPrinterLiveStatus(kobra());
   assert.equal(status.online, false);
   assert.equal(status.status, "offline");
-  assert.match(status.error ?? "", /самоподписанный сертификат/);
+  assert.match(status.error ?? "", /сертификат принтера не подтверждён/);
   assert.deepEqual(fetchCalls, []);
 });
 
@@ -79,7 +84,7 @@ test("an unimplemented protocol gets an explicit refusal, not Moonraker's poll",
 });
 
 test("pause, resume and cancel are refused and nothing is sent", async () => {
-  for (const printer of [kobra({ allowInsecureTls: true }), ALIEN]) {
+  for (const printer of [kobra(CONFIGURED), ALIEN]) {
     assert.equal(supportsPrinterControl(printer), false);
     for (const command of ["pause", "resume", "cancel"] as const) {
       await assert.rejects(sendPrinterCommand(printer, command), PrinterCommandError);
@@ -89,7 +94,7 @@ test("pause, resume and cancel are refused and nothing is sent", async () => {
 });
 
 test("a remote start is refused before any transport is chosen", async () => {
-  for (const printer of [kobra({ allowInsecureTls: true }), ALIEN]) {
+  for (const printer of [kobra(CONFIGURED), ALIEN]) {
     assert.equal(supportsPrinterStart(printer), false);
     await assert.rejects(sendPrinterStart(printer, "part.gcode"), PrinterCapabilityError);
   }
@@ -97,7 +102,7 @@ test("a remote start is refused before any transport is chosen", async () => {
 });
 
 test("the light is not controllable, even with light settings on the record", async () => {
-  const printer = kobra({ allowInsecureTls: true });
+  const printer = kobra(CONFIGURED);
   assert.equal(supportsPrinterLight(printer), false);
   await assert.rejects(sendPrinterLight(printer, true), PrinterCommandError);
   await assert.rejects(sendPrinterLight(ALIEN, true), PrinterCommandError);
@@ -105,7 +110,7 @@ test("the light is not controllable, even with light settings on the record", as
 });
 
 test("files cannot be listed, uploaded or deleted — and never through Moonraker", async () => {
-  for (const printer of [kobra({ allowInsecureTls: true }), ALIEN]) {
+  for (const printer of [kobra(CONFIGURED), ALIEN]) {
     await assert.rejects(fetchPrinterFiles(printer, ""), PrinterCapabilityError);
     await assert.rejects(uploadPrinterFile(printer, "part.gcode", new Uint8Array([1, 2, 3])), PrinterCapabilityError);
     await assert.rejects(deletePrinterFile(printer, "part.gcode"), PrinterCapabilityError);
@@ -114,14 +119,14 @@ test("files cannot be listed, uploaded or deleted — and never through Moonrake
 });
 
 test("no camera URL is guessed for it", () => {
-  const printer = kobra({ allowInsecureTls: true });
+  const printer = kobra(CONFIGURED);
   assert.equal(resolveSnapshotUrl(printer), null);
   assert.equal(canCaptureSnapshot(printer), false);
   assert.equal(hasCameraSource(printer), false);
 });
 
 test("discovery is the Anycubic adapter's — a cache read with no I/O", async () => {
-  const result = await discoverPrinterSpecs(kobra({ allowInsecureTls: true }));
+  const result = await discoverPrinterSpecs(kobra(CONFIGURED));
   assert.equal(result.succeeded, false);
   assert.match(result.error ?? "", /Anycubic LAN/);
   const alien = await discoverPrinterSpecs(ALIEN);

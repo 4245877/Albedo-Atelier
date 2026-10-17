@@ -16,7 +16,10 @@ import type { PrinterLiveStatus } from "../status/types";
  *    printing → pausing → paused → resuming → … → stopping → stoped`, ending in
  *    `finished` under `last_project`). `print` pushes carry progress — and so do
  *    command acks and settings snapshots on the same topic — so they enrich a
- *    job `info` already confirmed and never start, pause or finish one;
+ *    job `info` already confirmed and never start, pause or finish one. They
+ *    may still *name* how it ended: on firmware 2.0.2.2 `last_project` stays
+ *    empty and the push beside the `free` flip (`state: "finished"`) is the
+ *    only place the ending is said — kept as words, never as a transition;
  *  - **a contradiction or a transition is `unknown`, never a guess.** `busy`
  *    with no project, `free` with a project still claiming to print, `stopping`,
  *    a `finished` that the top-level state does not confirm yet: each reads as
@@ -72,6 +75,7 @@ export interface AnycubicJobReport {
   pauseCode: number | null;
   /** The job's file as the printer names it (may carry its staging directory). */
   file: string | null;
+  /** Null as well for the firmware's "no task" sentinel (`-1`, `0`) — see {@link taskIdText}. */
   taskId: string | null;
   progressPct: number | null;
   currentLayer: number | null;
@@ -129,6 +133,14 @@ const PAUSED_PHASES: ReadonlySet<string> = new Set(["pausing", "paused"]);
 /** `project.pause` values that mean the job is held. */
 const PAUSED_CODES: ReadonlySet<number> = new Set([1, 2]);
 
+/**
+ * How a `print` push names the end of the job in hand. `finished` is captured
+ * on a Kobra X, firmware 2.0.2.2 (2026-10-17), whose `last_project` stays empty
+ * after a print started on the screen; `stoped` is the cancel word the other
+ * captures report.
+ */
+const ENDED_PHASES: ReadonlySet<string> = new Set(["finished", "stoped"]);
+
 export function parseInfoReport(payload: unknown): AnycubicInfoReport | null {
   if (!isObject(payload) || !isObject(payload.data)) return null;
   const data = payload.data;
@@ -151,7 +163,7 @@ export function parseInfoReport(payload: unknown): AnycubicInfoReport | null {
       lastPhase: last ? lower(last.state) : null,
       pauseCode: project ? integer(project.pause) : null,
       file: project ? text(project.filename) : null,
-      taskId: project ? idText(project.taskid ?? project.task_id) : null,
+      taskId: project ? taskIdText(project.taskid ?? project.task_id) : null,
       ...progressFields(project)
     },
     temperatures,
@@ -171,9 +183,44 @@ export function parsePrintReport(payload: unknown): AnycubicProgressReport | nul
   if (!("progress" in data)) return null;
   return {
     file: text(data.filename),
-    taskId: idText(data.taskid ?? data.task_id),
+    taskId: taskIdText(data.taskid ?? data.task_id),
     ...progressFields(data)
   };
+}
+
+/** The end of a job, as a `print` push announces it. */
+export interface AnycubicJobEnding {
+  /** The printer's own word: `finished`, `stoped`. */
+  phase: string;
+  file: string | null;
+  taskId: string | null;
+}
+
+/**
+ * The ending a `print` push announces in its top-level `state`, or null. Like
+ * its progress, it is about the job `info` confirmed and ends nothing: the
+ * session keeps it only as the words for how that job ended
+ * ({@link AnycubicObservation.ending}).
+ */
+export function parsePrintEnding(payload: unknown): AnycubicJobEnding | null {
+  if (!isObject(payload) || !isObject(payload.data)) return null;
+  const phase = lower(payload.state);
+  if (!phase || !ENDED_PHASES.has(phase)) return null;
+  return {
+    phase,
+    file: text(payload.data.filename),
+    taskId: taskIdText(payload.data.taskid ?? payload.data.task_id)
+  };
+}
+
+/**
+ * Whether an announced ending is about `job`: the same task id, else the same
+ * file. Stricter than {@link applyProgress} on purpose — an ending decides how a
+ * print is recorded, so one that names neither is not taken.
+ */
+export function endsJob(job: AnycubicJobReport, ending: AnycubicJobEnding): boolean {
+  if (job.taskId && ending.taskId) return job.taskId === ending.taskId;
+  return job.file !== null && ending.file !== null && job.file === ending.file;
 }
 
 /** A `tempature` push (the firmware's spelling). */
@@ -242,12 +289,13 @@ export function lifecycleOf(job: AnycubicJobReport): AnycubicLifecycle {
 /**
  * The raw words behind the state, for the operator and for the shared outcome
  * classifier (`stoped` → cancelled, `finished` → completed): the job's phase
- * while busy, how the last job ended once free, else `free`/`busy`.
+ * while busy; once free, how the last job ended — as `info` says it, else as a
+ * `print` push announced it — else `free`/`busy`.
  */
-export function stateTextOf(job: AnycubicJobReport): string {
+export function stateTextOf(job: AnycubicJobReport, announcedEnding: string | null = null): string {
   if (job.work === "busy") return job.phase ?? "busy";
   const ended = job.phase && !PRINTING_PHASES.has(job.phase) && !PAUSED_PHASES.has(job.phase) ? job.phase : null;
-  return ended ?? job.lastPhase ?? "free";
+  return ended ?? job.lastPhase ?? announcedEnding ?? "free";
 }
 
 /**
@@ -287,6 +335,12 @@ export interface AnycubicObservation {
   jobObservedAt: number | null;
   temperatures: AnycubicTemperatures | null;
   temperaturesObservedAt: number | null;
+  /**
+   * How the job in hand ended, when a `print` push named it for that very job
+   * ({@link parsePrintEnding}, {@link endsJob}). Words only — the lifecycle
+   * still changes on `info` alone; cleared once `info` shows a job running again.
+   */
+  ending?: string | null;
 }
 
 /** How old a job state may be before it no longer counts as live. */
@@ -357,7 +411,7 @@ export function buildAnycubicStatus(
       : null,
     currentLayer: active ? job.currentLayer : null,
     totalLayers: active ? job.totalLayers : null,
-    stateText: stateTextOf(job),
+    stateText: stateTextOf(job, observation.ending ?? null),
     error: null,
     updatedAt: new Date(observedAt).toISOString()
   };
@@ -384,6 +438,18 @@ function integer(value: unknown): number | null {
 function idText(value: unknown): string | null {
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   return text(value);
+}
+
+/**
+ * A task id, or null. A job with no task id is reported as `-1` (an empty
+ * `last_project` as `0`) — every print started on the printer's own screen
+ * carries it (captured on a Kobra X, firmware 2.0.2.2). It means "no id", not
+ * one id shared by all such prints: matched as an id, it would fold one local
+ * job's progress into another's instead of falling back to the file name.
+ */
+function taskIdText(value: unknown): string | null {
+  const id = idText(value);
+  return id !== null && /^-?\d+$/.test(id) && Number(id) <= 0 ? null : id;
 }
 
 /** A plausible temperature in °C, or null. Guards against sentinel garbage. */

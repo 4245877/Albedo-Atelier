@@ -464,16 +464,34 @@ whole without the browser ever holding a secret.
 **Anycubic Kobra X (`anycubic-lan`) — monitoring only.** Add it with protocol
 «Anycubic (режим LAN, Kobra X)», the printer's bare IP address and no port; LAN
 mode must be on at the printer. It stays «Требуется настройка» and contacts
-nothing until «Разрешить TLS без проверки сертификата» is ticked on that printer
-(its broker certificate is self-signed — tick it only on a trusted network
-segment). Then «Проверить связь» runs the LAN handshake and shows the state. No
-credential is typed or stored: the broker login is fetched from the printer and
-kept in memory only. The printer reads «Только наблюдение»: it receives no jobs
-and no commands (pause, cancel, light, files) — see
+nothing until its broker certificate is confirmed: press «Сертификат» on the
+printer's row (a TLS handshake that sends nothing), check what it presents and
+press «Подтвердить» — from then on the service connects only to a broker with
+that SHA-256 fingerprint, and there is no "without verification" mode. Then
+«Проверить связь» runs the LAN handshake and shows the state. No credential is
+typed or stored: the broker login is fetched from the printer and kept in memory
+only. The printer reads «Только наблюдение»: it receives no jobs and no commands
+(pause, cancel, light, files) — see
 [Anycubic LAN](../apps/print-orchestrator/README.md#anycubic-lan-kobra-x-monitoring-only).
-The code needs schema 18 (migration `018_anycubic_lan` rebuilds the `printers`
-table; forward-only like every migration), so it is a release for an idle farm
-after [ops/verify](../ops/verify/README.md).
+
+If the card reads «сертификат принтера не совпадает с подтверждённым —
+подключение заблокировано», the printer presents a different certificate. After
+a reset or a firmware update that is expected: press «Сертификат», compare, and
+«Заменить на этот сертификат». If nothing like that happened, do not replace
+it — another device may be answering on that address. The printer hands its
+certificate and key to any LAN client (see the README), so keep it on a trusted
+segment.
+
+The code needs schema 19 (migration `018_anycubic_lan` rebuilds the `printers`
+table, `019_printer_tls_fingerprint` adds one column; forward-only like every
+migration), so it is a release for an idle farm after
+[ops/verify](../ops/verify/README.md).
+
+Every Kobra X print is started at the printer, so to the farm it is an external
+print: the card follows it, the plate goes to «awaiting clearance» when it ends,
+and a completed print records a manual filament debt (the printer reports no
+consumption). While it prints, `restart-safety` reports it as `untracked-print`,
+so `deploy.sh` holds the orchestrator back until the print is over.
 
 ### Restart cost
 

@@ -64,7 +64,8 @@ const KOBRA = {
   type: "FDM",
   protocol: "anycubic-lan",
   host: "127.0.0.9",
-  allowInsecureTls: true,
+  // A confirmed certificate: fully configured, and still monitoring only.
+  tlsFingerprint: "0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0:0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0",
   material: "PLA / PETG",
   enabled: true
 } as unknown as PrinterConfig;

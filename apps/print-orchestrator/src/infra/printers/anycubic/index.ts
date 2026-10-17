@@ -1,4 +1,5 @@
 import type { DiscoveredFacts } from "../../../domain/printers/discovery";
+import { canonicalTlsFingerprint } from "../../../domain/printers/validation";
 import { anycubicModelCodeFor, lookupModelSpec } from "../../../domain/printers/modelSpecs";
 import { printerReadiness, type PrinterRequirement } from "../capabilities";
 import type { PrinterConfig } from "../config";
@@ -12,6 +13,7 @@ import {
 import { makeOfflineStatus } from "../status/mapper";
 import type { PrinterLiveStatus } from "../status/types";
 import { ANYCUBIC_MQTT_PORT, AnycubicSession, type AnycubicTiming, type AnycubicTransport } from "./session";
+import { readBrokerCertificate, type AnycubicBrokerCertificate } from "./tls";
 
 /**
  * The Anycubic LAN adapter (`anycubic-lan`) as the rest of the service sees it:
@@ -25,6 +27,7 @@ import { ANYCUBIC_MQTT_PORT, AnycubicSession, type AnycubicTiming, type Anycubic
 
 export { ANYCUBIC_MQTT_PORT } from "./session";
 export { ANYCUBIC_HTTP_PORT } from "./handshake";
+export type { AnycubicBrokerCertificate } from "./tls";
 
 interface Entry {
   /** The settings the session was built from; a change rebuilds it. */
@@ -44,8 +47,11 @@ export const anycubicTestHooks: {
   httpPort?: number;
 } = {};
 
+/** How long reading the broker certificate for an operator may take. */
+const CERTIFICATE_READ_TIMEOUT_MS = 6000;
+
 function connectionKey(printer: PrinterConfig): string {
-  return JSON.stringify([printer.host, printer.port ?? null, printer.allowInsecureTls === true]);
+  return JSON.stringify([printer.host, printer.port ?? null, canonicalTlsFingerprint(printer.tlsFingerprint ?? "")]);
 }
 
 /**
@@ -56,8 +62,8 @@ function connectionKey(printer: PrinterConfig): string {
 export function getAnycubicStatus(printer: PrinterConfig): PrinterLiveStatus {
   const readiness = printerReadiness(printer);
   if (!readiness.ready) {
-    // Not connecting at all is the honest answer for an unconfirmed TLS policy or
-    // an unusable address; any session from earlier settings is closed.
+    // Not connecting at all is the honest answer for an unconfirmed certificate
+    // or an unusable address; any session from earlier settings is closed.
     dropAnycubicConnection(printer.id);
     return makeOfflineStatus(printer, notConfiguredReason(readiness.missing));
   }
@@ -76,6 +82,8 @@ export function getAnycubicStatus(printer: PrinterConfig): PrinterLiveStatus {
         printerId: printer.id,
         host: printer.host,
         mqttPort: printer.port ?? ANYCUBIC_MQTT_PORT,
+        // Ready means confirmed: readiness refuses a printer without a valid pin.
+        tlsFingerprint: canonicalTlsFingerprint(printer.tlsFingerprint ?? "") ?? "",
         httpPort: anycubicTestHooks.httpPort,
         transport: anycubicTestHooks.transport,
         timing: anycubicTestHooks.timing
@@ -105,7 +113,7 @@ export function discoverAnycubicFacts(printer: PrinterConfig): DiscoveryResult {
   // card keeps it — but labelled stale rather than freshly confirmed.
   if (!session || !snapshot || !device || session.state !== "connected") {
     return failedDiscovery(
-      "Принтер сейчас не на связи по Anycubic LAN — проверьте адрес, режим LAN и разрешение TLS"
+      "Принтер сейчас не на связи по Anycubic LAN — проверьте адрес, режим LAN и подтверждённый сертификат"
     );
   }
 
@@ -137,6 +145,15 @@ export function discoverAnycubicFacts(printer: PrinterConfig): DiscoveryResult {
   return succeededDiscovery(facts);
 }
 
+/**
+ * The certificate the printer's broker presents right now, for an operator to
+ * confirm — a TLS handshake with nothing sent and nothing trusted (`./tls.ts`).
+ * Independent of the live session, which it neither opens nor disturbs.
+ */
+export function readAnycubicBrokerCertificate(printer: PrinterConfig): Promise<AnycubicBrokerCertificate> {
+  return readBrokerCertificate(printer.host, printer.port ?? ANYCUBIC_MQTT_PORT, CERTIFICATE_READ_TIMEOUT_MS);
+}
+
 /** Closes one printer's session and forgets everything it learned, credentials included. */
 export function dropAnycubicConnection(printerId: string): void {
   const entry = sessions.get(printerId);
@@ -152,15 +169,14 @@ export function shutdownAnycubicConnections(): void {
 }
 
 function notConfiguredReason(missing: PrinterRequirement[]): string {
-  if (missing.some((m) => m.field === "allowInsecureTls")) {
-    return (
-      "Anycubic LAN использует самоподписанный сертификат — подключение без проверки сертификата " +
-      "не разрешено для этого принтера: отметьте «Разрешить TLS без проверки сертификата» в его настройках " +
-      "(только в доверенной сети)"
-    );
-  }
   if (missing.some((m) => m.field === "host")) {
     return "Anycubic LAN: укажите IP-адрес принтера — без http://, порта и пути";
+  }
+  if (missing.some((m) => m.field === "tlsFingerprint")) {
+    return (
+      "Anycubic LAN: сертификат принтера не подтверждён — в настройках принтера получите сертификат " +
+      "с принтера и подтвердите его отпечаток SHA-256; до этого сервис к принтеру не подключается"
+    );
   }
   return `Anycubic LAN: не настроено — ${missing.map((m) => m.label).join(", ")}`;
 }

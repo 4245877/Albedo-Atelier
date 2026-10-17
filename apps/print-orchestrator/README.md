@@ -126,7 +126,8 @@ cancelled, lit or heated on it — by any route. Code in
 
 **The protocol** (not vendor-documented; the flow three independent open
 implementations converge on and OrcaCubic validated read-only on a Kobra X with
-firmware 2.0.1.9 — `modelId` `20030`):
+firmware 2.0.1.9 — `modelId` `20030`; confirmed on this farm's Kobra X, firmware
+2.0.2.2, on 2026-10-17 — see *Hardware check* below):
 
 1. `GET http://<ip>:18910/info` → identity (`modelId`, `modelName`, `cn`) and a
    one-time `token`;
@@ -144,12 +145,36 @@ The device never chooses where we connect: its `ctrlInfoUrl` and the bundle's
 time-bounded, and the client certificate/key the bundle carries are discarded
 (the broker accepts the username/password login without them).
 
-**TLS.** The broker's certificate is self-signed with no CA, so it cannot be
-verified. Verification is not silently waived: without the per-printer
-`allowInsecureTls` opt-in (the same field Bambu uses; `BAMBU_ALLOW_INSECURE_TLS`
-does *not* apply) the adapter contacts nothing and the card reads «Требуется
-настройка». With it, the TLS handshake completes *before* the MQTT client exists,
-so the password is only ever written to a socket the policy accepted.
+**TLS: the confirmed certificate, and nothing else.** The broker's certificate is
+self-signed (`O=AnyCubic`, no CN/SAN, not a CA), so no CA and no name can vouch
+for it — the certificate itself does. An operator confirms its SHA-256
+fingerprint once (`tlsFingerprint`, column added by migration
+`019_printer_tls_fingerprint`); every connection, first and reconnect alike,
+must present exactly that certificate (`src/infra/printers/anycubic/tls.ts`).
+The TLS handshake still makes the broker prove it holds the certificate's key;
+the fingerprint check replaces the CA-chain check, and it runs *before* the MQTT
+client exists, so the login is never written to a broker that presented anything
+else. There is no unverified mode: `allowInsecureTls` is refused for this
+protocol (400) and ignored if present, and `BAMBU_ALLOW_INSECURE_TLS` does not
+apply. Until a certificate is confirmed the adapter contacts nothing and the card
+reads «Требуется настройка».
+
+- *Confirming:* «Сертификат» on the printer's row calls
+  `POST /api/printers/config/:id/tls-certificate` — a TLS handshake, no byte
+  sent, nothing stored — and shows what the printer presents; «Подтвердить»
+  PATCHes `tlsFingerprint` with exactly that value. The field can also be
+  pasted (any spelling of the digest; stored canonical) or cleared by hand.
+- *A changed certificate* (reset, firmware update — or another device on the
+  address) reads «сертификат принтера не совпадает с подтверждённым —
+  подключение заблокировано» with the presented fingerprint; retries keep
+  refusing it. It is never adopted by itself: the operator reads it and
+  replaces the pin explicitly.
+- *The limit, measured on the unit:* `/ctrl` hands the broker's certificate
+  **and private key** to any LAN client that performs the handshake. The pin
+  keeps out everything that has not (a reassigned IP, another broker, a MITM
+  without the key); against a host on the same LAN that has, no client-side
+  check can help. The printer's network is the trust boundary — keep it a
+  trusted segment.
 
 **Read-only, enforced in code.** The session publishes exactly one message shape
 — the `info` query above — built in one place and re-checked by
@@ -168,10 +193,10 @@ instead of «Готов к печати».
 | Field | Source | Notes |
 |---|---|---|
 | state | `info.data.state` (`free`/`busy`) + `project.state`, `project.pause` | the only lifecycle source; `print` pushes never start, pause or end a job |
-| progress, layer, layers, time left | `project` / `print` pushes (`progress`, `curr_layer`, `total_layers`, `remain_time` in minutes) | `print` only enriches the job `info` confirmed (same task id/file) |
+| progress, layer, layers, time left | `project` / `print` pushes (`progress`, `curr_layer`, `total_layers`, `remain_time` in minutes) | `print` only enriches the job `info` confirmed (same task id; same file when there is none — a print started on the screen reports `task_id` `"-1"`) |
 | nozzle/bed temperature and targets | `info.data.temp`, `tempature` pushes | own freshness: older than 60 s → unknown |
 | file | `project.filename` | staging directory dropped |
-| how the last job ended | `last_project.state` (`finished`, `stoped`) | becomes `stateText`, which the shared classifier reads |
+| how the last job ended | `last_project.state` (`finished`, `stoped`); else the `print` push that names it for the job in hand (`state: "finished"`) | becomes `stateText`, which the shared classifier reads. On 2.0.2.2 `last_project` stays empty, so the push is the only source; it is words only — the job still ends when `info` says `free` |
 | model, serial, device name | `/info` (`modelName`, `cn`, `deviceName`) | serial is identity here, not a credential |
 | firmware | `info.data.version` | |
 | build volume | catalogue, only for `modelId` 20030 | 260×260×260 mm; never lent to other Anycubic models |
@@ -198,12 +223,33 @@ re-learned by handshake after a restart, a config change, or a refused CONNACK;
 never persisted, logged, audited or returned by any API. Hardware discovery reads
 the session (no I/O) and succeeds only while it is connected.
 
-**Not yet verified on hardware.** Everything above is tested against fakes and a
-loopback TLS/MQTT/HTTP stand-in (`src/infra/printers/anycubic/*.test.ts`), not
-against a Kobra X. To be confirmed at the hardware acceptance: the handshake on
-this unit's firmware, the `info` field names and the state vocabulary during a
-real print (including pause and cancel), whether the broker certificate survives
-a printer reboot, and the cadence at which the printer answers `info`.
+**Hardware check (2026-10-17, Kobra X, firmware 2.0.2.2).** Read-only, from an
+isolated client running this adapter's handshake, session and parsers (TLS pinned
+to the unit's certificate; no orchestrator, no other printer): two sessions,
+34 minutes in all, during a print started on the screen and through its end; the
+29-minute one never dropped its connection. Anonymized captures:
+`src/infra/printers/anycubic/testkit/kobraXCaptures.ts`.
+
+- `/info` in LAN mode (`ctrlType: "lan"`, `modelId` `"20030"` as a string) carries
+  no firmware version; `info.data.version` does. The `/ctrl` bundle holds
+  `broker, deviceId, deviceType, devicecrt, devicepk, ip, modeId, modelId,
+  modelName, password, username`; the broker accepts the login without the client
+  certificate (TLS 1.3; the server requests none).
+- `info` is answered only when asked (29 ms – 1.1 s); nothing pushes it, so
+  freshness rests on the 20 s query. Silencing the query on purpose: offline at
+  60.5 s, watchdog reconnect at 139 s with the cached login (no new handshake).
+- While printing, `print` pushes arrive unprompted every 4–60 s, each with
+  `action: "start"`; no `tempature`/`status` pushes until the heaters go off.
+- The end of a print: cool-down pushes (`hotbed_cooling_off`,
+  `nozzle_cooling_off`), `info` `busy` + `project.state: "nozzle_cooling_off"`
+  (read as `unknown`), lifetime statistics on the info topic
+  (`action: "statistic-reported"`, ignored), `status` `free`, the `print` push
+  with `state: "finished"`, then `info` `free` with `project: null` — and
+  `last_project` empty.
+
+Still unverified: idle-to-print start, pause/resume and cancel words, the
+certificate across a reboot or firmware update, and an ending while the session
+is reconnecting (it then reads as an ambiguous ending for the operator).
 
 ## Persistent print-queue model (SQLite)
 

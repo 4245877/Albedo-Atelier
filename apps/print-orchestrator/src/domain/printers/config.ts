@@ -148,8 +148,15 @@ export interface PrinterRecord {
   apiKey: string;
   serial: string;
   accessCode: string;
-  /** Explicit opt-in for a TLS connection WITHOUT certificate verification. */
+  /** Explicit opt-in for a TLS connection WITHOUT certificate verification (never Anycubic LAN). */
   allowInsecureTls: boolean;
+  /**
+   * SHA-256 fingerprint of the TLS certificate the operator confirmed for this
+   * printer — Anycubic LAN only; "" until one is confirmed and for every other
+   * protocol. Canonical: upper-case hex pairs joined by colons. Not a secret —
+   * a printer shows its certificate to anyone who connects.
+   */
+  tlsFingerprint: string;
 
   automaticContinuation: AutomaticContinuationConfig;
   light: PrinterLightSettings;

@@ -26,6 +26,8 @@ interface IdParams {
  *   POST   /:id/enabled      body: { enabled: boolean }
  *   POST   /:id/test         probe the real device with the current settings
  *   POST   /:id/discover     re-ask the device what hardware it is
+ *   POST   /:id/tls-certificate  read the certificate the broker presents (Anycubic
+ *                            LAN) — confirming it is a PATCH of `tlsFingerprint`
  *   POST   /reorder          body: { ids: string[] }
  *   DELETE /:id              remove it from the farm
  *
@@ -128,6 +130,17 @@ export async function registerPrinterConfigRoutes(
     printer: await service().discoverNow(request.params.id, actorOf(request.body))
   }));
 
+  /**
+   * Reads the certificate an Anycubic LAN broker presents, so the operator can
+   * compare and confirm it. Read-only towards the device (a TLS handshake, no
+   * byte sent) and it changes nothing here: the confirmation is a separate PATCH
+   * of `tlsFingerprint` carrying the value the operator saw.
+   */
+  app.post<{ Params: IdParams; Body: unknown }>("/:id/tls-certificate", async (request) => ({
+    ok: true,
+    result: await service().readTlsCertificate(request.params.id, actorOf(request.body))
+  }));
+
   app.post<{ Body: { ids?: unknown; operator?: unknown } }>("/reorder", async (request) => {
     const ids = request.body?.ids;
     if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) {
@@ -159,7 +172,8 @@ const PROTOCOL_HINTS: Record<PrinterProtocol, string> = {
   creality: "Только чтение телеметрии по WebSocket: удалённый запуск и пауза этим протоколом не поддерживаются.",
   "anycubic-lan":
     "Достаточно IP-адреса: на принтере должен быть включён режим LAN, порт указывать не нужно. " +
-    "Сертификат принтера самоподписанный — подключение начнётся только после отметки «Разрешить TLS без проверки сертификата». " +
+    "Сертификат принтера самоподписанный: после добавления получите его с принтера в настройках и подтвердите отпечаток SHA-256 — " +
+    "до подтверждения сервис к принтеру не подключается, а другой сертификат он не примет. " +
     "Только телеметрия: задания, запуск, пауза, подсветка и файлы не поддерживаются."
 };
 

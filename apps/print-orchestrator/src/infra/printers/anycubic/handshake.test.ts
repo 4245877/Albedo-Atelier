@@ -10,6 +10,7 @@ import {
   performAnycubicHandshake,
   signCtrlRequest
 } from "./handshake";
+import { KOBRA_X_CTRL_BUNDLE_SHAPE, KOBRA_X_HTTP_INFO } from "./testkit/kobraXCaptures";
 
 /*
  * The LAN handshake against a local fake printer (127.0.0.1, ephemeral port):
@@ -128,6 +129,37 @@ test("a printer in LAN mode yields its identity and broker login", async () => {
   // Nothing beyond the bundle's login reaches the caller: no cert, key or address.
   assert.ok(!JSON.stringify(result).includes("203.0.113.50"));
   assert.ok(!JSON.stringify(result).includes("-----KEY-----"));
+});
+
+test("the /info and bundle shapes a Kobra X on firmware 2.0.2.2 sends", async () => {
+  // Captured shapes (testkit): `modelId` as a string, extra /info keys (usn,
+  // env, zone, deviceType, ip), and a bundle spelling both `modeId` and `modelId`.
+  printer({
+    info: { ...KOBRA_X_HTTP_INFO, token: TOKEN },
+    ctrl: (url) =>
+      url.searchParams.get("sign") ===
+      signCtrlRequest(TOKEN, Number(url.searchParams.get("ts")), url.searchParams.get("nonce") ?? "")
+        ? { code: 200, message: "success", data: { token: LOCAL_TOKEN, info: encrypt(KOBRA_X_CTRL_BUNDLE_SHAPE) } }
+        : { code: 401, message: "sign error" }
+  });
+  const result = await performAnycubicHandshake("127.0.0.1", options());
+
+  assert.deepEqual(result.identity, {
+    modelId: "20030",
+    modelName: "Anycubic Kobra X",
+    serialNumber: "TESTSERIAL000000000",
+    deviceName: "Anycubic Kobra X"
+  });
+  assert.deepEqual(result.credentials, {
+    username: KOBRA_X_CTRL_BUNDLE_SHAPE.username,
+    password: KOBRA_X_CTRL_BUNDLE_SHAPE.password,
+    deviceId: KOBRA_X_CTRL_BUNDLE_SHAPE.deviceId,
+    modelId: "20030"
+  });
+  assert.deepEqual(seen.map((r) => `${r.method} ${r.path}`), ["GET /info", "POST /ctrl"], "ctrlInfoUrl not followed");
+  for (const dropped of ["CERTIFICATE", "PRIVATE KEY", "192.0.2.10"]) {
+    assert.ok(!JSON.stringify(result).includes(dropped), `${dropped} does not reach the caller`);
+  }
 });
 
 test("the signature is md5(md5(token[0:16]) + ts + nonce) — what the printer checks", () => {

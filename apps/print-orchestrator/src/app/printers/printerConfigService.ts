@@ -16,6 +16,10 @@ import {
   type ResolvedPrinterSpecs
 } from "../../domain/printers/specs";
 import { buildPrinterRecord, type PrinterInput } from "../../domain/printers/validation";
+import {
+  readAnycubicBrokerCertificate,
+  type AnycubicBrokerCertificate
+} from "../../infra/printers/anycubic";
 import type { PrinterConfig } from "../../infra/printers/config";
 import { materializePrinter } from "../../infra/printers/materialize";
 import {
@@ -74,6 +78,23 @@ export interface PrinterConnectionTest {
   checkedAt: string;
 }
 
+/**
+ * What reading a printer's broker certificate found — the material an operator
+ * confirms a certificate from (Anycubic LAN).
+ */
+export interface PrinterTlsCertificateCheck {
+  printerId: string;
+  /** What the broker presents right now; null when it could not be read. */
+  certificate: AnycubicBrokerCertificate | null;
+  /** Why it could not be read, in the operator's language; null when it was. */
+  error: string | null;
+  /** The fingerprint confirmed for this printer; null when none is. */
+  confirmed: string | null;
+  /** Whether what is presented is what was confirmed; null when either is missing. */
+  matches: boolean | null;
+  checkedAt: string;
+}
+
 export interface PrinterConfigServiceOptions {
   now?: () => Date;
   actor?: string;
@@ -88,6 +109,8 @@ export interface PrinterConfigServiceOptions {
   probe?: (printer: PrinterConfig) => Promise<{ online: boolean; status: string; error: string | null }>;
   /** Drops a printer's live device connection; the real adapter by default. */
   disconnect?: (printerId: string) => void;
+  /** Reads the certificate an Anycubic broker presents; injected in tests (no device). */
+  readCertificate?: (printer: PrinterConfig) => Promise<AnycubicBrokerCertificate>;
   /**
    * Hardware-profile discovery. Optional so this service keeps working (and
    * stays testable) without one — the card then shows only manual values.
@@ -146,6 +169,7 @@ export class PrinterConfigService {
   private readonly onChanged?: (changedPrinterId: string | null) => void;
   private readonly probeFn?: PrinterConfigServiceOptions["probe"];
   private readonly disconnect: (printerId: string) => void;
+  private readonly readCertificate: (printer: PrinterConfig) => Promise<AnycubicBrokerCertificate>;
   private readonly discovery?: PrinterDiscoveryPort;
 
   constructor(
@@ -159,6 +183,7 @@ export class PrinterConfigService {
     this.onChanged = options.onChanged;
     this.probeFn = options.probe;
     this.disconnect = options.disconnect ?? disconnectPrinter;
+    this.readCertificate = options.readCertificate ?? readAnycubicBrokerCertificate;
   }
 
   // ── Reads ──────────────────────────────────────────────────────────────────
@@ -420,6 +445,49 @@ export class PrinterConfigService {
     return toView(record, result ?? null);
   }
 
+  /**
+   * Reads the certificate an Anycubic LAN printer's broker presents, for the
+   * operator to confirm — the first time, or after the card reports that it
+   * changed. A TLS handshake and nothing more: nothing is sent, nothing is
+   * stored, and the live session is left alone.
+   *
+   * Confirming is a separate, explicit act — a PATCH of `tlsFingerprint` with
+   * the value the operator saw. Nothing here, or anywhere, accepts a
+   * certificate on their behalf.
+   */
+  async readTlsCertificate(id: string, actor?: string): Promise<PrinterTlsCertificateCheck> {
+    const record = this.require(id);
+    if (record.protocol !== "anycubic-lan") {
+      throw new ValidationError("Сертификат подтверждается только у принтеров Anycubic LAN", {
+        field: "protocol"
+      });
+    }
+    const config = materializePrinter(record);
+
+    let certificate: AnycubicBrokerCertificate | null = null;
+    let error: string | null = null;
+    try {
+      certificate = await this.readCertificate(config);
+    } catch (cause) {
+      error = humanizeProbeError(cause instanceof Error ? cause.message : null, config);
+    }
+    const confirmed = record.tlsFingerprint || null;
+    const matches = certificate && confirmed ? certificate.fingerprint256 === confirmed : null;
+
+    const checkedAt = this.nowIso();
+    this.store.transaction(() => {
+      this.audit({
+        entityType: "printer",
+        entityId: id,
+        action: "tls_certificate_read",
+        actor,
+        // A certificate is public; its fingerprint is what the operator acts on.
+        detail: { fingerprint: certificate?.fingerprint256 ?? null, matches, error }
+      });
+    });
+    return { printerId: id, certificate, error, confirmed, matches, checkedAt };
+  }
+
   private async probeDevice(
     config: PrinterConfig
   ): Promise<{ online: boolean; status: string; error: string | null }> {
@@ -460,11 +528,12 @@ export class PrinterConfigService {
 
   /**
    * Whether the patch touches something a live connection was built from. Host,
-   * port, protocol and the TLS opt-in all change *where and how* we connect, so
-   * the cached client must go even though no credential moved.
+   * port, protocol, the TLS opt-in and the confirmed certificate all change
+   * *where and how* we connect, so the cached client must go even though no
+   * credential moved.
    */
   private connectionAffecting(input: PrinterInput): boolean {
-    return ["host", "port", "protocol", "allowInsecureTls"].some((key) =>
+    return ["host", "port", "protocol", "allowInsecureTls", "tlsFingerprint"].some((key) =>
       Object.prototype.hasOwnProperty.call(input, key)
     );
   }
@@ -583,7 +652,9 @@ function describe(record: PrinterRecord): Record<string, unknown> {
     protocol: record.protocol,
     host: record.host,
     port: record.port,
-    enabled: record.enabled
+    enabled: record.enabled,
+    // Which certificate an operator confirmed is part of the wiring (and public).
+    ...(record.protocol === "anycubic-lan" ? { tlsFingerprint: record.tlsFingerprint || null } : {})
   };
 }
 

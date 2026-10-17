@@ -83,7 +83,11 @@ test("018 keeps every printer row, column for column, and every discovery row", 
 
   const db = openDatabase(file);
   try {
-    assert.deepEqual(rows(db, "SELECT * FROM printers ORDER BY id"), printersBefore);
+    assert.deepEqual(
+      rows(db, "SELECT * FROM printers ORDER BY id"),
+      printersBefore.map((row) => ({ ...(row as object), tls_fingerprint: "" })),
+      "every value survives; 019 adds only the empty, unconfirmed certificate column"
+    );
     assert.deepEqual(
       rows(db, "SELECT * FROM printer_discovery ORDER BY id"),
       discoveryBefore,
@@ -92,7 +96,7 @@ test("018 keeps every printer row, column for column, and every discovery row", 
     const versions = rows(db, "SELECT version FROM schema_migrations ORDER BY version").map(
       (r) => (r as { version: number }).version
     );
-    assert.equal(versions.at(-1), 18);
+    assert.ok(versions.includes(18));
     assert.ok(
       db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_printers_position'").get(),
       "the position index is recreated"
@@ -176,7 +180,8 @@ test("an anycubic-lan printer round-trips through the repository unchanged", () 
       apiKey: "",
       serial: "",
       accessCode: "",
-      allowInsecureTls: true,
+      allowInsecureTls: false,
+      tlsFingerprint: "0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0:0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0",
       automaticContinuation: { ...NO_AUTOMATIC_CONTINUATION },
       light: { ...DEFAULT_LIGHT_SETTINGS },
       position: 40,

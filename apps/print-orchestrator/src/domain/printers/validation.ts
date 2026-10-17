@@ -129,6 +129,37 @@ const HOSTNAME_RE =
   /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i;
 
 /**
+ * A certificate's SHA-256 fingerprint in the one form the service stores and
+ * compares: 32 upper-case hex pairs joined by colons — what Node reports as
+ * `fingerprint256`. The same digest is accepted with or without separators and
+ * in either case, so `openssl x509 -fingerprint -sha256` output can be pasted
+ * as is. Null for anything that is not exactly 32 bytes of hex. Pure.
+ */
+export function canonicalTlsFingerprint(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const hex = value
+    .trim()
+    .replace(/^sha-?256\s+fingerprint\s*=\s*/i, "")
+    .replace(/[\s:-]/g, "");
+  if (!/^[0-9a-f]{64}$/i.test(hex)) return null;
+  return (hex.toUpperCase().match(/.{2}/g) ?? []).join(":");
+}
+
+/** A confirmed-certificate fingerprint from the form: empty = none confirmed. */
+function tlsFingerprint(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string" && value.trim() === "") return "";
+  const canonical = canonicalTlsFingerprint(value);
+  if (!canonical) {
+    throw new ValidationError(
+      "Отпечаток сертификата — SHA-256: 64 шестнадцатеричных символа (двоеточия допускаются), например «0F:1E:2D:…:E1:F0»",
+      { field: "tlsFingerprint" }
+    );
+  }
+  return canonical;
+}
+
+/**
  * A bare network address — an IPv4/IPv6 literal or a DNS name, and nothing else.
  *
  * Some adapters build URLs out of the stored host (Anycubic LAN:
@@ -368,6 +399,9 @@ export function buildPrinterRecord(input: PrinterInput, options: BuildOptions): 
     serial: secret(input, "serial", base?.serial ?? ""),
     accessCode: secret(input, "accessCode", base?.accessCode ?? ""),
     allowInsecureTls: bool(input.allowInsecureTls, "allowInsecureTls", base?.allowInsecureTls ?? false),
+    tlsFingerprint: has(input, "tlsFingerprint")
+      ? tlsFingerprint(input.tlsFingerprint)
+      : (base?.tlsFingerprint ?? ""),
 
     automaticContinuation: automaticContinuation(
       input.automaticContinuation,
@@ -382,8 +416,37 @@ export function buildPrinterRecord(input: PrinterInput, options: BuildOptions): 
     metadata: base?.metadata ?? {}
   };
 
+  applyTlsPolicy(record, input);
   assertProtocolRequirements(record);
   return record;
+}
+
+/**
+ * TLS trust is per protocol. Anycubic LAN connects only to the certificate the
+ * operator confirmed (`tlsFingerprint`) — never without verification, so its
+ * `allowInsecureTls` is refused when asked for and otherwise held at false. No
+ * other protocol uses a pinned certificate: one sent for them is refused, and
+ * one left over from a protocol change is dropped rather than kept looking
+ * configured.
+ */
+function applyTlsPolicy(record: PrinterRecord, input: PrinterInput): void {
+  if (record.protocol === "anycubic-lan") {
+    if (input.allowInsecureTls === true) {
+      throw new ValidationError(
+        "Anycubic LAN не подключается без проверки сертификата — подтвердите отпечаток сертификата принтера",
+        { field: "allowInsecureTls" }
+      );
+    }
+    record.allowInsecureTls = false;
+    return;
+  }
+  if (!record.tlsFingerprint) return;
+  if (has(input, "tlsFingerprint")) {
+    throw new ValidationError("Отпечаток сертификата задаётся только для Anycubic LAN", {
+      field: "tlsFingerprint"
+    });
+  }
+  record.tlsFingerprint = "";
 }
 
 /**

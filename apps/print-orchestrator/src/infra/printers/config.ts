@@ -13,6 +13,7 @@ import {
   type PrinterRecord
 } from "../../domain/printers/config";
 import type { PrinterTechnology } from "../../domain/printers/types";
+import { canonicalTlsFingerprint } from "../../domain/printers/validation";
 import { isObject } from "../../shared/isObject";
 import { expandEnvRefs, materializePrinter } from "./materialize";
 
@@ -121,9 +122,16 @@ export interface PrinterConfig {
    * Without this flag (or the global `BAMBU_ALLOW_INSECURE_TLS=1`) the adapter
    * refuses to connect and reports the printer offline with the reason —
    * unverified TLS is never a silent default. Optional so existing fixtures
-   * and configs stay valid; absent means `false` (refuse).
+   * and configs stay valid; absent means `false` (refuse). Anycubic LAN never
+   * reads it — it connects only to {@link tlsFingerprint}.
    */
   allowInsecureTls?: boolean;
+  /**
+   * The SHA-256 fingerprint of the broker certificate the operator confirmed
+   * (Anycubic LAN). Every TLS connection must present exactly this certificate;
+   * absent or empty means none is confirmed and the adapter connects to nothing.
+   */
+  tlsFingerprint?: string;
   /**
    * Whether this printer may continue the queue **by itself** after a print
    * finishes, i.e. whether it clears its own bed.
@@ -293,6 +301,7 @@ export function normalizePrinterRecord(value: unknown, position = 0): PrinterRec
     serial: asRaw(value.serial),
     accessCode: asRaw(value.accessCode),
     allowInsecureTls: value.allowInsecureTls === true,
+    tlsFingerprint: protocol === "anycubic-lan" ? (canonicalTlsFingerprint(value.tlsFingerprint) ?? "") : "",
     automaticContinuation: normalizeAutomaticContinuation(value.automaticContinuation),
     light: normalizeLightSettings(value.light),
 

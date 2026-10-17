@@ -84,7 +84,7 @@ test("Creality declares NO file abilities — the manual path, honestly", () => 
 });
 
 test("Anycubic LAN is monitoring only: it takes no job, by any route", () => {
-  assert.deepEqual(capabilitiesOf(printer("anycubic-lan", { allowInsecureTls: true })), {
+  assert.deepEqual(capabilitiesOf(printer("anycubic-lan", { tlsFingerprint: "0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0:0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0" })), {
     supportsJobs: false,
     supportsUpload: false,
     supportsFileListing: false,
@@ -100,16 +100,21 @@ test("Anycubic LAN is monitoring only: it takes no job, by any route", () => {
   );
 });
 
-test("an Anycubic printer needs a bare IP and the explicit TLS opt-in before it is contacted", () => {
+test("an Anycubic printer needs a bare IP and a confirmed certificate before it is contacted", () => {
+  const PIN = "0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0:0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0";
   const missing = (over: Record<string, unknown>) =>
     printerReadiness(printer("anycubic-lan", over)).missing.map((m) => m.field);
-  assert.deepEqual(missing({ allowInsecureTls: true }), []);
-  assert.deepEqual(missing({ allowInsecureTls: false }), ["allowInsecureTls"]);
-  assert.deepEqual(missing({ allowInsecureTls: true, host: "http://192.168.1.60" }), ["host"]);
-  // The Bambu-wide escape hatch does not reach another vendor's adapter.
+  assert.deepEqual(missing({ tlsFingerprint: PIN }), []);
+  assert.deepEqual(missing({ tlsFingerprint: PIN.toLowerCase().replaceAll(":", "") }), [], "any spelling of the digest");
+  assert.deepEqual(missing({}), ["tlsFingerprint"]);
+  assert.deepEqual(missing({ tlsFingerprint: "0F:1E:2D" }), ["tlsFingerprint"], "a partial digest is no pin");
+  assert.deepEqual(missing({ tlsFingerprint: PIN, host: "http://192.168.1.60" }), ["host"]);
+  // Unverified TLS is no substitute — neither the printer's opt-in nor the
+  // Bambu-wide escape hatch reaches this adapter.
+  assert.deepEqual(missing({ allowInsecureTls: true }), ["tlsFingerprint"]);
   process.env.BAMBU_ALLOW_INSECURE_TLS = "1";
   try {
-    assert.deepEqual(missing({ allowInsecureTls: false }), ["allowInsecureTls"]);
+    assert.deepEqual(missing({ allowInsecureTls: true }), ["tlsFingerprint"]);
   } finally {
     delete process.env.BAMBU_ALLOW_INSECURE_TLS;
   }

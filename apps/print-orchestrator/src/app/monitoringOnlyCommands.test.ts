@@ -45,7 +45,8 @@ const KOBRA = normalizePrinterConfig({
   name: "Kobra X",
   host: "192.168.1.60",
   protocol: "anycubic-lan",
-  allowInsecureTls: true,
+  // A confirmed certificate: fully configured, and still monitoring only.
+  tlsFingerprint: "0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0:0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0",
   // Light settings on the record must not make the light controllable.
   light: { enabled: true, onGcode: "M355 S1", offGcode: "M355 S0", bambuNode: "chamber_light" }
 }) as PrinterConfig;

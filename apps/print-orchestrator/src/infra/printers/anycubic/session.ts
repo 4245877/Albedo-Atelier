@@ -1,8 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { EventEmitter } from "node:events";
-import net from "node:net";
 import type { Duplex } from "node:stream";
-import tls from "node:tls";
 
 import mqtt from "mqtt";
 
@@ -20,9 +18,11 @@ import {
 import {
   applyProgress,
   buildAnycubicStatus,
+  endsJob,
   JOB_STATE_MAX_AGE_MS,
   lifecycleOf,
   parseInfoReport,
+  parsePrintEnding,
   parsePrintReport,
   parseStatusReport,
   parseTemperatureReport,
@@ -33,6 +33,7 @@ import {
   type AnycubicReportedIdentity,
   type AnycubicTemperatures
 } from "./reports";
+import { openPinnedTls, TlsConnectError, TlsPinMismatchError } from "./tls";
 
 /**
  * One live LAN session with one Anycubic printer: handshake → TLS → MQTT, the
@@ -59,12 +60,12 @@ import {
  *    configuration change or an authentication failure; never persisted, never
  *    logged, never part of a status or an error.
  *
- * TLS: the broker's certificate is self-signed with no CA (every capture
- * agrees), so the session connects without verification — and only when the
- * printer carries the explicit `allowInsecureTls` opt-in; the registry refuses
- * to start a session otherwise. The TLS handshake completes *before* the MQTT
- * client exists, so the password is never written to a socket the policy has not
- * accepted.
+ * TLS: the broker's certificate is self-signed with no CA, so every
+ * connection — first and reconnect alike — must present exactly the certificate
+ * the operator confirmed (`tlsFingerprint`, see `./tls.ts`); the registry starts
+ * no session without one, and there is no unverified fallback. The check is made
+ * *before* the MQTT client exists, so the password is never written to a socket
+ * that presented anything else.
  */
 
 export const ANYCUBIC_MQTT_PORT = 9883;
@@ -123,8 +124,11 @@ export interface AnycubicClientOptions {
 /** The network edges, injectable so tests never open a socket to a real device. */
 export interface AnycubicTransport {
   handshake(host: string, options: { clientId: string; httpPort?: number }): Promise<AnycubicHandshakeResult>;
-  /** Resolves with a TLS stream whose handshake has completed. */
-  openTls(host: string, port: number, timeoutMs: number): Promise<Duplex>;
+  /**
+   * Resolves with a TLS stream whose broker presented exactly the `fingerprint`
+   * certificate; rejects, having written nothing, for any other.
+   */
+  openTls(host: string, port: number, timeoutMs: number, fingerprint: string): Promise<Duplex>;
   /** An MQTT client over an already-established stream. */
   createClient(stream: Duplex, options: AnycubicClientOptions): AnycubicMqttClient;
 }
@@ -155,6 +159,8 @@ export interface AnycubicSessionOptions {
   printerId: string;
   host: string;
   mqttPort: number;
+  /** The confirmed broker certificate (canonical SHA-256); every connection must present it. */
+  tlsFingerprint: string;
   /** Only for tests; production uses the protocol's 18910. */
   httpPort?: number;
   transport?: AnycubicTransport;
@@ -257,7 +263,12 @@ export class AnycubicSession {
         this.device = result.identity;
       }
 
-      const stream = await this.transport.openTls(host, mqttPort, this.timing.tlsTimeoutMs);
+      const stream = await this.transport.openTls(
+        host,
+        mqttPort,
+        this.timing.tlsTimeoutMs,
+        this.options.tlsFingerprint
+      );
       if (generation !== this.generation) {
         stream.destroy();
         return;
@@ -479,6 +490,10 @@ export class AnycubicSession {
       };
       if (report.temperatures) this.foldTemperatures(report.temperatures, now);
       if (report.job) {
+        // A job running again is the next job: the last one's ending must not
+        // become the words for how this one ends.
+        const lifecycle = lifecycleOf(report.job);
+        if (lifecycle === "printing" || lifecycle === "paused") this.observation.ending = null;
         this.observation.job = report.job;
         this.observation.jobObservedAt = now;
       }
@@ -492,9 +507,14 @@ export class AnycubicSession {
     }
 
     if (type === "print") {
+      const job = this.observation.job;
+      // How the job in hand ended, when the push names it for that job — the
+      // only place firmware 2.0.2.2 says it. Kept as words; `info` still ends it.
+      const ending = parsePrintEnding(json);
+      if (ending && job && endsJob(job, ending)) this.observation.ending = ending.phase;
+
       const progress = parsePrintReport(json);
       if (!progress) return;
-      const job = this.observation.job;
       const lifecycle = job ? lifecycleOf(job) : null;
       if (!job || (lifecycle !== "printing" && lifecycle !== "paused")) {
         // Progress for a job `info` has not confirmed: ask, do not infer.
@@ -524,7 +544,7 @@ export class AnycubicSession {
 }
 
 function emptyObservation(): AnycubicObservation {
-  return { job: null, jobObservedAt: null, temperatures: null, temperaturesObservedAt: null };
+  return { job: null, jobObservedAt: null, temperatures: null, temperaturesObservedAt: null, ending: null };
 }
 
 /** 5 s, 10 s, 20 s … capped at 5 min, ±20 % so a farm of printers does not retry in lockstep. */
@@ -548,7 +568,9 @@ export function lanClientId(printerId: string): string {
 /** An operator-safe sentence for a failed attempt: categories and OS codes only. */
 function describeConnectError(error: unknown): string {
   if (error instanceof AnycubicHandshakeError) return `Anycubic LAN: ${error.message}`;
-  if (error instanceof TlsConnectError) return `Anycubic LAN: ${error.message}`;
+  if (error instanceof TlsPinMismatchError || error instanceof TlsConnectError) {
+    return `Anycubic LAN: ${error.message}`;
+  }
   return `Anycubic LAN: ошибка подключения (${errorCode(error)})`;
 }
 
@@ -559,46 +581,7 @@ function errorCode(error: unknown): string {
   return networkCode(error);
 }
 
-class TlsConnectError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "TlsConnectError";
-  }
-}
-
 // ── The real transport ───────────────────────────────────────────────────────
-
-function openTls(host: string, port: number, timeoutMs: number): Promise<Duplex> {
-  return new Promise((resolve, reject) => {
-    const socket = tls.connect({
-      host,
-      port,
-      // Self-signed broker certificate with no CA: verification cannot succeed.
-      // Reached only for a printer whose operator opted in (`allowInsecureTls`);
-      // the registry refuses to create a session without it.
-      rejectUnauthorized: false,
-      minVersion: "TLSv1.2",
-      // SNI is for names; sending an IP literal as one is a protocol violation.
-      ...(net.isIP(host) === 0 ? { servername: host } : {})
-    });
-    const timer = setTimeout(() => {
-      socket.destroy();
-      reject(new TlsConnectError(`TLS-соединение с портом ${port} не установлено за отведённое время (timeout)`));
-    }, timeoutMs);
-    timer.unref?.();
-    const onError = (error: unknown) => {
-      clearTimeout(timer);
-      socket.destroy();
-      reject(new TlsConnectError(`TLS-соединение с портом ${port} не установлено (${errorCode(error)})`));
-    };
-    socket.once("error", onError);
-    socket.once("secureConnect", () => {
-      clearTimeout(timer);
-      socket.removeListener("error", onError);
-      resolve(socket);
-    });
-  });
-}
 
 function createClient(stream: Duplex, options: AnycubicClientOptions): AnycubicMqttClient {
   return new mqtt.MqttClient(() => stream as unknown as mqtt.IStream, {
@@ -618,6 +601,6 @@ function createClient(stream: Duplex, options: AnycubicClientOptions): AnycubicM
 
 const DEFAULT_TRANSPORT: AnycubicTransport = {
   handshake: (host, options) => performAnycubicHandshake(host, options),
-  openTls,
+  openTls: openPinnedTls,
   createClient
 };

@@ -24,7 +24,9 @@ const TEXT_FIELDS = [
   "swatch",
   "interfaceUrl",
   "snapshotUrl",
-  "streamUrl"
+  "streamUrl",
+  // Только у Anycubic LAN: подтверждённый отпечаток сертификата, пусто = снять.
+  "tlsFingerprint"
 ];
 
 const NUMBER_FIELDS = ["port", "nozzleDiameterMm"];

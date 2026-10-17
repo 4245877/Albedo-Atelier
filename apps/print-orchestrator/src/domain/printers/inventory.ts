@@ -104,6 +104,7 @@ export const PRINTER_INVENTORY_FORBIDDEN_FIELDS = [
   "serial",
   "accessCode",
   "allowInsecureTls",
+  "tlsFingerprint",
   "snapshotUrl",
   "streamUrl",
   "interfaceUrl",

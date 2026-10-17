@@ -84,6 +84,7 @@ const printerMapper: RowMapper<PrinterRecord> = {
     "serial",
     "access_code",
     "allow_insecure_tls",
+    "tls_fingerprint",
     "auto_continuation_allowed",
     "auto_continuation_mechanism",
     "auto_continuation_verified_at",
@@ -126,6 +127,7 @@ const printerMapper: RowMapper<PrinterRecord> = {
       serial: p.serial,
       access_code: p.accessCode,
       allow_insecure_tls: boolToInt(p.allowInsecureTls),
+      tls_fingerprint: p.tlsFingerprint,
       auto_continuation_allowed: boolToInt(p.automaticContinuation.allowed),
       auto_continuation_mechanism: p.automaticContinuation.mechanism,
       auto_continuation_verified_at: p.automaticContinuation.verifiedAt,
@@ -171,6 +173,7 @@ const printerMapper: RowMapper<PrinterRecord> = {
       serial: asString(row.serial),
       accessCode: asString(row.access_code),
       allowInsecureTls: asBool(row.allow_insecure_tls),
+      tlsFingerprint: asString(row.tls_fingerprint),
       automaticContinuation: {
         ...NO_AUTOMATIC_CONTINUATION,
         allowed: asBool(row.auto_continuation_allowed),

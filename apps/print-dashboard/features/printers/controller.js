@@ -35,6 +35,8 @@ const state = {
   options: null,
   /** Результат последней проверки связи, по id принтера. */
   tests: {},
+  /** Что предъявил брокер Anycubic при последнем чтении сертификата, по id принтера. */
+  certificates: {},
   /** Какое действие сейчас в полёте, по id принтера (плюс __create). */
   busy: {},
   /** Протокол, выбранный в форме добавления — от него зависят поля формы. */
@@ -162,6 +164,8 @@ function wireDelegates() {
     const id = btn.dataset.id;
     if (btn.dataset.prnAction === "test") void testConnection(id);
     else if (btn.dataset.prnAction === "discover") void discoverHardware(id);
+    else if (btn.dataset.prnAction === "tls-read") void readCertificate(id);
+    else if (btn.dataset.prnAction === "tls-confirm") void confirmCertificate(id, btn.dataset.fingerprint);
     else if (btn.dataset.prnAction === "toggle") {
       // Целевое состояние берём из состояния раздела, а не из атрибута кнопки:
       // пункт меню живёт в перерисовываемой разметке и может отстать.
@@ -271,6 +275,62 @@ function discoverHardware(id) {
     }
     toast("Характеристики обновлены с принтера", "toast-ok");
   });
+}
+
+/**
+ * Показывает, какой сертификат предъявляет брокер Anycubic. Только чтение: на
+ * принтер ничего не отправляется и ничего не сохраняется — это материал для
+ * решения оператора, а не само решение.
+ */
+async function readCertificate(id) {
+  state.busy[id] = "tls-read";
+  render();
+  await mutations.run(`${id}:tls-read`, async () => {
+    try {
+      const res = await apiPost(`${BASE}/${encodeURIComponent(id)}/tls-certificate`, {});
+      state.certificates[id] = res.result;
+      if (!res.result?.certificate) toast("Сертификат прочитать не удалось: см. причину в строке принтера", "toast-danger");
+    } catch (err) {
+      if (err?.name === "AbortError") return;
+      toast(`Не вышло: ${esc(err?.message || "ошибка")}`, "toast-danger");
+    }
+  });
+  delete state.busy[id];
+  render();
+}
+
+/**
+ * Подтверждение сертификата — тот самый отпечаток, который оператор видел, и
+ * только после явного согласия в окне. С этой минуты сервис подключается лишь
+ * к брокеру с этим сертификатом.
+ */
+async function confirmCertificate(id, fingerprint) {
+  if (!fingerprint) return;
+  const printer = state.printers.find((p) => p.id === id);
+  const replacing = Boolean(printer?.tlsFingerprint);
+  const ok = await confirmAction({
+    title: replacing ? "Заменить подтверждённый сертификат" : "Подтвердить сертификат принтера",
+    object: printer?.name || id,
+    body: "Сервис будет подключаться только к брокеру, предъявившему сертификат с этим отпечатком SHA-256:",
+    points: [
+      fingerprint,
+      replacing
+        ? "Прежний сертификат перестанет приниматься. Заменяйте, только если знаете, почему он сменился"
+        : "Подтверждайте, только если это ваш принтер в вашей сети"
+    ],
+    cta: replacing ? "Заменить сертификат" : "Подтвердить",
+    tone: "warn"
+  });
+  if (!ok) return;
+  await run(
+    id,
+    "tls-confirm",
+    async () => {
+      await apiPatch(`${BASE}/${encodeURIComponent(id)}`, { tlsFingerprint: fingerprint });
+      delete state.certificates[id];
+    },
+    "Сертификат подтверждён — подключение только к нему"
+  );
 }
 
 /* Удаление — единственное необратимое действие раздела, поэтому подтверждение

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createCipheriv } from "node:crypto";
+import { createCipheriv, X509Certificate } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -17,9 +17,11 @@ import {
   discoverAnycubicFacts,
   dropAnycubicConnection,
   getAnycubicStatus,
+  readAnycubicBrokerCertificate,
   shutdownAnycubicConnections
 } from "./index";
 import { isReadOnlyQuery } from "./session";
+import { isSelfSigned, openPinnedTls, TlsConnectError, TlsPinMismatchError } from "./tls";
 
 /*
  * The whole adapter on real transports, against a fake printer on loopback:
@@ -63,6 +65,11 @@ try {
 
 const skip = certificate ? false : "openssl CLI unavailable — cannot generate a test certificate";
 
+/** The fake broker's certificate, as an operator would have confirmed it. */
+const PIN = certificate ? new X509Certificate(certificate.cert).fingerprint256 : "";
+/** A well-formed fingerprint of some other certificate. */
+const OTHER = "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89";
+
 // ── The fake printer: HTTP handshake ──────────────────────────────────────────
 
 let httpServer: http.Server;
@@ -82,11 +89,20 @@ interface BrokerSession {
   connect: { clientId: string; username: string; password: string } | null;
   subscriptions: string[];
   published: { topic: string; payload: string }[];
+  /** Application bytes the client wrote after the TLS handshake. */
+  bytes: number;
 }
 
 let broker: tls.Server;
 let brokerPort = 0;
 let sessions: BrokerSession[] = [];
+/**
+ * TCP connections the broker accepted. Counted below TLS on purpose: a client
+ * that closes right after its side of a TLS 1.3 handshake (which is what a pin
+ * mismatch does) may never complete the server's side, so it would not show up
+ * as a session at all.
+ */
+let tcpConnections = 0;
 /** What the broker answers to an info query, per connection index. */
 let infoReplies: unknown[] = [];
 
@@ -186,12 +202,13 @@ before(async () => {
   httpPort = (httpServer.address() as AddressInfo).port;
 
   broker = tls.createServer({ key: certificate.key, cert: certificate.cert }, (socket) => {
-    const session: BrokerSession = { socket, connect: null, subscriptions: [], published: [] };
+    const session: BrokerSession = { socket, connect: null, subscriptions: [], published: [], bytes: 0 };
     const index = sessions.length;
     sessions.push(session);
     let buffer = Buffer.alloc(0);
     socket.on("error", () => {});
     socket.on("data", (chunk: Buffer) => {
+      session.bytes += chunk.length;
       buffer = Buffer.concat([buffer, chunk]);
       for (;;) {
         if (buffer.length < 2) return;
@@ -213,6 +230,9 @@ before(async () => {
       }
     });
   });
+  broker.on("connection", () => {
+    tcpConnections += 1;
+  });
   await new Promise<void>((resolve) => broker.listen(0, "127.0.0.1", resolve));
   brokerPort = (broker.address() as AddressInfo).port;
 });
@@ -221,6 +241,7 @@ afterEach(() => {
   shutdownAnycubicConnections();
   for (const session of sessions) session.socket.destroy();
   sessions = [];
+  tcpConnections = 0;
   httpRequests = [];
   infoReplies = [];
   delete anycubicTestHooks.httpPort;
@@ -254,7 +275,7 @@ function printer(overrides: Partial<PrinterConfig> = {}): PrinterConfig {
     apiKey: "",
     serial: "",
     accessCode: "",
-    allowInsecureTls: true,
+    tlsFingerprint: PIN,
     light: { ...DEFAULT_LIGHT_SETTINGS, enabled: false, statusField: "value", bambuNode: "" } as PrinterConfig["light"],
     ...overrides
   } as PrinterConfig;
@@ -346,27 +367,96 @@ test("a dropped broker connection reads offline at once and recovers on reconnec
   assert.deepEqual(httpRequests, ["GET /info", "POST /ctrl"], "the in-memory login was reused");
 });
 
-test("without the explicit TLS opt-in nothing is contacted at all", { skip }, async () => {
+test("without a confirmed certificate nothing is contacted at all — the old TLS opt-in opens nothing", { skip }, async () => {
   anycubicTestHooks.httpPort = httpPort;
-  const status = getAnycubicStatus(printer({ allowInsecureTls: false }));
-  assert.equal(status.online, false);
-  assert.equal(status.status, "offline");
-  assert.match(status.error ?? "", /самоподписанный сертификат/);
+  for (const config of [printer({ tlsFingerprint: "" }), printer({ tlsFingerprint: "", allowInsecureTls: true })]) {
+    const status = getAnycubicStatus(config);
+    assert.equal(status.online, false);
+    assert.equal(status.status, "offline");
+    assert.match(status.error ?? "", /сертификат принтера не подтверждён/);
+  }
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.deepEqual(httpRequests, []);
   assert.equal(sessions.length, 0);
 });
 
-test("changing the address or the TLS opt-in rebuilds the session from scratch", { skip }, async () => {
+test("a broker presenting another certificate is refused before the login is written, on every attempt", { skip }, async () => {
+  anycubicTestHooks.httpPort = httpPort;
+  anycubicTestHooks.timing = { reconnectBaseMs: 100, reconnectMaxMs: 200 };
+  infoReplies = [PRINTING];
+  const config = printer({ tlsFingerprint: OTHER });
+
+  const refused = await until(() => getAnycubicStatus(config), (s) => s.status === "offline");
+  assert.match(refused.error ?? "", /не совпадает с подтверждённым — подключение заблокировано/);
+  assert.ok((refused.error ?? "").includes(PIN.slice(0, 11)), "names the certificate the broker presented");
+  await until(() => tcpConnections, (n) => n >= 3);
+  for (const session of sessions) {
+    assert.equal(session.connect, null, "no MQTT CONNECT — the password never left");
+    assert.equal(session.bytes, 0, "not one application byte after the handshake");
+  }
+  assert.equal(getAnycubicStatus(config).online, false, "and nothing was accepted in its place");
+});
+
+test("confirming a different certificate rebuilds the session, and a stale one stays blocked", { skip }, async () => {
   anycubicTestHooks.httpPort = httpPort;
   infoReplies = [PRINTING];
-  const config = printer();
-  await until(() => getAnycubicStatus(config), (s) => s.online);
+  await until(() => getAnycubicStatus(printer()), (s) => s.online);
 
-  // The operator withdraws the TLS opt-in: the live session must close.
-  getAnycubicStatus(printer({ allowInsecureTls: false }));
+  // The operator replaces the pin: the live session must close and the new pin rule.
+  getAnycubicStatus(printer({ tlsFingerprint: OTHER }));
   await until(() => sessions[0].socket.destroyed || sessions[0].socket.readableEnded, Boolean);
+  const blocked = await until(() => getAnycubicStatus(printer({ tlsFingerprint: OTHER })), (s) => s.status === "offline");
+  assert.match(blocked.error ?? "", /не совпадает с подтверждённым/);
 
   dropAnycubicConnection("kobra-x");
   assert.equal(getAnycubicStatus(printer()).status, "unknown", "a dropped session starts over");
+});
+
+test("reading the broker certificate for the operator sends nothing and trusts nothing", { skip }, async () => {
+  const certificate = await readAnycubicBrokerCertificate(printer({ tlsFingerprint: "" }));
+  assert.equal(certificate.fingerprint256, PIN);
+  assert.equal(certificate.subject, "CN=anycubic-test");
+  assert.equal(certificate.selfSigned, true);
+  await until(() => tcpConnections, (n) => n === 1);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  for (const session of sessions) {
+    assert.equal(session.bytes, 0);
+    assert.equal(session.connect, null);
+  }
+});
+
+test("the pinned TLS opener refuses without a valid pin before touching the network", { skip }, async () => {
+  for (const pin of ["", "not-a-fingerprint", PIN.slice(0, 20)]) {
+    await assert.rejects(openPinnedTls("127.0.0.1", brokerPort, 2000, pin), TlsConnectError);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(tcpConnections, 0, "no connection was even opened");
+  await assert.rejects(openPinnedTls("127.0.0.1", brokerPort, 2000, OTHER), TlsPinMismatchError);
+  const stream = await openPinnedTls("127.0.0.1", brokerPort, 2000, PIN.toLowerCase().replaceAll(":", ""));
+  stream.destroy();
+  await until(() => tcpConnections, (n) => n === 2, 2000);
+});
+
+test("a certificate shaped like the printer's (no keyCertSign, no CA flag) still reads as self-signed", { skip }, () => {
+  // The Kobra X broker's own profile: O=AnyCubic, serial 01, keyUsage
+  // digitalSignature + keyEncipherment, nothing else.
+  const config = path.join(workDir, "kobra-profile.cnf");
+  fs.writeFileSync(
+    config,
+    "[req]\ndistinguished_name = dn\nx509_extensions = ext\nprompt = no\n[dn]\nO = AnyCubic\n" +
+      "[ext]\nkeyUsage = digitalSignature, keyEncipherment\n"
+  );
+  execFileSync(
+    "openssl",
+    [
+      "req", "-x509", "-config", config, "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+      "-keyout", path.join(workDir, "kobra-key.pem"), "-out", path.join(workDir, "kobra-cert.pem"),
+      "-days", "2", "-set_serial", "1"
+    ],
+    { stdio: "ignore" }
+  );
+  const cert = new X509Certificate(fs.readFileSync(path.join(workDir, "kobra-cert.pem"), "utf8"));
+  assert.equal(cert.checkIssued(cert), false, "OpenSSL's issuer check rejects it — the trap");
+  assert.equal(isSelfSigned(cert), true);
+  assert.equal(isSelfSigned(new X509Certificate(certificate!.cert)), true);
 });

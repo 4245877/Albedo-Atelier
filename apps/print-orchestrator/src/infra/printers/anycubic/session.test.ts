@@ -5,6 +5,7 @@ import { afterEach, beforeEach, mock, test } from "node:test";
 
 import type { PrinterConfig } from "../config";
 import { AnycubicHandshakeError, type AnycubicHandshakeResult } from "./handshake";
+import { TlsPinMismatchError } from "./tls";
 import {
   AnycubicSession,
   backoffDelay,
@@ -16,6 +17,17 @@ import {
   type AnycubicMqttClient,
   type AnycubicTransport
 } from "./session";
+import {
+  KOBRA_X_INFO_COOLING,
+  KOBRA_X_INFO_FREE_AFTER_PRINT,
+  KOBRA_X_INFO_PRINTING,
+  KOBRA_X_INFO_STATISTICS,
+  KOBRA_X_PRINT_COOLING,
+  KOBRA_X_PRINT_FINISHED,
+  KOBRA_X_PRINT_RESET,
+  KOBRA_X_STATUS_FREE,
+  KOBRA_X_TEMPERATURE_PUSH
+} from "./testkit/kobraXCaptures";
 
 /*
  * The session over a fake transport: no socket, no device. Timers are mocked, so
@@ -23,6 +35,8 @@ import {
  */
 
 const PRINTER = { id: "kobra-x", name: "Kobra X", host: "192.168.1.60" } as PrinterConfig;
+const PIN = "0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0:0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0";
+const OTHER = "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89";
 const REPORTS = "anycubic/anycubicCloud/v1/printer/public/20030/dev1";
 const CREDENTIALS = { username: "lan-user", password: "lan-secret-password", deviceId: "dev1", modelId: "20030" };
 const HANDSHAKE: AnycubicHandshakeResult = {
@@ -55,19 +69,27 @@ class FakeClient extends EventEmitter implements AnycubicMqttClient {
 interface Fake extends AnycubicTransport {
   handshakes: string[];
   clients: FakeClient[];
+  /** The certificate fingerprint each TLS attempt was told to require. */
+  pins: string[];
   handshakeResult: () => Promise<AnycubicHandshakeResult>;
+  tlsResult: () => Promise<Duplex>;
 }
 
 function fakeTransport(): Fake {
   const fake: Fake = {
     handshakes: [],
     clients: [],
+    pins: [],
     handshakeResult: async () => HANDSHAKE,
+    tlsResult: async () => new PassThrough() as Duplex,
     handshake: (_host, options) => {
       fake.handshakes.push(options.clientId);
       return fake.handshakeResult();
     },
-    openTls: async () => new PassThrough() as Duplex,
+    openTls: (_host, _port, _timeoutMs, fingerprint) => {
+      fake.pins.push(fingerprint);
+      return fake.tlsResult();
+    },
     createClient: (_stream, options) => {
       const client = new FakeClient(options);
       fake.clients.push(client);
@@ -105,6 +127,7 @@ function session(transport: AnycubicTransport): AnycubicSession {
     printerId: PRINTER.id,
     host: PRINTER.host,
     mqttPort: 9883,
+    tlsFingerprint: PIN,
     transport,
     now: () => clock,
     random: () => 0.5 // no jitter: backoff is exactly base·2^n
@@ -366,5 +389,94 @@ test("nothing thrown inside a listener escapes into the process", async () => {
   assert.equal(second.ended, true);
   await advance(DEFAULT_TIMING.reconnectBaseMs * 2);
   assert.equal(transport.clients.length, 3, "and the session tried again");
+  s.stop();
+});
+
+test("the captured end of a print (firmware 2.0.2.2) reads as finished, in the order it arrived", async () => {
+  const transport = fakeTransport();
+  const { s, client } = await connected(transport);
+  client.report("info", KOBRA_X_INFO_PRINTING);
+  assert.equal(s.status(PRINTER).status, "printing");
+
+  client.report("print", KOBRA_X_PRINT_COOLING);
+  client.report("tempature", KOBRA_X_TEMPERATURE_PUSH);
+  client.report("info", KOBRA_X_INFO_COOLING);
+  assert.equal(s.status(PRINTER).status, "unknown", "cooling down: over, but not confirmed");
+  client.report("print", KOBRA_X_PRINT_RESET);
+  client.report("info", KOBRA_X_INFO_STATISTICS);
+  client.report("status", KOBRA_X_STATUS_FREE);
+  client.report("print", KOBRA_X_PRINT_FINISHED);
+  assert.equal(s.status(PRINTER).status, "unknown", "a push names the ending; only info ends the job");
+
+  client.report("info", KOBRA_X_INFO_FREE_AFTER_PRINT);
+  const idle = s.status(PRINTER);
+  assert.equal(idle.status, "idle");
+  assert.equal(idle.stateText, "finished", "last_project is empty — the push's word is kept");
+  assert.equal(idle.currentFile, null);
+  assert.equal(s.identity().reported.firmware, "2.0.2.2", "the statistics push erased nothing");
+  client.report("info", KOBRA_X_INFO_FREE_AFTER_PRINT);
+  assert.equal(s.status(PRINTER).stateText, "finished", "while the machine stays free");
+
+  // The next print clears it: an ending never outlives the job it named.
+  client.report("info", KOBRA_X_INFO_PRINTING);
+  client.report("info", KOBRA_X_INFO_FREE_AFTER_PRINT);
+  assert.equal(s.status(PRINTER).stateText, "free");
+
+  // An ending announced for another file is not this job's.
+  client.report("info", KOBRA_X_INFO_COOLING);
+  client.report("print", {
+    ...KOBRA_X_PRINT_FINISHED,
+    data: { ...KOBRA_X_PRINT_FINISHED.data, filename: "other_plate.gcode" }
+  });
+  client.report("info", KOBRA_X_INFO_FREE_AFTER_PRINT);
+  assert.equal(s.status(PRINTER).stateText, "free");
+  s.stop();
+});
+
+test("a lost connection forgets an announced ending with everything else", async () => {
+  const transport = fakeTransport();
+  const { s, client } = await connected(transport);
+  client.report("info", KOBRA_X_INFO_COOLING);
+  client.report("print", KOBRA_X_PRINT_FINISHED);
+  client.emit("close");
+  await advance(DEFAULT_TIMING.reconnectBaseMs);
+  const next = transport.clients.at(-1)!;
+  assert.notEqual(next, client);
+  next.emit("connect");
+  next.report("info", KOBRA_X_INFO_FREE_AFTER_PRINT);
+  assert.equal(s.status(PRINTER).stateText, "free", "an ending heard over a dead connection is not carried over");
+  s.stop();
+});
+
+test("every TLS connection — the first and each reconnect — requires the confirmed certificate", async () => {
+  const transport = fakeTransport();
+  const { s, client } = await connected(transport);
+  client.emit("close");
+  await advance(DEFAULT_TIMING.reconnectBaseMs);
+  assert.equal(transport.clients.length, 2);
+  assert.deepEqual(transport.pins, [PIN, PIN]);
+  s.stop();
+});
+
+test("a broker presenting another certificate gets no MQTT client, keeps getting refused, and the card says why", async () => {
+  const transport = fakeTransport();
+  transport.tlsResult = async () => {
+    throw new TlsPinMismatchError(OTHER);
+  };
+  const s = session(transport);
+  s.start();
+  await settle();
+  assert.equal(transport.clients.length, 0, "no MQTT client, so the broker login is never written");
+  const status = s.status(PRINTER);
+  assert.equal(status.status, "offline");
+  assert.match(status.error ?? "", /не совпадает с подтверждённым — подключение заблокировано/);
+  assert.ok((status.error ?? "").includes("AB:CD:EF:01…45:67:89"), "names what the printer presented");
+  assert.ok(!(status.error ?? "").includes(CREDENTIALS.password));
+
+  // Retries keep demanding the same certificate: nothing is accepted in its place.
+  await advance(DEFAULT_TIMING.reconnectBaseMs);
+  await advance(DEFAULT_TIMING.reconnectBaseMs * 2);
+  assert.equal(transport.clients.length, 0);
+  assert.deepEqual(transport.pins, [PIN, PIN, PIN]);
   s.stop();
 });

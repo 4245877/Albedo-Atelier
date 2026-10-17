@@ -1,5 +1,5 @@
 import { AppError } from "../../core/errors";
-import { isBareNetworkHost } from "../../domain/printers/validation";
+import { canonicalTlsFingerprint, isBareNetworkHost } from "../../domain/printers/validation";
 import type { PrinterConfig, PrinterProtocol } from "./config";
 
 /**
@@ -269,15 +269,15 @@ export function printerReadiness(printer: PrinterConfig): PrinterReadiness {
         hint: "только адрес, без http://, порта и пути — экран принтера: настройки → сеть"
       });
     }
-    // The broker's certificate is self-signed with no CA, so a verified TLS
-    // session cannot be established. Unverified TLS is never a silent default:
-    // without this per-printer opt-in the adapter does not connect at all. The
-    // global BAMBU_ALLOW_INSECURE_TLS deliberately does not apply here.
-    if (printer.allowInsecureTls !== true) {
+    // The broker's certificate is self-signed with no CA, so the only check is
+    // the certificate itself: the adapter connects solely to the one whose
+    // SHA-256 fingerprint the operator confirmed. Until then it contacts nothing.
+    // There is no unverified fallback — `allowInsecureTls` does not apply here.
+    if (!canonicalTlsFingerprint(printer.tlsFingerprint ?? "")) {
       missing.push({
-        field: "allowInsecureTls",
-        label: "подтверждение TLS без проверки сертификата",
-        hint: "у Anycubic LAN самоподписанный сертификат без CA — отметьте разрешение у этого принтера, только в доверенной сети"
+        field: "tlsFingerprint",
+        label: "подтверждённый сертификат принтера",
+        hint: "в настройках принтера получите сертификат с принтера и подтвердите его отпечаток SHA-256"
       });
     }
   }

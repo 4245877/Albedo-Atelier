@@ -67,11 +67,13 @@ const ENDINGS: {
   { name: "aborted at 99 %", status: { stateText: "ABORTED", progressPct: 99 }, outcome: "cancelled", evidence: "device_state" },
   { name: "stopped at 99.5 %", status: { stateText: "stopped by user", progressPct: 99.5 }, outcome: "cancelled", evidence: "device_state" },
   { name: "cancel beats a completion word in the same text", status: { stateText: "cancelled before finish" }, outcome: "cancelled", evidence: "device_state" },
+  { name: "Anycubic «stoped» (the firmware's spelling)", status: { stateText: "stoped" }, outcome: "cancelled", evidence: "device_state" },
 
   // ── The device names a completion ─────────────────────────────────────────
   { name: "Moonraker «complete»", status: { stateText: "complete", progressPct: 100 }, outcome: "completed", evidence: "device_state" },
   { name: "Bambu «FINISH»", status: { stateText: "FINISH", progressPct: 100 }, outcome: "completed", evidence: "device_state" },
   { name: "«done»", status: { stateText: "done" }, outcome: "completed", evidence: "device_state" },
+  { name: "Anycubic «finished» (Kobra X, firmware 2.0.2.2)", status: { stateText: "finished" }, outcome: "completed", evidence: "device_state" },
   // The device's word is what counts, even when progress disagrees: a print can
   // report FINISH with a stale percentage.
   { name: "«FINISH» at 97 %", status: { stateText: "FINISH", progressPct: 97 }, outcome: "completed", evidence: "device_state" },
@@ -83,7 +85,10 @@ const ENDINGS: {
   { name: "100 %, no state text", status: { progressPct: 100 }, outcome: "unknown", evidence: "none" },
   { name: "nothing at all", status: {}, outcome: "unknown", evidence: "none" },
   { name: "Klipper «standby» (the file was reset)", status: { stateText: "standby", progressPct: 100 }, outcome: "unknown", evidence: "none" },
-  { name: "Bambu «IDLE»", status: { stateText: "IDLE", progressPct: 99.9 }, outcome: "unknown", evidence: "none" }
+  { name: "Bambu «IDLE»", status: { stateText: "IDLE", progressPct: 99.9 }, outcome: "unknown", evidence: "none" },
+  // A free Kobra X whose ending no `print` push named (last_project stays empty on 2.0.2.2).
+  { name: "Anycubic «free»", status: { stateText: "free" }, outcome: "unknown", evidence: "none" },
+  { name: "Anycubic «nozzle_cooling_off»", status: { stateText: "nozzle_cooling_off", progressPct: 99 }, outcome: "unknown", evidence: "none" }
 ];
 
 test("print ending matrix: only a device's own terminal state may say «success»", () => {

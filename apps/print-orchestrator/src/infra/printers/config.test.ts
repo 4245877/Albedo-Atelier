@@ -135,10 +135,20 @@ test("anycubic-lan is a protocol of its own, kept verbatim", () => {
     name: "Kobra X",
     host: "192.168.1.60",
     protocol: "anycubic-lan",
-    allowInsecureTls: true
+    tlsFingerprint: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
   });
   assert.equal(printer?.protocol, "anycubic-lan");
-  assert.equal(printer?.allowInsecureTls, true);
+  assert.equal(
+    printer?.tlsFingerprint,
+    "0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0:0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0",
+    "a seeded fingerprint is kept, canonical"
+  );
+  assert.equal(
+    normalizePrinterConfig({ id: "x", name: "X", host: "1.2.3.4", protocol: "bambu", tlsFingerprint: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0" })
+      ?.tlsFingerprint,
+    "",
+    "and ignored for any other protocol"
+  );
   assert.equal(printer?.light.enabled, false, "no light default for an adapter with no light control");
   assert.equal(normalizePrinterConfig({ id: "x", name: "X", host: "1.2.3.4", protocol: " Anycubic-LAN " })?.protocol, "anycubic-lan");
 });
