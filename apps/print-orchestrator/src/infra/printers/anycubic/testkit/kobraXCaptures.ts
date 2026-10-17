@@ -36,8 +36,10 @@ export const KOBRA_X_CTRL_BUNDLE_SHAPE = {
   broker: "mqtts://192.0.2.10:9883",
   deviceId: "0123456789abcdef0123456789abcdef", // 32 characters on the device
   deviceType: "fdm",
-  devicecrt: "-----BEGIN CERTIFICATE-----\nsynthetic\n-----END CERTIFICATE-----", // ~1 KB on the device
-  devicepk: "-----BEGIN PRIVATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----", // ~1.7 KB on the device
+  // PEM on the device. No `-----BEGIN` header here: CI's secret-scan refuses one even
+  // around a placeholder. The words stay, so handshake.test.ts can prove they are dropped.
+  devicecrt: "synthetic CERTIFICATE", // ~1 KB on the device
+  devicepk: "synthetic PRIVATE KEY", // ~1.7 KB on the device
   ip: "192.0.2.10",
   modeId: "20030",
   modelId: "20030",

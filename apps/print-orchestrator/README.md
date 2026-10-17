@@ -246,10 +246,17 @@ to the unit's certificate; no orchestrator, no other printer): two sessions,
   (`action: "statistic-reported"`, ignored), `status` `free`, the `print` push
   with `state: "finished"`, then `info` `free` with `project: null` — and
   `last_project` empty.
+- Certificate pinning, through this adapter's own registry (readiness → session
+  → `openPinnedTls`): the confirmed fingerprint connects and telemetry flows; a
+  wrong one is refused before the login is written; none contacts nothing. The
+  certificate (self-signed `O=AnyCubic`, RSA, serial `01`, valid from
+  2026-09-24) survived a power cycle byte for byte, and a fresh pinned session
+  was back online within 3 s with telemetry.
 
 Still unverified: idle-to-print start, pause/resume and cancel words, the
-certificate across a reboot or firmware update, and an ending while the session
-is reconnecting (it then reads as an ambiguous ending for the operator).
+certificate across a firmware update or a factory reset, and an ending while
+the session is reconnecting (it then reads as an ambiguous ending for the
+operator).
 
 ## Persistent print-queue model (SQLite)
 
