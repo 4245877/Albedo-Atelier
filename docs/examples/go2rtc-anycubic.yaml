@@ -1,4 +1,6 @@
-# Candidate addition to the EXISTING go2rtc config, after deployment approval.
+# Illustrative addition; do not mount this incomplete snippet as a config.
+# Complete candidate: apps/print-orchestrator/config/go2rtc-kobra-x.yaml
+# Activation and rollback: docs/ANYCUBIC_KOBRA_X_RELEASE.md
 # The backend proxy refreshes the private URL through the shared pinned MQTT
 # session. No stream token appears in go2rtc config, logs or the dashboard.
 # Keep the existing k2 entry, api and webrtc settings when applying this addition.

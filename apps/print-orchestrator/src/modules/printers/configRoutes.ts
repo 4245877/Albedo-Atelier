@@ -163,7 +163,7 @@ const PROTOCOL_LABELS: Record<PrinterProtocol, string> = {
   moonraker: "Moonraker (Klipper: K2, Fluidd, Mainsail)",
   bambu: "Bambu Lab (локальный MQTT, режим LAN)",
   creality: "Creality (WebSocket, Ender 3 V3 KE)",
-  "anycubic-lan": "Anycubic (режим LAN, Kobra X) — только наблюдение"
+  "anycubic-lan": "Anycubic (режим LAN, Kobra X) — наблюдение и файлы"
 };
 
 const PROTOCOL_HINTS: Record<PrinterProtocol, string> = {
@@ -174,7 +174,8 @@ const PROTOCOL_HINTS: Record<PrinterProtocol, string> = {
     "Достаточно IP-адреса: на принтере должен быть включён режим LAN, порт указывать не нужно. " +
     "Сертификат принтера самоподписанный: после добавления получите его с принтера в настройках и подтвердите отпечаток SHA-256 — " +
     "до подтверждения сервис к принтеру не подключается, а другой сертификат он не примет. " +
-    "Только телеметрия: задания, запуск, пауза, подсветка и файлы не поддерживаются."
+    "Доступны телеметрия, просмотр локальных файлов и настроенная камера. " +
+    "Задания, загрузка, удаление, управление печатью и подсветка пока заблокированы."
 };
 
 const PROTOCOL_CREDENTIALS: Record<PrinterProtocol, string[]> = {

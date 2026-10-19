@@ -300,7 +300,9 @@ test("GET /options offers Anycubic LAN with its own words and no credential fiel
   }[]).find((p) => p.id === "anycubic-lan");
   assert.ok(anycubic);
   assert.match(anycubic.label, /Anycubic/);
-  assert.match(anycubic.label, /только наблюдение/);
+  assert.match(anycubic.label, /наблюдение и файлы/);
+  assert.match(anycubic.hint, /просмотр локальных файлов и настроенная камера/);
+  assert.match(anycubic.hint, /управление печатью и подсветка пока заблокированы/);
   assert.match(anycubic.hint, /IP-адрес/);
   assert.match(anycubic.hint, /подтвердите отпечаток SHA-256/);
   assert.match(anycubic.hint, /другой сертификат он не примет/);

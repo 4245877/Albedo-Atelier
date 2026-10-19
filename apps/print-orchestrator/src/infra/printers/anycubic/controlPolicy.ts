@@ -1,8 +1,11 @@
 import type { PrinterConfig } from "../config";
 
-/** Empty by default. Populate a category only AFTER its separate hardware acceptance. */
-export function anycubicControlAllowed(printer: PrinterConfig, category: "light" | "print"): boolean {
-  if (printer.protocol !== "anycubic-lan") return false;
-  const key = category === "light" ? "ANYCUBIC_LIGHT_CONTROL_PRINTERS" : "ANYCUBIC_PRINT_CONTROL_PRINTERS";
-  return (process.env[key] ?? "").split(",").map(x => x.trim()).filter(Boolean).includes(printer.id);
+/**
+ * This release admits passive camera viewing and file browsing only. Environment
+ * allowlists cannot enable unaccepted hardware commands or the light scheduler.
+ * Keep the isolated session-control tests; opening a category requires a later
+ * reviewed change after its separate hardware acceptance.
+ */
+export function anycubicControlAllowed(_printer: PrinterConfig, _category: "light" | "print"): boolean {
+  return false;
 }

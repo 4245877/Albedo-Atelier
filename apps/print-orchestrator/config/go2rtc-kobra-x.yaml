@@ -1,0 +1,19 @@
+# Reviewed candidate for the EXISTING go2rtc service; inactive by default.
+# Select with GO2RTC_CONFIG_PATH only after deployment approval.
+# Preserve the K2 source and the host ICE candidate from the existing .env.
+streams:
+  k2: ${K2_CAMERA_SOURCE}
+  # The existing backend endpoint refreshes the private native FLV URL using
+  # the shared pinned MQTT session. Never put a printer token in this config.
+  anycubic-kobra-x: http://print-orchestrator:3100/api/printers/anycubic-kobra-x/camera.mp4
+
+api:
+  listen: ":1984"
+
+webrtc:
+  listen: ":8555"
+  candidates:
+    - ${GO2RTC_WEBRTC_CANDIDATE}
+
+log:
+  level: info

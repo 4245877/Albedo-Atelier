@@ -25,6 +25,7 @@ const code = conf
 test("go2rtc stream ids are server-side allowlisted (no arbitrary src)", () => {
   assert.match(code, /map\s+\$arg_src\s+\$go2rtc_src_ok/, "a $arg_src → allowlist map exists");
   assert.match(code, /"k2"\s+1;/, "the known stream id is allowlisted");
+  assert.match(code, /"anycubic-kobra-x"\s+1;/, "the Kobra X stream uses the same restricted signaling path");
   assert.match(code, /default\s+0;/, "unknown src ids default to blocked");
 });
 

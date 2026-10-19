@@ -22,7 +22,7 @@ import { anycubicControlAllowed } from "./controlPolicy";
  * four entry points the protocol switches in `status/` and `discovery/` call.
  *
  * Files and camera use this same session. Job admission remains disabled;
- * physical light/print categories default to closed until hardware acceptance.
+ * physical light/print categories are closed in this release until acceptance.
  */
 
 export { ANYCUBIC_MQTT_PORT } from "./session";

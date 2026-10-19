@@ -158,6 +158,34 @@ test("the live view allows file browsing independently of physical controls", ()
   assert.equal(view.setupRequired, false);
 });
 
+test("environment allowlists cannot enable unaccepted controls in the files/camera release", async () => {
+  const keys = ["ANYCUBIC_LIGHT_CONTROL_PRINTERS", "ANYCUBIC_PRINT_CONTROL_PRINTERS"] as const;
+  const saved = keys.map(key => process.env[key]);
+  try {
+    for (const key of keys) process.env[key] = KOBRA.id;
+    const view = buildPrinterView(KOBRA, printing(), undefined);
+    assert.equal(view.filesSupported, true);
+    assert.equal(view.printControlSupported, false);
+    assert.equal(view.lightSupported, false);
+    assert.equal(view.remoteStartSupported, false);
+    const { svc, events } = service(printing());
+    await assert.rejects(svc.pause(KOBRA.id), /не поддерживается/);
+    await assert.rejects(svc.cancel(KOBRA.id), /не поддерживается/);
+    const { svc: paused } = service({ ...printing(), status: "paused" });
+    await assert.rejects(paused.resume(KOBRA.id), /не поддерживается/);
+    await assert.rejects(svc.setLight(KOBRA.id, true), JobError);
+    await assert.rejects(svc.setLight(KOBRA.id, false), JobError);
+    await assert.rejects(svc.startPrint(KOBRA.id, "part.gcode"), /не поддерживается/);
+    assert.deepEqual(events, []);
+    assert.deepEqual(fetchCalls, []);
+  } finally {
+    keys.forEach((key, i) => {
+      if (saved[i] === undefined) delete process.env[key];
+      else process.env[key] = saved[i];
+    });
+  }
+});
+
 test("a view whose adapter reports no layers carries no layer key — the published contract is unchanged", () => {
   const k2 = normalizePrinterConfig({ id: "k2", name: "K2", host: "192.0.2.10", protocol: "moonraker" }) as PrinterConfig;
   const { currentLayer: _c, totalLayers: _t, ...noLayers } = printing();

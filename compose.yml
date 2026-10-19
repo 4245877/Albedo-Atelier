@@ -26,7 +26,9 @@ services:
       # below. Change this if the host IP changes.
       GO2RTC_WEBRTC_CANDIDATE: "${GO2RTC_WEBRTC_CANDIDATE:?set GO2RTC_WEBRTC_CANDIDATE in .env (see .env.example — host LAN ip:8555)}"
     volumes:
-      - ./apps/print-orchestrator/config/go2rtc.yaml:/config/go2rtc.yaml:ro
+      # Default preserves the running configuration. Select the reviewed Kobra
+      # candidate only after deployment approval; never overwrite a live bind.
+      - ${GO2RTC_CONFIG_PATH:-./apps/print-orchestrator/config/go2rtc.yaml}:/config/go2rtc.yaml:ro
     healthcheck:
       # go2rtc's own API — this asks "is the bridge process serving", NOT "is the
       # K2 reachable": a printer that is off must not mark the service unhealthy.
