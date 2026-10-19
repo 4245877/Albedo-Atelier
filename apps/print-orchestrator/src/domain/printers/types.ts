@@ -181,9 +181,9 @@ export interface PrinterView {
   snapshotAvailable: boolean;
   /** API path of the most recently saved snapshot, or null when none exist yet. */
   latestSnapshotUrl: string | null;
-  /** Whether the backend can browse this printer's on-device files (Moonraker only). */
+  /** Whether the adapter implements browsing this printer's on-device files. */
   filesSupported: boolean;
-  /** Whether the backend can remote-start an on-device file (Moonraker only). */
+  /** Whether the adapter is allowed to remote-start an on-device file. */
   remoteStartSupported: boolean;
   /**
    * Whether the adapter can pause / resume / cancel a running print. False for
@@ -191,6 +191,8 @@ export interface PrinterView {
    * buttons there produced a command that could only ever fail.
    */
   printControlSupported?: boolean;
+  /** Refuses stale control requests across job boundaries, reconnects and restarts. */
+  controlJobKey?: string | null;
   /**
    * Whether the printer can take the next job, as one honest sentence — see
    * `describePrinterReadiness`. Filled by the read model (it needs the bed, the

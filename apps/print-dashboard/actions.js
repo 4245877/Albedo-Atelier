@@ -73,9 +73,9 @@ export function installActions({ getState, refresh }) {
     // для остальных протоколов openFilesModal честно объяснит, что не поддержано.
     files(p) { openFilesModal(p.id); },
 
-    pause(p, el) { runAction(`/api/printers/${p.id}/pause`, null, `«${esc(p.name)}» замер по вашему велению, Владыка`, "toast-ok", `pause:${p.id}`, el, "Останавливаю…"); },
+    pause(p, el) { runAction(`/api/printers/${p.id}/pause`, p.controlJobKey ? { jobKey: p.controlJobKey } : null, `«${esc(p.name)}» замер по вашему велению, Владыка`, "toast-ok", `pause:${p.id}`, el, "Останавливаю…"); },
 
-    resume(p, el) { runAction(`/api/printers/${p.id}/resume`, null, `«${esc(p.name)}» вновь трудится во славу Владыки`, "toast-ok", `resume:${p.id}`, el, "Возобновляю…"); },
+    resume(p, el) { runAction(`/api/printers/${p.id}/resume`, p.controlJobKey ? { jobKey: p.controlJobKey } : null, `«${esc(p.name)}» вновь трудится во славу Владыки`, "toast-ok", `resume:${p.id}`, el, "Возобновляю…"); },
 
     async cancel(p, el) {
       // Снимок identity берём В МОМЕНТ подтверждения (не после диалога —
@@ -84,6 +84,7 @@ export function installActions({ getState, refresh }) {
       // ответит 409 PRINT_IDENTITY_CONFLICT и ничего не отменит.
       const expectJob = p.job ?? null;
       const expectRunId = p.activeRunId ?? null;
+      const expectJobKey = p.controlJobKey;
       const ok = await confirmAction({
         title: "Отменить печать",
         object: p.job ? `${p.job} — на «${p.name}»` : `Текущее задание на «${p.name}»`,
@@ -100,7 +101,7 @@ export function installActions({ getState, refresh }) {
       if (!ok) return;
       runAction(
         `/api/printers/${p.id}/cancel`,
-        { job: expectJob, runId: expectRunId },
+        { job: expectJob, runId: expectRunId, ...(expectJobKey ? { jobKey: expectJobKey } : {}) },
         `«${esc(p.name)}»: печать отменена — как вы и повелели`,
         "toast-danger",
         `cancel:${p.id}`,

@@ -31,9 +31,9 @@ import type { PrinterLiveStatus } from "../status/types";
 export const ANYCUBIC_TOPIC_ROOT = "anycubic/anycubicCloud/v1";
 
 /** The report types this adapter reads. Every other type is ignored unparsed. */
-export type AnycubicReportType = "info" | "tempature" | "print" | "status";
+export type AnycubicReportType = "info" | "tempature" | "print" | "status" | "file" | "light" | "peripherie";
 
-const READ_TYPES: ReadonlySet<string> = new Set<AnycubicReportType>(["info", "tempature", "print", "status"]);
+const READ_TYPES: ReadonlySet<string> = new Set<AnycubicReportType>(["info", "tempature", "print", "status", "file", "light", "peripherie"]);
 
 /** The one subscription: this printer's report topics. */
 export function reportSubscription(modelId: string, deviceId: string): string {
@@ -289,13 +289,13 @@ export function lifecycleOf(job: AnycubicJobReport): AnycubicLifecycle {
 /**
  * The raw words behind the state, for the operator and for the shared outcome
  * classifier (`stoped` → cancelled, `finished` → completed): the job's phase
- * while busy; once free, how the last job ended — as `info` says it, else as a
- * `print` push announced it — else `free`/`busy`.
+ * while busy; once free, the current project's ending or a push matched to
+ * that job. `last_project` is historical and may still name an older job.
  */
 export function stateTextOf(job: AnycubicJobReport, announcedEnding: string | null = null): string {
   if (job.work === "busy") return job.phase ?? "busy";
   const ended = job.phase && !PRINTING_PHASES.has(job.phase) && !PAUSED_PHASES.has(job.phase) ? job.phase : null;
-  return ended ?? job.lastPhase ?? announcedEnding ?? "free";
+  return ended ?? announcedEnding ?? job.lastPhase ?? "free";
 }
 
 /**

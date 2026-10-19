@@ -1,0 +1,10 @@
+# Candidate addition to the EXISTING go2rtc config, after deployment approval.
+# The backend proxy refreshes the private URL through the shared pinned MQTT
+# session. No stream token appears in go2rtc config, logs or the dashboard.
+# Keep the existing k2 entry, api and webrtc settings when applying this addition.
+streams:
+  anycubic-kobra-x: http://print-orchestrator:3100/api/printers/anycubic-kobra-x/camera.mp4
+
+# Printer settings (through the existing inventory form, after approval):
+# streamUrl: http://go2rtc:1984/api/stream.mp4?src=anycubic-kobra-x
+# snapshotUrl: leave empty until still capture has been validated.

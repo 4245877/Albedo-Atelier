@@ -1,7 +1,7 @@
 import type { DiscoveredFacts } from "../../../domain/printers/discovery";
 import { canonicalTlsFingerprint } from "../../../domain/printers/validation";
 import { anycubicModelCodeFor, lookupModelSpec } from "../../../domain/printers/modelSpecs";
-import { printerReadiness, type PrinterRequirement } from "../capabilities";
+import { printerReadiness, requireReady, type PrinterRequirement } from "../capabilities";
 import type { PrinterConfig } from "../config";
 import {
   failedDiscovery,
@@ -14,15 +14,15 @@ import { makeOfflineStatus } from "../status/mapper";
 import type { PrinterLiveStatus } from "../status/types";
 import { ANYCUBIC_MQTT_PORT, AnycubicSession, type AnycubicTiming, type AnycubicTransport } from "./session";
 import { readBrokerCertificate, type AnycubicBrokerCertificate } from "./tls";
+import { anycubicControlAllowed } from "./controlPolicy";
 
 /**
  * The Anycubic LAN adapter (`anycubic-lan`) as the rest of the service sees it:
  * one session per printer, kept in this module like the Bambu MQTT clients, and
  * four entry points the protocol switches in `status/` and `discovery/` call.
  *
- * Monitoring only. There is no command, upload, file or light function here to
- * call — the capability table declares all of them absent, and the dispatchers
- * refuse this protocol explicitly rather than falling through to another one.
+ * Files and camera use this same session. Job admission remains disabled;
+ * physical light/print categories default to closed until hardware acceptance.
  */
 
 export { ANYCUBIC_MQTT_PORT } from "./session";
@@ -51,7 +51,7 @@ export const anycubicTestHooks: {
 const CERTIFICATE_READ_TIMEOUT_MS = 6000;
 
 function connectionKey(printer: PrinterConfig): string {
-  return JSON.stringify([printer.host, printer.port ?? null, canonicalTlsFingerprint(printer.tlsFingerprint ?? "")]);
+  return JSON.stringify([printer.host, printer.port ?? null, canonicalTlsFingerprint(printer.tlsFingerprint ?? ""), printer.light.enabled && anycubicControlAllowed(printer, "light"), anycubicControlAllowed(printer, "print")]);
 }
 
 /**
@@ -68,6 +68,12 @@ export function getAnycubicStatus(printer: PrinterConfig): PrinterLiveStatus {
     return makeOfflineStatus(printer, notConfiguredReason(readiness.missing));
   }
 
+  return getAnycubicSession(printer).status(printer);
+}
+
+/** All device features share the monitoring session and its pinned transport. */
+export function getAnycubicSession(printer: PrinterConfig): AnycubicSession {
+  requireReady(printer);
   const key = connectionKey(printer);
   let entry = sessions.get(printer.id);
   if (entry && entry.key !== key) {
@@ -86,13 +92,14 @@ export function getAnycubicStatus(printer: PrinterConfig): PrinterLiveStatus {
         tlsFingerprint: canonicalTlsFingerprint(printer.tlsFingerprint ?? "") ?? "",
         httpPort: anycubicTestHooks.httpPort,
         transport: anycubicTestHooks.transport,
-        timing: anycubicTestHooks.timing
+        timing: anycubicTestHooks.timing,
+        controls: { light: printer.light.enabled && anycubicControlAllowed(printer, "light"), print: anycubicControlAllowed(printer, "print") }
       })
     };
     sessions.set(printer.id, entry);
   }
   entry.session.start();
-  return entry.session.status(printer);
+  return entry.session;
 }
 
 /**

@@ -2,6 +2,7 @@ import { capabilitiesOf, PrinterCapabilityError, requireCapability } from "../ca
 import type { PrinterConfig } from "../config";
 import { listBambuFiles } from "./bambu";
 import { listMoonrakerFiles } from "./moonraker";
+import { listAnycubicFiles } from "./anycubic";
 import type { PrinterFilesListing } from "./types";
 
 /**
@@ -9,8 +10,8 @@ import type { PrinterFilesListing } from "./types";
  * adapter can do is declared once in {@link file://../capabilities.ts
  * capabilities.ts}; this module only dispatches to the implementation.
  *
- * Two adapters expose a real file API: Moonraker over HTTP, and Bambu over its
- * own implicit-FTPS server on port 990. The Creality WebSocket protocol has no
+ * Moonraker uses HTTP, Bambu its implicit FTPS server on 990, and Anycubic the
+ * shared pinned MQTT session. The Creality WebSocket protocol has no
  * implemented file API and is reported honestly as unsupported rather than
  * faked — mirroring the remote-start policy in `../status`.
  */
@@ -44,8 +45,8 @@ export function supportsPrinterFiles(printer: PrinterConfig): boolean {
 }
 
 /**
- * Lists one directory of the printer's storage. Implemented for Moonraker (HTTP)
- * and Bambu (FTPS); other protocols throw a structured
+ * Lists one directory of the printer's storage. Implemented for Moonraker (HTTP),
+ * Bambu (FTPS), and Anycubic (shared MQTT); other protocols throw a structured
  * {@link PrinterCapabilityError} rather than an empty listing that would read as
  * "no files there".
  */
@@ -56,6 +57,7 @@ export async function fetchPrinterFiles(
   requireCapability(printer, "supportsFileListing", "проверьте файл на самом принтере");
   if (printer.protocol === "bambu") return listBambuFiles(printer, path);
   if (printer.protocol === "moonraker") return listMoonrakerFiles(printer, path);
+  if (printer.protocol === "anycubic-lan") return listAnycubicFiles(printer, path);
   // Never a fall-through to Moonraker: a protocol reaching this line declared a
   // capability it has no implementation for, and must not be spoken to as Klipper.
   throw new PrinterCapabilityError(printer, "supportsFileListing", "проверьте файл на самом принтере");

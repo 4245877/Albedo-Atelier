@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 
 import type { PrinterConfig } from "../config";
+import { getAnycubicSession } from "../anycubic";
 import { subscribeBambuLiveview } from "./bambuLiveview";
 import { DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT_MS } from "./constants";
 import type { CameraStream } from "./types";
@@ -21,10 +22,23 @@ export async function openCameraStream(
     );
   }
 
-  const url = resolveStreamUrl(printer);
-  if (!url) return null;
-
   const controller = new AbortController();
+  let url = resolveStreamUrl(printer);
+  let release = (): void => {};
+  if (printer.protocol === "anycubic-lan") {
+    // Native HTTP-FLV is already available without startCapture on 2.0.2.2.
+    // go2rtc 1.9.14 refuses its HTTP 206, so the existing proxy supplies HTTP
+    // 200, hides the rotating token and owns one upstream for all WebRTC viewers.
+    try {
+      const session = getAnycubicSession(printer);
+      if ((await session.readPeripheral()).cameraPresent !== true) return null;
+      await session.refreshInfo();
+      const lease = session.leaseCameraSource(() => controller.abort());
+      url = lease.url;
+      release = lease.release;
+    } catch { return null; }
+  }
+  if (!url) return null;
   // The timeout guards only connection setup — negotiating the source and
   // receiving the response headers. Once frames start flowing the stream must
   // never be torn down on a timer, so the timer is cleared the moment headers
@@ -32,11 +46,12 @@ export async function openCameraStream(
   const connectTimer = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, { signal: controller.signal, ...(printer.protocol === "anycubic-lan" ? { redirect: "error" as const } : {}) });
     clearTimeout(connectTimer);
 
     if (!response.ok || !response.body) {
       controller.abort();
+      release();
       return null;
     }
 
@@ -51,6 +66,7 @@ export async function openCameraStream(
       contentType !== "application/vnd.apple.mpegurl"
     ) {
       controller.abort();
+      release();
       return null;
     }
 
@@ -67,12 +83,15 @@ export async function openCameraStream(
       closed = true;
       controller.abort();
       body.destroy();
+      release();
     };
+    body.once("close", close);
 
     return { body, mime: contentType || "video/mp4", close };
   } catch {
     clearTimeout(connectTimer);
     controller.abort();
+    release();
     return null;
   }
 }

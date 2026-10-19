@@ -208,7 +208,7 @@ test("unknown fields and unknown report types are ignored", () => {
   assert.equal(reportTypeOf(`${base}/info/report`, "20030", "dev1"), "info");
   assert.equal(reportTypeOf(`${base}/tempature/report`, "20030", "dev1"), "tempature");
   assert.equal(reportTypeOf(`${base}/multiColorBox/report`, "20030", "dev1"), null, "out of scope");
-  assert.equal(reportTypeOf(`${base}/file/report`, "20030", "dev1"), null);
+  assert.equal(reportTypeOf(`${base}/file/report`, "20030", "dev1"), "file");
   assert.equal(reportTypeOf(`${base}/response`, "20030", "dev1"), null, "the generic ack is not a report");
   assert.equal(reportTypeOf(`${base.replace("dev1", "dev2")}/info/report`, "20030", "dev1"), null, "another device");
   assert.equal(reportTypeOf("anycubic/anycubicCloud/v1/web/printer/20030/dev1/info", "20030", "dev1"), null);
@@ -352,9 +352,9 @@ test("the captured end of a print: cool-down confirms nothing, the push names th
     [announced.nozzleTemp, announced.nozzleTarget, announced.bedTemp, announced.bedTarget],
     [171, 0, 73, 0]
   );
-  // The info report's own words still win when it has them.
+  // A job-matched ending wins over historical last_project, which may be stale.
   const said = observe(info({ state: "free", last_project: { state: "stoped" } }));
-  assert.equal(buildAnycubicStatus(PRINTER, { ...said, ending: "finished" }, T0).stateText, "stoped");
+  assert.equal(buildAnycubicStatus(PRINTER, { ...said, ending: "finished" }, T0).stateText, "finished");
 });
 
 test("captured side traffic: statistics on the info topic, temperature and status pushes", () => {

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, mock, test } from "node:test";
 import type { PrinterConfig } from "../config";
 import { AnycubicHandshakeError, type AnycubicHandshakeResult } from "./handshake";
 import { TlsPinMismatchError } from "./tls";
+import { isFileReadRequest } from "./requests";
 import {
   AnycubicSession,
   backoffDelay,
@@ -219,6 +220,85 @@ test("the publish guard refuses every control message", () => {
     { type: "tempature", action: "query", timestamp: 1, msgid: "m", data: null }
   ];
   for (const message of controls) assert.equal(isReadOnlyQuery(message), false, JSON.stringify(message));
+});
+
+test("file reads use a separate allowlist and require bounded pagination and safe paths", () => {
+  const m = { type: "file", action: "listLocal", timestamp: 1, msgid: "m", data: { path: "/", page_num: 1, page_size: 200 } };
+  assert.equal(isFileReadRequest(m), true);
+  assert.equal(isReadOnlyQuery(m), false);
+  for (const data of [{ path: "/" }, { ...m.data, path: "/../etc" }, { ...m.data, page_num: 0 }, { ...m.data, page_size: 201 }, { ...m.data, delete: true }]) {
+    assert.equal(isFileReadRequest({ ...m, data }), false);
+  }
+  for (const action of ["deleteLocal", "deleteUdisk", "deleteBatch", "start", "rename"]) {
+    assert.equal(isFileReadRequest({ ...m, action }), false);
+  }
+});
+
+test("file reads share one connection, ignore generic ACKs and serialize replies with rewritten msgid", async () => {
+  const { s, client } = await connected(fakeTransport());
+  const a = s.readFilePage("local", "/", 1, 200);
+  const b = s.readFilePage("usb", "/", 1, 200);
+  await settle();
+  assert.equal(client.published.filter(x => x.topic.endsWith("/file")).length, 1);
+  let done = false;
+  a.then(() => { done = true; });
+  client.emit("message", `${REPORTS}/response`, Buffer.from(JSON.stringify({ code: 0 })));
+  client.emit("message", `${REPORTS}/file/report`, Buffer.from(JSON.stringify({ type: "file", action: "listLocal", code: 200, data: { records: [] } })), { retain: true });
+  client.report("file", { type: "file", action: "listUdisk", code: 200, data: { records: [] } });
+  await settle();
+  assert.equal(done, false);
+  client.report("file", { type: "file", action: "listLocal", msgid: "firmware-replaced", code: 200, data: { records: [] } });
+  await a;
+  await settle();
+  assert.equal(client.published.filter(x => x.topic.endsWith("/file")).length, 2);
+  client.report("file", { type: "file", action: "listUdisk", code: 200, data: { records: [] } });
+  await b;
+  assert.equal(client.subscribed.length, 1);
+  s.stop();
+});
+
+test("file errors are surfaced; timeout discards the generation so late replies cannot satisfy retries", async () => {
+  const { s, client } = await connected(fakeTransport());
+  const refused = assert.rejects(s.readFilePage("local", "/", 1, 200), /10112/);
+  await settle();
+  client.report("file", { type: "file", action: "listLocal", code: 10112, state: "failed", data: null });
+  await refused;
+  const timedOut = assert.rejects(s.readFilePage("local", "/", 1, 200), /соединение закрыто/);
+  await settle();
+  await advance(8000);
+  await timedOut;
+  assert.equal(client.ended, true);
+  await assert.rejects(s.readFilePage("local", "/", 2, 200), /подключения/);
+  s.stop();
+});
+
+test("fileDetails must name the requested storage and literal filename; shutdown rejects waiters", async () => {
+  const { s, client } = await connected(fakeTransport());
+  const details = s.readFileDetails("local", "a+b.gcode");
+  await settle();
+  let done = false;
+  details.then(() => { done = true; });
+  client.report("file", { type: "file", action: "fileDetails", code: 200, data: { root: "udisk", filename: "a+b.gcode" } });
+  await settle();
+  assert.equal(done, false);
+  client.report("file", { type: "file", action: "fileDetails", code: 200, data: { root: "local", filename: "a+b.gcode", file_details: {} } });
+  await details;
+  const pending = assert.rejects(s.readPeripheral(), /соединение закрыто/);
+  await settle();
+  s.stop();
+  await pending;
+});
+
+test("light telemetry is factual: control ACKs do not set light; stale and disconnected values clear", async () => {
+  const { s, client } = await connected(fakeTransport());
+  client.report("info", printingInfo);
+  client.report("light", { type: "light", action: "control", code: 200, data: { type: 3, status: 1 } });
+  assert.equal(s.status(PRINTER).light, null);
+  client.report("light", { type: "light", action: "query", code: 200, data: { lights: [{ type: 3, status: 0, brightness: 0 }] } });
+  assert.equal(s.status(PRINTER).light, false);
+  client.emit("close");
+  assert.equal(s.status(PRINTER).light, null);
+  s.stop();
 });
 
 test("a lost connection drops the old job at once and reconnects with backoff", async () => {

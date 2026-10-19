@@ -9,6 +9,8 @@ import { shutdownPrinterConnections } from "../infra/printers/status";
 import type { SnapshotStore } from "../infra/persistence/snapshotStore";
 import type { CameraService } from "./cameraService";
 import { PrinterCommandService } from "./commandService";
+import { FarmCommands } from "./FarmCommands";
+import type { FarmRuntime } from "../bootstrap/createRuntime";
 import type { EventFeed } from "./eventFeed";
 import type { LightScheduler } from "./lightScheduler";
 import type { PrinterPoller } from "./printerPoller";
@@ -133,11 +135,22 @@ test("a direct remote start is refused before the device is even re-read", async
   assert.deepEqual(fetchCalls, []);
 });
 
-test("the live view says what the printer can do: watch, nothing else", () => {
+test("enabling file browsing never creates queue/assignment/device-artifact records through the file-start API", async () => {
+  let ledgerCalls = 0;
+  const commands = new FarmCommands({
+    configById: () => KOBRA,
+    ensureQueue: () => { ledgerCalls++; throw new Error("the ledger must not be accessed"); }
+  } as unknown as FarmRuntime);
+  await assert.rejects(commands.startPrinterFile(KOBRA.id, "local/part.gcode"), /приём заданий/);
+  assert.equal(ledgerCalls, 0);
+  assert.deepEqual(fetchCalls, []);
+});
+
+test("the live view allows file browsing independently of physical controls", () => {
   const view = buildPrinterView(KOBRA, printing(), undefined);
   assert.equal(view.printControlSupported, false);
   assert.equal(view.remoteStartSupported, false);
-  assert.equal(view.filesSupported, false);
+  assert.equal(view.filesSupported, true);
   assert.equal(view.lightSupported, false);
   assert.equal(view.snapshotAvailable, false);
   assert.equal(view.camera, "none");

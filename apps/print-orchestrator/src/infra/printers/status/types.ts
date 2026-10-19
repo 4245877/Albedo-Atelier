@@ -114,6 +114,8 @@ export interface PrinterLiveStatus {
   chamberTemp: number | null;
   /** Chamber/work-area light state; null when the device or adapter cannot report it. */
   light: boolean | null;
+  /** Ephemeral observation identity for Anycubic screen-started jobs (task_id=-1). */
+  controlJobKey?: string | null;
   /** Raw device state string (e.g. moonraker "complete"/"cancelled"). */
   stateText: string | null;
   /** Human-readable reason (pause reason, error text) when the device gives one. */

@@ -1,8 +1,11 @@
 import {
   dropAnycubicConnection,
   getAnycubicStatus,
+  getAnycubicSession,
   shutdownAnycubicConnections
 } from "../anycubic";
+import { anycubicControlAllowed } from "../anycubic/controlPolicy";
+import { prepareAnycubicStart, type AnycubicStartIdentity } from "../anycubic/start";
 import { capabilitiesOf, requireCapability } from "../capabilities";
 import type { PrinterConfig } from "../config";
 import {
@@ -45,16 +48,18 @@ export async function getPrinterLiveStatus(printer: PrinterConfig): Promise<Prin
 
 /**
  * Sends a real control command to the device. Supported: Moonraker HTTP
- * (`/printer/print/*`) and Bambu local MQTT (`print.command`). Creality's
- * WebSocket control and Anycubic LAN control are not implemented — that is
- * reported honestly, and nothing is sent.
+ * (`/printer/print/*`) and Bambu local MQTT (`print.command`). Anycubic control
+ * additionally requires its own hardware-acceptance gate and observed job key.
+ * Creality WebSocket control remains unsupported.
  */
 export async function sendPrinterCommand(
   printer: PrinterConfig,
-  command: PrinterCommand
+  command: PrinterCommand,
+  expectedJobKey?: string
 ): Promise<void> {
   if (printer.protocol === "moonraker") return sendMoonrakerCommand(printer, command);
   if (printer.protocol === "bambu") return sendBambuCommand(printer, command);
+  if (printer.protocol === "anycubic-lan" && anycubicControlAllowed(printer, "print")) return getAnycubicSession(printer).controlPrint(command, expectedJobKey);
   throw new PrinterCommandError(
     `Управление печатью для протокола «${printer.protocol}» пока не поддерживается`
   );
@@ -69,7 +74,7 @@ export async function sendPrinterCommand(
  */
 /** Whether pause/resume/cancel can be sent to this printer at all (see `sendPrinterCommand`). */
 export function supportsPrinterControl(printer: PrinterConfig): boolean {
-  return printer.protocol === "moonraker" || printer.protocol === "bambu";
+  return printer.protocol === "moonraker" || printer.protocol === "bambu" || anycubicControlAllowed(printer, "print");
 }
 
 export function supportsPrinterStart(printer: PrinterConfig): boolean {
@@ -85,9 +90,13 @@ export function supportsPrinterStart(printer: PrinterConfig): boolean {
 export async function sendPrinterStart(
   printer: PrinterConfig,
   filename: string,
-  options: { feed?: Record<string, unknown> | null; plateGcodePath?: string | null } = {}
+  options: { feed?: Record<string, unknown> | null; plateGcodePath?: string | null; anycubicIdentity?: AnycubicStartIdentity } = {}
 ): Promise<{ confirmed: boolean }> {
   requireCapability(printer, "supportsRemoteStart", "запустите файл на самом принтере");
+  if (printer.protocol === "anycubic-lan") {
+    await getAnycubicSession(printer).startPreparedFile(prepareAnycubicStart(filename, options.anycubicIdentity, options.feed));
+    return { confirmed: true };
+  }
   if (printer.protocol === "bambu") {
     // The Bambu start does not return until the device's own report names the
     // job as running (see `confirmBambuStart`) — that IS confirmation.
@@ -104,6 +113,7 @@ export async function sendPrinterStart(
 
 export function supportsPrinterLight(printer: PrinterConfig): boolean {
   if (!printer.light.enabled) return false;
+  if (printer.protocol === "anycubic-lan") return anycubicControlAllowed(printer, "light");
   if (printer.protocol === "bambu") return Boolean(printer.light.bambuNode);
   if (printer.protocol === "moonraker") {
     return Boolean(printer.light.onGcode && printer.light.offGcode);
@@ -119,6 +129,7 @@ export async function sendPrinterLight(printer: PrinterConfig, on: boolean): Pro
   }
   if (printer.protocol === "moonraker") return sendMoonrakerLightCommand(printer, on);
   if (printer.protocol === "bambu") return sendBambuLightCommand(printer, on);
+  if (printer.protocol === "anycubic-lan") return getAnycubicSession(printer).setLight(on);
 }
 
 /**

@@ -3,10 +3,15 @@ import type { EventEmitter } from "node:events";
 import type { Duplex } from "node:stream";
 
 import mqtt from "mqtt";
+import { isObject } from "../../../shared/isObject";
+import { KeyedMutex } from "../../../shared/keyedMutex";
 
 import type { PrinterConfig } from "../config";
 import { makeOfflineStatus } from "../status/mapper";
-import type { PrinterLiveStatus } from "../status/types";
+import { PrinterCommandError, type PrinterCommand, type PrinterLiveStatus } from "../status/types";
+import { isFileReadRequest, isLightCommand, isPrintControlCommand, type AnycubicRequest, type AnycubicStorage } from "./requests";
+import { anycubicPrivateUrl } from "./urls";
+import { isPreparedAnycubicStart, type AnycubicPreparedStart } from "./start";
 import {
   AnycubicHandshakeError,
   networkCode,
@@ -41,11 +46,10 @@ import { openPinnedTls, TlsConnectError, TlsPinMismatchError } from "./tls";
  *
  * The rules it keeps:
  *
- *  - **read-only, enforced in code.** The only thing ever published is a
- *    `{type: "info", action: "query", data: null}` request, built here and
- *    re-checked by {@link isReadOnlyQuery} before it leaves; there is no method
- *    that publishes anything else. The broker's command vocabulary (print, light,
- *    temperature, camera, file…) is not reachable from this module;
+ *  - **separate publication guards.** Payload-free telemetry queries and
+ *    file reads each have an allowlist. Physical light,
+ *    print and file-write categories each require an explicit, separate gate;
+ *    neither read guard can authorize a physical command;
  *  - **one session per printer, never two in flight.** A connection attempt or a
  *    live connection belongs to a generation; tearing down bumps it, so a late
  *    callback of a superseded socket cannot touch the state;
@@ -70,8 +74,8 @@ import { openPinnedTls, TlsConnectError, TlsPinMismatchError } from "./tls";
 
 export const ANYCUBIC_MQTT_PORT = 9883;
 
-/** The read queries this adapter may publish. Nothing else, ever. */
-export const READ_ONLY_QUERIES = ["info"] as const;
+/** Payload-free telemetry reads, separate from files and physical commands. */
+export const READ_ONLY_QUERIES = ["info", "light", "peripherie"] as const;
 export type AnycubicReadQuery = (typeof READ_ONLY_QUERIES)[number];
 
 export interface AnycubicQueryMessage {
@@ -87,8 +91,8 @@ export function buildReadQuery(type: AnycubicReadQuery, timestamp: number, msgid
 }
 
 /**
- * The publish guard: true only for a read query from {@link READ_ONLY_QUERIES}
- * with no payload. Every outgoing message passes it; anything else is dropped.
+ * The telemetry guard: true only for a query from {@link READ_ONLY_QUERIES}
+ * with no payload. File reads and physical commands have separate guards.
  */
 export function isReadOnlyQuery(message: unknown): message is AnycubicQueryMessage {
   if (message === null || typeof message !== "object" || Array.isArray(message)) return false;
@@ -97,6 +101,8 @@ export function isReadOnlyQuery(message: unknown): message is AnycubicQueryMessa
     (READ_ONLY_QUERIES as readonly unknown[]).includes(m.type) &&
     m.action === "query" &&
     m.data === null &&
+    typeof m.timestamp === "number" && Number.isFinite(m.timestamp) &&
+    typeof m.msgid === "string" && m.msgid.length > 0 && m.msgid.length <= 128 &&
     Object.keys(m).every((key) => ["type", "action", "timestamp", "msgid", "data"].includes(key))
   );
 }
@@ -167,6 +173,9 @@ export interface AnycubicSessionOptions {
   timing?: Partial<AnycubicTiming>;
   now?: () => number;
   random?: () => number;
+  /** Separate physical categories; omitted means no physical command may leave. */
+  controls?: { light?: boolean; print?: boolean; upload?: boolean; start?: boolean };
+  confirmationPollMs?: number;
 }
 
 /** What the session knows about the device itself, for hardware discovery. */
@@ -180,6 +189,20 @@ export interface AnycubicIdentitySnapshot {
 type Phase = "idle" | "connecting" | "connected" | "backoff" | "stopped";
 
 const MAX_REPORT_BYTES = 512 * 1024;
+
+export interface AnycubicPeripheral {
+  cameraPresent: boolean | null;
+  usbPresent: boolean | null;
+}
+
+interface PendingRead {
+  type: string;
+  action: string;
+  matches: (reply: Record<string, unknown>) => boolean;
+  resolve: (reply: Record<string, unknown>) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
 
 export class AnycubicSession {
   private readonly transport: AnycubicTransport;
@@ -200,9 +223,22 @@ export class AnycubicSession {
   private stream: Duplex | null = null;
   private connectedAt = 0;
   private lastQueryAt = 0;
+  private lastLightQueryAt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private connackTimer: ReturnType<typeof setTimeout> | null = null;
   private queryTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly fileReads = new KeyedMutex();
+  private readonly reads = new KeyedMutex();
+  private pendingReads = new Set<PendingRead>();
+  private lightReport: { on: boolean; observedAt: number } | null = null;
+  private cameraUrl: string | null = null;
+  private uploadUrl: string | null = null;
+  private uncertainStart = false;
+  private cameraDisconnect: (() => void) | null = null;
+  private jobKey: string | null = null;
+  private jobElapsed: number | null = null;
+  private uncertainPrint: { key: string; command: PrinterCommand } | null = null;
+  private readonly controls = new KeyedMutex();
 
   constructor(private readonly options: AnycubicSessionOptions) {
     this.transport = options.transport ?? DEFAULT_TRANSPORT;
@@ -229,7 +265,14 @@ export class AnycubicSession {
 
   /** The live status, from memory. Never touches the network. */
   status(printer: PrinterConfig): PrinterLiveStatus {
-    if (this.phase === "connected") return buildAnycubicStatus(printer, this.observation, this.now());
+    if (this.phase === "connected") {
+      const status = buildAnycubicStatus(printer, this.observation, this.now());
+      status.controlJobKey = status.online && ["printing", "paused"].includes(status.status) ? this.jobKey : null;
+      if (status.online && this.lightReport && this.now() - this.lightReport.observedAt <= JOB_STATE_MAX_AGE_MS) {
+        status.light = this.lightReport.on;
+      }
+      return status;
+    }
     if (this.lastError === null) {
       // Not failed yet — just not there yet. Unknown, like a Bambu awaiting its
       // first report: neither "offline" nor anything a lifecycle may act on.
@@ -245,6 +288,237 @@ export class AnycubicSession {
   /** For tests and diagnostics: the session's phase. */
   get state(): Phase {
     return this.phase;
+  }
+
+  withFileRead<T>(task: () => Promise<T>): Promise<T> {
+    return this.fileReads.run("files", task);
+  }
+
+  readFilePage(storage: AnycubicStorage, path: string, page: number, size: number): Promise<Record<string, unknown>> {
+    return this.requestRead("file", storage === "local" ? "listLocal" : "listUdisk", { path, page_num: page, page_size: size });
+  }
+
+  readFileDetails(storage: AnycubicStorage, filename: string): Promise<Record<string, unknown>> {
+    return this.withFileRead(() => this.requestRead("file", "fileDetails", { root: storage === "local" ? "local" : "udisk", filename },
+      (reply) => isObject(reply.data) && reply.data.filename === filename && reply.data.root === (storage === "local" ? "local" : "udisk")));
+  }
+
+  async readPeripheral(): Promise<AnycubicPeripheral> {
+    const reply = await this.requestRead("peripherie", "query", null);
+    const data = isObject(reply.data) ? reply.data : {};
+    return { cameraPresent: bit(data.camera), usbPresent: bit(data.udisk) };
+  }
+
+  async readLight(): Promise<boolean> {
+    const reply = await this.requestRead("light", "query", null);
+    const on = parseLight(reply);
+    if (on === null) throw new PrinterCommandError("Anycubic LAN: состояние подсветки не получено");
+    return on;
+  }
+
+  async refreshInfo(): Promise<void> {
+    await this.requestRead("info", "query", null, (reply) => Boolean(parseInfoReport(reply)?.job));
+  }
+
+  async uploadAddress(): Promise<string> {
+    this.requireControl("upload");
+    await this.refreshInfo();
+    this.requireControl("upload");
+    if (this.observation.job?.work !== "free" || !this.uploadUrl) throw new PrinterCommandError("Anycubic LAN: для загрузки требуется свободный принтер и актуальный адрес", true);
+    return this.uploadUrl;
+  }
+
+  /** Called only through the common start driver after DeviceArtifact dispatch admission. */
+  async startPreparedFile(data: AnycubicPreparedStart): Promise<void> {
+    return this.controls.run("print", async () => {
+      this.requireControl("start");
+      if (!isPreparedAnycubicStart(data)) throw new PrinterCommandError("Anycubic LAN: некорректный запрос запуска", true);
+      if (this.uncertainStart) throw new PrinterCommandError("Anycubic LAN: предыдущий запуск не подтверждён — повтор запрещён", true);
+      await this.refreshInfo();
+      this.requireControl("start");
+      if (this.observation.job?.work !== "free") throw new PrinterCommandError("Anycubic LAN: запуск разрешён только из idle", true);
+      const reply = await this.readFilePage("local", "/", 1, 200);
+      const records = isObject(reply.data) && Array.isArray(reply.data.records) ? reply.data.records : [];
+      if (!isObject(reply.data) || reply.data.list_mode !== 0 || records.filter(r => isObject(r) && r.filename === data.filename && r.is_dir === false && r.size === data.filesize).length !== 1) {
+        throw new PrinterCommandError("Anycubic LAN: файл запуска с ожидаемым именем и размером отсутствует", true);
+      }
+      await this.refreshInfo();
+      this.requireControl("start");
+      if (this.observation.job?.work !== "free") throw new PrinterCommandError("Anycubic LAN: принтер стал занят перед запуском", true);
+      // Existing PrinterCommandService owns the durable start guard. This is
+      // only an additional transport hold, including on lost response/reconnect.
+      this.uncertainStart = true;
+      const credentials = this.credentials!;
+      const topic = `anycubic/anycubicCloud/v1/slicer/printer/${credentials.modelId}/${credentials.deviceId}/print`;
+      try {
+        this.client!.publish(topic, JSON.stringify({ type: "print", action: "start", data, timestamp: this.now(), msgid: randomUUID() }), { qos: 0, retain: false }, () => {});
+      } catch { throw new PrinterCommandError("Anycubic LAN: исход отправки запуска неизвестен — повтор запрещён"); }
+      for (let i = 0; i < 12; i++) {
+        await this.refreshInfo();
+        const job = this.observation.job;
+        if (job?.work === "busy" && job.file?.split("/").at(-1) === data.filename && lifecycleOf(job) === "printing") {
+          this.uncertainStart = false;
+          return;
+        }
+        if (job?.work === "busy") break;
+        await this.controlPollDelay();
+      }
+      throw new PrinterCommandError("Anycubic LAN: реальный старт не подтверждён — повтор запрещён");
+    });
+  }
+
+  async setLight(on: boolean): Promise<void> {
+    return this.controls.run("light", async () => {
+      this.requireControl("light");
+      await this.refreshInfo();
+      this.requireControl("light");
+      if (await this.readLight() === on) return;
+      await this.publishControl("light", "light", "control", { type: 3, status: on ? 1 : 0, brightness: on ? 100 : 0 });
+      for (let i = 0; i < 6; i++) {
+        if (await this.readLight() === on) return;
+        await this.controlPollDelay();
+      }
+      throw new PrinterCommandError("Anycubic LAN: принтер не подтвердил изменение подсветки");
+    });
+  }
+
+  async controlPrint(command: PrinterCommand, expectedJobKey?: string): Promise<void> {
+    return this.controls.run("print", async () => {
+      this.requireControl("print");
+      await this.refreshInfo();
+      this.requireControl("print");
+      const job = this.observation.job;
+      const key = this.jobKey;
+      if (!key || !expectedJobKey || key !== expectedJobKey || !job?.file) {
+        throw new PrinterCommandError("Anycubic LAN: печать изменилась — обновите карточку перед командой", true);
+      }
+      if (this.uncertainPrint?.key === key) {
+        const previous = this.uncertainPrint.command;
+        const confirmed = previous === "pause" ? job.phase === "paused" && job.pauseCode === 1
+          : previous === "resume" && job.phase === "printing" && job.pauseCode === 0;
+        if (!confirmed) throw new PrinterCommandError("Anycubic LAN: результат предыдущей команды неизвестен — повторная отправка заблокирована", true);
+        // A late factual report settles the earlier intent without resending it.
+        // The operator can then issue the next action for that same print.
+        this.uncertainPrint = null;
+        if (command === previous) return;
+      }
+      if (job.work !== "busy" || (command === "pause" ? job.phase !== "printing" : command === "resume" ? job.phase !== "paused" : !["printing", "paused"].includes(job.phase ?? ""))) {
+        throw new PrinterCommandError("Anycubic LAN: текущее состояние не допускает эту команду", true);
+      }
+      const file = job.file;
+      // This hold precedes the send and survives connection loss. No timeout retries.
+      this.uncertainPrint = { key, command };
+      await this.publishControl("print", "print", command === "cancel" ? "stop" : command, { taskid: job.taskId ?? "-1" });
+      for (let i = 0; i < 6; i++) {
+        await this.refreshInfo();
+        const next = this.observation.job;
+        // last_project may still describe an older print. Only the ending
+        // matched to the job in hand, followed by free, confirms this stop.
+        const stopped = next?.work === "free" && this.observation.ending === "stoped";
+        const same = this.jobKey === key && next?.file === file && next.work === "busy";
+        const confirmed = command === "cancel" ? stopped : same && (command === "pause" ? next.phase === "paused" && next.pauseCode === 1 : next.phase === "printing" && next.pauseCode === 0);
+        if (confirmed) { this.uncertainPrint = null; return; }
+        if (!same && !(command === "cancel" && next?.work === "free")) break;
+        await this.controlPollDelay();
+      }
+      throw new PrinterCommandError("Anycubic LAN: выполнение команды печати не подтверждено; повтор запрещён до проверки состояния");
+    });
+  }
+
+  private requireControl(category: "light" | "print" | "upload" | "start"): void {
+    if (!this.options.controls?.[category]) throw new PrinterCommandError("Anycubic LAN: эта категория управления ещё не разрешена после аппаратной проверки", true);
+    if (this.phase !== "connected" || this.device?.modelId !== "20030" || this.reported.firmware !== "2.0.2.2" ||
+        this.observation.jobObservedAt === null || this.now() - this.observation.jobObservedAt > JOB_STATE_MAX_AGE_MS ||
+        !this.observation.job || ["unknown", "offline", "error"].includes(lifecycleOf(this.observation.job))) {
+      throw new PrinterCommandError("Anycubic LAN: нет актуального подтверждённого состояния совместимого Kobra X", true);
+    }
+  }
+
+  private publishControl(category: "light" | "print", type: string, action: string, data: unknown): Promise<void> {
+    this.requireControl(category);
+    const message: AnycubicRequest = { type, action, data, timestamp: this.now(), msgid: randomUUID() };
+    if (!(category === "light" ? isLightCommand(message) : isPrintControlCommand(message))) {
+      return Promise.reject(new PrinterCommandError("Anycubic LAN: управляющая команда запрещена", true));
+    }
+    const client = this.client!;
+    const credentials = this.credentials!;
+    // The callback only confirms transport delivery. Callers must read the
+    // resulting device state before reporting any physical success.
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new PrinterCommandError("Anycubic LAN: исход отправки команды неизвестен")), 8000);
+      try {
+        client.publish(queryTopic(credentials.modelId, credentials.deviceId, type), JSON.stringify(message), { qos: 0, retain: false }, (error) => {
+          clearTimeout(timer);
+          if (error) reject(new PrinterCommandError("Anycubic LAN: исход отправки команды неизвестен"));
+          else resolve();
+        });
+      } catch { clearTimeout(timer); reject(new PrinterCommandError("Anycubic LAN: исход отправки команды неизвестен")); }
+    });
+  }
+
+  private controlPollDelay(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, this.options.confirmationPollMs ?? 500));
+  }
+
+  /** Private upstream lease for go2rtc. No video command is issued, even on reconnect. */
+  leaseCameraSource(onDisconnect: () => void): { url: string; release: () => void } {
+    if (this.phase !== "connected" || this.device?.modelId !== "20030" || !this.cameraUrl ||
+        this.observation.jobObservedAt === null || this.now() - this.observation.jobObservedAt > JOB_STATE_MAX_AGE_MS) {
+      throw new PrinterCommandError("Anycubic LAN: адрес камеры сейчас недоступен");
+    }
+    if (this.cameraDisconnect) throw new PrinterCommandError("Anycubic LAN: видеопоток уже обслуживается go2rtc");
+    this.cameraDisconnect = onDisconnect;
+    return { url: this.cameraUrl, release: () => {
+      if (this.cameraDisconnect === onDisconnect) this.cameraDisconnect = null;
+    } };
+  }
+
+  /**
+   * Firmware 2.0.2.2 replaces msgid. Serialize by report type/action, require the
+   * actual device report, and discard the socket on timeout: a late answer must
+   * never satisfy the next request. The generic /response ACK is never read.
+   */
+  private requestRead(type: string, action: string, data: unknown, matches: PendingRead["matches"] = () => true): Promise<Record<string, unknown>> {
+    return this.reads.run(type, () => new Promise((resolve, reject) => {
+      const message = { type, action, data, timestamp: this.now(), msgid: randomUUID() };
+      if (!(isReadOnlyQuery(message) || isFileReadRequest(message))) {
+        reject(new PrinterCommandError("Anycubic LAN: запрос чтения запрещён", true));
+        return;
+      }
+      const client = this.client;
+      const credentials = this.credentials;
+      if (this.phase !== "connected" || !client || !credentials) {
+        reject(new PrinterCommandError("Anycubic LAN: дождитесь подключения к принтеру", true));
+        return;
+      }
+      const generation = this.generation;
+      const pending: PendingRead = { type, action, matches, resolve, reject, timer: setTimeout(() => {
+        this.fail(generation, "Anycubic LAN: таймаут ответа — переподключение");
+      }, 8000) };
+      this.pendingReads.add(pending);
+      try {
+        client.publish(queryTopic(credentials.modelId, credentials.deviceId, type), JSON.stringify(message), { qos: 0, retain: false }, (error) => {
+          if (error) this.fail(generation, "Anycubic LAN: ошибка отправки запроса — переподключение");
+        });
+      } catch {
+        this.fail(generation, "Anycubic LAN: ошибка отправки запроса — переподключение");
+      }
+    }));
+  }
+
+  private resolveRead(type: string, json: unknown): void {
+    if (!isObject(json) || json.type !== type) return;
+    for (const pending of this.pendingReads) {
+      const action = type === "info" && json.action === "report" ? "query" : json.action;
+      if (pending.type !== type || pending.action !== action) continue;
+      if (json.code === 200 && !pending.matches(json)) continue;
+      clearTimeout(pending.timer);
+      this.pendingReads.delete(pending);
+      if (json.code !== 200 || json.state === "failed") {
+        const code = typeof json.code === "number" ? json.code : "unknown";
+        pending.reject(new PrinterCommandError(`Anycubic LAN: запрос ${pending.action} отклонён (код ${code})`, true));
+      } else pending.resolve(json);
+    }
   }
 
   // ── Connecting ─────────────────────────────────────────────────────────────
@@ -300,8 +574,8 @@ export class AnycubicSession {
       client.on("connect", () =>
         this.guarded(generation, () => this.onConnected(generation, credentials), true)
       );
-      client.on("message", (topic: string, payload: Buffer) =>
-        this.guarded(generation, () => this.onMessage(generation, topic, payload), false)
+      client.on("message", (topic: string, payload: Buffer, packet?: { retain?: boolean }) =>
+        this.guarded(generation, () => { if (!packet?.retain) this.onMessage(generation, topic, payload); }, false)
       );
       client.on("error", (error: unknown) =>
         this.guarded(generation, () => this.onClientError(generation, error), true)
@@ -365,6 +639,7 @@ export class AnycubicSession {
       return;
     }
     this.query("info");
+    if (this.reported.firmware === "2.0.2.2") this.query("light");
   }
 
   private onClientError(generation: number, error: unknown): void {
@@ -411,6 +686,19 @@ export class AnycubicSession {
   private teardown(): void {
     this.clearTimer("connack");
     this.clearTimer("query");
+    for (const pending of this.pendingReads) {
+      clearTimeout(pending.timer);
+      pending.reject(new PrinterCommandError("Anycubic LAN: соединение закрыто до ответа"));
+    }
+    this.pendingReads.clear();
+    this.lightReport = null;
+    this.lastLightQueryAt = 0;
+    this.cameraUrl = null;
+    this.uploadUrl = null;
+    this.cameraDisconnect?.();
+    this.cameraDisconnect = null;
+    this.jobKey = null;
+    this.jobElapsed = null;
     const client = this.client;
     this.client = null;
     if (client) {
@@ -444,14 +732,17 @@ export class AnycubicSession {
 
   // ── Talking ────────────────────────────────────────────────────────────────
 
-  /** Publishes one read query. The only publish in this module. */
+  /** Publishes a payload-free telemetry read; never a file or physical command. */
   private query(type: AnycubicReadQuery): void {
     const client = this.client;
     const credentials = this.credentials;
     if (!client || !credentials || this.phase !== "connected") return;
+    if ([...this.pendingReads].some((p) => p.type === type)) return;
+    if (type === "light" && this.now() - this.lastLightQueryAt < this.timing.infoQueryMs) return;
     const message = buildReadQuery(type, this.now(), randomUUID());
     if (!isReadOnlyQuery(message)) return;
     this.lastQueryAt = this.now();
+    if (type === "light") this.lastLightQueryAt = this.now();
     client.publish(
       queryTopic(credentials.modelId, credentials.deviceId, type),
       JSON.stringify(message),
@@ -479,10 +770,22 @@ export class AnycubicSession {
       return; // not JSON: not a report this adapter reads
     }
     const now = this.now();
+    this.resolveRead(type, json);
+
+    if (type === "file" || type === "peripherie") return;
+    if (type === "light") {
+      const on = parseLight(json);
+      if (on !== null) this.lightReport = { on, observedAt: now };
+      return;
+    }
 
     if (type === "info") {
       const report = parseInfoReport(json);
       if (!report) return;
+      if (isObject(json) && isObject(json.data) && isObject(json.data.urls)) {
+        this.cameraUrl = anycubicPrivateUrl(json.data.urls.rtspUrl, this.options.host, "camera");
+        this.uploadUrl = anycubicPrivateUrl(json.data.urls.fileUploadurl, this.options.host, "upload");
+      }
       this.reported = {
         printerName: report.identity.printerName ?? this.reported.printerName,
         model: report.identity.model ?? this.reported.model,
@@ -494,9 +797,16 @@ export class AnycubicSession {
         // become the words for how this one ends.
         const lifecycle = lifecycleOf(report.job);
         if (lifecycle === "printing" || lifecycle === "paused") this.observation.ending = null;
+        const old = this.observation.job;
+        const elapsed = isObject(json) && isObject(json.data) && isObject(json.data.project) && typeof json.data.project.print_time === "number" ? json.data.project.print_time : null;
+        if (report.job.work === "free") this.jobKey = null;
+        else if (report.job.file && (!this.jobKey || old?.file !== report.job.file || old?.taskId !== report.job.taskId ||
+            elapsed !== null && this.jobElapsed !== null && elapsed < this.jobElapsed)) this.jobKey = randomUUID();
+        this.jobElapsed = elapsed;
         this.observation.job = report.job;
         this.observation.jobObservedAt = now;
       }
+      if (this.reported.firmware === "2.0.2.2" && !this.lightReport) this.query("light");
       return;
     }
 
@@ -541,6 +851,18 @@ export class AnycubicSession {
     };
     this.observation.temperaturesObservedAt = now;
   }
+}
+
+function bit(value: unknown): boolean | null {
+  return value === 1 ? true : value === 0 ? false : null;
+}
+
+/** Only a query report of the one light captured on model 20030, never a control ACK. */
+function parseLight(json: unknown): boolean | null {
+  if (!isObject(json) || json.type !== "light" || json.action !== "query" || json.code !== 200 ||
+      !isObject(json.data) || !Array.isArray(json.data.lights)) return null;
+  const light = json.data.lights.find((l) => isObject(l) && l.type === 3);
+  return isObject(light) ? bit(light.status) : null;
 }
 
 function emptyObservation(): AnycubicObservation {

@@ -124,18 +124,16 @@ const CAPABILITIES: Readonly<Record<PrinterProtocol, PrinterCapabilities>> = {
   },
   // Anycubic LAN mode (Kobra X): monitoring only at this stage. The protocol
   // has upload, start and control actions (`/gcode_upload`, MQTT `print/*`),
-  // but none is implemented or verified on hardware here, so every capability
-  // is declared absent — including the manual-transfer pipeline, which Creality
-  // WS keeps: no job is planned, prepared or started on this printer until a
-  // later stage proves each step. The extensions are inert while `supportsJobs`
-  // is false.
+  // File listing is implemented and verified on 2.0.2.2 (names, byte sizes,
+  // millisecond dates). It is independent of admission: no job is planned,
+  // prepared or started until delivery/identity/start have hardware acceptance.
   "anycubic-lan": {
     supportsJobs: false,
     supportsUpload: false,
-    supportsFileListing: false,
+    supportsFileListing: true,
     supportsRemoteStart: false,
     supportsFileDelete: false,
-    fileVerification: "none",
+    fileVerification: "name_and_size",
     startableExtensions: [".gcode"],
     deviceFileExtension: ".gcode"
   }

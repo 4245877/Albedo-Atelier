@@ -94,27 +94,27 @@ export class PrinterCommandService {
     this.logger = logger;
   }
 
-  pause(id: string): Promise<PrinterView> {
+  pause(id: string, jobKey?: string): Promise<PrinterView> {
     return this.runExclusive(id, async () => {
       const printer = this.getReachableConfig(id);
       const status = this.poller.getStatus(id);
       if (status?.status !== "printing") {
         throw new JobError(`Принтер «${printer.name}» не печатает — ставить на паузу нечего`);
       }
-      await this.dispatch(printer, "pause");
+      await this.dispatch(printer, "pause", jobKey);
       this.events.push("⏸", `Оператор поставил <b>${printer.name}</b> на паузу`, "info");
       return this.refresh(printer);
     });
   }
 
-  resume(id: string): Promise<PrinterView> {
+  resume(id: string, jobKey?: string): Promise<PrinterView> {
     return this.runExclusive(id, async () => {
       const printer = this.getReachableConfig(id);
       const status = this.poller.getStatus(id);
       if (status?.status !== "paused") {
         throw new JobError(`Печать на «${printer.name}» не стоит на паузе`);
       }
-      await this.dispatch(printer, "resume");
+      await this.dispatch(printer, "resume", jobKey);
       this.events.push("▶", `<b>${printer.name}</b> продолжил печать`, "ok");
       return this.refresh(printer);
     });
@@ -128,7 +128,7 @@ export class PrinterCommandService {
    * never cancel the wrong, newly-started print. Without `expect` the behaviour
    * is unchanged (server-to-server callers that have no snapshot to assert).
    */
-  cancel(id: string, expect?: { job?: string | null }): Promise<PrinterView> {
+  cancel(id: string, expect?: { job?: string | null; jobKey?: string }): Promise<PrinterView> {
     return this.runExclusive(id, async () => {
       const printer = this.getReachableConfig(id);
       // Fresh device read: the identity check and the cancel must act on the job
@@ -141,7 +141,7 @@ export class PrinterCommandService {
       if (expect && expect.job !== undefined && (expect.job ?? null) !== (job ?? null)) {
         throw new PrintIdentityConflictError(printer.name, expect.job ?? null, job ?? null);
       }
-      await this.dispatch(printer, "cancel");
+      await this.dispatch(printer, "cancel", expect?.jobKey);
       this.events.push(
         "✕",
         `Печать «${job ?? "—"}» на <b>${printer.name}</b> отменена оператором`,
@@ -500,8 +500,8 @@ export class PrinterCommandService {
     return printer;
   }
 
-  private dispatch(printer: PrinterConfig, command: PrinterCommand): Promise<void> {
-    return runDriverOperation(printer.id, () => sendPrinterCommand(printer, command));
+  private dispatch(printer: PrinterConfig, command: PrinterCommand, jobKey?: string): Promise<void> {
+    return runDriverOperation(printer.id, () => sendPrinterCommand(printer, command, jobKey));
   }
 
   /** Re-polls one printer right after a command so the view reflects reality. */

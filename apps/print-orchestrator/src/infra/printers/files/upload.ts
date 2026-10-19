@@ -12,6 +12,7 @@ import { PrinterCommandError } from "../status/types";
 import { deleteBambuFile, uploadBambuFile } from "./bambu";
 import { deleteMoonrakerFile } from "./moonraker";
 import { normalizeStartablePath } from "./path";
+import { uploadAnycubicFile } from "./anycubicUpload";
 
 /**
  * Pushing a prepared file **to** a printer — the transport the slice→print chain
@@ -83,6 +84,7 @@ export async function uploadPrinterFile(
   if (printer.protocol === "bambu") {
     return uploadBambuFile(printer, normalizeStartablePath(remotePath, printer), bytes);
   }
+  if (printer.protocol === "anycubic-lan") return uploadAnycubicFile(printer, remotePath, bytes);
   // Only Moonraker's multipart endpoint is below. Any other protocol arriving
   // here is refused, never sent Moonraker's request.
   if (printer.protocol !== "moonraker") {

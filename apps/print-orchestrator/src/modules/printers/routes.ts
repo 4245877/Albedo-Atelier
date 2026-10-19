@@ -218,17 +218,17 @@ export async function registerPrinterRoutes(
     }
   );
 
-  app.post<{ Params: PrinterParams }>("/:id/pause", async (request) => ({
+  app.post<{ Params: PrinterParams; Body: { jobKey?: unknown } }>("/:id/pause", async (request) => ({
     ok: true,
-    printer: await commands.pausePrinter(request.params.id)
+    printer: await (typeof request.body?.jobKey === "string" ? commands.pausePrinter(request.params.id, request.body.jobKey) : commands.pausePrinter(request.params.id))
   }));
 
-  app.post<{ Params: PrinterParams }>("/:id/resume", async (request) => ({
+  app.post<{ Params: PrinterParams; Body: { jobKey?: unknown } }>("/:id/resume", async (request) => ({
     ok: true,
-    printer: await commands.resumePrinter(request.params.id)
+    printer: await (typeof request.body?.jobKey === "string" ? commands.resumePrinter(request.params.id, request.body.jobKey) : commands.resumePrinter(request.params.id))
   }));
 
-  app.post<{ Params: PrinterParams; Body: { job?: unknown; runId?: unknown } }>(
+  app.post<{ Params: PrinterParams; Body: { job?: unknown; runId?: unknown; jobKey?: unknown } }>(
     "/:id/cancel",
     async (request) => {
       // Optional expected identity: the canonical runId (strong — survives a
@@ -237,7 +237,8 @@ export async function registerPrinterRoutes(
       // working unchanged.
       const rawJob = request.body?.job;
       const rawRun = request.body?.runId;
-      const expect: { job?: string | null; runId?: string | null } = {};
+      const expect: { job?: string | null; runId?: string | null; jobKey?: string } = {};
+      if (typeof request.body?.jobKey === "string") expect.jobKey = request.body.jobKey;
       if (typeof rawJob === "string") expect.job = rawJob;
       else if (rawJob === null) expect.job = null;
       if (typeof rawRun === "string") expect.runId = rawRun;
@@ -246,7 +247,7 @@ export async function registerPrinterRoutes(
         ok: true,
         printer: await commands.cancelPrinter(
           request.params.id,
-          expect.job !== undefined || expect.runId !== undefined ? expect : undefined
+          expect.job !== undefined || expect.runId !== undefined || expect.jobKey !== undefined ? expect : undefined
         )
       };
     }

@@ -87,10 +87,10 @@ test("Anycubic LAN is monitoring only: it takes no job, by any route", () => {
   assert.deepEqual(capabilitiesOf(printer("anycubic-lan", { tlsFingerprint: "0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0:0F:1E:2D:3C:4B:5A:69:78:87:96:A5:B4:C3:D2:E1:F0" })), {
     supportsJobs: false,
     supportsUpload: false,
-    supportsFileListing: false,
+    supportsFileListing: true,
     supportsRemoteStart: false,
     supportsFileDelete: false,
-    fileVerification: "none",
+    fileVerification: "name_and_size",
     startableExtensions: [".gcode"],
     deviceFileExtension: ".gcode"
   });

@@ -120,11 +120,11 @@ export class FarmCommands {
 
   // ── Printer commands (→ PrinterCommandService) ─────────────────────────────
 
-  pausePrinter(id: string) {
-    return this.runtime.deviceCommands.pause(id);
+  pausePrinter(id: string, jobKey?: string) {
+    return jobKey === undefined ? this.runtime.deviceCommands.pause(id) : this.runtime.deviceCommands.pause(id, jobKey);
   }
-  resumePrinter(id: string) {
-    return this.runtime.deviceCommands.resume(id);
+  resumePrinter(id: string, jobKey?: string) {
+    return jobKey === undefined ? this.runtime.deviceCommands.resume(id) : this.runtime.deviceCommands.resume(id, jobKey);
   }
   /**
    * Cancels the print on a device. Identity is verified at TWO levels before
@@ -133,7 +133,7 @@ export class FarmCommands {
    * file name* — and the on-device file name against a fresh device read (in
    * the command service). Either mismatch is a 409, nothing is cancelled.
    */
-  cancelPrinter(id: string, expect?: { job?: string | null; runId?: string | null }) {
+  cancelPrinter(id: string, expect?: { job?: string | null; runId?: string | null; jobKey?: string }) {
     if (expect && expect.runId !== undefined) {
       const active = this.runtime.activeRunForPrinter(id);
       if ((expect.runId ?? null) !== (active?.id ?? null)) {
@@ -322,7 +322,7 @@ export class FarmCommands {
     const printer = this.runtime.configById(id);
     if (!supportsPrinterFiles(printer)) {
       throw new JobError(
-        `Просмотр файлов на «${printer.name}» пока поддерживается только для Moonraker-принтеров`
+        `Адаптер принтера «${printer.name}» пока не поддерживает просмотр файлов`
       );
     }
     const status = this.runtime.poller.getStatus(id);
@@ -360,8 +360,11 @@ export class FarmCommands {
     file: string,
     actor = "operator"
   ): Promise<{ runId: string; taskId: string; assignmentId: string; file: string }> {
-    this.runtime.ensureQueue();
     const printer = this.runtime.configById(id);
+    // Browsing storage never admits a monitoring printer into the job ledger.
+    requireCapability(printer, "supportsJobs");
+    requireCapability(printer, "supportsRemoteStart");
+    this.runtime.ensureQueue();
     // Validated against THIS printer's startable set: the file browser lists a
     // Bambu `.gcode.3mf` as printable (it passes the printer), so the start path
     // behind the same row must judge it by the same rule.

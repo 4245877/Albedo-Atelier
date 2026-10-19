@@ -12,6 +12,7 @@ import {
   type CameraStream
 } from "../infra/printers/camera";
 import type { PrinterConfig } from "../infra/printers/config";
+import { getAnycubicSession } from "../infra/printers/anycubic";
 
 // A camera frame older than this is re-fetched on demand; between polls the
 // cached frame doubles as the "is the camera reachable" probe result.
@@ -61,7 +62,12 @@ export class CameraService {
     // the real picture over WebRTC; here we just keep the status honest and
     // leave any previously captured snapshot untouched.
     if (isGo2RtcCamera(printer)) {
-      const online = await probeGo2RtcStream(printer);
+      let present = true;
+      if (printer.protocol === "anycubic-lan") {
+        try { present = (await getAnycubicSession(printer).readPeripheral()).cameraPresent === true; }
+        catch { present = false; }
+      }
+      const online = present && await probeGo2RtcStream(printer);
       this.cameras.set(printer.id, {
         state: online ? "online" : "offline",
         snapshotAt: entry?.snapshotAt ?? null,
@@ -172,6 +178,13 @@ export class CameraService {
 
   /** A live camera stream for `GET /api/printers/:id/camera.mp4`. */
   async getStream(printer: PrinterConfig): Promise<CameraStream> {
+    // go2rtc pulls this existing backend endpoint as its private FLV source.
+    // The dashboard still uses the common WebRTC player and stable stream id.
+    if (printer.protocol === "anycubic-lan" && isGo2RtcCamera(printer)) {
+      const stream = await openCameraStream(printer);
+      if (!stream) throw new CameraError(printer.id, "нет видеопотока Kobra X");
+      return stream;
+    }
     if (isGo2RtcCamera(printer)) {
       throw new CameraError(printer.id, "трансляция доступна через WebRTC");
     }

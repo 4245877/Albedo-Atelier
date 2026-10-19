@@ -3,7 +3,7 @@ import { afterEach, beforeEach, mock, test } from "node:test";
 import mqtt from "mqtt";
 
 import { canCaptureSnapshot, hasCameraSource, resolveSnapshotUrl } from "../camera";
-import { PrinterCapabilityError } from "../capabilities";
+import { PrinterCapabilityError, PrinterNotConfiguredError } from "../capabilities";
 import { normalizePrinterConfig, type PrinterConfig } from "../config";
 import { discoverPrinterSpecs } from "../discovery";
 import { deletePrinterFile, fetchPrinterFiles, uploadPrinterFile } from "../files";
@@ -109,9 +109,10 @@ test("the light is not controllable, even with light settings on the record", as
   assert.deepEqual(fetchCalls, []);
 });
 
-test("files cannot be listed, uploaded or deleted — and never through Moonraker", async () => {
+test("files require configured Anycubic transport; upload and delete remain blocked", async () => {
+  await assert.rejects(fetchPrinterFiles(kobra(), ""), PrinterNotConfiguredError);
+  await assert.rejects(fetchPrinterFiles(ALIEN, ""), PrinterCapabilityError);
   for (const printer of [kobra(CONFIGURED), ALIEN]) {
-    await assert.rejects(fetchPrinterFiles(printer, ""), PrinterCapabilityError);
     await assert.rejects(uploadPrinterFile(printer, "part.gcode", new Uint8Array([1, 2, 3])), PrinterCapabilityError);
     await assert.rejects(deletePrinterFile(printer, "part.gcode"), PrinterCapabilityError);
   }

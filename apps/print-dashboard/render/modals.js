@@ -400,8 +400,8 @@ function filesListHtml(p, entries) {
         <span class="file-ico ${e.printable ? "file-ico-go" : ""}">${icon(e.printable ? "filePrintable" : "file")}</span>
         <span class="file-name">${esc(e.name)}</span>
         <span class="file-meta">${fmtFileMeta(e)}</span>
-        <button type="button" class="btn btn-sm btn-primary file-start" data-files-print="${esc(e.path)}"
-          ${disabled ? "disabled" : ""} title="${esc(title)}">${icon("play")}<span>Печать</span></button>
+        ${p.remoteStartSupported ? `<button type="button" class="btn btn-sm btn-primary file-start" data-files-print="${esc(e.path)}"
+          ${disabled ? "disabled" : ""} title="${esc(title)}">${icon("play")}<span>Печать</span></button>` : ""}
       </div>`;
   });
 
