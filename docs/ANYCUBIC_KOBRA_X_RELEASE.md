@@ -1,9 +1,11 @@
 # Kobra X: выпуск файлового браузера и камеры
 
-Кандидат от 2026-10-19, поверх принятого `e19e81a` (исследование и реализация).
-Production при подготовке кандидата не обновлялся: orchestrator — `72dfde5`,
-SQLite — схема 19. Аппаратные результаты и ограничения — в
-[отчёте этапа 2](ANYCUBIC_KOBRA_X_STAGE2.md).
+Кандидат принят в `7eca5c4` поверх `e19e81a` (исследование и реализация).
+Read-only сверка **20 октября 2026**: работающие backend/dashboard — `72dfde5`,
+SQLite — схема 19, go2rtc использует прежний YAML. Файлы и камера ещё не выпущены.
+Аппаратные результаты, матрица возможностей и ограничения — в
+[LAN reference](ANYCUBIC_KOBRA_X_STAGE2.md). Этот документ — порядок будущего
+согласованного redeploy, не отчёт о выполненном развёртывании.
 
 ## Границы выпуска
 
@@ -19,16 +21,6 @@ Light scheduler не может включить Kobra X вместе с эти�
 
 Автоочередь остаётся выключенной; её настройки, PrintRun, BedCycle и списание
 филамента не меняются. Поддержка Bambu, K2 и Ender-3 V3 KE сохраняется.
-
-| Функция | Реализация | Изолированные тесты | Проверка Kobra X 2.0.2.2 | Осталось |
-|---|---|---|---|---|
-| Локальные файлы | Да | Да | Да, память/встроенный каталог/пустой USB | Приёмка UI после deploy; подключённый USB отдельно |
-| Камера | Да, существующий go2rtc | Да | Да, пассивные FLV/H.264 и MP4, два зрителя/один upstream | Приёмка WebRTC в трёх представлениях после deploy |
-| Подсветка | Подготовлена, закрыта | Да | Только чтение состояния | Отдельный согласованный on/off |
-| Пауза/продолжение | Подготовлены, закрыты | Да | Нет | Отдельная согласованная печать |
-| Отмена | Подготовлена, закрыта | Да | Нет | Отдельная согласованная печать |
-| Загрузка файлов | Транспорт подготовлен, закрыт | Да | Нет | Согласованная загрузка, идентичность и dispatch |
-| Удалённый запуск | Транспорт подготовлен, закрыт | Да | Нет | Полная цепочка DeviceArtifact/dispatch и аппаратная приёмка |
 
 ## Проверяемая видеоконфигурация
 
@@ -148,9 +140,6 @@ light.enabled и правила автоматизации. Не подстав�
   PrintRun, BedCycle, отмену, DispatchAttempt или списание материала. Случайные
   фоновые изменения исследовать по журналу, не «исправлять» production SQLite.
 
-После успешной приёмки можно отдельно провести небольшой аудит и чистку. Полезные
-тесты и подготовленные заблокированные транспорты остаются до этого аудита.
-
 ## Откат
 
 При проблеме только с камерой вернуть прежние camera-поля через тот же partial
@@ -191,53 +180,21 @@ COMPOSE_FILE=compose.yml:compose.orca.yml:.deploy/acceptance-kobra-readonly-2026
 в этом выпуске схема остаётся 19. Любое восстановление данных требует отдельного
 решения с учётом появившихся после backup печатей и операций fulfillment.
 
-## Изолированная проверка кандидата
+## Проверка перед выпуском
 
-Это не аппаратная приёмка production WebRTC: она выполняется после разрешённого
-redeploy. Проверено на финальном коде:
+На **текущем** checkout выполнить backend typecheck/build и полный изолированный
+набор, dashboard tests, deploy fake scenarios, browser smoke и `nginx -t` на
+закреплённом image. [Команды](testing.md). Ранее принятые прогоны не доказывают
+состояние следующей ревизии. Аппаратные чтения и пассивный MP4-поток уже
+подтверждены; production WebRTC ещё нет.
 
-- Целевой backend-набор: **287/287**, без skips/failures. Все Anycubic-тесты,
-  файловые адаптеры Bambu/Moonraker, камера, capabilities, command service,
-  monitoring-only launch, restart/recovery и printer routes. Запуск с
-  `--test-concurrency=2`, фиктивными устройствами, временной/in-memory SQLite.
-- Dashboard: **352/352**; nginx security guard дополнительно **4/4** после
-  уточнения allowlist assertion. Это повтор поднабора, числа не суммируются.
-- `tsc -p tsconfig.json --noEmit` и `tsc -p tsconfig.build.json` прошли.
-- `./scripts/tests/deploy.test.sh`: **24/24**, настоящий deploy-скрипт на fake
-  Docker/curl и временных checkout; проверены deferral, rollback и config-only
-  изменения без единого production restart.
-- `nginx -t`: тот же локальный image, одноразовый контейнер без сети, фиктивный
-  API token, штатный envsubst. Проверка не использовала production volumes.
-- Полный YAML загружен реальным go2rtc **1.9.14** на pinned image в одноразовом
-  контейнере с `--network none`, фиктивными K2/ICE значениями и без зрителей.
-  Runtime API зарегистрировал оба источника; источник из env маскируется самим
-  go2rtc. Его `/api/config` возвращает исходный YAML с placeholders, поэтому
-  этот endpoint не используется как доказательство runtime-подстановки.
-- Effective compose без нового env-параметра совпадает с прежним; при выборе
-  кандидата изменяется **только** read-only bind конфигурации go2rtc. Остальные
-  сервисы, auth, `production-orca`, порты и `AUTO_QUEUE_ENABLED=false` сохранены.
-- Read-only preflight прошёл: три healthy сервиса, около 34 ГБ свободно,
-  persistent volume на месте. Он обнаружил текущую внешнюю печать K2
-  (`untracked-print`): смена backend откладывается до безопасного окна.
-  Production containers, `.env`, inventory и активный YAML не менялись.
+Полный YAML проверяется реальным pinned go2rtc 1.9.14 в одноразовом контейнере
+с `--network none`, фиктивными K2/ICE значениями и без зрителей. Проверить runtime
+регистрацию обоих stream ids. `/api/config` возвращает исходный YAML с placeholders
+и не доказывает runtime-подстановку env.
 
-В первом целевом прогоне исправлено устаревшее ожидание подписи формы в тесте;
-также один loopback-handshake превысил свой 1.5-секундный тестовый таймаут при
-параллельной сборке. Повтор этих наборов — 43/43; окончательный чистый прогон
-287/287 выполнен после завершения сборки. Рабочие таймауты и TLS не менялись.
-Принятый ранее полный backend-прогон 2290/2290 относится к `e19e81a`; повторного
-полного прогона всех 2290 тестов в этой финализации не заявляется.
-
-## Файлы финализации поверх e19e81a
-
-- `.env.example`, `compose.yml`: отложенный выбор YAML без изменения текущего mount.
-- `apps/print-orchestrator/config/go2rtc-kobra-x.yaml`: полный кандидат K2 + Kobra X.
-- `apps/print-orchestrator/src/infra/printers/anycubic/controlPolicy.ts`, `index.ts`:
-  закрытые аппаратные категории в production registry.
-- `apps/print-orchestrator/src/app/monitoringOnlyCommands.test.ts`: блокировка
-  backend/UI даже с заданными env allowlists.
-- `apps/print-orchestrator/src/modules/printers/configRoutes.ts`, `configRoutes.test.ts`:
-  актуальное описание доступных функций в штатной форме.
-- `apps/print-dashboard/tests/nginx-config.test.mjs`: guard фиксированного Kobra src.
-- `docs/examples/go2rtc-anycubic.yaml`, `docs/ANYCUBIC_KOBRA_X_STAGE2.md`,
-  `docs/ANYCUBIC_KOBRA_X_RELEASE.md`: конфигурация, результаты и порядок выпуска.
+Effective compose без `GO2RTC_CONFIG_PATH` должен сохранять прежний mount;
+выбор кандидата меняет только read-only bind go2rtc. Остальные сервисы, auth,
+`production-orca`, порты и `AUTO_QUEUE_ENABLED` сохраняются. Production preflight
+и restart-safety выполняются заново в согласованном окне; старые снимки загрузки
+принтеров не являются разрешением на recreate.

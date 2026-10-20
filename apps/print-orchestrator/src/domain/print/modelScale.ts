@@ -1,6 +1,5 @@
 import {
   isKnownUnit,
-  mmPerUnit,
   resolveUnits,
   UNIT_TO_MM,
   type ModelUnits
@@ -141,11 +140,6 @@ function isStale(confirmation: ModelScaleConfirmation, artifact: Artifact): bool
     return confirmation.sizeBytes !== artifact.sizeBytes;
   }
   return true;
-}
-
-/** Millimetres per unit for a stored confirmation (unit factor × operator factor). */
-export function scaleMmPerUnit(confirmation: ModelScaleConfirmation): number {
-  return (mmPerUnit(confirmation.units) ?? 1) * confirmation.scaleFactor;
 }
 
 /**

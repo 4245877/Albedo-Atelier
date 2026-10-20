@@ -112,26 +112,6 @@ export interface DiscoveredFacts {
   kinematics?: Fact<string>;
 }
 
-/** Every fact key, for iteration in the resolver, the API and the tests. */
-export const DISCOVERED_FACT_KEYS = [
-  "modelCode",
-  "model",
-  "firmware",
-  "deviceName",
-  "serialNumber",
-  "technology",
-  "buildVolume",
-  "nozzleDiameterMm",
-  "nozzleType",
-  "extruderCount",
-  "ams",
-  "materials",
-  "chamberSensor",
-  "heatedChamber",
-  "filamentSensor",
-  "kinematics"
-] as const satisfies readonly (keyof DiscoveredFacts)[];
-
 /** One printer's stored discovery result. Keyed by the printer id — one row per printer. */
 export interface PrinterDiscoveryRecord {
   /** The printer's id; this table is a 1:1 extension of `printers`. */

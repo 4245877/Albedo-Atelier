@@ -85,7 +85,14 @@ loss, operator error and filesystem corruption — but **not** against losing th
 disk, host death, theft, fire or a root compromise. A second disk in the same
 chassis is still not an off-host backup.
 
-> **Current state (2026-10-16):** the host has a single physical disk, so the sets
-> live in the `~/atelier-backups` fallback and every run reports DEGRADED. There is
-> no copy on another medium yet. Attaching one needs no code change: mount it and
-> set `BACKUP_DISK_UUID` in `ops/backup/backup.conf`.
+> **Checked 2026-10-20:** both user timers are active; the latest hourly run
+> published and verified a set in `~/atelier-backups`. The configured fallback
+> remains on the production filesystem; no separate backup medium was established
+> by this check. Mount the intended medium and set `BACKUP_DISK_UUID` in
+> `ops/backup/backup.conf`, then verify a full set and rehearse restore there.
+
+The full backup copies the default `config/go2rtc.yaml`. An alternate tracked
+YAML selected by `GO2RTC_CONFIG_PATH` must also be recoverable from the matching
+checkout; record that revision/path with the backup. A host-only alternate file
+needs its own deliberate backup. Restoring the data volume does not overwrite
+`.env` or host configuration automatically.

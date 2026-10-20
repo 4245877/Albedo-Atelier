@@ -21,6 +21,7 @@ externalVar("TZ", "compose", "compose.yml (container timezone)");
 externalVar("DASHBOARD_BIND", "compose", "compose.yml (dashboard publish address)");
 externalVar("K2_CAMERA_SOURCE", "compose", "compose.yml → go2rtc.yaml (K2 WebRTC source)");
 externalVar("GO2RTC_WEBRTC_CANDIDATE", "compose", "compose.yml → go2rtc.yaml (LAN ICE candidate)");
+externalVar("GO2RTC_CONFIG_PATH", "compose", "compose.yml (go2rtc configuration bind mount)");
 externalVar("ORCA_HOST_DIR", "compose", "compose.orca.yml (host OrcaSlicer squashfs mount)");
 
 // Variables consumed by scripts/deploy.sh, not by the service. They live in

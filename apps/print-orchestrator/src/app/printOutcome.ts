@@ -66,12 +66,6 @@ export interface PrintOutcomeVerdict {
 const COMPLETE_RE = /complete|finish|done/i;
 const CANCEL_RE = /cancel|abort|stop/i;
 
-/**
- * How far a print got, when that is worth telling an operator. Not a threshold
- * anything branches on — only wording.
- */
-export const NEARLY_DONE_PCT = 99;
-
 export function classifyPrintOutcome(status: PrinterLiveStatus): PrintOutcomeVerdict {
   const progressPct = typeof status.progressPct === "number" ? status.progressPct : null;
   const stateText = status.stateText ?? null;

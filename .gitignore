@@ -46,5 +46,14 @@ id_*.pub
 
 # Session transcripts dropped into the repo root for context (e.g. «прошлый
 # чат.md», auto-committed once by accident). Working notes, not project files —
-# the project's own record is ALBEDO_MODERNIZATION_PROGRESS.md.
+# current project instructions live in README.md and docs/.
 /прошлый чат*.md
+
+# Generated local test/build diagnostics; keep protocol captures under testkit.
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+*.tsbuildinfo
+__pycache__/
+*.py[cod]

@@ -14,7 +14,6 @@ brief asks for:
     │   ├── machine/           # extracted printer profiles (raw bytes, unmodified)
     │   ├── process/
     │   └── filament/
-    ├── profile-sets/          # curated, human-authored profile-set candidates
     └── vendor/                # OrcaSlicer *system* profiles (parents) go here
 
 Guarantees:
@@ -108,7 +107,7 @@ def main() -> int:
         return 2
 
     sources_dir = os.path.join(out_dir, "sources")
-    for sub in ("sources", "profiles/machine", "profiles/process", "profiles/filament", "profile-sets", "vendor"):
+    for sub in ("sources", "profiles/machine", "profiles/process", "profiles/filament", "vendor"):
         os.makedirs(os.path.join(out_dir, sub), exist_ok=True)
 
     archives = sorted(

@@ -9,13 +9,14 @@ safely in [testing.md](testing.md).
 - [Compose files and disk](#compose-files-and-disk)
 - [Updating a running deployment](#updating-a-running-deployment)
 - [Deploying during a print](#deploying-during-a-print)
-- [Other subcommands](#other-subcommands)
+- [Other subcommands](#other-subcommands) · [Service restart](#service-restart)
 - [Rollback](#rollback) · [Rollback limitations](#rollback-limitations)
 - [Which version is running?](#which-version-is-running)
-- [Persistence](#persistence) · [Schema compatibility](#schema-compatibility)
+- [Persistence](#persistence) · [Schema compatibility](#schema-compatibility) · [Restore after a migration](#restore-after-a-migration)
 - [Reboot and recovery](#reboot-and-recovery)
 - [Reclaiming disk safely](#reclaiming-disk-safely)
 - [Dashboard and API access](#dashboard-and-api-access)
+- [Printer diagnostics](#printer-diagnostics) · [Hardware acceptance](#hardware-acceptance)
 - [Fulfillment integration](#fulfillment-integration) — wire contracts,
   [printer config & secrets](#printer-config--secrets), [restart cost](#restart-cost)
 
@@ -223,34 +224,36 @@ migration; recover from a backup instead.
   what was just deployed, not to the version before it. `:previous` still names
   the old images until the *next* deploy re-tags it; after that they are untagged
   and the post-deploy reclaim deletes them. To keep a way back across an
-  acceptance period, pin them with a tag of your own — as of 2026-10-16 the
-  pre-modernization images are kept as `atelier-print-*:rollback-3db702e`
-  (neither `deploy.sh` nor its reclaim touches such tags; remove them by hand once
-  acceptance is done).
+  acceptance period, use a unique rollback tag and record its immutable image ID.
+  Existing `:rollback-3db702e` / `:rollback-1bbc72a` tags are recovery artifacts,
+  not cleanup candidates; their presence does not prove schema compatibility.
 * It restores **running containers, not the checkout**; the working tree stays
   on the new code.
 * It cannot undo a migration. That is what the pre-deploy snapshot in
   `.deploy/db-snapshots/` and the [scheduled backups](../ops/backup/README.md) are
-  for. The procedure for going back past migration 017 (restore, or the expert
-  SQL path) is recorded in the
-  [modernization journal](../ALBEDO_MODERNIZATION_PROGRESS.md#откат-после-успешного-деплоя).
+  for. Use [Restore after a migration](#restore-after-a-migration); an old
+  SQL recipe for migration 017 is not a rollback for the current schema 19.
 * A host that has never completed a verified deploy has no target; the first run
   adopts the currently-running healthy stack and says so.
 
-The equivalent of a deploy by hand, if you ever need it without the script — it
-skips **every** gate, so ask `restart-safety` first
-(`curl -s localhost:8090/api/print-orchestrator/restart-safety`):
+## Service restart
+
+A restart is a maintenance action, not a way to apply a new image/config.
+For an orchestrator restart, first check `./scripts/deploy.sh preflight
+--strict-active-prints` and `/restart-safety`, inspect offline/unknown devices,
+and agree an idle window. Keep a verified backup and the current image IDs.
+Only after these conditions are met:
 
 ```bash
-df -h /                 # 1. preflight: production-orca needs 4096 MB free (lean: 2048)
-docker compose build    # 2. build — on failure the old stack keeps serving
-docker compose up -d    # 3. swap: recreates only the services whose image changed
+docker compose restart print-orchestrator
 ```
 
-If a build fails on disk space, reclaim it with `docker builder prune -a`
-(build cache only) — never `docker volume prune` or
-`docker system prune --volumes`, which would delete `orchestrator-data` whenever
-the containers happen to be stopped.
+For a service-only nginx or video recovery, restart only `print-dashboard` or
+`go2rtc` respectively; camera viewers will reconnect. A restart does not apply
+changed environment, mounts or images — use the normal gated deploy for updates.
+Afterward inspect health/ready/version, restart count, printer freshness and
+unresolved runs; preserve the volume and avoid `down`. After a host reboot,
+follow [Reboot and recovery](#reboot-and-recovery).
 
 ## Which version is running?
 
@@ -298,8 +301,40 @@ versions it does not recognise and then reading and writing a schema it was neve
 compiled against. A crash-loop is visible to `deploy.sh`; silent divergence is
 not.
 
-Production is on schema **17** since 2026-10-16 (`017_profile_resolution_identity`);
-images built before `1bbc72a` refuse to start on it.
+Read-only verification on **2026-10-20** found schema **19** in production;
+backend and dashboard image labels both identify `72dfde5`. The checkout already
+contains the later Kobra X files/camera release (`7eca5c4`), still undeployed.
+The registry currently ends at `019_printer_tls_fingerprint`; migration 018
+rebuilds the printer table to admit `anycubic-lan`, 019 adds its TLS fingerprint.
+There are no additional migrations in the files/camera candidate.
+Check `/version`, running image IDs and `schema_migrations` again before a release.
+
+### Restore after a migration
+
+1. Obtain an idle maintenance window and inspect `restart-safety`; do not turn an
+   `UNKNOWN` run into a success or clear a bed to make the gate pass. Record the
+   running image IDs, schema and a fresh verified full backup before recovery.
+2. Choose the target image **and a backup it can read**. Test `verify.sh` and
+   `restore.sh --set <set-dir> --to-dir <scratch>` first. A pre-deploy database
+   snapshot alone lacks `state.json`, artifacts and credential/config copies.
+3. Decide explicitly how to reconcile prints, history and fulfillment movements
+   written since that backup. Restore loses these later records; a SQLite restore
+   does not reverse stock movements in fulfillment.
+4. Stop the affected services in the agreed maintenance window. Only with the
+   orchestrator stopped, run `ops/backup/restore.sh --set <set-dir>
+   --to-production --i-mean-it`. Restore matching deployment configuration from
+   the set deliberately; the restore script does not overwrite host secrets.
+5. Select the pinned compatible image IDs using a reviewed compose override,
+   preserving `compose.orca.yml` where needed. Start only the affected services
+   with `--no-build`, then verify health/ready/version, queue/history, profiles,
+   printer configuration, bed/operation states and pending deductions.
+
+Do not delete migration rows or columns to make an old image start. In particular,
+the former migration-017-only SQL downgrade does not undo the table rebuild in
+018 or the pin column in 019. Prefer restoring the matching full set, or redeploy
+the newer image. For the current Kobra X candidate both sides use schema 19:
+rollback normally needs only the pinned images/camera settings, **not** an older DB.
+See the [release-specific procedure](ANYCUBIC_KOBRA_X_RELEASE.md#откат).
 
 ## Reboot and recovery
 
@@ -353,8 +388,7 @@ Dashboard (the entry point): `http://localhost:8090`.
 
 It binds to `127.0.0.1` by default. For intentional LAN access, set
 `DASHBOARD_BIND=0.0.0.0` in `.env`; then use the host address, for example
-`http://192.168.0.139:8090/`. Read the README section «Порты и безопасность
-(Ports & security)» and [SECURITY.md](../SECURITY.md) first.
+`http://<host>:8090/`. Read [SECURITY.md](../SECURITY.md) first.
 
 The dashboard calls the orchestrator same-origin through its nginx proxy, so the
 API is reached at `http://localhost:8090/api/print-orchestrator/...`, e.g.:
@@ -369,7 +403,7 @@ for the API and the `/health`, `/ready`, `/metrics`, `/version` probes.
 ## Fulfillment integration
 
 This orchestrator is the **only** service that talks to the printer hardware
-(Moonraker HTTP, Bambu MQTT, Creality WebSocket, cameras/go2rtc) — exactly one
+(Moonraker HTTP, Bambu MQTT, Creality WebSocket, Anycubic LAN, cameras/go2rtc) — exactly one
 Bambu MQTT client and one go2rtc instance exist on the host, both in this
 stack. The fulfillment API (`~/apps/fulfillment`) consumes it read-only over
 HTTP:
@@ -439,7 +473,7 @@ the device genuinely cannot report. Each value is shown with its source
 (**с принтера** / **по модели** / **вручную**), the device wins over a stale
 hand-typed value, and a disagreement between the two is surfaced rather than
 hidden. See
-[Hardware discovery](../apps/print-orchestrator/README.md#hardware-discovery-what-a-printer-says-about-itself).
+[Hardware discovery](../apps/print-orchestrator/README.md#hardware-discovery).
 
 The inventory (hosts, serial, access code) lives in the
 orchestrator's SQLite database on the `orchestrator-data` volume, so it must be
@@ -461,7 +495,7 @@ is set and, for an env reference, which variable it names — never the value. A
 edit that omits a credential keeps the stored one, so the form can be submitted
 whole without the browser ever holding a secret.
 
-**Anycubic Kobra X (`anycubic-lan`) — monitoring only.** Add it with protocol
+**Anycubic Kobra X (`anycubic-lan`) — monitoring, with files/camera pending release.** Add it with protocol
 «Anycubic (режим LAN, Kobra X)», the printer's bare IP address and no port; LAN
 mode must be on at the printer. It stays «Требуется настройка» and contacts
 nothing until its broker certificate is confirmed: press «Сертификат» on the
@@ -470,9 +504,12 @@ press «Подтвердить» — from then on the service connects only to a
 that SHA-256 fingerprint, and there is no "without verification" mode. Then
 «Проверить связь» runs the LAN handshake and shows the state. No credential is
 typed or stored: the broker login is fetched from the printer and kept in memory
-only. The printer reads «Только наблюдение»: it receives no jobs and no commands
-(pause, cancel, light, files) — see
-[Anycubic LAN](../apps/print-orchestrator/README.md#anycubic-lan-kobra-x-monitoring-only).
+only. The printer reads «Только наблюдение»: it receives no jobs or physical control
+commands. In the current checkout file listing and passive camera are implemented;
+production `72dfde5` has monitoring only. Light/print controls remain closed even
+with the old env allowlists; upload/start/delete stay disabled. See
+[Anycubic LAN](ANYCUBIC_KOBRA_X_STAGE2.md) and the
+[files/camera release procedure](ANYCUBIC_KOBRA_X_RELEASE.md).
 
 If the card reads «сертификат принтера не совпадает с подтверждённым —
 подключение заблокировано», the printer presents a different certificate. After
@@ -482,10 +519,8 @@ it — another device may be answering on that address. The printer hands its
 certificate and key to any LAN client (see the README), so keep it on a trusted
 segment.
 
-The code needs schema 19 (migration `018_anycubic_lan` rebuilds the `printers`
-table, `019_printer_tls_fingerprint` adds one column; forward-only like every
-migration), so it is a release for an idle farm after
-[ops/verify](../ops/verify/README.md).
+Schema 19 is already applied in production. Further releases still require
+restart-safety and the applicable [isolated checks](../ops/verify/README.md).
 
 Every Kobra X print is started at the printer, so to the farm it is an external
 print: the card follows it, the plate goes to «awaiting clearance» when it ends,
@@ -510,3 +545,87 @@ rather than only announced once in the capped event feed. `deploy.sh` holds the
 orchestrator back while a print in flight would lose state this way (see
 [Deploying during a print](#deploying-during-a-print)), and fails closed when it
 cannot tell.
+
+## Printer diagnostics
+
+Start with cached state, `/ready`, `/version`, `/restart-safety` and the relevant
+container logs; keep credentials, private camera URLs and whole inventory/config
+payloads out of reports. An offline device need not make the service unhealthy.
+Connection test in the equipment form **drops the existing device session**;
+use it deliberately, not as a continuous health probe.
+
+- **K2 / Moonraker:** distinguish Klipper startup/shutdown from idle. Nozzle
+  diameter is a setting; live material is the loaded job's sliced metadata.
+  CFS payload with unknown slots does not prove a loaded spool. The read-only
+  `apps/print-orchestrator/scripts/probe-k2.mjs <host> [port]` queries actual
+  hardware; run only as a separately agreed diagnostic, never as a unit test.
+  Check `output_pin LED` / configured light pin when observed light does not
+  converge, rather than raising the retry budget.
+- **A1:** check LAN mode, current serial/access code, TLS configuration, MicroSD
+  and device fault codes. `0500-C010` was observed with unreadable MicroSD while
+  status stayed idle. An uploaded file and a MQTT ACK are not proof of printing.
+  AMS/AMS Lite and multi-plate starts require their own supervised acceptance.
+- **KE / Creality WS:** telemetry and manual file transfer are supported;
+  remote control/upload are not. `BED_MESH_CALIBRATE` in the vendor start block
+  can yield `output_not_schedulable`; use the reviewed external G-code/manual
+  workflow or approve a separate profile/policy change. Do not weaken the gate
+  as an operational workaround.
+- **Kobra X:** LAN mode, bare host, confirmed TLS fingerprint, firmware and
+  freshness are prerequisites. A changed certificate requires operator review;
+  never silently replace the pin. On a factory reset/update, recheck trust.
+  Files/camera limitations and sanitized protocol captures are documented in
+  [the LAN reference](ANYCUBIC_KOBRA_X_STAGE2.md).
+
+### Telegram and fulfillment
+
+Telegram transport, PostgreSQL outbox, notification settings and bot credentials
+belong to fulfillment. Atelier must keep command observations serialized through
+the poller: a light/camera/control observation must not swallow a completion or
+refresh an old job timestamp. Tests cover these previously observed races.
+
+For missing notifications inspect fulfillment's monitor/outbox status and logs,
+not printer write commands. Historical failures included a missing `failed`
+status migration, stale worker claims and an invalid bot token. Their old counts
+and token status are not current evidence. HTTP/API 401/403/429 can defer sends;
+repair configuration first. Do not automatically replay old failed events:
+a timeout may have happened after Telegram accepted a message. Event deduplication
+cannot guarantee exactly-once external delivery, and a print wholly missed between
+polls cannot be reconstructed from an erased device state.
+
+## Hardware acceptance
+
+Code tests and simulator runs are not hardware acceptance. Historical reports did
+not establish the full new K2/A1/KE workflow, AMS/`plate_2`, stop flow or automatic
+queue on real printers. Recheck the current acceptance record before enabling
+anything. Automatic queue remains an explicit deployment + operator decision;
+unknown loaded material blocks auto, and missing operator timezone/windows blocks
+its day mode.
+
+After an agreed deploy and with a person at the printer, run a small model:
+confirm units → compatible printer/approved profile set → slice/inspect → enqueue
+→ confirm empty bed and loaded material → one start → observed RUNNING → terminal
+run → AWAITING_CLEARANCE → physical part removal → named confirmation → CLEAR.
+Check history and that reprint creates a new task of the same bytes without
+reslicing. For K2 confirm material explicitly if telemetry is silent at idle;
+use the external-spool A1 path before separately testing AMS. On KE transfer and
+confirm the file manually, start on its screen and verify observation attaches
+to the task. Internal KE slicing may remain blocked as described above.
+
+Stop/pause/resume, double-click, batch, AMS and multi-plate scenarios require
+separately agreed prints. An unconfirmed start must not be retried: inspect the
+printer and record the outcome. Never clear a physical bed from telemetry alone.
+Anycubic has its own [read-only acceptance](ANYCUBIC_KOBRA_X_RELEASE.md#приёмка-после-применения).
+
+## Host items outside repository cleanup
+
+Backups, `.deploy/db-snapshots/`, rollback tags, the live seed, `.env`, local
+`data/` and Docker volumes are recovery/configuration assets. Retention or host
+cleanup requires a separate decision. Check backup timers and the actual target;
+a same-disk DEGRADED backup is not protection against host/disk loss. The last
+recorded missing external backup medium needs an operational check, not deletion
+of fallback sets. On 2026-10-20 the live `queue.db` mode was already `600`;
+the older `644` warning is no longer current evidence.
+
+The neighboring fulfillment PostgreSQL was observed publishing `5433` on
+`0.0.0.0` and `::` on 2026-10-20. Review its bind/firewall in that project's
+maintenance scope; this audit does not change its containers or configuration.

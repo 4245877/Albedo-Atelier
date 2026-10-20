@@ -85,9 +85,6 @@ import { finding } from "./types";
  * to a file we produced and a file someone handed us.
  */
 
-/** Verdict for one command word in one file. */
-export type CommandClass = "allowed" | "review" | "forbidden";
-
 /** Commands that are never acceptable inside a print job, on any machine. */
 const FORBIDDEN_COMMANDS: ReadonlyMap<string, string> = new Map([
   ["M501", "загрузка настроек из EEPROM (подменяет конфигурацию во время печати)"],

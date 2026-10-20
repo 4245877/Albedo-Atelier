@@ -15,7 +15,6 @@ config/slicers/orca/
 │   ├── machine/        printer profiles (raw bytes as extracted, unmodified)
 │   ├── process/        print/quality profiles
 │   └── filament/       filament profiles
-├── profile-sets/       human-authored profile-set candidates (see its README)
 ├── corrections/        operator-authored fixes to defective exports (see its README)
 └── vendor/             OrcaSlicer *system* profiles — the inheritance parents (see its README)
 ```
@@ -106,3 +105,27 @@ Each revision records what it resolved through in its `metadata`
 A preset whose parent genuinely does not exist in the pinned OrcaSlicer release
 stays quarantined — that is a real unresolved dependency, and the orchestrator will
 not slice against an unresolved profile.
+
+## Creating a profile set
+
+Profile sets are stored in SQLite and created/approved through the dashboard or
+API, not loaded from a `profile-sets/` directory. Read current revision IDs from
+`GET /api/print/slicing/profiles`, then create a compatible triple:
+
+```json
+{
+  "name": "K2 · PETG 0.4",
+  "printer": "<configured-printer-id>",
+  "machine": "<machine-revision-id>",
+  "process": "<process-revision-id>",
+  "filament": "<filament-revision-id>"
+}
+```
+
+Send to `POST /api/print/slicing/profile-sets`; alternatively target a
+`printerClass` instead of a concrete `printer`. Values are revision **IDs**, not
+profile names. In the shipped catalog, a K2 combination can be selected from
+`Creality K2 PETG 0.4`, `K2 PETG 0.4` and `PETG @K2`; inspect the current
+validation before approving with `POST /api/print/slicing/profile-sets/:id/approve`.
+Creation never auto-approves a set. Quarantined, superseded or incompatible
+members remain blocked; do not edit immutable profiles to force approval.

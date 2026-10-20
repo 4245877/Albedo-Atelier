@@ -1,1105 +1,286 @@
-# Albedo Atelier — print-orchestrator
+# Atelier — print-orchestrator
 
-Fastify service that backs the Albedo Atelier dashboard: printers, print jobs,
-queue, materials, cameras, automations, maintenance, events, warnings and
-system status.
+Fastify-сервис управления фермой. Он опрашивает принтеры, хранит оборудование,
+очередь и историю, анализирует файлы, вызывает OrcaSlicer, доставляет артефакты
+и отправляет разрешённые команды. Dashboard получает готовые решения и причины
+отказа. Неизвестные сведения возвращаются как `null` / пустые списки.
 
-Data is real, never seeded. Printers are configured **at runtime from the
-dashboard** and stored in SQLite (see
-[Printer inventory](#printer-inventory-configured-from-the-dashboard));
-`config/printers.json` / `PRINTERS_CONFIG_JSON` is only the one-time seed.
-Live telemetry is polled from the devices —
-Moonraker over HTTP, Bambu over local MQTT, Creality over WebSocket (see
-`src/infra/printers/status/`, adapted from `apps/fulfillment`), Anycubic over its
-LAN-mode MQTT, monitoring only (see [Anycubic LAN](#anycubic-lan-kobra-x-monitoring-only)); camera frames are
-real snapshots (`src/infra/printers/camera/`). Anything the farm genuinely does
-not know (maintenance history, the long-range plan, material stock while the
-fulfillment warehouse is not connected) is returned empty/null and the dashboard
-shows it as unavailable rather than inventing numbers.
+## Архитектура
 
-The **print queue lives in SQLite** — it is the single source of truth (see
-[the next section](#persistent-print-queue-model-sqlite)). The remaining durable
-state (the event feed, today's counters, saved-snapshot metadata and filament
-deductions still awaiting delivery) is persisted to a single JSON file so it
-survives a restart. The path is `STATE_FILE_PATH` (default
-`<cwd>/data/state.json`; `/app/data/state.json` on the `orchestrator-data` volume
-in Docker). Writes are atomic (temp file + rename) and loading is tolerant: a
-missing file starts empty (first run) and a corrupt/hand-edited one degrades to
-empty defaults with a logged warning instead of crashing startup. The JSON file
-still carries a `queue` section, but only so an **old** file can be read and
-imported once (see below); after that import commits, the queue is no longer
-written to JSON. The farm is composed of focused collaborators behind the
-`FarmStore` facade (`src/app/`): the `PrinterPoller` poll loop with its
-extracted `LightScheduler`, `TodayCounters` and `FilamentConsumption`,
-plus `CameraService`, `EventFeed` and the read-only `DashboardReadModel`
-(exposed as `farmStore.reads`). Persistence lives in `src/infra/persistence/`
-(`StateStore`, `SnapshotStore`); HTTP routes in `src/modules/`, the CORS/token
-hook in `src/http/security.ts`.
+| Каталог | Ответственность |
+|---|---|
+| `src/domain/` | Состояния заданий и столов, совместимость, единая политика допуска, профили, расписание оператора; без SQLite и сетевого I/O |
+| `src/app/` | `FarmStore` и composition root, `PrinterPoller`, command/camera/light services, launch/dispatch, очередь, планировщик, анализ и нарезка |
+| `src/infra/` | SQLite/repositories/migrations, адаптеры принтеров, Orca CLI, файловое хранилище, HTTP-клиент fulfillment |
+| `src/modules/` | HTTP-маршруты |
+| `src/http/security.ts` | Token, Origin/Host и защитные заголовки |
+| `src/shared/config/` | Реестр переменных окружения; пример настроек — [`.env.example`](../../.env.example) |
 
-Live telemetry is deliberately **not** persisted — printer statuses and the
-manual light override are re-derived on the next poll, and persisting statuses
-would make a restart re-announce pre-existing conditions. Maintenance history and
-the long-range plan (`/api/maintenance`, `/api/plan`) are still honest stubs with
-no runtime state — the dashboard hides those sections. Material stock is read
-from fulfillment and only cached in memory (see
-[Filament warehouse](#filament-warehouse-fulfillment)); the automation rules
-(`night-lights`, `night-queue`, `auto-queue`) are persisted in `state.json`.
+`DashboardReadModel` (`farmStore.reads`) синхронно читает runtime/cache;
+загрузка доски не запускает запрос к складу. Медленные устройства не должны
+блокировать остальные: Bambu и Anycubic имеют по одной общей MQTT-сессии на
+принтер, Moonraker работает HTTP-запросами, Creality — WebSocket.
 
-How to run the service and its tests: [Local development](#local-development).
-How a launch is decided — the rules every start path shares — is summarised in
-[Launch path: rules that hold everywhere](#launch-path-rules-that-hold-everywhere).
+## Принтеры и возможности адаптеров
 
-## Printer inventory (configured from the dashboard)
+Протоколы — закрытый список: `moonraker`, `bambu`, `creality`, `anycubic-lan`.
+Неизвестный протокол не превращается в Moonraker. Источник возможностей —
+[`capabilities.ts`](src/infra/printers/capabilities.ts); физические команды
+дополнительно проверяют readiness и policy адаптера.
 
-The farm's hardware lives in the `printers` table (migration 012) and is edited
-at runtime from the dashboard section **«Оборудование фермы»**. Adding a printer,
-correcting an address, rotating a Bambu LAN access code after a reset, disabling
-one for repairs — all take effect **from the next poll**: no file edit, no image
-rebuild, no restart. Before this, a rotated access code meant editing a file in
-the repository and redeploying.
+| Адаптер | Jobs | Просмотр файлов | Upload / remote start / delete | Управление печатью / свет |
+|---|---|---|---|---|
+| Moonraker (K2 :4408) | Да | Да | Да / да / да | Да / да |
+| Bambu LAN (A1 Combo) | Да | Да, FTPS :990 | Да / да / да | Да, MQTT / да |
+| Creality WS (Ender-3 V3 KE) | Ручной перенос | Нет | Нет / нет / нет | Нет / нет |
+| Anycubic LAN (Kobra X) | Нет | Да, память/USB | Нет / нет / нет | Подготовлено, закрыто / подготовлено, закрыто |
 
-**How a change lands.** A committed write re-materializes the config into the
-live runtime (`FarmRuntime.reloadPrinterConfig`) and **drops that printer's
-device connection**. The last part matters for Bambu: its MQTT client is
-long-lived and authenticated with the *old* access code, so leaving it open would
-keep reporting a plausible status for credentials that no longer work. The
-Anycubic LAN session is long-lived too and is dropped the same way (with the
-broker login it held in memory). Moonraker (request/response) and Creality (a
-fresh WebSocket per poll) hold nothing, so for them the disconnect is correctly a
-no-op.
+Для Moonraker/Bambu проверка доставки — **имя и размер**, а не удалённый SHA-256.
+Creality WS требует именного подтверждения ручного переноса; печать запускают
+на экране. Kobra X допускает чтение файлов независимо от `supportsJobs=false`;
+просмотр не создаёт task/assignment/DeviceArtifact. Не обходите capability отказ
+новой веткой dispatch.
 
-**Protocols are a closed vocabulary**: `moonraker`, `bambu`, `creality`,
-`anycubic-lan` (`PRINTER_PROTOCOLS`, CHECK-constrained in SQLite since migration
-018). A value outside it is refused wherever it is read — a `400` from the form,
-a skipped row *with a named warning* from the seed file, an explicit error from a
-corrupted row — and every adapter switch names each protocol it serves. Before
-this, an unknown or absent protocol silently became `moonraker`, i.e. whatever was
-at that address was driven as a Klipper printer, commands included.
+Moonraker запускает `.gcode` / `.gco` / `.g`; Bambu — `.gcode.3mf` / `.3mf` /
+`.gcode`, подготовленный пакет имеет расширение `.gcode.3mf`.
+FTPS-пакет и факт его наличия не доказывают, что принтер начал печать.
 
-**Credentials.** `apiKey`, `serial` and `accessCode` go **in but never out**:
-every read returns a status — `set` / not set / read from which `${ENV_VAR}` (and
-whether that variable resolves) — never the value. An update that *omits* a
-credential keeps the stored one, so the edit form is submitted whole without the
-browser ever holding a secret; an explicit `null` is the only way to clear one.
-Audit rows record which credential *fields* changed, never their values. The
-values themselves are stored in `queue.db` exactly as the JSON file stored them,
-so that database file now carries the farm's device secrets — keep it `600` and
-out of images.
+### Anycubic LAN
 
-**Seed & cutover.** On the first boot after this change, `config/printers.json`
-(or `PRINTERS_CONFIG_JSON`) is imported once, guarded by an `app_meta` marker
-exactly like the legacy queue import, and then never read again — a stale file
-can never revert an edit made in the panel. Strings are imported **verbatim**, so
-`${BAMBU_A1_ACCESS_CODE}` references keep resolving from `.env` until an operator
-types a literal value. An *empty* seed still marks the import done, so a farm that
-starts with no printers can add its first one from the UI without the old file
-resurrecting on the next boot.
+Мониторинг аппаратно проверен на Kobra X `modelId=20030`, firmware `2.0.2.2`.
+Код просмотра памяти и пассивной камеры тоже проверен на устройстве; эти части
+пока не развёрнуты. Срез production и протокол —
+[ANYCUBIC_KOBRA_X_STAGE2.md](../../docs/ANYCUBIC_KOBRA_X_STAGE2.md).
 
-**Validation** is strict on this path (`domain/printers/validation.ts`): the
-operator gets a `400` naming the offending field rather than a silently dropped
-value. The lenient loader (`infra/printers/config.ts`, which drops a bad row so
-one typo cannot take the farm down) is kept for the hand-written seed file only.
-An enabled Bambu printer without a serial + access code is refused outright — it
-could never connect — but the same printer may be saved **disabled** as a draft
-and completed later, which is the intended "add a printer step by step" flow.
+LAN handshake получает broker login в память, затем MQTT/TLS подключается
+только к сертификату с подтверждённым SHA-256 fingerprint. Без pin адаптер
+не обращается к устройству; при несовпадении credentials не отправляются.
+`allowInsecureTls` и `BAMBU_ALLOW_INSECURE_TLS` не ослабляют Anycubic TLS.
+Сертификат подтверждает оператор через штатную форму.
 
-The printer `id` is immutable: it is already the key of every snapshot directory,
-API path and `printer_id` reference in the queue, so renaming it would be a data
-migration, not an edit. Removing a printer leaves its run history intact —
-deleting a printer must not erase what it printed.
+Файлы, камера и телеметрия используют общую сессию. Физические light/print
+категории закрыты [`controlPolicy.ts`](src/infra/printers/anycubic/controlPolicy.ts)
+даже при старых env allowlists. Upload/start — транспортные заготовки, ещё
+не принятая цепочка dispatch. Их тесты и обезличенные captures сохраняются.
+Выпуск чтения файлов и камеры — [отдельная процедура](../../docs/ANYCUBIC_KOBRA_X_RELEASE.md).
 
-**Most of the card fills itself in.** The technical characteristics — model,
-build volume, nozzle diameter and type, AMS, loaded materials — are read from the
-device and returned on every printer as `specs`, each with the source that
-supplied it. An empty form field means «take it from the printer», not «no
-value»; only what the protocol cannot report is typed by hand, and the form says
-which fields those are (`GET /options` → `autoFields`). See
-[Hardware discovery](#hardware-discovery-what-a-printer-says-about-itself).
+## Оборудование, характеристики и секреты
 
-## Anycubic LAN (Kobra X): monitoring only
+Настройки редактируются в «Оборудование фермы» (`/api/printers/config`) и живут
+в таблице `printers`. Изменение пересобирает runtime-конфиг и закрывает старую
+сессию устройства; применяется без redeploy. `id` неизменяем: он связан с
+историей, API и каталогами снимков. Удаление оборудования не удаляет историю.
 
-Stage 1 of the Anycubic integration: the Kobra X is added from «Оборудование
-фермы» by its IP address and its state is watched like any other printer's. It
-takes **no jobs**: nothing is planned onto it, uploaded to it, started, paused,
-cancelled, lit or heated on it — by any route. Code in
-`src/infra/printers/anycubic/`.
+`config/printers.json` / `PRINTERS_CONFIG_JSON` — только seed первого старта.
+Импорт защищён транзакционным `app_meta` marker, включая пустой seed; файл
+не перезаписывает изменения из панели. `${ENV_VAR}` сохраняется как ссылка.
+Обычная форма валидируется строго; lenient loader предназначен лишь для seed.
 
-**The protocol** (not vendor-documented; the flow three independent open
-implementations converge on and OrcaCubic validated read-only on a Kobra X with
-firmware 2.0.1.9 — `modelId` `20030`; confirmed on this farm's Kobra X, firmware
-2.0.2.2, on 2026-10-17 — see *Hardware check* below):
+`apiKey`, `serial`, `accessCode` принимаются на запись, но API отдаёт только
+статус `secrets: { set, source, envVar, resolved }`. Пропущенное поле сохраняет
+секрет, явный `null` очищает. Audit хранит имена изменённых полей без значений.
+`queue.db` содержит device credentials: права `600`, вне образов и публичных отчётов.
 
-1. `GET http://<ip>:18910/info` → identity (`modelId`, `modelName`, `cn`) and a
-   one-time `token`;
-2. `POST http://<ip>:18910/ctrl?ts&nonce&sign&did`, `sign =
-   md5(md5(token[0:16]) + ts + nonce)`, `did` a stable per-printer id derived
-   from the farm's printer id;
-3. AES-128-CBC-decrypt the answer (key `token[16:32]`, IV the answer's own
-   `token`) → broker username/password and the `deviceId`;
-4. MQTT 3.1.1 over TLS on `<ip>:9883`; subscribe
-   `anycubic/anycubicCloud/v1/printer/public/{modelId}/{deviceId}/#`; publish
-   `{type:"info", action:"query", data:null}` on connect and every 20 s.
+### Hardware discovery
 
-The device never chooses where we connect: its `ctrlInfoUrl` and the bundle's
-`broker`/`ip` are ignored, redirects are refused, answers are size- and
-time-bounded, and the client certificate/key the bundle carries are discarded
-(the broker accepts the username/password login without them).
+[`resolvePrinterSpecs`](src/domain/printers/specs.ts) выбирает источник:
+`printer → manual → catalog → unknown`. Противоречащий ручной ввод возвращается
+как `overriddenManual`; характеристика без источника остаётся неизвестной.
 
-**TLS: the confirmed certificate, and nothing else.** The broker's certificate is
-self-signed (`O=AnyCubic`, no CN/SAN, not a CA), so no CA and no name can vouch
-for it — the certificate itself does. An operator confirms its SHA-256
-fingerprint once (`tlsFingerprint`, column added by migration
-`019_printer_tls_fingerprint`); every connection, first and reconnect alike,
-must present exactly that certificate (`src/infra/printers/anycubic/tls.ts`).
-The TLS handshake still makes the broker prove it holds the certificate's key;
-the fingerprint check replaces the CA-chain check, and it runs *before* the MQTT
-client exists, so the login is never written to a broker that presented anything
-else. There is no unverified mode: `allowInsecureTls` is refused for this
-protocol (400) and ignored if present, and `BAMBU_ALLOW_INSECURE_TLS` does not
-apply. Until a certificate is confirmed the adapter contacts nothing and the card
-reads «Требуется настройка».
+- Bambu: firmware, настройки сопла, AMS/AMS Lite, active tray / внешняя катушка;
+  модель определяется по устройству, build volume — из каталога.
+- Moonraker: firmware, bed size и сопло из конфигурации, доступные датчики из
+  списка объектов. Материал K2 — metadata **текущего нарезанного файла**, не RFID.
+  В простое он может быть неизвестен; CFS `box` / `filament_rack` с `-1`
+  и без active slot не используются как источник материала.
+- Creality WS: только факты, присутствующие в heartbeat, без выдуманных полей.
+- Anycubic: identity из `/info`, firmware из MQTT `info`; volume 260³ мм из
+  каталога только для `modelId=20030`. Сопло, материал, ACE и расход неизвестны.
 
-- *Confirming:* «Сертификат» on the printer's row calls
-  `POST /api/printers/config/:id/tls-certificate` — a TLS handshake, no byte
-  sent, nothing stored — and shows what the printer presents; «Подтвердить»
-  PATCHes `tlsFingerprint` with exactly that value. The field can also be
-  pasted (any spelling of the digest; stored canonical) or cleared by hand.
-- *A changed certificate* (reset, firmware update — or another device on the
-  address) reads «сертификат принтера не совпадает с подтверждённым —
-  подключение заблокировано» with the presented fingerprint; retries keep
-  refusing it. It is never adopted by itself: the operator reads it and
-  replaces the pin explicitly.
-- *The limit, measured on the unit:* `/ctrl` hands the broker's certificate
-  **and private key** to any LAN client that performs the handshake. The pin
-  keeps out everything that has not (a reassigned IP, another broker, a MITM
-  without the key); against a host on the same LAN that has, no client-side
-  check can help. The printer's network is the trust boundary — keep it a
-  trusted segment.
+Discovery хранится отдельно от printer row (`printer_discovery`), не меняет
+optimistic version формы на каждом опросе. Фоновый интервал —
+`PRINTER_DISCOVERY_INTERVAL_MS` (по умолчанию 300000); неудача оставляет прежние
+факты с признаком ошибки. Неизменившийся ответ не переписывает БД.
+Bambu/Anycubic читают cache без дополнительного I/O.
 
-**Read-only, enforced in code.** The session publishes exactly one message shape
-— the `info` query above — built in one place and re-checked by
-`isReadOnlyQuery()` before it leaves. There is no function that publishes
-anything else. In the capability table `anycubic-lan` declares every ability
-absent, including the new `supportsJobs`; the admission policy turns that into a
-non-overridable `PRINTER_MONITORING_ONLY` (preflight `monitoring_only`, headlined
-first), so the preview, the planner, a manual launch, the night start and the
-automatic queue all refuse it the same way; file preparation/confirmation refuses
-it with `PRINTER_CAPABILITY_UNSUPPORTED`; pause/resume/cancel/light/start are
-refused by the adapter switches. The printer card reads «Только наблюдение»
-instead of «Готов к печати».
+Диаметр сопла — настройка устройства, а не физический датчик. Bambu faults
+и `sdcard` проверяются отдельно от `idle`: аппаратно наблюдавшийся `0500-C010`
+может блокировать старт при недоступной MicroSD; неизвестным кодам смысл
+не приписывается. Диагностика — [operations](../../docs/operations.md#printer-diagnostics).
 
-**What is read, and how far it is trusted.**
+## SQLite, очередь и жизненный цикл
 
-| Field | Source | Notes |
-|---|---|---|
-| state | `info.data.state` (`free`/`busy`) + `project.state`, `project.pause` | the only lifecycle source; `print` pushes never start, pause or end a job |
-| progress, layer, layers, time left | `project` / `print` pushes (`progress`, `curr_layer`, `total_layers`, `remain_time` in minutes) | `print` only enriches the job `info` confirmed (same task id; same file when there is none — a print started on the screen reports `task_id` `"-1"`) |
-| nozzle/bed temperature and targets | `info.data.temp`, `tempature` pushes | own freshness: older than 60 s → unknown |
-| file | `project.filename` | staging directory dropped |
-| how the last job ended | `last_project.state` (`finished`, `stoped`); else the `print` push that names it for the job in hand (`state: "finished"`) | becomes `stateText`, which the shared classifier reads. On 2.0.2.2 `last_project` stays empty, so the push is the only source; it is words only — the job still ends when `info` says `free` |
-| model, serial, device name | `/info` (`modelName`, `cn`, `deviceName`) | serial is identity here, not a credential |
-| firmware | `info.data.version` | |
-| build volume | catalogue, only for `modelId` 20030 | 260×260×260 mm; never lent to other Anycubic models |
+`QUEUE_DB_PATH` по умолчанию находится рядом с `STATE_FILE_PATH`. В Docker это
+`/app/data/queue.db` на томе `orchestrator-data`. WAL, foreign keys, транзакции,
+optimistic `version` и `AuditEvent` защищают согласованность модели.
 
-Not read (stay `null`, nothing derived): filament consumed (`supplies_usage`
-exists, but its unit and per-slot attribution on a four-colour Kobra X are
-unverified — it must not become a deduction), loaded material and the built-in
-colour changer, nozzle diameter/type, chamber, light, camera, faults. The
-tokenized upload/camera URLs in the `info` report are never stored or shown.
-
-**Freshness.** `busy` with no job, `stopping`, a phase nobody has captured, or a
-`free` printer whose project still claims to print are `unknown` — the poller
-keeps the last real lifecycle state, so no start or completion is ever announced
-from them. A job state `info` has not re-confirmed for 60 s reads `offline`;
-losing the connection clears the job and the temperatures at once, so nothing
-from before a drop is shown as current. `updatedAt` is when the job state was
-observed, never when the cache was read.
-
-**Sessions.** One per printer, in memory (like the Bambu clients). Failures back
-off 5 s → 10 s → … → 5 min with jitter; a connected broker that stops answering
-`info` for 120 s is replaced. `status()` only reads memory, so a dead printer
-never delays the poll of the others. The broker login lives only in the session:
-re-learned by handshake after a restart, a config change, or a refused CONNACK;
-never persisted, logged, audited or returned by any API. Hardware discovery reads
-the session (no I/O) and succeeds only while it is connected.
-
-**Hardware check (2026-10-17, Kobra X, firmware 2.0.2.2).** Read-only, from an
-isolated client running this adapter's handshake, session and parsers (TLS pinned
-to the unit's certificate; no orchestrator, no other printer): two sessions,
-34 minutes in all, during a print started on the screen and through its end; the
-29-minute one never dropped its connection. Anonymized captures:
-`src/infra/printers/anycubic/testkit/kobraXCaptures.ts`.
-
-- `/info` in LAN mode (`ctrlType: "lan"`, `modelId` `"20030"` as a string) carries
-  no firmware version; `info.data.version` does. The `/ctrl` bundle holds
-  `broker, deviceId, deviceType, devicecrt, devicepk, ip, modeId, modelId,
-  modelName, password, username`; the broker accepts the login without the client
-  certificate (TLS 1.3; the server requests none).
-- `info` is answered only when asked (29 ms – 1.1 s); nothing pushes it, so
-  freshness rests on the 20 s query. Silencing the query on purpose: offline at
-  60.5 s, watchdog reconnect at 139 s with the cached login (no new handshake).
-- While printing, `print` pushes arrive unprompted every 4–60 s, each with
-  `action: "start"`; no `tempature`/`status` pushes until the heaters go off.
-- The end of a print: cool-down pushes (`hotbed_cooling_off`,
-  `nozzle_cooling_off`), `info` `busy` + `project.state: "nozzle_cooling_off"`
-  (read as `unknown`), lifetime statistics on the info topic
-  (`action: "statistic-reported"`, ignored), `status` `free`, the `print` push
-  with `state: "finished"`, then `info` `free` with `project: null` — and
-  `last_project` empty.
-- Certificate pinning, through this adapter's own registry (readiness → session
-  → `openPinnedTls`): the confirmed fingerprint connects and telemetry flows; a
-  wrong one is refused before the login is written; none contacts nothing. The
-  certificate (self-signed `O=AnyCubic`, RSA, serial `01`, valid from
-  2026-09-24) survived a power cycle byte for byte, and a fresh pinned session
-  was back online within 3 s with telemetry.
-
-Still unverified: idle-to-print start, pause/resume and cancel words, the
-certificate across a firmware update or a factory reset, and an ending while
-the session is reconnecting (it then reads as an ambiguous ending for the
-operator).
-
-## Persistent print-queue model (SQLite)
-
-The print queue lives in a durable, relational model in **SQLite**
-(`QUEUE_DB_PATH`, default `<state dir>/queue.db` on the same `/app/data` volume;
-WAL + foreign keys on, schema managed by numbered migrations). This is the
-**single source of truth** for the queue — the flat JSON "queue jobs" store has
-been retired (see [migration](#migration-from-the-json-queue) below). It keeps
-the three concerns the flat model conflated strictly apart:
-
-- **task state** (`PrintTask`) — what the operator wants,
-- **assignment state** (`Assignment`) — the binding of a task to a printer/bed,
-- **actual-print state** (`PrintRun`) — what the machine actually did.
-
-A launched task is **never deleted**: the chain `PrintTask → Assignment →
-DispatchAttempt → PrintRun` is preserved by foreign keys, so how a task was
-launched survives as history. Bed occupancy is tracked as a `BedCycle`
-(`CLEAR → RESERVED → RUNNING → AWAITING_CLEARANCE → CLEAR`, plus `UNKNOWN` for a
-lost state), so a printer is never assigned onto a bed that still holds the last
-part. Every state move is validated against the domain transition maps
-(`src/domain/print/states.ts`) before it is written, contended rows carry an
-optimistic `version`, related changes run in one transaction, and every mutation
-appends an `AuditEvent` (the structured successor to the JSON event feed).
-
-Layering (the domain layer never imports `node:sqlite`):
-
-- `src/domain/print/` — entity types, state machines, repository **ports**.
-- `src/infra/db/` — connection + migrations, SQLite repository adapters, and the
-  one-time legacy import.
-- `src/app/printQueue/` — `PrintQueueService` (transactional orchestration) and
-  the legacy-format projection.
-- `src/modules/print/` — the `/api/print` HTTP surface.
-
-## Operator schedule & manual operations
-
-The queue model above answers "is the machine ready?". It cannot answer the
-question a farm actually runs on: *the print finished at 03:00, so when is that
-printer usable again?* The answer is not 03:00 — it is "once a human is awake,
-present, and has taken the part off the plate". That is modelled explicitly
-(`src/domain/operations/`, migration `011`).
-
-**Schedule.** One or more `Operator` rows (multi-operator from the start — the
-two rules that matter, "cannot do two things at once" and "is asleep", are
-per person), each with:
-
-- an **IANA timezone** — `null` means *unknown*, never the container's `TZ`;
-- **recurring weekly windows** on two separate tracks, `available` and `sleep`,
-  stored as **local minutes since midnight** so they survive DST unchanged
-  (`08:00` stays `08:00` on both sides of a transition). A window whose end is
-  ≤ its start wraps past midnight — the normal shape of a sleep schedule;
-- **date exceptions** (`available` / `sleep` / `off`) that *replace* that local
-  date's recurring rules, so an exception can narrow a day and not only widen it;
-- **absences** over UTC instant ranges, which beat everything else.
-
-Precedence is *absence → sleep → availability*. Resolution is pure and
-fail-closed (`resolveAvailability`): an unknown zone, no operator or an inactive
-one yields `UNKNOWN`, which is **not** the same fact as `OFF` — only the former
-blocks automation.
-
-**Manual operations.** Eight typed physical interventions — `PART_REMOVAL`,
-`PLATE_SERVICE`, `MATERIAL_CHANGE`, `SPOOL_CHANGE`, `NOZZLE_CHANGE`,
-`CALIBRATION`, `VISUAL_INSPECTION`, `FILE_TRANSFER_CONFIRM` — each with its own
-duration (a nozzle change is not a spool swap), an allowed window, a confirming
-actor, an actual duration and a full audit trail:
-
-```
-PENDING → READY → IN_PROGRESS → COMPLETED
-                     ↘ FAILED | CANCELLED
+```text
+PrintTask → Assignment → DispatchAttempt → PrintRun
+BedCycle: CLEAR → RESERVED → RUNNING → AWAITING_CLEARANCE → CLEAR
+                                                     ↘ UNKNOWN при потере фактов
 ```
 
-`PENDING ⇄ READY` is **derived**, not guessed: an operation becomes performable
-only when the schedule says somebody is available and its window has opened, and
-falls back to `PENDING` when they go to sleep. `COMPLETED` is terminal.
+Task — намерение оператора; assignment — назначение; run — фактическая печать.
+История запущенного задания сохраняется. Завершение открывает ручную операцию
+снятия детали; `idle` сам по себе не означает свободный стол.
 
-**What this changes for dispatch.** A finished run opens the clearance operation
-in the same transaction that moves the bed to `AWAITING_CLEARANCE`. While a
-`blocking` operation is open the printer is **busy**: `DispatchEligibility`
-raises `MANUAL_OPERATION_REQUIRED`, which is non-overridable and applies in
-`manual` mode exactly as in `night` mode — a manual start cannot walk past a full
-plate. Confirming the operation (a named human, never telemetry) is what moves
-the bed to `CLEAR`.
+Очередь одна: основной вид `/api/queue` и планировщик `/api/print/scheduler`
+читают те же строки через `PrintQueueService`. Старый JSON queue импортируется
+один раз, транзакционно; marker ставится только при commit. До успешного импорта
+JSON сохраняется, после — queue в нём пуст. Поздно появившиеся legacy-задания
+попадают в `NEEDS_REVIEW`, не становятся вторым исполняемым источником.
 
-Two things the brief keeps apart and so does this model: **a print may run
-unattended** (`unattendedAllowed`) and **the queue may continue automatically**
-(`automaticContinuationAllowed`, plus an operator who can actually perform the
-intervention). The first never implies the second. Night auto-start and
-automatic continuation remain **off**; when the schedule, the timezone, an
-operation's duration or the operator's state is unknown, the projection reports
-`null` and automation is refused rather than guessed.
+`state.json` сохраняет feed, счётчики, автоматизации, snapshot metadata,
+отложенные списания и долги; запись temp-file + atomic rename. Телеметрия,
+ручной light override и складской cache не сохраняются. История обслуживания
+и дальний план (`/api/maintenance`, `/api/plan`) пока пусты, секции скрыты в UI.
 
-API: `/api/print/schedule` (+ `/exceptions`, `/absences`) and
-`/api/print/operations` (+ `/types`, `/:id/claim`, `/:id/complete`, `/:id/fail`,
-`/:id/cancel`). Dashboard section: **Оператор**.
+Миграции `001`–`019` выполняются до приёма трафика и сохраняются в репозитории.
+Образ отказывается читать БД новее известной ему схемы (`SchemaTooNewError`).
+Миграции только вперёд; [откат и восстановление](../../docs/operations.md#schema-compatibility)
+требуют совместимых образа и данных.
 
-### Migration from the JSON queue
+### Запуск и безопасность команд
 
-The queue was originally a flat array in `state.json`. It now lives entirely in
-SQLite; the old `QueueStore` and its JSON serialization are gone.
+Единая `evaluateDispatchEligibility` работает на preflight и внутри reserve
+транзакции dispatch. Preview, manual, night и auto используют одну политику.
 
-**First boot with an old `state.json`.** The legacy operator queue is imported
-**once** into the SQLite model — old ids kept as `legacyRef`, in their original
-order — and the whole import runs in a **single transaction**. Idempotence is
-guaranteed two independent ways: an `app_meta` marker (`legacy_import.state_json`)
-written *inside* that transaction, and a per-job `legacyRef` check. The marker is
-therefore set **only** after a successful commit, so an import that fails or is
-interrupted leaves **no** marker and no partial rows — it is simply retried on the
-next boot. A job that appears in the JSON queue *after* the cutover (an older
-binary, a hand edit) is imported fail-closed into `NEEDS_REVIEW` — visible to the
-operator, never silently runnable from a second source of truth. See
-`src/infra/db/legacyImport.ts`.
+- `auto` не мягче `night`: любой review, неизвестный материал, неподтверждённый
+  стол, отсутствие `unattendedAllowed` блокируют. Автоочередь выключена через
+  `AUTO_QUEUE_ENABLED=false` и persisted rule; неясный исход её старта разоружает правило.
+- `accepted` — команда принята, run ещё `PENDING`, bed `RESERVED`, guard удержан.
+  `started` подтверждается устройством/наблюдением. Нет печати после окна
+  подтверждения — `UNKNOWN`, printer hold, **без автоматического повтора**.
+- Idempotency key и durable start guard предотвращают повторный dispatch,
+  включая restart и отмену во время отправки.
+- Логическая отмена ожидающего задания не останавливает устройство. Физическая
+  остановка проверяет текущий run и имя файла; отмена не освобождает стол.
+- AMS feed plan закрепляется на run и перепроверяется по свежей телеметрии;
+  неоднозначный tray нельзя угадать. Аппаратная приёмка AMS и `plate_2` отдельно.
+- Повтор завершённой работы создаёт новое задание тех же проверенных байт,
+  без новой нарезки, с дедупликацией по `requestId`. FAILED имеет свой retry.
+- `day_night_preference` и его проекция `night` согласованы; разрешение печати
+  без человека не означает разрешения автоматического продолжения очереди.
 
-**What happens to the JSON.** Until the import marker is set, the original
-`queue` section is preserved verbatim in `state.json` (so a failed migration can
-be retried, and an old binary can still read it on a rollback). Once the marker is
-committed, the `queue` section is written **empty** — there is **no** dual-write,
-and new jobs live only in SQLite. Restoring an **old** backup (a `state.json` with
-a populated queue and no committed SQLite marker) re-runs the one-time import and
-reproduces every job; a **new** backup carries the queue in `queue.db`, not the
-JSON. `FarmStore.queueJsonSnapshot` implements this gate.
+Расписание оператора хранит IANA timezone, локальные weekly windows, exceptions
+и UTC absences; приоритет `absence → sleep → availability`. Неизвестное расписание
+блокирует автоматику. Восемь типов manual operations имеют собственные длительности,
+actor и audit. Открытая blocking operation запрещает dispatch даже в manual;
+свободный стол подтверждает человек.
 
-Remote start and dispatch live in `src/app/dispatch/` (the transactional
-`DispatchService` + the fail-closed `evaluateDispatchGate` admission check);
-manual planning lives in `src/app/scheduling/` (`SchedulerService` +
-`src/domain/scheduling/`).
+## Файлы, анализ и нарезка
 
-### One queue, two views
+`/api/print/artifacts` принимает один файл multipart. SHA-256 считается потоково;
+blob атомарно фиксируется в `artifacts/sha256/<prefix>/<hash>` **до** записи ссылки
+в SQLite. Artifact, DRAFT task, pending analysis и audit создаются транзакционно;
+загрузка сама не ставит задание в очередь.
 
-The operator sees the queue through **two interfaces that are views over the one
-SQLite model — never two queues:**
+Анализ выполняется ограниченным worker pool, переживает restart pending/running
+работ и разделяет состояние выполнения и verdict (`needs_preparation`,
+`schedulable`, `needs_input`, `review`, `blocked`). `schedulable` не разрешает автозапуск.
 
-- the **simplified queue/night** section of the main dashboard, driven by the
-  legacy `/api/queue` compatibility adapter (reads served inside
-  `GET /api/dashboard` as `queue` + `night`); and
-- the **scheduler** (`/api/print/scheduler`) — the fuller view: per-task
-  priority/deadline/`notBefore`/day-night/pin, the compatibility matrix and
-  revisioned plans.
+- Формат определяется содержимым. STL не имеет единиц: их подтверждает оператор.
+  Подтверждение связано с хешем, масштаб входит в cache key и SliceVariant metadata;
+  проверяется именно тот вариант, который будет отправлен.
+- 3MF разбирается как недоверенный ZIP с ограничениями размера/сжатия/числа записей,
+  запретом traversal, symlink и duplicates. XML — без DTD/entities. Учитываются
+  transforms, пластины и реальный встроенный G-code.
+- G-code только анализируется, команды не исполняются. Неизвестный target,
+  опасные команды (`M500`, `M502`, `M302`) или ненадёжные bounds требуют review/block.
+- Утверждённая ревизия профиля неизменяема. Новые resolved bytes дают новую
+  revision; старый approved set продолжает использовать согласованные настройки.
+- Без рабочего `ORCA_SLICER_CMD` нарезка честно BLOCKED. Проверенный runtime
+  подключается через `compose.orca.yml`; каталог и provenance —
+  [config/slicers/orca/README.md](config/slicers/orca/README.md).
 
-Both go through the **same** application use cases on `PrintQueueService`
-(add/hold/release/cancel/reorder/pin) and read the **same** ordered rows
-(`repositories.queue.listOpen()`), so a change through either surfaces in the
-other with the same id, order and status. The scheduler works with the canonical
-model directly; the legacy view is a lossy **projection** of it
-(`PrintQueueService.projectLegacyQueue` → the flat `QueueJob`; a task/entry state
-pair maps to `ready`/`review`).
+Вендорский start G-code KE содержит `BED_MESH_CALIBRATE`: output gate требует
+`schedulable`, поэтому внутренняя нарезка может блокироваться как
+`output_not_schedulable`. Не ослабляйте политику ради успешного примера;
+внешний G-code с review и ручным переносом — отдельный путь.
 
-There is **one night rule set**, not two. A physical night start
-(`POST /api/queue/night/start`) is admitted only by `evaluateDispatchGate(mode:
-"night")` inside its reserve transaction. The dashboard's night section does not
-re-derive readiness — `nightPlanner` is a pure **projection** of that same gate
-(via `FarmStore.nightGateInfo`), so the blockers the operator sees are exactly
-the reasons the start would refuse. `src/app/scheduling/`'s night report is the
-*planning-stage* view of the same model (candidate slots from ready
-slices/approved sets/material overrides), not a competing dispatch rule.
-Cross-interface consistency is pinned by `src/app/queueConsistency.test.ts`.
+## Мониторинг, свет и камеры
 
-## Launch path: rules that hold everywhere
+`PrinterPoller` сериализует наблюдения, включая чтения после команд. `unknown`
+не завершает печать; после reconnect canonical run восстанавливается из SQLite
+с прежним id, `startedAt` и AMS baseline. Необъяснимое окончание остаётся
+`UNKNOWN` до решения оператора.
 
-The path from "file" to "print running" rests on a few rules. Each lives in one
-place, and every start path — the launch window, the night start, `start-next`,
-the automatic queue — goes through it. Most were introduced or tightened by the
-2026-10 modernization; its journal,
-[ALBEDO_MODERNIZATION_PROGRESS.md](../../ALBEDO_MODERNIZATION_PROGRESS.md),
-records the rationale and the defects each one closed.
+Политика света: manual override (5 минут, в памяти) → отключённая автоматика
+(не вмешиваться) → lease видимой вкладки (~90 секунд, renewal ~30 секунд) →
+solar/fixed schedule → выключено. Солнечный расчёт локальный, ошибки дают
+`LIGHT_FALLBACK_WINDOW` и warning. `NIGHT_PRINT_WINDOW` отдельно управляет
+ночной печатью и темой панели. `lights[]` различает desired, actual и reason;
+решение политики не доказывает физическое переключение.
 
-- **One admission policy, two stages.** `evaluateDispatchEligibility`
-  (`src/domain/dispatch/eligibility.ts`) runs at `preflight` (the launch preview,
-  queue readiness, the top of `LaunchService.launch`) and at `dispatch` (inside
-  `DispatchService.reserve`, adding only the device-file rules). A preview that
-  says «можно» followed by a launch that refuses is a bug: extend the policy with
-  a fact or a reason, never add a lighter check beside it.
-- **Three modes of that one policy: `manual | night | auto`.** `auto` is at least
-  as strict as `night`: every `review` is a blocker, nothing is confirmed on a
-  person's behalf (an unrecorded bed or unreported material stays a blocker), and
-  the task must allow unattended printing (`unattendedAllowed`). The automatic
-  queue (`src/app/automation/autoQueue.ts`) starts jobs only through
-  `LaunchService.launch(…, { mode: "auto" })`; it is off twice
-  (`AUTO_QUEUE_ENABLED`, default `false`, and the persisted `auto-queue` rule) and
-  disarms itself when the outcome of its own start is unknown.
-- **Accepted ≠ started.** A start the device accepted is phase `accepted` (run
-  `PENDING`, bed `RESERVED`, start guard kept); it becomes `started` only when
-  telemetry sees the print or the device confirms it. Accepted but not printing
-  after 3 minutes → run `UNKNOWN`, the printer is held, nothing is re-sent. A
-  launch carries an idempotency key, and the durable start guard refuses a second
-  dispatch.
-- **`idle` is not a clear bed.** `resolveBedOccupancy`
-  (`src/domain/print/bedOccupancy.ts`): `CLEAR` only from a recorded clearance,
-  nothing tracked → `UNKNOWN`, an observed print beats a `CLEAR` record. A
-  finished run opens the part-removal operation; a named human confirming it (or
-  ticking «Стол свободен» in the launch window, never in `auto`) is what clears
-  the bed. Prints started outside Albedo open an external bed cycle too.
-- **Cancelling never frees a bed with a part on it.** Pending work is cancelled
-  logically; a print in flight is stopped only physically
-  (`POST /api/print/tasks/:id/stop`, identity-checked), and the bed then waits for
-  clearance.
-- **Bambu AMS trays are planned, not guessed.** `src/domain/printers/feedPlan.ts`
-  maps each filament of the job to a tray (type, then colour); ambiguity is
-  `AMS_SLOT_AMBIGUOUS` with choices for the operator, and the plan is pinned on
-  the run and re-checked against a fresh report right before publishing.
-- **A reprint is a new print of the same verified bytes.** Finished tasks are
-  history and are never reopened (`src/domain/print/reprint.ts`,
-  `src/app/printQueue/history.ts`): a reprint gets its own copy of the slice
-  variant, or queues the file as an upload, never re-slices, and is idempotent by
-  `requestId`. A FAILED task keeps its own retry (`/release`).
-- **An approved profile revision is immutable.** The same bytes resolved
-  differently become a new revision (migration 017); a set approved on a
-  superseded revision keeps slicing with exactly the approved settings and offers
-  a successor set.
-- **Restart safety has one owner.** Whether the orchestrator may be recreated now
-  is answered by `src/app/restartSafety.ts` (`GET /restart-safety`); `deploy.sh`
-  only renders the verdict
-  ([docs/operations.md](../../docs/operations.md#deploying-during-a-print)).
-- **Two columns, one fact.** `day_night_preference` decides *when* a task may run
-  and `night` is its persisted projection — any path that writes a task sets both.
-  `unattendedAllowed` answers a different question: *whether* it may run with
-  nobody present.
-- **Configured material ≠ loaded spool.** A printer's configured `material` is
-  what it *can* print (`supportedMaterials`); the loaded filament comes only from
-  live telemetry, and unknown loaded material is a `review` the operator confirms
-  in the launch window (a blocker in `auto`).
+После трёх неуспешных scheduled light-команд — пауза 5 минут и одно предупреждение.
+Moonraker использует `SET_PIN` и status object (K2: `LED`), Bambu — `system.ledctrl`.
+Creality WS не управляет светом, Anycubic закрыт policy.
 
-## File upload & analysis (`/api/print/artifacts`)
-
-Operators upload sliceable models and G-code straight into the SQLite model —
-**never** the legacy queue or `state.json`. One file per request keeps per-file
-upload progress accurate in the dashboard.
-
-**Content-addressed storage.** The SHA-256 is computed *while streaming*; the
-file is written to a temp dir and **atomically moved** to
-`ARTIFACT_STORAGE_ROOT/sha256/<prefix>/<full-hash>` only once complete. Bytes
-live on disk, never in SQLite; the DB stores only the relative storage key
-(`Artifact.source`), never an absolute path. Identical content is stored **once**
-(the API reports `blobExisted: true` on a re-upload). Temp files are removed on
-any error — over-limit, aborted connection, DB failure — and a blob orphaned by a
-post-commit DB error is cleaned up unless another artifact already references it.
-
-**One transaction per upload.** After the blob lands, an `Artifact`, a
-`PrintTask` in **`DRAFT`** (deliberately *not* enqueued — no `QueueEntry`), a
-`pending` `ArtifactAnalysis` and their `AuditEvent`s are created together.
-
-**Analysis is off-request.** A bounded in-process worker pool
-(`ANALYSIS_CONCURRENCY`, `ANALYSIS_TIMEOUT_MS`) analyses the file; the dashboard
-polls the analysis row. `pending`/`running` analyses left by a crash are
-re-queued on the next boot. Technical **state** (`pending` → `running` → `ready`/
-`failed`) is kept distinct from the **verdict** (`needs_preparation`,
-`schedulable`, `needs_input`, `review`, `blocked`). A successful analysis leaves
-the task a `DRAFT`; a `blocked` verdict parks it in `NEEDS_REVIEW`. A `schedulable`
-verdict means *fit for later planning only* — never an auto-start authorisation.
-
-**Content-based format detection** (magic bytes + structure, never the extension
-alone; a mismatch is escalated to at least `review`), then:
-
-- **STL** — binary + ASCII; variant, triangle count, per-axis bounds, bounding
-  box; detects truncated/over-declared binary, empty model, non-finite coords.
-  Units are `unknown` (STL carries none) — only heuristic size warnings, never a
-  millimetre claim. Always `needs_preparation` (a source model needs slicing).
-- **3MF** — treated as an untrusted ZIP: a hand-rolled `SafeZip` reader (Node
-  `zlib`, no third-party unzip) enforces entry-count, per-entry/total decoded
-  size and compression-ratio caps, and rejects path traversal, absolute paths,
-  symlink entries and duplicates **before** inflating anything; the model XML is
-  parsed with DTDs/entities forbidden (no XXE / billion-laughs) and a size cap.
-  Extracts unit, object/build-item counts, a transform-aware bounding box,
-  slicer metadata, thumbnails and embedded profiles; classifies as generic model
-  / slicer project / sliced-or-G-code 3MF / unknown. A plain project is
-  `needs_preparation` (never auto-ready); a sliced payload follows G-code rules.
-- **G-code** — streamed line by line (constant memory, never executed): slicer +
-  version, estimated time, material + usage, layer height, nozzle diameter,
-  temperatures, tool count, firmware flavor, target printer, and a toolpath
-  bounding box computed with the coordinate model (G90/G91, M82/M83, G92,
-  G20/G21) and a reported confidence. Unknown target/slicer, a risky command
-  (`M500`/`M502`/`M302`) or low bbox confidence force at least `review` — foreign
-  G-code is never assumed safe for the night queue.
-
-Runtime dependencies added for this: **`@fastify/multipart`** (streaming
-multipart with a size limit) and **`fast-xml-parser`** (pure-JS XML, no network/
-DTD). ZIP handling uses Node's built-in `zlib` — no unzip dependency.
-
-Layering: analyzers + service under `src/app/artifacts/`, the blob store under
-`src/infra/storage/`, migration `002_artifact_analysis` extends
-`artifact_analyses` (new `running` state + typed `verdict`/`detected_format`/
-`warnings`/`blockers`/`data`/`analyzer_version` columns; migration `001` is left
-as shipped).
-
-Printer lights are governed by the **solar light policy** (`LIGHT_*`
-variables; `src/app/solarLightPolicy.ts`), applied on each poll to every
-supported printer with this priority (top wins):
-
-1. **manual override** — an operator command holds its state for 5 minutes;
-2. **automation disabled** — the `night-lights` rule off means hands off;
-3. **monitoring lease** — while a dashboard tab is visible it renews
-   `POST /api/monitoring/lease` (~90 s TTL), and the lights stay on so the
-   cameras show something;
-4. **dark & active** — from `sunset + LIGHT_ON_OFFSET_MINUTES` (default −30)
-   until `sunrise + LIGHT_OFF_OFFSET_MINUTES` (default +30) the light is on
-   for printers that are printing/paused (`LIGHT_ONLY_WHEN_ACTIVE=true`; set
-   it to `false` to light idle printers at night too);
-5. otherwise — off.
-
-Sunrise/sunset are computed **locally** (suncalc; no external APIs) for
-`LIGHT_LATITUDE`/`LIGHT_LONGITUDE` (default Kyiv 50.45/30.52), once per
-farm-local calendar day (`TZ` in Docker) with a recompute on the date
-rollover. If the solar calculation is impossible (broken coordinates, polar
-day/night) or the config is invalid, the service does **not** crash: it
-degrades to the fixed `LIGHT_FALLBACK_WINDOW` (default `16:00-08:00`, may
-cross midnight) and reports a warning to the event feed plus the dashboard
-warnings block. If even the window is unusable, the safe default keeps an
-actively printing printer lit. `LIGHT_SCHEDULE_MODE=fixed` skips the solar
-calculation entirely and switches on the fixed window — without an explicit
-`LIGHT_FALLBACK_WINDOW` it takes the legacy `NIGHT_PRINT_WINDOW`, which
-reproduces the pre-solar behaviour.
-
-Per printer, `GET /api/dashboard` exports the policy verdict as
-`lights[]`: `desired` (what the automation wants), `actual` (last reported
-physical state), a machine-readable `reason` (`manual_override`,
-`monitoring_lease`, `solar_dark_active_print`, `solar_daylight`,
-`printer_inactive`, `automation_disabled`, `fallback_window`, `unsupported`,
-…), `nextTransitionAt` and `usingFallback`. The reason describes the
-*decision*, never whether the physical command worked.
-
-`NIGHT_PRINT_WINDOW` (default `21:30 – 07:30`) deliberately stays a separate
-setting: it governs night-print planning and the dashboard theme, **not** the
-lights. `GET /api/dashboard` (and `GET /api/queue/night`) exports it both as
-the human label (`night.window`) and machine-readable bounds
-(`night.windowStart` / `night.windowEnd`, `"HH:MM"`, `null` when the
-configured window cannot be parsed). The dashboard's automatic dark/light
-theme follows these fields instead of keeping its own copy of the schedule —
-the frontend only has one built-in fallback mirroring the default, used until
-the first successful payload.
-
-**Manual override.** A manual light command is allowed at any time. It is
-serialized with the scheduler through a per-printer light queue, so a manual
-command and a scheduled one can never interleave on the wire, and a stale
-scheduled command can never clobber a fresh manual one. After a manual command
-the chosen state is held for **5 minutes**; once that window passes the
-schedule takes over again — turning the light on if the light policy says on,
-off if it says off. Two caveats:
-
-- The return to the schedule happens on the **next poll tick**, not exactly at
-  the 5-minute mark, so the effective hold is `5 min + up to
-  PRINTER_POLL_INTERVAL_MS` (default 10 s).
-- The override lives **in memory only**. Restarting the orchestrator drops it,
-  and the schedule may reassert the scheduled state on the first poll after
-  restart. This is intentional — a five-minute hold is not worth persisting;
-  persist it only if that ever becomes a requirement.
-
-If a scheduled light command is sent but the reported state never converges to
-the target (wrong `pin`, `SET_PIN` accepted but nothing physically changes, or
-`output_pin <pin>` reflecting a different device), the poller stops retrying
-after 3 attempts, backs off for 5 minutes, and logs/feeds **one** warning
-naming the pin to check in `printer.cfg` — instead of resending every tick and
-flapping the UI. The counter resets on convergence or on a manual command.
-
-**Per protocol.** Bambu uses local MQTT `system.ledctrl` (`light.bambuNode`,
-default `chamber_light`). Moonraker uses `light.pin` to generate
-`SET_PIN PIN=<pin> VALUE=1/0` and reads `output_pin <pin>`; use explicit
-`light.onGcode`, `light.offGcode`, `light.statusObject` and `light.statusField`
-for custom setups. **The Creality K2 in this deployment is driven over
-Moonraker**, not the Creality WebSocket adapter — its config uses
-`protocol: "moonraker"`, `port: 4408`, `light: { pin: "LED" }`, so its light is
-`SET_PIN PIN=LED VALUE=1/0` read back from `output_pin LED`. Creality
-**WebSocket** light control is not implemented for any model.
+Камеры доступны через `camera.jpg` / `camera.mp4`, приватные URL не возвращаются
+клиентам. K2 и кандидат Kobra X используют существующий go2rtc; браузеру открыт
+только signalling WebSocket с точной allowlist. Снимок с `ensureLight=1` имеет
+побочный эффект и требует token; dashboard nginx блокирует такой GET.
 
 ## Filament warehouse (fulfillment)
 
-Fulfillment owns the filament warehouse; the orchestrator keeps **no copy of the
-stock**. One client (`src/infra/fulfillment/inventoryClient.ts`) is the only door
-between the two services, and it runs in both directions: writes (auto-consume,
-loaded-reel binding) and reads (the balances the dashboard's «Материалы» card
-shows). Everything is gated by the same `FULFILLMENT_API_URL` switch, so the farm
-still runs standalone.
+[`inventoryClient.ts`](src/infra/fulfillment/inventoryClient.ts) — единственный
+клиент соседнего склада. `FULFILLMENT_API_URL` пуст — интеграция выключена.
+`ATELIER_FULFILLMENT_TOKEN` передаётся как `x-service-token`.
 
-### Reading the shelf (the «Материалы» card)
+- Summary и loaded bindings читаются фоном (`FILAMENT_STOCK_REFRESH_MS`, 60 с).
+  Недоступный склад сохраняет последний cache с error/stale, не становится пустым.
+  Пороги остатков принадлежат fulfillment; очередь считает только известный расход.
+- Live material/colour синхронизируются в loaded-reel binding; отсутствие hint
+  не стирает прежнюю привязку. AMS учитывается по slot. Склад разрешает hint
+  в существующую позицию, не создаёт вымышленную катушку.
+- По окончании completed/cancelled/failed списывается измеренное потребление:
+  Moonraker — extruded length, Bambu — падение AMS remain × nominal weight.
+  Прогноз слайсера автоматически не списывается. Квантование remain и неизвестный
+  baseline дают ограничение точности либо долг, а не выдуманные граммы.
+- Стабильный idempotency key на run/tray защищает повторную доставку. Сетевые
+  ошибки/5xx сохраняются в retry queue `state.json`; бизнес-отказ не ретраится
+  автоматически и остаётся долгом. Внешняя печать без canonical run и
+  непроверенный расход Anycubic также требуют ручной сверки.
+- `/api/monitoring/filament-debts`: settle повторяет исходный payload/key;
+  acknowledge отмечает внешнее урегулирование. Для неизмеренного долга граммы
+  явно задаёт оператор.
 
-`FilamentStock` (`src/app/filamentStock.ts`) polls
-`GET /api/inventory/summary` + `GET /api/inventory/printer-filament` on its own
-cadence (`FILAMENT_STOCK_REFRESH_MS`, default 60 s) and caches the answer in
-memory — nothing is persisted, and the cache is rebuilt from fulfillment on the
-first poll after a restart. `GET /api/dashboard` reads that cache
-**synchronously**: a hot dashboard read never makes a call to a neighbouring
-service, and can never fail because that service is slow.
+Fulfillment читает `/api/printers/inventory` (включая disabled, без connection
+параметров), `/api/printers` и снимки. DTO закреплены в `contracts/*.json`;
+[процедура синхронизации](../../docs/operations.md#wire-contracts).
+Telegram/outbox принадлежат fulfillment, не оркестратору.
 
-The card distinguishes four states that used to render identically as «учёт не
-подключён» — the whole point of `materials.source`:
+## Разработка и тесты
 
-| state | `source` | what the operator sees |
-| --- | --- | --- |
-| not configured | `kind: "none"` | «учёт не подключён», naming `FULFILLMENT_API_URL` |
-| first read in flight | `pending: true` | «склад опрашивается» |
-| configured, silent | `ok: false` + `error` | last known balances, flagged, with the reason |
-| answered | `ok: true` | the balances, `stale` once the answer ages past 3× the interval |
-
-A warehouse that is **down** must never render as a warehouse that is **empty**,
-and an empty shelf must never render as one that is absent. On an outage the
-previous balances are kept and labelled, never blanked; the outage also raises an
-operator warning and shows on the «Склад филамента» system row.
-
-What the projection (`src/app/readModels/buildMaterials.ts`) will and will not
-say:
-
-- **thresholds belong to fulfillment.** A position's level bar is scaled against
-  that position's own `lowStockG`, and its colour comes from fulfillment's
-  `status` — the orchestrator never re-derives «low» from a hardcoded fraction.
-- **resin stays empty.** Fulfillment tracks none, so the list is empty rather
-  than a zeroed column that would read as «we have no resin».
-- **queue demand counts only what was measured.** Jobs are grouped by material
-  (the queue names a material, never a colour) and matched against the sum of
-  that material's positions; jobs with no filament estimate are counted and
-  stated (`+N без оценки`) instead of silently lowering the total. With an
-  unreadable shelf the demand is reported alone — no shortage and no all-clear
-  is claimed against unknown stock.
-- **reel bindings are the truth about what is loaded**, better than the material
-  typed into a printer's config. Bindings for printers this farm does not have
-  are dropped (fulfillment keeps them as history; they name no machine here).
-
-## Filament auto-consume
-
-When a print **ends** — completed, cancelled, or failed — the poller deducts the
-filament the device MEASURED from the fulfillment warehouse via
-`POST /api/inventory/filament/consume`. A cancelled or failed print consumed
-real material and the device's own figure (AMS remain-drop / extruded length)
-measures exactly how much, so it is deducted the same way; what is never
-deducted is a job's *planned* total. All stock logic stays in fulfillment —
-the orchestrator only reports what a printer consumed. Disabled (a no-op) until
-`FULFILLMENT_API_URL` is set, so the farm still runs standalone. Warehouse
-errors are **soft** — never fatal to the poll loop — and split by whether
-delivery is worth repeating:
-
-- **Rejected** (fulfillment processed the call and refused: no loaded reel, not
-  enough stock, material mismatch): no auto-retry — retrying would re-fail
-  identically, and once the operator corrects the stock by hand a late
-  auto-retry could double-deduct. The measured quantity is **not** discarded:
-  it becomes a durable debt (see below) carrying the original payload, so one
-  action settles it after the cause is fixed.
-- **Unreachable** (network error, timeout, 5xx — delivery unknown): the
-  deduction is queued and redelivered with exponential backoff (1 min doubling
-  up to 30 min, given up loudly after 7 days). The queue is persisted in
-  `state.json` (`pendingConsumes`), so a restart cannot lose an owed deduction.
-
-Each deduction carries a stable `idempotencyKey` (minted per print run, and per
-AMS tray), so a re-observed completion or any redelivery cannot double-deduct —
-fulfillment answers `duplicate: true` instead of writing a second movement.
-
-### Unreconciled debts (filament the warehouse never applied)
-
-A print whose consumption did not reach the shelf is recorded as a durable debt
-rather than a feed line — the feed is capped and unacknowledged, so an
-obligation left only there scrolls away and the warehouse drifts a spool at a
-time. Debts are persisted with the farm state and exposed for an operator to
-act on:
-
-    GET  /api/monitoring/filament-debts                 the outstanding list
-    POST /api/monitoring/filament-debts/:id/settle      post the deduction now
-    POST /api/monitoring/filament-debts/:id/acknowledge settled outside the system
-
-Three ways a debt appears: a print nobody tracked (started on the printer itself,
-or otherwise not re-adoptable after a restart), a print nothing could measure (an
-external spool with no `tray_weight`), and a
-**measured** deduction the warehouse refused or that was finally dropped from
-the retry queue.
-
-`settle` re-posts the debt's ORIGINAL payload, `idempotencyKey` included, so a
-delivery that had in fact landed answers `duplicate` and nothing moves twice. A
-refusal leaves the debt standing with the new reason — a debt that vanishes on a
-failed settlement is the drift this ledger exists to prevent.
-
-For a debt with nothing measured, `settle` accepts an operator-stated
-`{ "grams": N }`. That is the one door through which a non-measurement may move
-the warehouse, and it is deliberately narrow: a person names the number, having
-been shown the slicer's estimate beside it. Automatic deduction still never
-accepts an estimate.
-
-### Automatic loaded-reel binding (no manual entry)
-
-The deduction above resolves *which* stock to draw down from fulfillment's
-per-printer loaded-reel binding (`printer_filament_state`). That binding is kept
-current automatically — the operator never has to load filament in the
-fulfillment dashboard. On every poll the orchestrator reports each printer's
-**live loaded reel** — the same telemetry the dashboard shows (active AMS trays
-on Bambu, the current job's sliced material on the K2) — to
-`POST /api/inventory/printer-filament/sync`, and fulfillment resolves it against
-what is actually on the shelf and saves the binding:
-
-- **Resolution is fulfillment's job.** The orchestrator sends raw device hints
-  (a material that may carry a brand suffix like `PLA Basic`, and a `#RRGGBB`
-  colour); fulfillment matches them to an existing stock position by material
-  family and nearest named colour. It **never invents stock** — a material that
-  is not stocked answers `{ resolved: false }` and binds nothing, so the
-  completion deduction honestly reports "no loaded reel" until the operator adds
-  it (rather than deducting a phantom spool).
-- **Per slot.** One binding per AMS slot (`amsTray`), so a multi-colour Bambu
-  print binds and later deducts each slot's own reel. Single-reel printers
-  (Moonraker/K2) bind the printer-level reel (`amsTray` null).
-- **Cheap and soft.** A slot is posted only when its loaded filament *changes*
-  (deduped in memory), gated by the same `FULFILLMENT_API_URL` switch, and never
-  fatal to the poll loop — a failed sync is simply retried on the next poll. The
-  binding is created well before a print finishes, so the completion deduction
-  always has a target. See `src/app/filamentSync.ts`.
-- **Observable, and never blanks a binding.** A missing hint is *not* synced — a
-  printer that reports no loaded reel simply skips the call, so a good binding is
-  never overwritten with a blank when a device goes idle or an AMS empties. Each
-  case is logged so an operator can tell them apart: one `info`
-  (`printer reported no loaded filament — nothing to sync`) per online *dry
-  spell*, deduped so an idle K2 between prints does not log every tick and
-  re-armed once it names a reel again; one `warn`
-  (`loaded filament matched no fulfillment stock`) when a hint resolves to no
-  shelf stock; and one `warn` (`filament sync failed`) on a failed delivery.
-
-The consumed amount comes from whatever the device actually knows:
-
-- **Moonraker / K2** reports extruded length (`print_stats.filament_used`), sent
-  as `lengthMm` for the single loaded reel. A dispatched print still running
-  across an orchestrator restart is re-adopted with its run id
-  (`hydrateRunFromCanonical`) and deducts normally. A print with no canonical run
-  — started on the printer itself — has no reliable idempotency anchor (its
-  reported length spans the whole job), so its completion **skips**
-  auto-deduction, records an unreconciled debt (below) and warns to deduct by
-  hand, rather than guessing a key that two same-day prints could collide on.
-- **Bambu A1 Combo / AMS Lite** MQTT does **not** report grams or length (that
-  lives in slicer metadata). Instead each AMS tray reports `remain` — the
-  printer's own 0–100 % estimate of filament left — and a nominal spool weight.
-  The poller snapshots the trays at print start and, at completion, deducts the
-  drop in `remain` × nominal weight as **grams per tray**, sending one call per
-  used slot with `amsTray` + material/colour hints so fulfillment resolves the
-  right per-slot reel. This naturally covers multi-colour prints. See
-  `src/infra/printers/status/bambuUsage.ts`.
-
-  Caveats, handled honestly rather than papered over: `remain` is quantised to
-  1 % (≈10 g on a 1 kg spool, ≈2.5 g on a 250 g AMS-Lite spool), so very small
-  prints can round to zero; an **uncalibrated** tray (`remain = -1`) or a print
-  the farm never saw start (no start snapshot) yields no data — nothing is
-  deducted, an unreconciled debt is recorded and a warning is fed. The start
-  snapshot of a dispatched print is persisted with its run (`amsStart`), so a
-  restart mid-print does not lose it. For exact per-filament grams the upgrade
-  path is the sliced 3MF `Metadata/slice_info.config` (`used_g`/`used_m`)
-  fetched over the printer's FTPS, pluggable behind the same completion →
-  consume-items seam.
-
-## Hardware discovery: what a printer says about itself
-
-Connecting a printer fills its card in. The farm asks each device what it *is* —
-model, firmware, bed size, nozzle, AMS, loaded filament — and the operator types
-in only what the protocol genuinely cannot report.
-
-**Three sources, one rule.** `resolvePrinterSpecs()`
-(`src/domain/printers/specs.ts`) is the only place in the service that decides
-who wins, so the hardware card, the live view, the scheduler and the published
-inventory can never drift into different answers:
-
-`printer` → `manual` → `catalog` → `unknown`
-
-- **the device wins.** A stale hand-typed value silently overriding the machine
-  would put the manual transfer of specs straight back;
-- **the operator outranks the catalogue.** Both speak about this specific unit —
-  but the operator has seen it, and the catalogue only knows the model;
-- **nothing is invented.** With no source, the value is `null` and the source is
-  `unknown`, which the card renders as «принтер эту характеристику не передаёт».
-
-A manual value that loses is reported as `overriddenManual` and shown as a
-conflict, not dropped — that is how a physical nozzle swap gets noticed, since
-every device's nozzle field is a *setting* rather than a sensor.
-
-**What each protocol can actually tell us.** Nothing outside this table is read,
-and nothing missing from it is guessed:
-
-| Characteristic | Bambu (LAN MQTT) | Moonraker / Klipper (K2, Ender) | Creality WS |
-|---|---|---|---|
-| Firmware | `info.get_version` → `ota.sw_ver` | `/printer/info.software_version` | heartbeat, if present |
-| Device name | — | `/printer/info.hostname` | `DeviceName`, if present |
-| Model | `ota.sn` prefix → catalogue | not reported → manual | `model`, if present |
-| Build volume | ✗ not in the protocol → catalogue | ✓ `configfile.settings.stepper_{x,y,z}.position_max` | — |
-| Nozzle diameter | ✓ `print.nozzle_diameter` | ✓ `configfile.settings.extruder.nozzle_diameter` | — |
-| Nozzle type | ✓ `print.nozzle_type` | ✗ no Klipper field → manual | — |
-| AMS / AMS Lite / CFS | ✓ `print.ams` (kind from the catalogue) | presence of the `box` object only | — |
-| Loaded materials | ✓ `print.ams` / `vt_tray` | job metadata (see below) | heartbeat `materialType`, if present |
-| Extruders, chamber, filament sensor | chamber *sensor* only | ✓ `/printer/objects/list` | — |
-| Filament consumed | ✗ per-AMS-tray `remain` drop only | ✓ `print_stats.filament_used` (mm) | heartbeat `usedMaterialLength` (mm), if present |
-| Faults (codes) | ✓ `print.print_error` + `print.hms` | ✗ a state + message, no code register | error string only |
-| Removable print medium | ✓ `print.sdcard` | ✗ prints from streamed G-code | — |
-
-**Faults are not a status.** A printer can report `idle` and still be unable to
-start: a job that never begins never leaves idle. That is not hypothetical — an
-A1 refused an uploaded, size-verified plate package because it could not read its
-MicroSD card, displayed `0500-C010` on its own screen, and stayed at `IDLE` for
-the whole confirmation window. So `PrinterLiveStatus.faults` is a separate
-channel from `status`, decoded in `status/bambuFaults.ts`, and the codes are
-rendered exactly as the device renders them (`print_error` → `%04X-%04X`, one
-`hms` entry → `%04X_%04X_%04X_%04X`) because that string is the only identifier
-an operator can match against the machine in front of them.
-
-Only codes whose meaning has been **observed on a real machine** carry
-`blocksStart` and may refuse anything; every other code is reported honestly with
-no invented meaning and blocks nothing, because devices emit benign advisories
-through the same register and grounding a printer on an undecoded number is worse
-than the fault. `print.sdcard` is the one structural pre-flight: a `false` there
-is the difference between "the file is on the card" and "the printer can open
-it".
-
-**Anycubic LAN** (see [its section](#anycubic-lan-kobra-x-monitoring-only)):
-model, serial and device name from `/info`, firmware from the `info` report, the
-build volume from the catalogue for `modelId` 20030 (Kobra X) only; no nozzle,
-material, AMS or consumption facts.
-
-**The model catalogue** (`src/domain/printers/modelSpecs.ts`) exists for one gap:
-Bambu's LAN MQTT never states the build volume. The model is identified from the
-serial the *device* reports (`ota.sn`), and the bed size and AMS kind come from
-the table — tagged `catalog` («по модели»), never `printer`. An unrecognised
-serial yields `null` rather than the nearest-looking entry. The serial itself is
-a credential and never leaves the service; only the model it identifies does.
-
-**Cost and cadence.** `PRINTER_DISCOVERY_INTERVAL_MS` (default 300000) governs a
-background pass on the poll loop — fire-and-forget and self-guarded, so a slow
-device can never delay telemetry. Bambu and Anycubic cost **no I/O at all** (they
-read what their sessions already received); Moonraker costs three small LAN
-requests. The pass remembers in memory when it last probed each printer: an
-unchanged probe deliberately writes nothing (so the stored `probedAt` does not
-move), and before that memory existed every poll after the first interval
-re-probed every printer. A probe is also forced on
-create, on a re-address/re-credential, after a successful `POST /:id/test`, and
-by `POST /api/printers/config/:id/discover` («Опросить принтер»). Discovery is
-strictly read-only — it asks a device to describe itself and sends no command —
-so it is safe against a printer that is mid-print.
-
-**Storage** is the `printer_discovery` table (migration 013), one row per
-printer, FK-cascaded on delete. It is kept out of `printers` on purpose: a probe
-every few minutes would bump that row's `version` and collide with an operator
-editing the same record through the optimistic-locking `update`. A failed probe
-records the failure but **keeps the last known facts** — a printer that is
-briefly offline has not changed its bed size — and an unchanged probe writes
-nothing at all.
-
-## Nozzle & active filament (live)
-
-Each printer view carries the nozzle and the currently loaded filament **live
-from the device** where it reports them, so the operator does not have to keep
-the config's `material` field in sync by hand:
-
-- `nozzleDiameter` (mm) — Bambu `print.nozzle_diameter`, **and** Moonraker/Klipper
-  `configfile.settings.extruder.nozzle_diameter` (`parseMoonrakerNozzleDiameter`
-  in `moonraker.ts`), so the **Creality K2** (driven over Moonraker on port 4408)
-  reports it live too. Like Bambu's, it is a *setting* read from the printer's own
-  config, not a sensor. `nozzleType` is **Bambu-only** — Klipper has no standard
-  nozzle-type field.
-- `liveMaterial` / `liveMaterialColor` / `activeTray` — the active filament. On
-  **Bambu**, resolved in `resolveActiveFilament()`
-  (`src/infra/printers/status/bambuUsage.ts`): first the active AMS/AMS-Lite tray
-  (`print.ams.tray_now` → `print.ams.ams[].tray[].tray_type` / `tray_color`), then
-  the external spool (`print.vt_tray`) when no AMS tray is feeding. On the
-  **Creality K2** (Moonraker), resolved in `parseMoonrakerJobFilament()` from the
-  *current job's sliced metadata* (`/server/files/metadata` → `filament_type` /
-  `filament_colors`) while a print is loaded — see the K2 note below. `activeTray`
-  is `null` on the K2 (no slot concept in metadata).
-- `liveMaterialSource` / `nozzleDiameterSource` / `nozzleTypeSource` — where the
-  shown value came from, in the shared vocabulary of
-  [Hardware discovery](#hardware-discovery-what-a-printer-says-about-itself):
-  `"printer"`, `"manual"`, `"catalog"` or `"unknown"`. The dashboard shows a small
-  **с принтера** / **вручную** tag on the material, and the `Сопло 0.4 мм` chip
-  renders muted/dashed when the diameter is a declared fallback rather than live.
-  On the K2, a `"printer"` material tag means "the sliced material of the running
-  job" (not an RFID/sensor read) — the honest live source Moonraker exposes there.
-
-**Declared fallback.** Beyond `material`, a printer record carries optional
-`nozzleDiameterMm` and `nozzleType`. They are shown only as a labelled **вручную**
-fallback when the device does not report a live value (a Creality-WebSocket
-printer, or any printer while offline) — never dressed up as telemetry.
-
-Partial MQTT deltas that omit these fields keep the last known value (merge in
-`mergeBambuStatus`), so the chips do not flicker to "unknown" between reports.
-
-The same rule applies across a **job change**, and getting it wrong was a real
-defect. `mergeBambuRawPrint` resets the merged report when a new subtask is
-announced, so one print's fields cannot leak into the next — but `nozzle_diameter`
-and `nozzle_type` describe the *machine*, not the job, and the announcing delta
-never resends them. Dropping them made the printer's own nozzle unknown for the
-~30 s until the next `pushall`, which is exactly the launch window: every start
-raced against a `printer_nozzle_unknown` review it had caused itself. Worse,
-hardware discovery reads this same cache and replaces its fact set wholesale, so
-the loss was persisted rather than merely transient. They are now in
-`PRINTER_SCOPED_FIELDS` alongside `ams`/`vt_tray`.
-
-Declaring `nozzleDiameterMm` on the printer card is still worth doing: it is the
-`manual` layer beneath live telemetry and discovery, and with all three silent
-the diameter is honestly `null` — which the compatibility rules report as
-`printer_nozzle_unknown`.
-
-### Creality K2 filament type — what is and isn't available
-
-The K2 runs Klipper behind Moonraker, so its **nozzle diameter** is a real live
-read (above). Its **active filament** comes from the **current job's sliced
-metadata** (`parseMoonrakerJobFilament()`); the CFS `box`/`filament_rack` objects
-are deliberately **not** a source. This was verified against the real unit
-(K2-7F14) with `scripts/probe-k2.mjs`:
-
-- **Sliced-file metadata (used)** — `GET /server/files/metadata?filename=<print_stats.filename>`
-  returns the job's `filament_type` / `filament_name` and (slicer-dependent)
-  `filament_colors`. `parseMoonrakerJobFilament` takes the primary material and
-  first valid `#RRGGBB`, tagged `liveMaterialSource: "printer"`. Fetched only
-  while a print is `printing`/`paused` with a known filename; otherwise the view
-  falls back to the configured `material`. It is the *sliced* material, not a
-  sensor read — same "setting, not measurement" caveat as the nozzle diameter.
-- **CFS (`box` object) — not used.** The probe showed `box.state: "disconnect"`
-  with every slot (`T1..T4`, positions A–D) reporting `material_type` /
-  `color_value` / `remain_len` as `"-1"`, and **no field naming the active slot**.
-  `filament_rack` likewise reported `material_type: "-1"`. Reading an "active
-  filament" from these would mean inventing the slot, so it is left alone until a
-  loaded CFS payload can be captured. (`material_type` is a coded `1XXXXX` value
-  decoded via Creality's cloud `material_database.json`, also not available here.)
-
-Use `scripts/probe-k2.mjs` to dump these raw payloads from real hardware:
-
-```bash
-docker cp apps/print-orchestrator/scripts/probe-k2.mjs \
-  atelier-print-orchestrator:/tmp/probe-k2.mjs
-docker exec atelier-print-orchestrator node /tmp/probe-k2.mjs 192.168.0.132 4408
-```
-
-**Limitation.** The A1 Combo has no physical nozzle-diameter sensor:
-`nozzle_diameter` mirrors the **setting** in the printer/slicer. If the nozzle is
-swapped without updating that setting, the reported diameter is stale — treat it
-as "what the printer is configured for", not a measurement. Requires **LAN Mode**
-and the printer's **access code** (`serial` + `accessCode`); without them the
-Bambu adapter reports the printer as not configured and nothing is live.
-
-## Local development
-
-Uses **pnpm** (via `corepack enable`, or `corepack pnpm …` when `pnpm` is not on
-`PATH`).
-
-```bash
-pnpm install --frozen-lockfile
-pnpm run dev        # tsx watch
-pnpm run typecheck  # tsc --noEmit, sources and tests
-pnpm run build      # emit dist/ (tests excluded)
-```
-
-Without explicit environment, `pnpm run dev` and the test scripts fall back to
-`config/printers.json` and `data/` next to the code — and on the farm host that
-file is the real printer inventory. A dev server started there would become a
-second poller of the live printers (a second Bambu MQTT client, light commands):
-on the farm host point `PRINTERS_CONFIG_PATH`/`STATE_FILE_PATH` elsewhere first,
-and run the suite only in the isolated form described in
-[docs/testing.md](../../docs/testing.md).
-
-## Docker
-
-The service listens on `0.0.0.0:3100` inside the container but is **not** published
-to the host — the dashboard reaches it over the compose network.
-
-Build and deploy it **only** with `./scripts/deploy.sh` from the repository root —
-never a hand-run `docker compose up -d --build print-orchestrator`, which skips the
-restart-safety gate and can recreate the orchestrator under a print in flight. See
-[docs/operations.md](../../docs/operations.md).
+Установка и безопасный dev-запуск — [корневой README](../../README.md#локальная-разработка).
+`corepack pnpm run typecheck`, `test`, `test:unit`, `test:integration`, `build`
+запускаются из этого каталога. Тестовый runner изолирует inventory, состояние
+и внешние настройки; подробности и прямой Node-запуск —
+[docs/testing.md](../../docs/testing.md). `dist/` не содержит tests/testkit.
+Production обновляется штатным `scripts/deploy.sh`; [operations](../../docs/operations.md).
 
 ## API
 
-Responses are JSON in the exact shape the dashboard renders (see
-`apps/print-dashboard`). Errors are `{ "error": { "code", "message", "details" } }`
-with a stable `code` (`PRINTER_OFFLINE`, `PRINTER_CONNECTION`, `CAMERA_ERROR`,
-`MATERIAL_ERROR`, `JOB_ERROR`, `VALIDATION`, `NOT_FOUND`).
+JSON ошибки имеют `{ error: { code, message, details } }`. Точный список маршрутов
+и DTO — в `src/modules/`; таблица ниже — карта, не отдельная спецификация.
+Через dashboard добавляется префикс `/api/print-orchestrator`.
 
-The lists below cover the dashboard reads and the core actions; they are **not
-exhaustive**. The launch window (`/api/print/launch/:taskId`), slicing and profile
-sets (`/api/print/slicing/…`), the scheduler (`/api/print/scheduler/…`), history
-and reprint (`/api/print/history`, `…/reprint`), assignments, operations and the
-automatic queue (`/api/automations/auto-queue`) are registered in
-`src/modules/` — read the route files there for the authoritative list; most
-carry a route table in their header comment.
+| Группа | Основные пути |
+|---|---|
+| Observability | `GET /health`, `/ready`, `/metrics`, `/version`, `/restart-safety?window=<s>` |
+| Доска | `GET /api/dashboard`, `/api/printers`, `/api/printers/inventory` |
+| Оборудование | `/api/printers/config`, `/options`, `/:id`, `/:id/enabled`, `/:id/test`, `/:id/discover`, `/:id/tls-certificate` |
+| Устройство | `/api/printers/:id/{pause,resume,cancel,light,snapshot}`, `camera.jpg`, `camera.mp4`, файловые маршруты |
+| Задания и очередь | `/api/print/tasks`, `/api/print/queue`, `/api/queue`, `/api/queue/night`, `/api/print/launch/:taskId` |
+| История | `/api/print/history`, повтор через reprint; task detail содержит chain/audit |
+| Анализ и нарезка | `/api/print/artifacts`, `/api/print/slicing/...` |
+| План и оператор | `/api/print/scheduler/...`, `/api/print/schedule`, `/api/print/operations` |
+| Автоматика и учёт | `/api/automations/auto-queue`, `/api/monitoring/lease`, `/api/monitoring/filament-debts` |
 
-### Observability
+`/health` — liveness; `/ready` даёт 503 до первого poll, при stale loop или
+недоступной БД, но не из-за одного offline-принтера. `/version` показывает
+identity образа; `/restart-safety` — риск перезапуска текущих наблюдаемых печатей.
 
-- `GET /health` — liveness + uptime
-- `GET /ready` — real readiness: `503` until the first poll completes and again
-  if the poll loop goes stale or the database does not answer; a merely degraded
-  farm (some printers offline) still returns `200`
-- `GET /metrics` — Prometheus counters drawn from the live farm state
-  (`print_orchestrator_printers_online`, `_degraded`, `_queue_jobs`, …)
-- `GET /version` — the commit, build time and dirty flag of the running image
-- `GET /restart-safety?window=<s>` — may the orchestrator be recreated right now
-  without losing what the database cannot give back; `deploy.sh` asks it before
-  every swap
-
-### Security
-
-State-changing requests (everything below "Actions") require the shared secret
-`ORCHESTRATOR_API_TOKEN`, sent as `Authorization: Bearer <token>` (or
-`X-Api-Token`); reads stay open. **With no token configured, mutations are
-refused with `503`** — unless the deployment explicitly opts in with
-`ALLOW_UNAUTHENTICATED_MUTATIONS=1` for an isolated network; either way a startup
-warning is logged (`src/http/security.ts`). Foreign `Origin`s are refused (CSRF),
-and CORS is closed by default (no wildcard) — allow cross-origin callers via
-`CORS_ALLOW_ORIGINS`. The model and the operator checklist:
-[SECURITY.md](../../SECURITY.md).
-
-### Dashboard reads
-
-- `GET /api/dashboard` — the whole board in one payload
-- `GET /api/status` — overall service status
-- `GET /api/printers` · `GET /api/printers/active` · `GET /api/printers/:id`
-- `GET /api/printers/:id/camera.jpg` · `GET /api/printers/:id/camera.mp4`
-- `GET /api/printers/config` · `GET /api/printers/config/:id` — the editable
-  inventory ([above](#printer-inventory-configured-from-the-dashboard)); credentials
-  come back as a `secrets: { accessCode: { set, source, envVar, resolved }, … }`
-  status, never as values
-- `GET /api/printers/config/options` — the protocol vocabulary the add/edit form is built from
-- `GET /api/printers/inventory` — the read-only **inter-service** view of the
-  same inventory (apps/fulfillment reads it): configuration only, disabled
-  printers included and flagged, no host, port, credential status or camera URL.
-  Carries a `revision` fingerprint of the whole set, so a consumer detects an
-  add/edit/delete without diffing every field
-- `GET /api/queue` · `GET /api/queue/night`
-- `GET /api/print/tasks` · `GET /api/print/tasks/:id` (task + full chain + audit) · `GET /api/print/queue` (legacy-shape projection of the SQLite model) · `GET /api/print/audit`
-- `GET /api/print/artifacts` (uploads + latest analysis + draft task) · `GET /api/print/artifacts/:id` (artifact + analyses + audit) · `GET /api/print/artifacts/config` (upload limits for the dashboard)
-- `GET /api/materials` · `GET /api/cameras` · `GET /api/maintenance`
-- `GET /api/events` · `GET /api/critical` · `GET /api/warnings`
-- `GET /api/system` · `GET /api/today` · `GET /api/performance` · `GET /api/plan`
-- `GET /api/automations`
-
-These are the canonical routes. The historical spec aliases
-`GET /api/events/recent`, `GET /api/night-print` and `GET /api/jobs/active`
-duplicated `/api/events`, `/api/queue/night` and `/api/printers/active` 1:1,
-were called by nothing (dashboard, tests, nginx, compose, scripts) and have
-been **removed** — they now return 404.
-
-### Actions
-
-Printer actions dispatch **real** commands to the device (Moonraker HTTP,
-Bambu local MQTT); unsupported combinations fail honestly rather than pretending,
-and anything without an engine behind it returns a clear error instead of
-fabricating a result. Every start, whichever route it comes from, passes the
-admission policy described in
-[Launch path](#launch-path-rules-that-hold-everywhere).
-
-- `POST /api/printers/config` — add a printer · `PATCH /api/printers/config/:id` — change settings and/or credentials (a field you omit keeps its stored value; `null` clears it; `id` is immutable) · `DELETE /api/printers/config/:id`
-- `POST /api/printers/config/:id/enabled` — body `{ "enabled": boolean }` · `POST /api/printers/config/reorder` — body `{ "ids": [...] }`
-- `POST /api/printers/config/:id/test` — probe the real device with the stored settings; drops the printer's connection first, so a client authenticated with superseded credentials can never answer for the new ones
-- `POST /api/printers/config/:id/discover` — re-ask the device what hardware it is, without waiting for the background interval. Read-only against the printer (it requests a description and sends no command), so it is safe mid-print; a device that does not answer is reported as a failed probe and the previously learned characteristics stay in force
-- `POST /api/printers/:id/pause` · `.../resume` · `.../cancel` · `.../snapshot`
-- `POST /api/printers/:id/light` — body `{ "on": boolean }`; manual state is kept for 5 minutes (in memory; ±one poll tick), then the solar light policy takes over again
-- `POST /api/monitoring/lease` — create/extend the farm-wide "operator is watching" lease (no body; idempotent, ~90 s TTL, expires on its own — there is no release endpoint). The dashboard renews it every ~30 s while its tab is visible; deliberately **not** a side effect of any camera read (`camera.jpg?ensureLight=1` stays blocked by the dashboard nginx)
-- `POST /api/queue` — add a job, body `{ title, printer?, material?, eta?, at?, night? }`
-- `POST /api/queue/start-next` · `POST /api/queue/night/start` · `POST /api/queue/night/pick`
-- `POST /api/queue/:id/review` — park a job in `review` (body `{ reason? }`) so a job that can never start (unknown printer, no/invalid file, material mismatch) stops blocking `start-next`
-- `DELETE /api/queue/:id` — remove a job by id (the other escape hatch for a wedged queue); `404` when the id is unknown
-- `POST /api/print/tasks` — create a task in the persistent model, body `{ title, printer?, material?, file?, night?, priority?, eta?, at? }`
-- `POST /api/print/tasks/:id/hold` (body `{ reason? }`) · `.../release` · `.../cancel` (body `{ reason? }`, kept as history) · `.../assign` (body `{ printer }`, reserves the bed)
-- `POST /api/print/artifacts` — `multipart/form-data` upload of one `.stl`/`.3mf`/`.gcode` file (field `file`); returns the created `Artifact` + `DRAFT` `PrintTask` + `pending` `ArtifactAnalysis` and `blobExisted` (`201` new blob, `200` de-duplicated, `413` over the size limit)
-- `POST /api/print/artifacts/:id/analyze` — re-run analysis (after a `failed` attempt); returns the fresh `pending` analysis
-- `POST /api/automations/:id/toggle` — body `{ "on"?: boolean }` (omit to flip)
+Мутации требуют `Authorization: Bearer` / `X-Api-Token`; без настроенного token
+возвращается 503, кроме явного isolated opt-in. Origin/Host проверяются отдельно;
+чтение `camera.jpg?ensureLight=1` также защищено. [Модель безопасности](../../SECURITY.md).

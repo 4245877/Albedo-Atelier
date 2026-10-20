@@ -62,16 +62,17 @@ image has no mount, which is why the closure below is installed and committed.
 
 ## What is installed here
 
-The closure the shipped `catalog.v1.json` needs — 24 files across two vendors:
+Installed system parents: 30 files across two vendors. Keep parents needed by
+stored immutable revisions as well as the current `catalog.v1.json`:
 
 | Vendor | Kind | Profiles |
 | --- | --- | --- |
 | BBL | machine | `Bambu Lab A1 0.4 nozzle` → `fdm_bbl_3dp_001_common` → `fdm_machine_common` |
 | BBL | process | `0.20mm Standard @BBL A1`, `0.20mm Strength @BBL A1` → `fdm_process_bbl_0.20` → `fdm_process_bbl_common` → `fdm_process_common` |
 | BBL | filament | `Bambu PLA Basic @BBL A1` → `Bambu PLA Basic @base` → `fdm_filament_pla` → `fdm_filament_common` |
-| Creality | machine | `Creality K2 0.2 nozzle`, `Creality K2 0.4 nozzle` → `fdm_creality_common` → `fdm_machine_common` |
-| Creality | process | `0.08mm SuperDetail @Creality K2 0.2 nozzle` → `fdm_process_common_klipper` → `fdm_process_creality_common` → `fdm_process_common` |
-| Creality | filament | `Creality Generic PLA @K2-all` → `Creality Generic PLA` → `fdm_filament_pla` → `fdm_filament_common` |
+| Creality | machine | `Creality K2 0.2 nozzle`, `Creality K2 0.4 nozzle`, `Creality Ender-3 V3 KE 0.4 nozzle` → vendor/common bases |
+| Creality | process | K2 0.2/0.4 SuperDetail and Ender-3V3KE Standard → `fdm_process_common_klipper` → `fdm_process_creality_common` → `fdm_process_common` |
+| Creality | filament | K2 PLA and Ender-3V3 PETG → corresponding material/common bases |
 
 ### Why the Creality K2 parents come from v2.3.2, not 2.3.0
 
@@ -95,12 +96,11 @@ Nothing. Every parent the catalog and the stored revisions reference resolves �
 `pnpm run slicing:vendor:check` exits 0 and `GET /api/print/slicing/runtime`
 reports an empty `missingParents`.
 
-One preset is nevertheless still quarantined, and no vendor file can change that:
-machine `Creality K2 PETG 0.4 FAST` declares `nozzle_diameter: ["0.4"]` on
-`printer_variant: "0.2"`. That contradiction is inside the operator's own export
-(the printer reports a 0.4 mm nozzle), so it is fixed by re-exporting the preset
-from OrcaSlicer with the printer bound to its 0.4-nozzle variant — never by
-loosening validation.
+The former K2 `0.4 FAST` export had a 0.4-nozzle / 0.2-parent contradiction.
+The current catalog uses the corrected `Creality K2 PETG 0.4`; the rationale and
+reproducible source are in [corrections/README.md](../corrections/README.md).
+Older persisted revisions may still be quarantined; that is not evidence of a
+missing vendor parent and is not fixed by loosening validation.
 
 > The system profiles are pinned to a specific OrcaSlicer version. Always install a
 > parent from the release its dependent preset was exported against, and diff the

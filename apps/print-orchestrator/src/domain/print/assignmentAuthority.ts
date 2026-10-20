@@ -37,11 +37,3 @@ export function assignmentHolds(
   if (assignment.planId !== null) return planState === "ACTIVE";
   return assignment.source === "manual";
 }
-
-/** A `PROPOSED` placement on a plan nobody confirmed — advice, not a claim. */
-export function isRecommendation(
-  assignment: Pick<Assignment, "state" | "planId">,
-  planState: PlanState | null
-): boolean {
-  return assignment.state === "PROPOSED" && assignment.planId !== null && planState !== "ACTIVE";
-}

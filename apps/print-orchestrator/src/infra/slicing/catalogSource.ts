@@ -72,9 +72,6 @@ export interface LoadedProfile {
   parseError: string | null;
 }
 
-/** A vendor (system) parent profile available as an inheritance parent. */
-export type LoadedVendorProfile = SystemProfile;
-
 export interface SourceVerification {
   id: string;
   file: string;

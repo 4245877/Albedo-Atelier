@@ -1,8 +1,0 @@
-{
-  "name": "K2 · PETG · FAST",
-  "printer": "creality-k2",
-  "printerClass": null,
-  "machine": "Creality K2 PETG 0.4 FAST",
-  "process": "Creality K2 0.4 FAST1",
-  "filament": "PETG @K2 FAST1"
-}

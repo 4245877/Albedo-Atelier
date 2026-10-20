@@ -1,271 +1,129 @@
-# Albedo Atelier
+# Atelier
 
-**Albedo** («Зал Верховного Надзора») — система управления небольшой фермой
-FDM-принтеров: веб-панель оператора и сервис-оркестратор, единственный на хосте,
-кто говорит с железом. Путь печати: загрузка STL / 3MF / G-code → анализ файла →
-нарезка встроенным OrcaSlicer 2.3.0 по утверждённому «рецепту» (набору профилей)
-→ очередь и планировщик → запуск с проверкой допуска → наблюдение, камера, свет →
-история и повтор печати. Склад филамента и уведомления в Telegram живут в
-соседнем проекте fulfillment.
+Atelier (Albedo) — система управления фермой FDM-принтеров: загрузка
+STL / 3MF / G-code, анализ, нарезка OrcaSlicer, очередь, планировщик, запуск
+с проверкой допуска, мониторинг, камеры и история. Склад филамента и
+Telegram-уведомления находятся в отдельном проекте fulfillment.
 
-Работает в production на одном хосте. Текущее состояние и нерешённые вопросы —
-[ниже](#текущее-состояние-и-известные-ограничения).
+## Компоненты и оборудование
 
-## Оборудование
+- **print-orchestrator** — Node.js 22 / TypeScript / Fastify. Единственный сервис,
+  работающий с принтерами; SQLite хранит оборудование, задания, очередь и историю.
+- **print-dashboard** — статические ES-модули за nginx, без сборщика.
+- **OrcaSlicer** — необязательный runtime нарезки, закреплённая версия 2.3.0.
+- **go2rtc** — мост камер к WebRTC в браузере.
+- **fulfillment** — соседний репозиторий `/home/miha/apps/fulfillment`, HTTP-интеграция
+  через общую Docker-сеть `print-farm`.
 
-| Принтер | Протокол | Что умеет Albedo |
+| Оборудование | Протокол | Возможности текущего кода |
 |---|---|---|
-| Creality K2 | Moonraker HTTP (порт 4408); камера — WebRTC через go2rtc | загрузка файла, удалённый старт и управление печатью, свет, телеметрия |
-| Creality Ender-3 V3 KE | Creality WebSocket | только телеметрия: файл переносится вручную, печать запускается на экране принтера |
-| Bambu Lab A1 Combo | локальный MQTT (LAN Mode) + FTPS | загрузка, удалённый старт и управление печатью, свет, телеметрия; путь через AMS Lite на железе не проверен |
-| Anycubic Kobra X | режим LAN Anycubic: HTTP :18910 (handshake) + MQTT/TLS :9883 | **только наблюдение** (этап 1): состояние, температуры, прогресс, слой, оставшееся время; заданий и команд не получает. Код готов, мониторинг подтверждён на самом принтере (прошивка 2.0.2.2), не развёрнут |
+| Creality K2 | Moonraker HTTP :4408 | Файлы, удалённый старт, управление печатью, свет, телеметрия, камера через go2rtc |
+| Bambu Lab A1 Combo | LAN MQTT + FTPS | Файлы, удалённый старт, управление печатью, свет, телеметрия; AMS требует отдельной аппаратной приёмки |
+| Creality Ender-3 V3 KE | Creality WebSocket | Телеметрия; задания через ручной перенос файла и запуск на экране принтера |
+| Anycubic Kobra X | LAN HTTP :18910 + MQTT/TLS :9883 | Мониторинг, просмотр файлов и пассивная камера; jobs/upload/start/delete и физические команды закрыты |
 
-Принтеры добавляются и настраиваются в панели, раздел «Оборудование фермы»;
-технические характеристики сервис читает с самих устройств.
+**Срез production на 20 октября 2026:** метки работающих backend и dashboard —
+`72dfde5`, SQLite — схема **19**, go2rtc использует прежний `config/go2rtc.yaml`.
+Файлы и камера Kobra X подготовлены в `e19e81a` / `7eca5c4`, но ещё не развёрнуты.
+Аппаратно подтверждены мониторинг, чтение памяти и пассивный видеопоток;
+production WebRTC ещё требует приёмки. Подробности и границы проверки —
+[документ Anycubic](docs/ANYCUBIC_KOBRA_X_STAGE2.md),
+[порядок выпуска](docs/ANYCUBIC_KOBRA_X_RELEASE.md).
+Фактическую ревизию перед эксплуатационными действиями проверяют заново.
 
-## Как устроено
+## Структура
 
-```
-браузер оператора ── http://<хост>:8090
-   │
-print-dashboard ─── nginx: статика + прокси /api/print-orchestrator/* (подставляет API-токен)
-   │                       и сигнальный WebSocket камеры /go2rtc/api/ws
-print-orchestrator ─ Fastify :3100, только внутри сети compose
-   │   queue.db (SQLite) + state.json + artifacts/   ← том orchestrator-data
-   │   OrcaSlicer 2.3.0 с хоста в /opt/orca          ← compose.orca.yml
-   ├──► принтеры: Moonraker HTTP · Bambu MQTT/FTPS · Creality WebSocket · Anycubic LAN MQTT
-   ├──► go2rtc: камера K2, WebRTC-медиа на :8555
-   └──◄► fulfillment (docker-сеть print-farm): склад филамента, уведомления
-```
-
-- **print-orchestrator** (`apps/print-orchestrator`, TypeScript, Node 22) опрашивает
-  принтеры, хранит очередь и историю в SQLite, анализирует и нарезает файлы,
-  решает, можно ли запускать печать — одной политикой допуска для превью,
-  ручного, ночного и автоматического запуска, — доставляет файлы и отправляет
-  команды. Устройство — [README сервиса](apps/print-orchestrator/README.md).
-- **print-dashboard** (`apps/print-dashboard`) — статические ES-модули без сборки
-  за nginx. Решения принимает сервер, панель показывает их и причины отказов.
-  [README панели](apps/print-dashboard/README.md).
-- **go2rtc** — мост живого видео камеры K2.
-- **fulfillment** (`~/apps/fulfillment`, отдельный репозиторий и стек) читает
-  оркестратор (инвентарь, статусы, снимки камер для Telegram), а оркестратор
-  списывает в нём израсходованный филамент.
-
-## Карта репозитория
-
-```
-apps/print-orchestrator/   backend
-  src/domain/              правила и модели без ввода-вывода: допуск, стол, очередь, профили
-  src/app/                 сервисы: запуск, dispatch, очередь, нарезка, автоочередь, опрос
-  src/infra/               SQLite и миграции, протоколы принтеров, OrcaSlicer, хранилище файлов
-  src/modules/             HTTP-маршруты
-  config/                  каталог профилей OrcaSlicer, go2rtc.yaml, printers.example.json (входит в образ)
-  contracts/               зафиксированные ответы API для fulfillment
-  scripts/                 каталог Orca, probe-k2, деление тестов на unit/integration
-apps/print-dashboard/      frontend: features/, render/, shared/, styles/, tests/, smoke/
-ops/backup/                резервное копирование и восстановление (таймеры systemd --user)
-ops/verify/                проверка кандидатного образа и миграций до деплоя
-scripts/deploy.sh          штатный и единственный способ обновить production
-scripts/tests/             тесты deploy.sh на фейковом docker
-docs/                      эксплуатация, тестирование, архив отчётов
-compose.yml, compose.orca.yml   стек: go2rtc, print-orchestrator, print-dashboard
-.env.example               все настройки с пояснениями; .env — только на хосте
+```text
+apps/print-orchestrator/
+  src/domain/       модели, совместимость, допуск, очередь, профили
+  src/app/          сервисы, poller, dispatch, нарезка и планировщик
+  src/infra/        SQLite и миграции, адаптеры устройств, файлы, fulfillment
+  src/modules/      HTTP-маршруты
+  config/           профили Orca, примеры оборудования и конфиги go2rtc
+  contracts/        обезличенные межсервисные DTO для fulfillment
+  scripts/          тестовый runner и инструменты каталога Orca
+apps/print-dashboard/  features/, render/, shared/, styles/, tests/, smoke/
+docs/                 эксплуатация, тесты, Anycubic LAN
+ops/backup/           резервное копирование и восстановление
+ops/verify/           изолированная проверка образов и миграций
+scripts/deploy.sh     штатное обновление production
+scripts/tests/        проверка deploy на fake Docker/curl
+compose.yml           базовый стек
+compose.orca.yml      runtime OrcaSlicer с хоста
+.env.example          настройки с пояснениями
 ```
 
-## Первый запуск на новом хосте
+## Локальная разработка
+
+Нужны Node.js ≥22 и pnpm 10.33.1 через corepack. Зависимости устанавливаются
+в backend; у dashboard внешних зависимостей нет. В корне нет pnpm workspace.
 
 ```bash
-cp .env.example .env               # заполнить значения развёртывания
-./ops/ensure-print-farm-network.sh # общая сеть с fulfillment, один раз
-./ops/backup/install-timers.sh     # бэкапы по расписанию — ДО первого деплоя
-./scripts/deploy.sh
+cd apps/print-orchestrator
+corepack pnpm install --frozen-lockfile
+atelier_dev_dir=$(mktemp -d)
+env -u QUEUE_DB_PATH -u ARTIFACT_STORAGE_ROOT -u SNAPSHOTS_DIR \
+  PRINTERS_CONFIG_PATH="$atelier_dev_dir/no-printers.json" PRINTERS_CONFIG_JSON='[]' \
+  STATE_FILE_PATH="$atelier_dev_dir/state.json" FULFILLMENT_API_URL= ORCA_SLICER_CMD= \
+  corepack pnpm run dev
 ```
 
-Панель — `http://localhost:8090`. По умолчанию она слушает только `127.0.0.1`;
-доступ из LAN — `DASHBOARD_BIND=0.0.0.0` в `.env`, но сначала прочитайте
-[Порты и безопасность](#порты-и-безопасность-ports--security).
+На хосте фермы `config/printers.json` и `data/` могут содержать настоящие адреса
+и локальное состояние. Явно задавайте пустой inventory и отдельные пути, не
+наследуйте `QUEUE_DB_PATH`, `ARTIFACT_STORAGE_ROOT` или `SNAPSHOTS_DIR` production.
+Для безопасного UI-стенда используется mock-сервер browser smoke, см.
+[testing.md](docs/testing.md).
 
-`COMPOSE_FILE=compose.yml:compose.orca.yml` в `.env` нужен для нарезки: без него
-собирается облегчённый образ без OrcaSlicer, а все проверки здоровья остаются
-зелёными ([подробнее](docs/operations.md#compose-files-and-disk)).
-
-## Разработка и тесты
-
-pnpm 10 через corepack (`corepack enable` или `corepack pnpm …`). Node-проект
-один — `apps/print-orchestrator`; дашборд — статика без сборки.
+Из корня репозитория:
 
 ```bash
-cd apps/print-orchestrator && corepack pnpm install --frozen-lockfile
-node_modules/.bin/tsc -p tsconfig.json --noEmit          # типы
-cd ../print-dashboard && node --test "tests/**/*.test.mjs"
+corepack pnpm run typecheck
+corepack pnpm run test                    # backend, с автоматической изоляцией
+node --test 'apps/print-dashboard/tests/**/*.test.mjs'
+corepack pnpm run build
+./scripts/tests/deploy.test.sh            # без Docker-демона и принтеров
 ```
 
-> ⚠️ **Полный прогон тестов оркестратора — только изолированно**, командой из
-> [docs/testing.md](docs/testing.md). На этом хосте без переменных окружения
-> сервис берёт реальный конфиг принтеров `config/printers.json`.
+Полные команды, browser smoke, CI и ограничения `ops/verify` —
+[docs/testing.md](docs/testing.md). Dashboard раздаётся nginx без компиляции;
+его контейнер собирается из [Dockerfile](apps/print-dashboard/Dockerfile).
 
-## Обновление production
+## Развёртывание и данные
 
-```bash
-./scripts/deploy.sh preflight   # только проверки, ничего не меняет
-./scripts/deploy.sh             # preflight → сборка → gate → подмена → health → HTTP → identity
-```
+На новом хосте заполните `.env` по `.env.example`, подготовьте seed по
+`config/printers.example.json`, общую сеть (`ops/ensure-print-farm-network.sh`)
+и таймеры backup (`ops/backup/install-timers.sh`). Оборудование затем редактируется
+через панель и хранится в SQLite; seed импортируется один раз.
 
-- Только так. Скрипт не останавливает ферму до появления новых образов и не
-  пересоздаёт оркестратор, пока печать в полёте потеряла бы учёт
-  (`GET /restart-safety`). Дашборд обновляется и во время печати.
-- Релиз, меняющий API между дашбордом и оркестратором, — только на простаивающей
-  ферме, иначе получится новый интерфейс против старого API (`DEPLOY PARTIAL`).
-- Перед релизом с изменениями оркестратора — свежий бэкап и
-  [ops/verify](ops/verify/README.md) (настоящий образ, симуляторы, копия БД).
-- `./scripts/deploy.sh rollback` возвращает образы, но не отменяет миграции.
+Для обновления используйте `./scripts/deploy.sh`: сначала preflight, сборка,
+`restart-safety`, затем применение, health/ready и проверка ревизий. Релиз с
+изменением API разворачивают на простаивающей ферме. После миграции старый образ
+может отказаться стартовать: откат кода и восстановление данных — разные операции.
+Порядок подготовки, перезапуска, проверки и отката — в
+[docs/operations.md](docs/operations.md).
 
-Подробно: [docs/operations.md](docs/operations.md).
+`queue.db`, `state.json`, артефакты и снимки находятся на томе
+`orchestrator-data` (`/app/data`). `.env`, настоящий seed, `.deploy/`, локальные
+данные и backup-конфигурация игнорируются Git. Они не являются мусором.
+Не удаляйте WAL/SHM, backup-наборы, rollback-образы или Docker volumes.
+Не ставьте `docker compose down` перед сборкой и не используйте `down -v` / volume prune.
 
-## Где что хранится
-
-| Что | Где |
-|---|---|
-| Принтеры: адреса, серийные номера, коды доступа | таблица `printers` в `queue.db`; правятся в панели. `config/printers.json` — только одноразовый сид нового хоста, не в git |
-| Очередь, задания, run, циклы стола, наборы профилей, расписание оператора | `queue.db` (SQLite, WAL) на томе `orchestrator-data` → `/app/data/` |
-| Лента событий, счётчики, правила автоматизаций, долги по списанию | `/app/data/state.json` |
-| Загруженные и нарезанные файлы | `/app/data/artifacts/` (по SHA-256) |
-| Профили OrcaSlicer | `apps/print-orchestrator/config/slicers/orca/` (в git; импортируются в БД) |
-| Настройки развёртывания и секреты | `.env` (не в git; образец — `.env.example`) |
-| Бэкапы | `~/atelier-backups` — [ops/backup](ops/backup/README.md) |
-| Состояние деплоя и снимки БД перед подменой | `.deploy/` (не в git) |
-
-## Чего делать нельзя
-
-- `docker compose down -v`, `docker volume prune`, `docker system prune --volumes` —
-  удаляют том с `queue.db` (очередь, история, учётные данные принтеров). Не ставить
-  `docker compose down` перед сборкой.
-- Обновлять, перезапускать или откатывать оркестратор в обход `deploy.sh`,
-  восстанавливать БД во время печати. `--allow-active-prints` принимает потерю
-  учёта печати — только осознанно.
-- Править `queue.db` руками. Восстановление — только `ops/backup/restore.sh`
-  (в production — `--to-production --i-mean-it` при остановленном оркестраторе).
-- Включать автоочередь (`AUTO_QUEUE_ENABLED=true`) без отдельного решения
-  владельца и до приёмки на железе.
-- Повторять запуск с неопределённым исходом: проверить принтер и отметить исход
-  в окне запуска.
-- Подтверждать «стол свободен», не посмотрев на стол.
-- Запускать тесты оркестратора без изоляции; отправлять команды реальным
-  принтерам из тестов и экспериментов.
-- Коммитить `.env`, `printers.json`, ключи; открывать порт 8090 в недоверенную сеть.
-
-## Текущее состояние и известные ограничения
-
-На 2026-10-16; подробности и доказательства — в
-[журнале модернизации](ALBEDO_MODERNIZATION_PROGRESS.md).
-
-- **Развёрнута модернизированная версия** `1bbc72a`: оба сервиса healthy,
-  миграция 017 применена, данные и профили сохранены, автоочередь выключена.
-- **Приёмки на реальных принтерах ещё не было** — с новой версии не было ни одной
-  печати и ни одной команды принтерам. Протокол —
-  [план приёмки](ALBEDO_MODERNIZATION_PROGRESS.md#план-приёмки-на-реальном-оборудовании-после-отдельного-разрешения):
-  K2 → A1 → KE, под наблюдением.
-- **Ender-3 V3 KE: встроенная нарезка заблокирована.** Стартовый G-code
-  вендорского профиля KE вызывает `BED_MESH_CALIBRATE`; политика команд считает
-  это `review`, и вариант нарезки получает `output_not_schedulable`. Это не
-  регрессия. Пока — нарезать снаружи, загрузить готовый G-code, подтвердить
-  проверку и перенести файл вручную. Решение (свой профиль без калибровки или
-  сужение политики) — за владельцем
-  ([дефект 13](ALBEDO_MODERNIZATION_PROGRESS.md#найдено-и-исправлено--требует-решения)).
-- **KE по Creality WebSocket — только телеметрия**: без загрузки и удалённого
-  старта; ночью и автоочередью не запускается никогда; печати вне Albedo видны
-  только при непрерывном наблюдении.
-- **Bambu AMS не проверен на железе**: выбор лотка и `plate_2.gcode` — первые
-  запуски под наблюдением. Сейчас A1 печатает с внешней катушки.
-- **Автоочередь выключена дважды**: `AUTO_QUEUE_ENABLED=false` и правило
-  «Автоочередь» в «Автоматизациях». Включать — только после приёмки, отдельным
-  решением. На этой ферме она практически применима лишь к A1: K2 и KE (Klipper)
-  в простое не сообщают загруженный материал, а в режиме `auto` неизвестный
-  материал — отказ. Расписание оператора не заполнено, поэтому режим «днём»
-  невозможен.
-- **Освобождение стола подтверждает человек.** `idle` не значит «стол свободен»:
-  после печати стол «Ждёт снятия детали» до подтверждения («Снять модель и
-  освободить стол»); принтер без истории стола показывает «Стол не подтверждён»
-  («Стол пуст — подтвердить»). Подтверждать — только посмотрев на стол. На
-  2026-10-16 у K2 открыта операция снятия модели (с 12.10), а запись `CLEAR` у A1
-  (от 14.08) может быть устаревшей — 15–16.10 на нём шли печати вне Albedo.
-- **Миграция 017 и откат.** Миграции только вперёд: образы до `1bbc72a` на схеме
-  17 не стартуют (`SchemaTooNewError`). `deploy.sh rollback` теперь ведёт к новым
-  образам; прежние закреплены как `atelier-print-*:rollback-3db702e`. Возврат к
-  `3db702e` — восстановление бэкапа `2026-10-16T06-02-00Z` (теряется всё
-  записанное после 06:02 UTC) или экспертный SQL-откат 017 —
-  [процедура](ALBEDO_MODERNIZATION_PROGRESS.md#откат-после-успешного-деплоя).
-- **Anycubic Kobra X — этап 1 (только наблюдение) в коде, не развёрнут.**
-  Протокол `anycubic-lan`, миграции `018_anycubic_lan` (пересборка таблицы
-  `printers`) и `019_printer_tls_fingerprint` (одна колонка); только вперёд.
-  TLS — только к сертификату, отпечаток SHA-256 которого подтвердил оператор;
-  режима «без проверки» у Anycubic нет. Адаптер проверен 2026-10-17 на самом
-  принтере (прошивка 2.0.2.2, только чтение, отдельным клиентом — без
-  оркестратора): handshake, MQTT/TLS, телеметрия печати и её завершение; по
-  итогам исправлены два расхождения с прежними фикстурами (`task_id` `-1`, слово
-  окончания только в `print`-пуше). Закрепление сертификата проверено там же:
-  верный отпечаток подключает, неверный блокирует до передачи логина, без
-  отпечатка нет ни одного обращения; сертификат пережил перезагрузку принтера
-  (побайтно тот же). Не проверены пауза/отмена и сертификат после обновления
-  прошивки. Релиз — на
-  простаивающей ферме после [ops/verify](ops/verify/README.md); подключение к
-  Kobra X — отдельным разрешением
-  ([как добавить](docs/operations.md#printer-config--secrets)).
-- **Бэкапы на том же физическом диске** (режим DEGRADED): второго носителя нет.
-- `queue.db` на томе с правами 644, хотя хранит учётные данные принтеров;
-  рекомендуется `chmod 600` (изменение production, не выполнялось).
-- Смена материала или сопла перед печатью — только предупреждение, во времени
-  плана не учитывается. Персональной аутентификации операторов нет — один общий
-  токен ([SECURITY.md](SECURITY.md)).
-
-## Порты и безопасность (Ports & security)
-
-Управляющий API оркестратора **на хост не публикуется** — он доступен только
-внутри сети compose. Дашборд (`8090`) слушает `127.0.0.1`, пока в `.env` явно не
-задано `DASHBOARD_BIND=0.0.0.0`. Порт WebRTC-медиа go2rtc (`8555`, нужен для
-живого видео K2) открыт на `0.0.0.0`; API go2rtc (`1985`) — только на localhost.
-
-> ⚠️ **Допущение доверия:** дашборд на `8090` раздаётся в LAN без собственного
-> логина и проксирует управляющий API со своего же origin
-> (`/api/print-orchestrator/*`), поэтому **любой, кто достаёт до `8090` из LAN,
-> может управлять принтерами** (запуск, пауза, отмена, свет). Не открывайте `8090`
-> в недоверенную сеть (публичный IP, проброс порта, общий VLAN); для
-> дополнительной защиты поставьте HTTP Basic Auth перед nginx.
->
-> Что обеспечивает код:
->
-> - **CSRF и чужие origin:** оркестратор отклоняет изменяющие запросы, чей
->   `Origin` не совпадает ни с хостом дашборда, ни с `CORS_ALLOW_ORIGINS` (403),
->   так что вредоносная страница в браузере из LAN не отправит POST на паузу или
->   отмену; CORS закрыт. Прокси дашборда дополнительно отклоняет
->   `camera.jpg?ensureLight=…` (403), чтобы `<img>` со сторонней страницы не
->   включал свет через опубликованный порт.
-> - **API-токен:** `ORCHESTRATOR_API_TOKEN` (задаётся в `.env`; генерация —
->   `openssl rand -hex 24`) обязателен для каждого изменяющего запроса и для
->   `camera.jpg?ensureLight=1`; остальные чтения открыты. nginx дашборда сам
->   подставляет токен для LAN-дашборда (compose передаёт одну переменную обоим
->   контейнерам), поэтому кнопки панели работают, а прямой доступ к API (сеть
->   compose, `print-farm`) закрыт токеном. Продублируйте значение в
->   `PRINTER_ORCHESTRATOR_API_TOKEN` fulfillment. Без токена изменяющие запросы
->   отклоняются с 503, если развёртывание явно не включило для изолированной
->   сети `ALLOW_UNAUTHENTICATED_MUTATIONS=1`.
-> - **go2rtc:** проксируется только сигнальный WebSocket (`/go2rtc/api/ws`, с
->   allowlist потоков); остальной HTTP API go2rtc (правка конфига, перезапуск)
->   через дашборд недоступен, а порт API go2rtc привязан к localhost.
-
-Модель угроз, обязанности оператора и чеклист сети — [SECURITY.md](SECURITY.md).
+Панель по умолчанию слушает `127.0.0.1:8090`, API go2rtc — `127.0.0.1:1985`,
+WebRTC — `8555/tcp+udp`. API оркестратора не публикуется на хост. Dashboard
+подставляет API-токен в прокси-запросы и собственного логина не имеет: доступ
+к панели даёт управление фермой. Модель доступа — [SECURITY.md](SECURITY.md).
 
 ## Документация
 
-| Документ | О чём |
+| Инструкция | Где |
 |---|---|
-| [docs/operations.md](docs/operations.md) | деплой, печать во время деплоя, откат, данные, перезагрузка, место на диске, интеграция с fulfillment; **Restart cost** — что теряет перезапуск оркестратора |
-| [docs/testing.md](docs/testing.md) | безопасный запуск тестов, smoke в браузере, CI |
-| [ops/backup/README.md](ops/backup/README.md) | бэкап и восстановление |
-| [ops/verify/README.md](ops/verify/README.md) | проверка кандидатного образа и миграций до деплоя |
-| [SECURITY.md](SECURITY.md) | модель безопасности и чеклист сети |
-| [apps/print-orchestrator/README.md](apps/print-orchestrator/README.md) | устройство backend: модель очереди, правила запуска, загрузка и анализ, свет, филамент, оборудование, API |
-| [config/slicers/orca/README.md](apps/print-orchestrator/config/slicers/orca/README.md) | каталог профилей OrcaSlicer |
-| [apps/print-dashboard/README.md](apps/print-dashboard/README.md), [VOICE.md](apps/print-dashboard/VOICE.md) | устройство панели и голос интерфейса |
-| [ALBEDO_MODERNIZATION_PROGRESS.md](ALBEDO_MODERNIZATION_PROGRESS.md) | журнал модернизации 2026-10: решения по этапам, развёртывание, план приёмки на железе |
-| [docs/archive/](docs/archive/README.md) | завершённые отчёты: ремедиация и приёмка (август 2026), уведомления Telegram |
+| Архитектура backend, адаптеры, задания, материалы, API | [print-orchestrator/README.md](apps/print-orchestrator/README.md) |
+| Интерфейс, данные, камеры, настройки | [print-dashboard/README.md](apps/print-dashboard/README.md) |
+| Deploy, restart-safety, SQLite rollback, диагностика, приёмка | [operations.md](docs/operations.md) |
+| Тесты, сборка, browser smoke, CI | [testing.md](docs/testing.md) |
+| Backup и restore | [ops/backup/README.md](ops/backup/README.md) |
+| Проверка кандидатного образа | [ops/verify/README.md](ops/verify/README.md) |
+| Anycubic LAN: протокол и проверенные возможности | [ANYCUBIC_KOBRA_X_STAGE2.md](docs/ANYCUBIC_KOBRA_X_STAGE2.md) |
+| Отложенный выпуск файлов и камеры Kobra X | [ANYCUBIC_KOBRA_X_RELEASE.md](docs/ANYCUBIC_KOBRA_X_RELEASE.md) |
+| Каталог и происхождение профилей Orca | [config/slicers/orca/README.md](apps/print-orchestrator/config/slicers/orca/README.md) |
+| Правила текстов панели | [VOICE.md](apps/print-dashboard/VOICE.md) |

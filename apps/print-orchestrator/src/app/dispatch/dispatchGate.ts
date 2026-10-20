@@ -32,13 +32,6 @@ export function blockersOf(result: EligibilityResult): DispatchBlocker[] {
     .map((r) => ({ code: r.code, message: r.message }));
 }
 
-/** The non-blocking reasons — what an audited operator override may clear. */
-export function warningsOf(result: EligibilityResult): DispatchBlocker[] {
-  return result.reasons
-    .filter((r) => r.severity === "warning")
-    .map((r) => ({ code: r.code, message: r.message }));
-}
-
 /**
  * Whether `result` may be started once `overriddenCodes` are waved through by an
  * operator. Hard rules (see `NON_OVERRIDABLE`) are never clearable, so a start

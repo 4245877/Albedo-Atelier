@@ -246,11 +246,6 @@ function readPlateEntry(plate: unknown, i: number): PlateConfigEntry {
   };
 }
 
-/** `plate_N` entries (thumbnails, per-plate G-code) — the fallback plate signal. */
-export function countPlateEntries(entryNames: string[]): number {
-  return plateEntryIndices(entryNames).size;
-}
-
 /** The distinct `N`s of every `plate_N.*` entry a writer placed in the package. */
 export function plateEntryIndices(entryNames: readonly string[]): Set<number> {
   return matchedIndices(entryNames, PLATE_ENTRY_RE);

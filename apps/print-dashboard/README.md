@@ -39,6 +39,33 @@
 рендеры сохранены; вернуть секции = убрать их id из `HIDDEN_SECTIONS`
 в `nav.js`.
 
+## Доступные функции и камеры
+
+UI использует серверные `readiness`, `filesSupported`, `remoteStartSupported`,
+`printControlSupported`, `lightSupported` и capabilities файлового ответа.
+Просмотр файлов не означает разрешения запуска/удаления. Клиентские disabled
+кнопки дополняют backend policy; не добавляйте отдельные правила совместимости
+в представления. Отправляемый `controlJobKey` привязывает действие к наблюдаемой
+печати, но сам не открывает закрытые категории Anycubic.
+
+В текущем коде Kobra X имеет браузер памяти/USB и подготовленную пассивную камеру;
+физические light/print команды, jobs/upload/start/delete закрыты. В production
+пока `72dfde5`, до выпуска этих частей. Проверенный статус —
+[документ Anycubic](../../docs/ANYCUBIC_KOBRA_X_STAGE2.md).
+
+Камера использует общий lifecycle плееров для карточки, «Камер» и увеличенного
+окна. `cameraFreshness.js` отличает наличие движущихся кадров от существования
+media track. Nginx пропускает только signalling `/go2rtc/api/ws` с точными `src`
+`k2` / `anycubic-kobra-x`, запрещает `dst` и доступ к остальному HTTP API go2rtc.
+Нативные приватные camera URL остаются на backend. Kobra X требует выбранного
+кандидатного YAML и настроенного streamUrl;
+[порядок активации](../../docs/ANYCUBIC_KOBRA_X_RELEASE.md).
+
+Настройки оборудования, slicing/profile sets, scheduler/operator и auto queue
+сохраняются через штатные API; отображение неизвестного значения не подменяет
+его физическим подтверждением. Подтверждение стола и разрешение unattended
+печати выполняет оператор.
+
 ## Тесты
 
 Модели, view-helpers, примитивы (`polling`, `inflight`, `editSnapshot`) и
@@ -52,7 +79,7 @@ node --test "tests/**/*.test.mjs"     # или pnpm test
 
 Браузерные smoke-тесты (`smoke/*.smoke.mjs`, `pnpm run test:smoke`) открывают
 панель в headless Chrome против mock-сервера `smoke/mockServer.mjs` и без браузера
-пропускаются. Как запустить их на этом хосте — [docs/testing.md](../../docs/testing.md#дашборд-appsprint-dashboard).
+пропускаются. Как запустить их на этом хосте — [docs/testing.md](../../docs/testing.md#dashboard).
 
 `package.json` здесь нужен только ради `"type": "module"` (чтобы Node читал
 файлы дашборда как ES-модули) и скриптов тестов; в Docker-образ он, `tests/` и
@@ -76,8 +103,9 @@ node --test "tests/**/*.test.mjs"     # или pnpm test
 
 ## nginx
 
-The nginx container serves the page on port `8080` and proxies:
-
-- `/api/print-orchestrator/*` to `http://print-orchestrator:3100/*`
-
-So the dashboard calls the API at `/api/print-orchestrator/api/...` (same origin).
+Nginx слушает `8080` в контейнере, `8090` на хосте. Префикс
+`/api/print-orchestrator/*` проксируется в `http://print-orchestrator:3100/*`
+с подстановкой серверного API-токена. Dashboard вызывает
+`/api/print-orchestrator/api/...` с того же origin. DNS upstream разрешается
+динамически, поэтому рестарт backend не требует перезапуска nginx.
+Панель не имеет собственного логина; [границы доступа](../../SECURITY.md).

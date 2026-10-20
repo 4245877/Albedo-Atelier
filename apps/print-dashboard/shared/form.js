@@ -67,13 +67,6 @@ export function setFieldError(form, name, message) {
   input.setAttribute("aria-describedby", [...described].join(" "));
 }
 
-/** Снять все пометки ошибок формы (перед новой проверкой). */
-export function clearFieldErrors(form) {
-  form.querySelectorAll("[aria-invalid]").forEach((el) => {
-    if (el.name) setFieldError(form, el.name, null);
-  });
-}
-
 /** Перевести фокус на первое поле с ошибкой. Возвращает true, если нашлось. */
 export function focusFirstInvalid(form) {
   const bad = form.querySelector('[aria-invalid="true"]');

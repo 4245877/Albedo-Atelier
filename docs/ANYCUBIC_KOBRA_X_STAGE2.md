@@ -1,11 +1,79 @@
-# Kobra X: кандидат расширения LAN-интеграции
+# Anycubic Kobra X: LAN-протокол и состояние поддержки
 
-Проверка: 2026-10-19. Исходная ревизия `72dfde5`, схема SQLite 19.
-Production не развёртывался, контейнеры не перезапускались, production SQLite
-открывалась только для SELECT host/TLS pin с `readOnly: true`. Принятая реализация
-зафиксирована в `e19e81a`; финализация выпуска файлов/камеры и порядок применения —
-в [плане redeploy](ANYCUBIC_KOBRA_X_RELEASE.md). Production остаётся на `72dfde5`.
-`tls.ts`, механизм pinning, PrintRun, BedCycle и правила списания материалов не изменялись.
+Состояние сверено **20 октября 2026**: в checkout приняты `e19e81a` и `7eca5c4`,
+рабочие backend/dashboard по меткам образов — `72dfde5`, production SQLite —
+схема **19**. Мониторинг развёрнут; файлы и новая камера ещё нет.
+Рабочий go2rtc монтирует `config/go2rtc.yaml`, без Kobra X.
+Проверка статуса была read-only, без рестарта контейнеров и команд оборудованию.
+
+| Функция | Текущий код | Аппаратное подтверждение | Production / осталось |
+|---|---|---|---|
+| Мониторинг | Реализован | 17 октября: печать, завершение, reconnect, TLS pinning | Развёрнут в `72dfde5` |
+| Локальные файлы | Реализованы | 19 октября: память, встроенная папка, пустой USB | Не развёрнуты; UI и подключённый USB требуют приёмки |
+| Камера | Пассивный proxy + go2rtc | 19 октября: FLV/H.264 и два MP4-зрителя с одним upstream | Не активирована; production WebRTC требует приёмки |
+| Свет | Подготовлен, policy закрыта | Только query | Отдельный визуальный on/off |
+| Pause/resume/stop | Подготовлены, policy закрыта | Нет | Отдельная согласованная печать |
+| Upload / remote start | Транспорт подготовлен, capability и session gate закрыты | Нет | Dispatch/идентичность и аппаратная приёмка ещё не завершены |
+
+Порядок выпуска только чтения файлов и камеры —
+[ANYCUBIC_KOBRA_X_RELEASE.md](ANYCUBIC_KOBRA_X_RELEASE.md).
+Не включать физические команды вместе с этим выпуском.
+
+## Подключение, TLS и наблюдение
+
+Подтверждённое устройство: `modelId=20030`, firmware **2.0.2.2**.
+В LAN mode `/info` может возвращать `modelId` строкой и `ctrlType: "lan"`;
+версия firmware приходит отдельно в MQTT `info`.
+
+1. `GET http://<host>:18910/info` получает identity и одноразовый token.
+2. `POST /ctrl?ts&nonce&sign&did`: `sign = md5(md5(token[0:16]) + ts + nonce)`,
+   `did` стабильно выводится из farm printer id.
+3. Ответ расшифровывается AES-128-CBC (key `token[16:32]`, IV — token ответа)
+   в broker username/password и deviceId. Принесённые client certificate/key
+   отбрасываются: broker принимает login без них.
+4. MQTT 3.1.1/TLS подключается **к заданному host:9883**, подписывается на
+   `anycubic/anycubicCloud/v1/printer/public/{modelId}/{deviceId}/#`.
+   `info/query` отправляется при connect и каждые 20 секунд.
+
+`ctrlInfoUrl`, broker/ip из ответа не выбирают адрес подключения; redirect
+запрещён, размеры/таймауты ограничены. Broker login и приватные URLs существуют
+только в памяти сессии, не в inventory/API/логах/SQLite.
+
+Оператор подтверждает SHA-256 fingerprint через
+`POST /api/printers/config/:id/tls-certificate` (только TLS handshake), затем
+сохраняет `tlsFingerprint` штатным PATCH/формой. Без pin — ни одного обращения;
+несовпадение блокирует соединение **до отправки login**. Пин проверяется при
+каждом reconnect. `allowInsecureTls` не принимается, Bambu env opt-in не действует.
+При reset/update или смене адреса новый pin требует проверки человеком.
+
+Broker использует self-signed certificate; pin заменяет CA/name проверку,
+TLS по-прежнему проверяет владение ключом. На устройстве сертификат пережил
+power cycle побайтно, свежая сессия вернулась с телеметрией в пределах 3 секунд.
+После firmware update/factory reset это не проверено. LAN handshake раскрывает
+broker private key клиентам сегмента: pin не защищает от узла, уже получившего
+этот ключ. Изоляция сети остаётся необходимой границей доверия.
+
+Сессия одна на принтер; файлы и камера используют её же. `status()` читает
+память без ожидания сети. Backoff 5 секунд → до 5 минут с jitter; отсутствие
+`info` 120 секунд заменяет сессию. Смена конфига закрывает старое соединение.
+
+`info` — единственный источник переходов печати: `free`/`busy`, project state,
+pause. `print` push только обогащает подтверждённую печать (имя/id, процент,
+слои, время в минутах); экранный старт часто имеет `task_id: "-1"`.
+Температуры имеют свою свежесть; после 60 секунд старые значения неизвестны.
+Не подтверждённая `info` печать через 60 секунд становится offline; disconnect
+сразу сбрасывает job/температуры. `updatedAt` — время наблюдения, не чтения cache.
+Противоречивые `busy` без project, cooling/stopping и неизвестные фазы дают
+unknown и не создают ложного старта/завершения.
+
+В аппаратном capture окончание проходило через cooling/unknown, `status free`,
+`print finished`, затем `info free` с `project: null` и пустым `last_project`.
+Push сам не завершает run; его terminal word используется после подтверждения
+idle через `info`. Неоднозначное окончание при reconnect требует решения человека.
+Неизвестны расход (`supplies_usage` не принят как граммы), материал/ACE, сопло
+и прочие не передаваемые факты. Build volume 260×260×260 мм — catalog только
+для modelId 20030. Обезличенные реальные captures сохранены в
+`src/infra/printers/anycubic/testkit/kobraXCaptures.ts` относительно backend.
 
 ## Реальные наблюдения: modelId 20030, firmware 2.0.2.2
 
@@ -156,29 +224,18 @@ jobs ещё требуется связать размер/MD5 и `local/` пу�
 доставки, идентичности и перехода в печать. Транспортная заготовка не объявляется
 завершённой интеграцией очереди.
 
-## Проверки
+## Проверки и пределы доказательств
 
-- Чистый полный backend-прогон принятой реализации `e19e81a`: **2290/2290**, без
-  пропусков и ошибок (Anycubic, Bambu/Moonraker, PrintRun, BedCycle, dispatch,
-  материалы, API и остальные модули).
-- Dashboard: 352/352.
-- Typecheck (`tsc --noEmit`) и production build (`tsconfig.build.json`) прошли.
-- `nginx -t` прошёл в одноразовом контейнере на том же локальном image, со
-  штатным envsubst и фиктивным тестовым API token; без сети/production volumes.
-- Изолированная TLS-интеграция проверяет pin mismatch, reconnect и отсутствие
-  отправки credentials при несовпадении сертификата.
-- Дополнительные тесты проверяют retained/ACK, таймауты и очистку waiters,
-  неясные команды без повторов, одинаковые имена с task_id=-1, устаревший
-  last_project, постпроверку размера upload и закрытые write/start gates.
-- Реальный адаптер: память, встроенный каталог, пустой USB, light/peripherie.
-- Реальная камера: FLV/H.264 → существующий backend proxy → временный go2rtc →
-  два MP4-потребителя, один upstream, освобождение после закрытия.
-- Отдельно перепроверены позднее подтверждение паузы без повторной отправки
-  (9/9), camera/upload (10/10) и затронутые наборы после исправлений (63/63).
-  Эти проверки входят в полный финальный прогон; их числа не суммируются.
-- Дополнительная проверка финализации выпуска фиксируется отдельно в
-  [release-плане](ANYCUBIC_KOBRA_X_RELEASE.md); полный прогон выше не выдаётся
-  за повторный запуск на следующем коммите.
+Изолированные тесты покрывают TLS pin mismatch/reconnect (credentials не уходят
+чужому сертификату), retained/ACK, correlation/timeouts, очистку waiters, late
+confirmation без повторной команды, task_id=-1, stale last_project, upload size
+и закрытые write/start gates. Они используют fakes, loopback и временную SQLite.
+Команды и актуальные результаты запуска — [testing.md](testing.md) и итог проверки
+конкретного checkout; исторические счётчики не заменяют новый прогон.
+
+Аппаратные наблюдения в этом документе относятся к чтениям 17 и 19 октября,
+не доказывают production WebRTC или безопасность write-команд. Настоящие
+управляющие команды и HTTP upload/delete в этих проверках не выполнялись.
 
 ## Что требуется для аппаратной приёмки
 
@@ -187,7 +244,7 @@ jobs ещё требуется связать размер/MD5 и `local/` пу�
 2. Отдельно согласованная печать для pause/resume/stop. Текущую печать не трогать.
 3. Отдельное разрешение на загрузку согласованного файла и позднее на его старт.
    Согласовать источник филамента; ACE/контейнерные файлы требуют своих проверок.
-4. Отдельное разрешение на deploy read-only частей и применение настроек камеры.
+4. Согласованное окно для deploy read-only частей и применения настроек камеры.
    Никакие управляющие возможности и автоматическая очередь не должны включаться
    вместе с этим развёртыванием.
 
@@ -213,41 +270,3 @@ jobs ещё требуется связать размер/MD5 и `local/` пу�
   страница доступна, извлекаемого описания MQTT-команд не предоставила.
 - [go2rtc 1.9.14 HTTP input](https://github.com/AlexxIT/go2rtc/blob/v1.9.14/internal/http/http.go):
   условие HTTP 200, объясняющее необходимость существующего backend proxy.
-
-## Изменённые и добавленные файлы
-
-- `apps/print-dashboard/actions.js`
-- `apps/print-dashboard/nginx.conf`
-- `apps/print-dashboard/render/modals.js`
-- `apps/print-orchestrator/src/app/FarmCommands.ts`
-- `apps/print-orchestrator/src/app/cameraService.ts`
-- `apps/print-orchestrator/src/app/commandService.ts`
-- `apps/print-orchestrator/src/app/monitoringOnlyCommands.test.ts`
-- `apps/print-orchestrator/src/app/printerView.ts`
-- `apps/print-orchestrator/src/domain/printers/types.ts`
-- `apps/print-orchestrator/src/infra/printers/anycubic/controlPolicy.ts`
-- `apps/print-orchestrator/src/infra/printers/anycubic/dispatch.test.ts`
-- `apps/print-orchestrator/src/infra/printers/anycubic/features.test.ts`
-- `apps/print-orchestrator/src/infra/printers/anycubic/index.ts`
-- `apps/print-orchestrator/src/infra/printers/anycubic/reports.test.ts`
-- `apps/print-orchestrator/src/infra/printers/anycubic/reports.ts`
-- `apps/print-orchestrator/src/infra/printers/anycubic/requests.ts`
-- `apps/print-orchestrator/src/infra/printers/anycubic/session.test.ts`
-- `apps/print-orchestrator/src/infra/printers/anycubic/session.ts`
-- `apps/print-orchestrator/src/infra/printers/anycubic/start.ts`
-- `apps/print-orchestrator/src/infra/printers/anycubic/urls.ts`
-- `apps/print-orchestrator/src/infra/printers/camera/anycubicStream.test.ts`
-- `apps/print-orchestrator/src/infra/printers/camera/stream.ts`
-- `apps/print-orchestrator/src/infra/printers/capabilities.test.ts`
-- `apps/print-orchestrator/src/infra/printers/capabilities.ts`
-- `apps/print-orchestrator/src/infra/printers/files/anycubic.test.ts`
-- `apps/print-orchestrator/src/infra/printers/files/anycubic.ts`
-- `apps/print-orchestrator/src/infra/printers/files/anycubicUpload.test.ts`
-- `apps/print-orchestrator/src/infra/printers/files/anycubicUpload.ts`
-- `apps/print-orchestrator/src/infra/printers/files/index.ts`
-- `apps/print-orchestrator/src/infra/printers/files/upload.ts`
-- `apps/print-orchestrator/src/infra/printers/status/index.ts`
-- `apps/print-orchestrator/src/infra/printers/status/types.ts`
-- `apps/print-orchestrator/src/modules/printers/routes.ts`
-- `docs/ANYCUBIC_KOBRA_X_STAGE2.md`
-- `docs/examples/go2rtc-anycubic.yaml`
