@@ -17,6 +17,7 @@
 import { apiGet, apiPost, apiDelete } from "../../api.js";
 import { createInflightGuard } from "../../shared/inflight.js";
 import { createPoller } from "../../shared/polling.js";
+import { isSectionVisible, subscribePrintChanges } from "../../shared/changes.js";
 import { inputToIso } from "../../shared/format.js";
 import { $, esc, toast } from "../../util.js";
 import { errorBanner, holdsHtml, operationsHtml, scheduleHtml } from "./view.js";
@@ -38,8 +39,8 @@ let wired = false;
 const mutations = createInflightGuard();
 
 const poller = createPoller({
-  run: (signal) => fetchAll(signal),
-  apply: (out, context) => applyAll(out, context),
+  run: (signal) => isSectionVisible("operations") ? fetchAll(signal) : Promise.resolve(null),
+  apply: (out, context) => { if (out) applyAll(out, context); },
   onError: (err) => onLoadError(err),
   intervalMs: POLL_MS,
   immediate: true,
@@ -52,7 +53,14 @@ export function setupOperations() {
   body.innerHTML = `<div class="slice-loading">Загрузка расписания…</div>`;
   if (!wired) {
     wireDelegates();
+    subscribePrintChanges(["operations", "printers", "tasks"], () => {
+      if (isSectionVisible("operations")) void poller.refresh({ fromPoll: true });
+    });
+    document.addEventListener("work-section-open", (e) => {
+      if (e.detail?.id === "operations") void poller.refresh({ fromPoll: true });
+    });
     window.addEventListener("pagehide", () => poller.stop());
+    window.addEventListener("pageshow", (e) => { if (e.persisted) poller.start({ fromPoll: true }); });
     wired = true;
   }
   poller.start({ fromPoll: false });

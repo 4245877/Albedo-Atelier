@@ -45,7 +45,7 @@ function analysis(over: Partial<ArtifactAnalysis> = {}): ArtifactAnalysis {
     detectedFormat: "gcode",
     verdict: "schedulable",
     analyzer: "gcode",
-    analyzerVersion: "1.4.0",
+    analyzerVersion: "1.5.0",
     estimatedDurationS: 3600,
     estimatedFilamentG: 12,
     material: "PETG",

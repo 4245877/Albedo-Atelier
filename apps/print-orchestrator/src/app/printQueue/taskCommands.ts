@@ -695,6 +695,8 @@ export class TaskCommands {
         unattendedAllowed:
           typeof patch.unattendedAllowed === "boolean" ? patch.unattendedAllowed : task.unattendedAllowed,
         material: patch.material === undefined ? task.material : patch.material?.trim() || null,
+        // An explicit operator choice must survive future analysis refreshes.
+        metadata: patch.material === undefined ? task.metadata : { ...task.metadata, materialAnalysisId: null },
         version: patch.expectedVersion ?? task.version,
         updatedAt: this.ctx.nowIso()
       };

@@ -346,10 +346,10 @@ function unresolvedBlock(preview, ui) {
         Посмотрите на принтер и отметьте, что произошло.
       </p>
       <div class="launch-unresolved-actions">
-        <button type="button" class="btn btn-sm btn-primary" data-launch-resolve="FAILED" ${ui.busy ? "disabled" : ""}>
+        <button type="button" class="btn btn-sm btn-primary" data-launch-resolve="FAILED" ${ui.busy || ui.loading || ui.previewReady === false ? "disabled" : ""}>
           Печать не началась
         </button>
-        <button type="button" class="btn btn-sm" data-launch-resolve="SUCCEEDED" ${ui.busy ? "disabled" : ""}>
+        <button type="button" class="btn btn-sm" data-launch-resolve="SUCCEEDED" ${ui.busy || ui.loading || ui.previewReady === false ? "disabled" : ""}>
           Печать идёт / прошла
         </button>
       </div>
@@ -430,7 +430,7 @@ export function launchModalHtml(preview, ui) {
   const unresolved = Boolean(preview.unresolvedRunId);
   // Пригоден сам по себе — или оператор явно принял на себя то, что помешало.
   const admitted = Boolean(candidate?.eligible) || overrideReady(candidate, ui);
-  const canLaunch = !unresolved && admitted && allConfirmed && !ui.busy;
+  const canLaunch = !unresolved && admitted && allConfirmed && !ui.busy && !ui.loading && ui.previewReady !== false;
 
   const cta = !candidate
     ? "Запустить печать"
@@ -477,6 +477,7 @@ export function launchModalHtml(preview, ui) {
     }
 
     ${ui.error ? `<div class="form-error">${esc(ui.error)}</div>` : ""}
+    ${ui.previewReady === false && !ui.loading ? `<button type="button" class="btn btn-sm" data-launch-recheck>Проверить принтер снова</button>` : ""}
 
     ${diagnosticsBlock(preview, candidate)}
 
@@ -496,7 +497,7 @@ export function launchModalHtml(preview, ui) {
         unresolved
           ? ""
           : `<button type="button" class="btn btn-sm btn-primary" data-launch-go ${canLaunch ? "" : "disabled"}>
-               ${ui.busy ? "Запускаю…" : esc(cta)}
+               ${ui.busy ? "Запускаю…" : ui.loading ? "Проверяю принтер…" : esc(cta)}
              </button>`
       }
     </div>`;

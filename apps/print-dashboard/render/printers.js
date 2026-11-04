@@ -190,7 +190,7 @@ export function bedBlock(p) {
     ? `<button type="button" class="btn btn-sm btn-primary"
          data-act="clear-bed" data-printer="${esc(p.id)}" data-bed-state="${esc(bed.state)}"
          ${bed.operationId ? `data-operation="${esc(bed.operationId)}"` : ""}>
-         ${bed.awaitingClearance ? "Снять модель и освободить стол" : "Стол пуст — подтвердить"}
+         ${bed.awaitingClearance ? "Модель снята — стол свободен" : "Стол пуст — подтвердить"}
        </button>`
     : "";
   return `

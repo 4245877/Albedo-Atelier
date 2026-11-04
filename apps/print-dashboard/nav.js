@@ -142,6 +142,9 @@ export function showMode(mode, { focus = false, remember = true, restoreScroll =
   if (secNav) secNav.hidden = mode !== "hall";
 
   if (mode === "works" && !currentWork) showWork(WORK_NAV[0][0], { remember });
+  else if (mode === "works" && from !== mode) {
+    document.dispatchEvent?.(new CustomEvent("work-section-open", { detail: { id: currentWork } }));
+  }
   if (remember) {
     try { localStorage.setItem(MODE_KEY, mode); } catch { /* приватный режим */ }
   }
@@ -177,6 +180,7 @@ export function showWork(id, { focus = false, remember = true } = {}) {
     // впервые открыли: пять фоновых опросов на старте страницы не нужны никому.
     try { onWorkOpen(id); } catch (err) { console.error("work init failed", id, err); }
   }
+  document.dispatchEvent?.(new CustomEvent("work-section-open", { detail: { id } }));
   if (remember) {
     try { localStorage.setItem(WORK_KEY, id); } catch { /* приватный режим */ }
   }

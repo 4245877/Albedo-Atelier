@@ -14,6 +14,7 @@ import { openLaunchModal } from "../../render/modals.js";
 import { $, toast, esc } from "../../util.js";
 import { buildCreateSetPayload, nextPollMs } from "./formModel.js";
 import { icon } from "../../shared/icons.js";
+import { isSectionVisible, subscribePrintChanges } from "../../shared/changes.js";
 import {
   createSetHtml,
   errorsHtml,
@@ -53,6 +54,7 @@ let wired = false;
 /* Latest-only guard: каждый loadAll берёт номер; ответ применяется, только если он
    всё ещё самый свежий. Запоздавший опрос не перетирает более новый state. */
 let loadSeq = 0;
+let loadController = null;
 /* Клиентский in-flight lock: пока идёт мутирующий POST, повторные клики/сабмиты
    игнорируются — двойная отправка не плодит дубли слайсов/наборов. */
 let busy = false;
@@ -63,29 +65,47 @@ export function setupSlicing() {
   body.innerHTML = `<div class="slice-loading">Загрузка профилей…</div>`;
   if (!wired) {
     wireDelegates();
+    subscribePrintChanges(["artifacts", "slicing", "tasks", "printers"], () => {
+      if (!busy && isSectionVisible("slicing")) void loadAll();
+    });
+    document.addEventListener("work-section-open", (e) => {
+      if (e.detail?.id === "slicing") void loadAll();
+    });
+    window.addEventListener("pagehide", () => {
+      clearTimeout(pollTimer);
+      loadController?.abort();
+      loadSeq++;
+    });
+    window.addEventListener("pageshow", (e) => { if (e.persisted) void loadAll(); });
     wired = true;
   }
   void loadAll();
 }
 
 async function loadAll({ full = false } = {}) {
+  clearTimeout(pollTimer);
+  pollTimer = null;
+  loadController?.abort();
+  loadController = new AbortController();
+  const opts = { signal: loadController.signal };
   // allSettled, а не Promise.all с per-request .catch(() => пусто): падение одного
   // ресурса не должно выглядеть как «нет профилей / загрузите STL». Успешные
   // ресурсы обновляют state, упавшие — сохраняют последнее корректное значение и
   // попадают в state.errors (баннер + автоповтор через ensurePolling).
   const seq = ++loadSeq;
   const results = await Promise.allSettled([
-    apiGet("/api/print/slicing/runtime"),
-    apiGet("/api/print/slicing/profiles"),
-    apiGet("/api/print/slicing/profile-sets"),
-    apiGet("/api/print/slicing/variants"),
-    apiGet("/api/print/artifacts"),
-    apiGet("/api/print/tasks"),
-    apiGet("/api/print/assignments")
+    apiGet("/api/print/slicing/runtime", opts),
+    apiGet("/api/print/slicing/profiles", opts),
+    apiGet("/api/print/slicing/profile-sets", opts),
+    apiGet("/api/print/slicing/variants", opts),
+    apiGet("/api/print/artifacts", opts),
+    apiGet("/api/print/tasks", opts),
+    apiGet("/api/print/assignments", opts)
   ]);
   // Более свежий запрос уже стартовал, пока этот шёл по сети — его ответ и станет
   // истиной; устаревший результат молча отбрасываем, чтобы не откатить state.
   if (seq !== loadSeq) return;
+  loadController = null;
   const [runtime, profiles, sets, variants, artifacts, tasks, assignments] = results;
   const errors = [];
 
@@ -132,23 +152,23 @@ function renderConnectionError() {
     <button type="button" class="btn btn-sm" data-slice-action="reload">${icon("refresh")}<span>Воззвать снова</span></button></div>`;
 }
 
-let pollMs = null;
 function ensurePolling() {
   const busyVariants =
     state.variants.some((v) => v.state === "pending" || v.state === "running") ||
     state.assignments.some((a) => a.deviceArtifact && a.deviceArtifact.state === "UPLOADING");
   // Быстрый опрос при активной работе или ошибках; иначе — редкий фоновый, но
-  // всегда: изменения, сделанные другим оператором или фоновым процессом, не
-  // должны оставаться незаметными сколь угодно долго. Пересоздаём таймер, только
-  // если интервал сменился.
+  // всегда. Следующий цикл начинается после ответа: медленный backend не
+  // порождает пересечения и бесконечное отбрасывание ещё не завершённых чтений.
   const want = nextPollMs(
     { busyVariants, hasErrors: state.errors.length > 0 },
     { fast: POLL_MS, idle: IDLE_POLL_MS }
   );
-  if (pollTimer !== null && pollMs === want) return;
-  if (pollTimer !== null) clearInterval(pollTimer);
-  pollMs = want;
-  pollTimer = setInterval(() => void loadAll(), want);
+  if (pollTimer !== null) clearTimeout(pollTimer);
+  pollTimer = setTimeout(() => {
+    pollTimer = null;
+    if (isSectionVisible("slicing")) void loadAll();
+    else ensurePolling();
+  }, want);
 }
 
 /* ── Отрисовка ──────────────────────────────────────────────── */
@@ -312,14 +332,14 @@ function wireDelegates() {
   // Модуль загрузки завершил анализ модели → подтягиваем свежий список, чтобы
   // загруженный STL сразу появился в «Запуске слайсинга» без перезагрузки страницы.
   document.addEventListener("artifact-analysis-completed", () => {
-    if (state.loaded) void loadAll();
+    if (state.loaded && isSectionVisible("slicing")) void loadAll();
   });
 
   // Файл удалён в разделе загрузок. Он мог быть и моделью из «Запуска слайсинга»,
   // и нарезанным выходом варианта — перечитываем, чтобы раздел не предлагал
   // нарезать или поставить в очередь то, чего уже нет.
   document.addEventListener("artifact-deleted", () => {
-    if (state.loaded) void loadAll({ full: true });
+    if (state.loaded && isSectionVisible("slicing")) void loadAll({ full: true });
   });
 }
 

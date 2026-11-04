@@ -11,6 +11,7 @@
 
 import { apiGet, apiPost } from "../../api.js";
 import { esc, toast } from "../../util.js";
+import { subscribePrintChanges } from "../../shared/changes.js";
 import { launchModalHtml, overridableProblems, overrideReady } from "./view.js";
 
 /* Ключ идемпотентности живёт столько же, сколько попытка запуска ОДНОЙ задачи.
@@ -41,15 +42,27 @@ const LAUNCH_TIMEOUT_MS = 366000;
 
 export function createLaunchController({ getContent, refresh, close }) {
   let session = null;
+  let previewSeq = 0;
+  let previewController = null;
+
+  function beginPreview() {
+    previewController?.abort();
+    previewController = new AbortController();
+    return { seq: ++previewSeq, signal: previewController.signal };
+  }
+
+  subscribePrintChanges(["operations", "printers"], () => {
+    if (session?.preview && !session.ui.busy && !session.ui.done) void reselect(session.ui.selectedPrinterId);
+  });
 
   function render() {
     if (!session) return;
     getContent().innerHTML = launchModalHtml(session.preview, session.ui);
   }
 
-  async function load(taskId, printerId) {
+  async function load(taskId, printerId, signal) {
     const q = printerId ? `?printer=${encodeURIComponent(printerId)}` : "";
-    const res = await apiGet(`/api/print/launch/${encodeURIComponent(taskId)}${q}`);
+    const res = await apiGet(`/api/print/launch/${encodeURIComponent(taskId)}${q}`, { signal });
     return res.preview;
   }
 
@@ -59,7 +72,7 @@ export function createLaunchController({ getContent, refresh, close }) {
    * рекомендацию; если он не годится, окно скажет почему и предложит другие.
    */
   async function open(taskId, { printerId = null } = {}) {
-    session = {
+    const active = session = {
       taskId,
       idempotencyKey: newIdempotencyKey(taskId),
       preview: null,
@@ -73,20 +86,26 @@ export function createLaunchController({ getContent, refresh, close }) {
         overrideReason: "",
         busy: false,
         error: null,
-        done: null
+        done: null,
+        loading: true,
+        previewReady: false
       }
     };
+    const request = beginPreview();
     getContent().innerHTML = `
       <div class="modal-head"><h2 id="modal-title">Запуск печати</h2></div>
       <div class="launch-loading">Проверяю принтеры…</div>`;
     try {
-      const preview = await load(taskId, printerId);
-      if (!session || session.taskId !== taskId) return; // окно уже сменили
+      const preview = await load(taskId, printerId, request.signal);
+      if (session !== active || request.seq !== previewSeq) return;
       session.preview = preview;
+      session.ui.loading = false;
+      session.ui.previewReady = true;
       const chosen = printerId && preview.candidates.some((c) => c.printerId === printerId) ? printerId : null;
       session.ui.selectedPrinterId = chosen ?? preview.recommendedPrinterId;
       render();
     } catch (err) {
+      if (session !== active || request.seq !== previewSeq || err?.name === "AbortError") return;
       getContent().innerHTML = `
         <div class="modal-head"><h2 id="modal-title">Запуск печати</h2></div>
         <div class="form-error">${esc(err.message || "Не удалось получить состояние задания")}</div>
@@ -96,8 +115,13 @@ export function createLaunchController({ getContent, refresh, close }) {
 
   /** Перечитывает preview под выбранный принтер (у него свои подтверждения). */
   async function reselect(printerId) {
-    if (!session) return;
+    if (!session || session.ui.busy) return;
+    const active = session;
+    const request = beginPreview();
     session.ui.selectedPrinterId = printerId;
+    session.ui.loading = true;
+    session.ui.previewReady = false;
+    session.ui.error = null;
     // Подтверждения относятся к КОНКРЕТНОМУ принтеру: у нового может не быть
     // вопроса про стол, а у старого — быть. Ранее поставленные галочки не
     // переносим, иначе оператор подтвердит одно, а запустит на другом.
@@ -108,17 +132,23 @@ export function createLaunchController({ getContent, refresh, close }) {
     session.ui.overrideReason = "";
     render();
     try {
-      const preview = await load(session.taskId, printerId);
-      if (!session) return;
+      const preview = await load(active.taskId, printerId, request.signal);
+      if (session !== active || request.seq !== previewSeq) return;
       session.preview = preview;
+      session.ui.loading = false;
+      session.ui.previewReady = true;
       render();
-    } catch {
-      /* Показываем прежний preview: список принтеров всё ещё верен. */
+    } catch (err) {
+      if (session !== active || request.seq !== previewSeq || err?.name === "AbortError") return;
+      session.ui.loading = false;
+      session.ui.error = err.message || "Не удалось проверить выбранный принтер";
+      render();
     }
   }
 
   async function launch() {
-    if (!session || session.ui.busy) return;
+    if (!session || session.ui.busy || !session.ui.previewReady || session.ui.loading) return;
+    const active = session;
     const { preview, ui } = session;
     const candidate = preview.candidates.find((c) => c.printerId === ui.selectedPrinterId);
     if (!candidate) return;
@@ -148,7 +178,7 @@ export function createLaunchController({ getContent, refresh, close }) {
         },
         { timeoutMs: LAUNCH_TIMEOUT_MS }
       );
-      if (!session) return;
+      if (session !== active) return;
       ui.busy = false;
       // «Запущена» — только если принтер сам показал, что печатает. Принятая
       // команда (Moonraker ответил 200) — это ещё не печать: окно говорит, что
@@ -164,16 +194,25 @@ export function createLaunchController({ getContent, refresh, close }) {
       );
       await refresh();
     } catch (err) {
-      if (!session) return;
+      if (session !== active) return;
       ui.busy = false;
       ui.error = err.message || "Запуск не удался";
+      ui.loading = true;
+      ui.previewReady = false;
+      render();
       // Состояние могло измениться именно из-за отказа (стол, занятость) —
       // перечитываем, чтобы окно показывало актуальные причины, а не прежние.
       try {
-        session.preview = await load(session.taskId, ui.selectedPrinterId);
+        const request = beginPreview();
+        const updated = await load(active.taskId, ui.selectedPrinterId, request.signal);
+        if (session !== active || request.seq !== previewSeq) return;
+        session.preview = updated;
+        ui.previewReady = true;
       } catch {
         /* оставляем прежний preview */
       }
+      if (session !== active) return;
+      ui.loading = false;
       render();
     }
   }
@@ -182,7 +221,8 @@ export function createLaunchController({ getContent, refresh, close }) {
      что там на самом деле. Сервер снимает удержание, освобождает стол и
      возвращает задание в очередь — после чего обычный запуск снова возможен. */
   async function resolveRun(outcome) {
-    if (!session || session.ui.busy) return;
+    if (!session || session.ui.busy || !session.ui.previewReady) return;
+    const active = session;
     const runId = session.preview?.unresolvedRunId;
     if (!runId) return;
 
@@ -194,14 +234,22 @@ export function createLaunchController({ getContent, refresh, close }) {
         outcome,
         reason: "оператор проверил принтер после неподтверждённого запуска"
       });
+      if (session !== active) return;
+      session.ui.previewReady = false;
+      session.ui.loading = true;
       // Ключ идемпотентности живёт ровно одну попытку запуска, а разрешение эту
       // попытку ЗАКРЫВАЕТ. Без нового ключа следующий «Запустить» в этом же окне
       // попадал бы в findByIdempotencyKey и получал прежний — уже отменённый —
       // run: окно показало бы «Печать запущена», а принтер бы не тронулся с
       // места. Ретрай и новая попытка — разные вещи, и различает их этот ключ.
       session.idempotencyKey = newIdempotencyKey(session.taskId);
+      const request = beginPreview();
+      const updated = await load(active.taskId, active.ui.selectedPrinterId, request.signal);
+      if (session !== active || request.seq !== previewSeq) return;
+      session.preview = updated;
       session.ui.busy = false;
-      session.preview = await load(session.taskId, session.ui.selectedPrinterId);
+      session.ui.previewReady = true;
+      session.ui.loading = false;
       render();
       toast(
         outcome === "FAILED"
@@ -211,8 +259,9 @@ export function createLaunchController({ getContent, refresh, close }) {
       );
       await refresh();
     } catch (err) {
-      if (!session) return;
+      if (session !== active) return;
       session.ui.busy = false;
+      session.ui.loading = false;
       session.ui.error = err.message || "Не удалось снять удержание";
       render();
     }
@@ -221,6 +270,11 @@ export function createLaunchController({ getContent, refresh, close }) {
   /** Делегированные клики внутри окна запуска. */
   function handleClick(e) {
     if (!session) return false;
+    const recheck = e.target.closest("[data-launch-recheck]");
+    if (recheck) {
+      void reselect(session.ui.selectedPrinterId);
+      return true;
+    }
 
     const modeBtn = e.target.closest("[data-launch-mode]");
     if (modeBtn) {
@@ -246,7 +300,7 @@ export function createLaunchController({ getContent, refresh, close }) {
 
   /** Изменения радиокнопок принтера и галочек подтверждения. */
   function handleChange(e) {
-    if (!session) return false;
+    if (!session || session.ui.busy) return false;
 
     const pick = e.target.closest("[data-launch-pick]");
     if (pick) {
@@ -287,13 +341,16 @@ export function createLaunchController({ getContent, refresh, close }) {
       const confirmations = preview?.confirmations || [];
       const allConfirmed = confirmations.filter((c) => c.required).every((c) => ui.confirmed.has(c.code));
       const admitted = Boolean(candidate?.eligible) || overrideReady(candidate, ui);
-      go.disabled = !(admitted && allConfirmed && !ui.busy && !preview?.unresolvedRunId);
+      go.disabled = !(admitted && allConfirmed && !ui.busy && ui.previewReady && !ui.loading && !preview?.unresolvedRunId);
     }
     return true;
   }
 
   function reset() {
     session = null;
+    previewSeq++;
+    previewController?.abort();
+    previewController = null;
   }
 
   return { open, handleClick, handleChange, handleInput, reset, isOpen: () => session !== null, close };

@@ -14,6 +14,7 @@
 import { apiGet, apiPost } from "../../api.js";
 import { createInflightGuard } from "../../shared/inflight.js";
 import { createPoller } from "../../shared/polling.js";
+import { isSectionVisible, subscribePrintChanges } from "../../shared/changes.js";
 import { inputToIso } from "../../shared/format.js";
 import { $, esc, toast } from "../../util.js";
 import { createSnapshot, isSnapshotStale, paramsPayload } from "./editSnapshot.js";
@@ -59,8 +60,8 @@ const editSnapshots = new Map();
    опрос планируется ПОСЛЕ завершения предыдущего (пересечения исключены), а
    устаревший ответ, пришедший позже нового, отбрасывается и не трогает UI. */
 const poller = createPoller({
-  run: (signal) => fetchAll(signal),
-  apply: (out, context) => applyAll(out, context),
+  run: (signal) => isSectionVisible("scheduler") ? fetchAll(signal) : Promise.resolve(null),
+  apply: (out, context) => { if (out) applyAll(out, context); },
   onError: (err) => onLoadError(err),
   intervalMs: POLL_MS,
   immediate: true,
@@ -74,8 +75,15 @@ export function setupScheduler() {
   body.innerHTML = `<div class="slice-loading">Загрузка планировщика…</div>`;
   if (!wired) {
     wireDelegates();
+    subscribePrintChanges(["tasks", "printers", "operations", "slicing"], () => {
+      if (isSectionVisible("scheduler")) void poller.refresh({ fromPoll: true });
+    });
+    document.addEventListener("work-section-open", (e) => {
+      if (e.detail?.id === "scheduler") void poller.refresh({ fromPoll: true });
+    });
     // Уход со страницы должен снять таймер и оборвать активный запрос.
     window.addEventListener("pagehide", () => poller.stop());
+    window.addEventListener("pageshow", (e) => { if (e.persisted) poller.start({ fromPoll: true }); });
     // Удаление файла в разделе загрузок могло отменить задание ЗДЕСЬ (каскад).
     // Перечитываем сразу, чтобы очередь не показывала строку, которой уже нет,
     // до следующего фонового опроса.

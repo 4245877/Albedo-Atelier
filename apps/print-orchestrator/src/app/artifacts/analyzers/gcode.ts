@@ -834,10 +834,12 @@ function extractComment(line: string, low: string, meta: GcodeMeta): void {
   }
 
   if (low.includes("material") || low.includes("filament")) {
-    m = line.match(/;\s*(?:filament_type|filament used material|material)\s*=\s*([A-Za-z0-9+\- ]+)/i);
-    if (m) set("material", m[1].split(/[;,]/)[0].trim());
-    m = line.match(/;\s*filament:\s*([A-Za-z0-9+\- ]+)/i);
-    if (m) set("material", m[1].split(/[;,]/)[0].trim());
+    // Orca's `; filament: 1` is a count, not a type. Reject numeric
+    // values rather than letting the first-writer rule hide filament_type.
+    m = line.match(/;\s*(?:filament_type|filament used material|material)\s*=\s*(.+)/i);
+    if (m) set("material", materialName(m[1]));
+    m = line.match(/;\s*filament:\s*(.+)/i);
+    if (m) set("material", materialName(m[1]));
   }
 
   if (low.includes("layer_height")) {
@@ -861,7 +863,9 @@ function extractComment(line: string, low: string, meta: GcodeMeta): void {
   if (low.includes("time")) {
     m = line.match(/;\s*estimated printing time.*?=\s*(.+)/i);
     if (m) set("estimatedDurationS", parseHms(m[1]));
-    m = line.match(/;\s*(?:model printing time|total estimated time):\s*(.+)/i);
+    // Orca writes both on ONE line; total includes machine preparation.
+    m = line.match(/(?:^;|;)\s*total estimated time:\s*([^;]+)/i)
+      ?? line.match(/;\s*model printing time:\s*([^;]+)/i);
     if (m) set("estimatedDurationS", parseHms(m[1]));
     m = line.match(/;\s*TIME:\s*(\d+)/i);
     if (m) set("estimatedDurationS", Number(m[1]));
@@ -884,6 +888,12 @@ function extractComment(line: string, low: string, meta: GcodeMeta): void {
     m = line.match(/;\s*Filament used:\s*([\d.]+)m\b/i);
     if (m) set("filamentUsedMm", Number(m[1]) * 1000);
   }
+}
+
+/** A type label must contain a letter; counts and numeric IDs supply no type. */
+function materialName(raw: string): string | null {
+  const name = raw.split(/[;,]/)[0].trim().replace(/^"(.*)"$/, "$1").trim();
+  return /^[A-Za-z0-9+\- ]+$/.test(name) && /[A-Za-z]/.test(name) ? name : null;
 }
 
 /**

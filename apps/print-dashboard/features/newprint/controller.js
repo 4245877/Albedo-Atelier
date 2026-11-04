@@ -11,7 +11,8 @@
 import { apiGet, apiPost, uploadArtifact } from "../../api.js";
 import { openLaunchModal } from "../../render/modals.js";
 import { $, esc, toast } from "../../util.js";
-import { BATCH_RESET, BATCH_RESETS, resolveBatchFlow, toggleBatchFile } from "./batch.js";
+import { isSectionVisible, subscribePrintChanges } from "../../shared/changes.js";
+import { BATCH_RESET, BATCH_RESETS, pruneBatchSelection, resolveBatchFlow, toggleBatchFile } from "./batch.js";
 import { batchHtml } from "./batchView.js";
 import { fileKind, isSlicing, recipesFor, resolveFlow } from "./model.js";
 import { newPrintHtml } from "./view.js";
@@ -25,6 +26,7 @@ const IDLE_POLL_MS = 20000;
 let wired = false;
 let timer = null;
 let loadSeq = 0;
+let loadController = null;
 let selection = readSelection();
 let data = { items: [], coverage: [], sets: [], variants: [], outputs: [], live: [] };
 const ui = { busy: false, error: null, uploading: false };
@@ -35,6 +37,34 @@ export function setupNewPrint() {
   body.innerHTML = `<div class="slice-loading">Готовлю новую печать…</div>`;
   if (!wired) {
     wireDelegates(body);
+    subscribePrintChanges(["artifacts", "slicing", "printers", "tasks"], (change) => {
+      const deleted = change.method === "DELETE" && /^\/api\/print\/artifacts\/([^/?]+)$/.exec(change.path.split("?")[0]);
+      if (deleted) {
+        loadSeq++;
+        loadController?.abort();
+        const id = decodeURIComponent(deleted[1]);
+        data.items = data.items.filter((it) => it.artifact.id !== id);
+        data.outputs = data.outputs.filter((it) => it.artifact.id !== id);
+        reconcileSelection();
+        render();
+      }
+      if (isSectionVisible("newprint") && !ui.busy && !ui.uploading) void load();
+    });
+    document.addEventListener("artifact-analysis-completed", () => {
+      if (isSectionVisible("newprint") && !ui.busy && !ui.uploading) void load();
+    });
+    document.addEventListener("work-section-open", (e) => {
+      if (e.detail?.id === "newprint") void load();
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (isSectionVisible("newprint")) void load();
+    });
+    window.addEventListener("pagehide", () => {
+      clearTimeout(timer);
+      loadController?.abort();
+      loadSeq++;
+    });
+    window.addEventListener("pageshow", (e) => { if (e.persisted) void load(); });
     wired = true;
   }
   void load();
@@ -59,21 +89,29 @@ const isBatch = () => selection.mode === "batch";
 // ── Данные ──────────────────────────────────────────────────────────────────
 
 async function load() {
+  clearTimeout(timer);
+  timer = null;
+  loadController?.abort();
+  const controller = new AbortController();
+  loadController = controller;
+  const opts = { signal: controller.signal };
   const seq = ++loadSeq;
   const results = await Promise.allSettled([
-    apiGet("/api/print/artifacts"),
-    apiGet("/api/print/slicing/runtime"),
-    apiGet("/api/print/slicing/profile-sets"),
-    apiGet("/api/print/slicing/variants"),
+    apiGet("/api/print/artifacts", opts),
+    apiGet("/api/print/slicing/runtime", opts),
+    apiGet("/api/print/slicing/profile-sets", opts),
+    apiGet("/api/print/slicing/variants", opts),
     // Что принтеры делают сейчас — пометка рядом с каждым на шаге «Принтер».
-    apiGet("/api/printers")
+    apiGet("/api/printers", opts)
   ]);
   if (seq !== loadSeq) return; // ответ устарел — свежий запрос уже в пути
+  loadController = null;
   const [artifacts, runtime, sets, variants, printers] = results;
   if (artifacts.status === "fulfilled") {
     const all = artifacts.value.artifacts || [];
     data.items = all;
     data.outputs = all.filter((a) => a.artifact && a.artifact.kind === "gcode");
+    reconcileSelection();
   }
   if (runtime.status === "fulfilled") data.coverage = runtime.value.coverage || [];
   if (sets.status === "fulfilled") data.sets = sets.value.sets || [];
@@ -89,6 +127,13 @@ async function load() {
   autoAdvance();
   render();
   schedule();
+}
+
+function reconcileSelection() {
+  const ids = new Set(data.items.map((it) => it.artifact.id));
+  if (selection.artifactId && !ids.has(selection.artifactId)) select(RESETS.file);
+  const batchPatch = pruneBatchSelection(selection, ids);
+  if (batchPatch) select(batchPatch);
 }
 
 const flowNow = () => (isBatch() ? resolveBatchFlow(selection, data) : resolveFlow(selection, data));
@@ -121,7 +166,7 @@ function schedule() {
   timer = setTimeout(() => {
     timer = null;
     // Раздел скрыт — не тратим запросы; проверим снова позже.
-    if (document.getElementById("newprint")?.hidden) schedule();
+    if (!isSectionVisible("newprint")) schedule();
     else void load();
   }, busy ? BUSY_POLL_MS : IDLE_POLL_MS);
 }

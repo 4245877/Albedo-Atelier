@@ -229,7 +229,9 @@ function projectFilePayload(
     subtask_id: "0",
     subtask_name: subtaskName,
     file: "",
-    url: `file:///mnt/sdcard/${remotePath}`,
+    // The command uses Bambu's storage namespace, not a Linux mount path.
+    // BambuStudio resources/printers/N2S.json declares ftp_folder = "sdcard/".
+    url: `file:///sdcard/${remotePath}`,
     md5: "",
     timelapse: false,
     bed_type: "auto",

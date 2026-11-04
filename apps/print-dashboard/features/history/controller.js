@@ -8,6 +8,7 @@ import { apiGet, apiPost } from "../../api.js";
 import { gotoSection } from "../../nav.js";
 import { openLaunchModal } from "../../render/modals.js";
 import { $, esc, toast } from "../../util.js";
+import { isSectionVisible, subscribePrintChanges } from "../../shared/changes.js";
 import { startNewPrintFrom } from "../newprint/controller.js";
 import { historyQuery, launchPrinterFor, reprepareSelection } from "./model.js";
 import { historyHtml } from "./view.js";
@@ -40,6 +41,10 @@ export function setupHistory() {
   if (!body) return;
   if (!wired) {
     wire(body);
+    subscribePrintChanges(["tasks", "artifacts"], () => { if (!vm.busy && isSectionVisible("history")) void load(); });
+    document.addEventListener("work-section-open", (e) => {
+      if (e.detail?.id === "history") void load();
+    });
     wired = true;
   }
   render();
@@ -79,7 +84,7 @@ function schedule() {
   timer = setTimeout(() => {
     timer = null;
     // Раздел скрыт — не тратим запросы; проверим позже.
-    if (document.getElementById("history")?.hidden) schedule();
+    if (!isSectionVisible("history")) schedule();
     else void load();
   }, POLL_MS);
 }

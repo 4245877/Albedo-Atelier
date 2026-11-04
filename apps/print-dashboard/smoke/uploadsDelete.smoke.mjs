@@ -86,13 +86,16 @@ test("удаление файла: подтверждение, запрос на
   // как настоящий backend — интерфейс не должен зависеть от повторного чтения,
   // но и расходиться с сервером тоже не должен.
   let artifacts = [row("art_free", "free.gcode", null), row("art_busy", "busy.gcode", BLOCKER)];
+  let slowReads = false;
   const mock = await startMockServer({
     handle: (req, key) => {
       if (key === "/api/print/artifacts" && req.method === "GET") {
+        if (slowReads) return new Promise((resolve) => setTimeout(() => resolve({ status: 200, body: { artifacts } }), 2000));
         return { status: 200, body: { artifacts } };
       }
       if (req.method === "DELETE" && key === "/api/print/artifacts/art_free") {
         artifacts = artifacts.filter((r) => r.artifact.id !== "art_free");
+        slowReads = true;
         return {
           status: 200,
           body: { ok: true, artifactId: "art_free", blobKey: "sha256/ab/cd", blobRemoved: true, removedSliceVariants: [] }
@@ -104,13 +107,15 @@ test("удаление файла: подтверждение, запрос на
 
   const target = await (await fetch(`${CDP_URL}/json/new?${encodeURIComponent(mock.url)}`, { method: "PUT" })).json();
   const cdp = await connect(target.webSocketDebuggerUrl);
+  let peerTarget;
+  let peer;
 
   const evalValue = async (expression) => {
     const { result } = await cdp.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
     return result.value;
   };
-  const until = async (expression, what) => {
-    for (let i = 0; i < 80; i++) {
+  const until = async (expression, what, attempts = 80) => {
+    for (let i = 0; i < attempts; i++) {
       if (await evalValue(expression)) return;
       await new Promise((r) => setTimeout(r, 250));
     }
@@ -130,6 +135,22 @@ test("удаление файла: подтверждение, запрос на
     await until('document.querySelectorAll("#worknav .work-tab").length > 0', "the app to boot");
     await evalValue('document.querySelector(\'.mode-tab[data-mode="works"]\').click(), 1');
     await until('document.getElementById("mode-works") && !document.getElementById("mode-works").hidden', "the works mode");
+    await until('document.getElementById("newprint-body").textContent.includes("free.gcode")', "files in New print");
+    await evalValue('document.querySelector(\'[data-np-action="pick-file"][data-id="art_free"]\').click(), 1');
+    // Вторая настоящая вкладка того же origin: BroadcastChannel должен убрать
+    // файл и там, без её собственного действия или фонового тика.
+    peerTarget = await (await fetch(`${CDP_URL}/json/new?${encodeURIComponent(mock.url)}`, { method: "PUT" })).json();
+    peer = await connect(peerTarget.webSocketDebuggerUrl);
+    const peerEval = async (expression) => (await peer.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result.value;
+    await peer.send("Page.navigate", { url: mock.url });
+    for (let i = 0; i < 80 && !await peerEval('document.querySelectorAll("#worknav .work-tab").length > 0'); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await peerEval('document.querySelector(\'.mode-tab[data-mode="works"]\').click(), 1');
+    for (let i = 0; i < 80 && !await peerEval('document.getElementById("newprint-body").textContent.includes("free.gcode")'); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.equal(await peerEval('document.getElementById("newprint-body").textContent.includes("free.gcode")'), true);
     // «Работы» открываются на «Новой печати»; файлы — в своём разделе.
     await evalValue('document.querySelector(\'[data-work-tab="uploads"]\').click(), 1');
     await until("document.querySelectorAll('#upload-list .upload-item').length === 2", "both file cards");
@@ -170,6 +191,12 @@ test("удаление файла: подтверждение, запрос на
     const stillBusy = await evalValue('Boolean(document.querySelector(\'[data-upload="art_busy"]\'))');
     assert.equal(stillBusy, true, "the other file is untouched");
 
+    // Даже скрытый мастер должен забыть удалённый файл сразу после DELETE,
+    // включая случай медленного последующего чтения. Не ждём его idle poll.
+    await until('!document.getElementById("newprint-body").textContent.includes("free.gcode")', "New print to forget the deleted file", 4);
+    assert.equal(await evalValue('JSON.parse(sessionStorage.getItem("albedo-newprint")).artifactId'), null, "deleted selection is forgotten");
+    assert.equal(await peerEval('document.getElementById("newprint-body").textContent.includes("free.gcode")'), false, "the other browser tab is synchronized too");
+
     const deletes = mock.requests.filter((r) => r.method === "DELETE");
     assert.deepEqual(
       deletes.map((r) => r.path),
@@ -179,6 +206,8 @@ test("удаление файла: подтверждение, запрос на
 
     assert.deepEqual(cdp.exceptions, [], "there should be no uncaught page errors");
   } finally {
+    peer?.close();
+    if (peerTarget) await fetch(`${CDP_URL}/json/close/${peerTarget.id}`).catch(() => {});
     cdp.close();
     await fetch(`${CDP_URL}/json/close/${target.id}`).catch(() => {});
     await mock.close();

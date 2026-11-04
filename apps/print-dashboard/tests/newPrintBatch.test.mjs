@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { BATCH_RESETS, MAX_BATCH, batchCandidates, resolveBatchFlow, toggleBatchFile } from "../features/newprint/batch.js";
+import { BATCH_RESETS, MAX_BATCH, batchCandidates, pruneBatchSelection, resolveBatchFlow, toggleBatchFile } from "../features/newprint/batch.js";
 import { batchHtml } from "../features/newprint/batchView.js";
 import { lastRecipeFor, resolveFlow } from "../features/newprint/model.js";
 import { newPrintHtml } from "../features/newprint/view.js";
@@ -160,4 +160,17 @@ test("the single path offers the batch; the batch offers the way back", () => {
   assert.match(batch, /data-np-batch-toggle="art_a"/);
   assert.doesNotMatch(batch, /data-np-batch-toggle="art_g"/, "a G-code needs no slicing — it is not a batch model");
   assert.match(batch, /type="file" data-np-upload multiple/);
+});
+test("removing one batch source preserves the other queued prints", () => {
+  const selection = {
+    mode: "batch", artifactIds: ["a", "b"], printerId: "k2", setId: "s", filesConfirmed: true,
+    variants: { a: "va", b: "vb" }, tasks: { va: "ta", vb: "tb" }, queued: true
+  };
+  const next = { ...selection, ...pruneBatchSelection(selection, new Set(["b"])) };
+  assert.deepEqual(next.artifactIds, ["b"]);
+  assert.deepEqual(next.tasks, { vb: "tb" });
+  assert.equal(next.printerId, "k2");
+  assert.equal(next.setId, "s");
+  assert.equal(next.queued, true, "the remaining task is still queued, not offered for duplicate promotion");
+  assert.equal(pruneBatchSelection(next, new Set(["b"])), null);
 });

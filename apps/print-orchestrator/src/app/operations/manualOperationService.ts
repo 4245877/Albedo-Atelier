@@ -23,10 +23,11 @@ import {
 } from "../../domain/operations/types";
 import { ID_PREFIX, newId } from "../../domain/print/ids";
 import type { PrintQueueStore } from "../../domain/print/repositories";
-import { assertTransition, BED_CYCLE_TRANSITIONS } from "../../domain/print/states";
 import type { AuditEntityType, Metadata } from "../../domain/print/types";
+import type { PrinterLiveStatus } from "../../infra/printers/status";
 import type { StoreLogger } from "../../shared/logger";
 import { recordAuditEvent, type AuditInput } from "../audit";
+import { RunLifecycleService } from "../dispatch/runLifecycle";
 import type { OperatorScheduleService } from "./operatorScheduleService";
 
 /** What an operator (or the system) is asking to have done. */
@@ -97,7 +98,12 @@ export class ManualOperationService {
   constructor(
     private readonly store: PrintQueueStore,
     private readonly schedule: OperatorScheduleService,
-    options: { now?: () => Date; actor?: string; logger?: StoreLogger } = {}
+    private readonly options: {
+      now?: () => Date;
+      actor?: string;
+      logger?: StoreLogger;
+      getStatus?: (printerId: string) => PrinterLiveStatus | undefined;
+    } = {}
   ) {
     this.nowFn = options.now ?? (() => new Date());
     this.actor = options.actor ?? "operator";
@@ -215,7 +221,9 @@ export class ManualOperationService {
         printerId,
         assignmentId: input.assignmentId ?? null,
         taskId: input.taskId ?? null,
-        bedCycleId: input.bedCycleId ?? null,
+        bedCycleId: input.bedCycleId ?? (BED_CLEARING_TYPES.has(type)
+          ? this.store.repositories.bedCycles.latestByPrinter(printerId)?.id ?? null
+          : null),
         estimatedMinutes:
           input.estimatedMinutes === undefined
             ? DEFAULT_OPERATION_MINUTES[type]
@@ -420,6 +428,7 @@ export class ManualOperationService {
 
       if (BED_CLEARING_TYPES.has(operation.type)) {
         this.clearBedFor(saved, confirmedBy);
+        this.retireSupersededRemovals(saved.printerId, saved.bedCycleId, confirmedBy);
       }
       return saved;
     });
@@ -568,41 +577,44 @@ export class ManualOperationService {
     return saved;
   }
 
-  /**
-   * The bed half of a confirmed clearance. Only `AWAITING_CLEARANCE` moves — a
-   * `RUNNING`/`RESERVED` bed means the operation is stale (a new print already
-   * started), and silently clearing that would free a plate that is in use.
-   */
-  private clearBedFor(operation: ManualOperation, actor: string): void {
-    if (!operation.bedCycleId) return;
+  /** Retire historical removal requests satisfied by confirmation of the current plate. */
+  retireSupersededRemovals(printerId: string, bedCycleId: string | null, actor: string): void {
     const repos = this.store.repositories;
-    const bed = repos.bedCycles.getById(operation.bedCycleId);
-    if (!bed) return;
-    if (bed.state !== "AWAITING_CLEARANCE" && bed.state !== "UNKNOWN") return;
+    // Only the CURRENT plate's explicit clearance may settle older requests.
+    const latest = repos.bedCycles.latestByPrinter(printerId);
+    if (!latest || latest.id !== bedCycleId || latest.state !== "CLEAR") return;
+    const ancestors = new Set<string>();
+    let previous = latest.metadata.supersedes;
+    while (typeof previous === "string" && !ancestors.has(previous)) {
+      const bed = repos.bedCycles.getById(previous);
+      if (!bed || bed.printerId !== printerId) break;
+      ancestors.add(bed.id);
+      previous = bed.metadata.supersedes;
+    }
+    for (const old of this.openFor(printerId)) {
+      if (old.type !== "PART_REMOVAL" || old.origin !== "print_finished" || !old.bedCycleId) continue;
+      if (!ancestors.has(old.bedCycleId)) continue;
+      this.cancelInternal(old, `устаревшая операция: оператор подтвердил свободный стол в цикле ${latest.id}`, actor);
+    }
+  }
 
-    const iso = this.nowIso();
-    assertTransition("цикл стола", BED_CYCLE_TRANSITIONS, bed.state, "CLEAR");
-    repos.bedCycles.update({
-      ...bed,
-      state: "CLEAR",
-      clearedAt: iso,
-      updatedAt: iso,
-      metadata: {
-        ...bed.metadata,
-        clearance: operation.type === "PLATE_SERVICE" ? "plate_swapped" : "part_removed",
-        clearedBy: actor,
-        clearedByOperationId: operation.id
-      }
-    });
-    this.audit("bed_cycle", bed.id, "cleared", {
-      from: bed.state,
-      to: "CLEAR",
+  private clearBedFor(operation: ManualOperation, actor: string): void {
+    const latest = this.store.repositories.bedCycles.latestByPrinter(operation.printerId);
+    // Completing a historical request cannot clear a newer print's plate.
+    if (operation.bedCycleId !== null && operation.bedCycleId !== latest?.id) return;
+    // Both entry points use the same guards, device-job identity and operation
+    // settlement. The operation is already COMPLETED within this transaction,
+    // so the lifecycle's callback into complete() is idempotent.
+    new RunLifecycleService(this.store, {
+      now: this.nowFn,
+      logger: this.logger,
+      getStatus: this.options.getStatus,
+      operations: this
+    }).clearBed(operation.printerId, {
+      confirmation: operation.type === "PLATE_SERVICE" ? "plate_swapped" : "part_removed",
       actor,
-      detail: {
-        printerId: operation.printerId,
-        operationId: operation.id,
-        confirmation: operation.type === "PLATE_SERVICE" ? "plate_swapped" : "part_removed"
-      }
+      operationId: operation.id,
+      note: operation.note ?? undefined
     });
   }
 

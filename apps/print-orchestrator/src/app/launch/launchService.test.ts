@@ -981,7 +981,10 @@ test("a start the device REFUSES unwinds completely instead of holding the print
   assert.equal(repos.tasks.getById(task.id)?.state, "QUEUED", "ready to retry once the card is fixed");
   // Nothing is held, so the screen offers the launch again rather than a dead
   // end — a refusal the device explained needs no operator reconciliation.
-  assert.equal(h.launch.preview(task.id).state, "ready");
+  const preview = h.launch.preview(task.id);
+  assert.equal(preview.state, "ready");
+  assert.equal(preview.candidates.find(c => c.printerId === "bambu-a1")?.deviceFile, "verified",
+    "releasing the rejected assignment does not remove its verified file");
 });
 
 test("a device fault is the headline, and the consequences are not repeated beside it", () => {

@@ -72,7 +72,7 @@ test("a .gcode.3mf is started as a project_file naming the plate inside it", () 
 
   assert.equal(payload.command, "project_file");
   assert.equal(payload.param, "Metadata/plate_1.gcode");
-  assert.equal(payload.url, "file:///mnt/sdcard/cube-1a2b3c4d.gcode.3mf");
+  assert.equal(payload.url, "file:///sdcard/cube-1a2b3c4d.gcode.3mf");
   assert.equal(payload.subtask_name, "cube-1a2b3c4d");
   assert.equal(subtaskName, "cube-1a2b3c4d");
   // Local print: these identify a cloud job and must be zeroed, not omitted.
@@ -457,4 +457,12 @@ test("pre-flight stays silent when the device has reported nothing yet", () => {
   // Absence of telemetry is refused by the dispatch gate, with a better message
   // than this module could give; inventing a second refusal here would be noise.
   assert.doesNotThrow(() => assertBambuCanStart(PRINTER));
+});
+
+
+test("the project URL addresses the same SD-relative file that FTPS verified", () => {
+  const remotePath = "cache/Shelf_PETG_2h34m-e0f5f6ec.gcode.3mf";
+  const { payload } = buildBambuStartPayload(PRINTER, remotePath);
+  assert.equal(payload.url, `file:///sdcard/${remotePath}`);
+  assert.equal(new URL(String(payload.url)).pathname.slice("/sdcard/".length), remotePath);
 });

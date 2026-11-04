@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { afterEach, mock, test } from "node:test";
 
-import { apiGet, apiPost } from "../api.js";
+import { apiGet, apiPost, uploadArtifact } from "../api.js";
+import { subscribePrintChanges } from "../shared/changes.js";
 
 /*
  * Клиент API (api.js): необязательный AbortSignal и настраиваемый timeout для GET
@@ -11,10 +12,60 @@ import { apiGet, apiPost } from "../api.js";
  */
 
 const realFetch = globalThis.fetch;
+const realXhr = globalThis.XMLHttpRequest;
 
 afterEach(() => {
   globalThis.fetch = realFetch;
+  globalThis.XMLHttpRequest = realXhr;
   mock.timers.reset();
+});
+
+test("an upload with an already-aborted signal rejects immediately without opening a request", async () => {
+  globalThis.XMLHttpRequest = class { constructor() { assert.fail("must not create XHR"); } };
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(uploadArtifact(new File(["x"], "x.stl"), { signal: controller.signal }), { name: "AbortError" });
+});
+
+test("a stalled upload has a deadline and releases its abort listener when finished", async () => {
+  let xhr;
+  globalThis.XMLHttpRequest = class extends EventTarget {
+    constructor() { super(); xhr = this; this.upload = new EventTarget(); }
+    open() {}
+    setRequestHeader() {}
+    send() {}
+    abort() { assert.fail("a finished XHR must no longer listen for abort"); }
+  };
+  const controller = new AbortController();
+  const uploading = uploadArtifact(new File(["x"], "x.stl"), { signal: controller.signal, timeoutMs: 1234 });
+  assert.equal(xhr.timeout, 1234);
+  xhr.dispatchEvent(new Event("timeout"));
+  xhr.dispatchEvent(new Event("loadend"));
+  await assert.rejects(uploading, { name: "TimeoutError" });
+  controller.abort();
+});
+
+test("related views are invalidated after a successful mutation, never after a refusal or a GET", async () => {
+  const originalDocument = globalThis.document;
+  const originalChannel = globalThis.BroadcastChannel;
+  globalThis.document = new EventTarget();
+  globalThis.BroadcastChannel = undefined;
+  const changes = [];
+  const off = subscribePrintChanges(["artifacts"], (change) => changes.push(change));
+  try {
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: true }) });
+    await apiGet("/api/print/artifacts");
+    assert.equal(changes.length, 0);
+    await apiPost("/api/print/artifacts/a/review", {});
+    assert.equal(changes.length, 1);
+    globalThis.fetch = async () => ({ ok: false, status: 409, json: async () => ({ error: { message: "busy" } }) });
+    await assert.rejects(apiPost("/api/print/artifacts/a/review", {}), /busy/);
+    assert.equal(changes.length, 1);
+  } finally {
+    off();
+    globalThis.document = originalDocument;
+    globalThis.BroadcastChannel = originalChannel;
+  }
 });
 
 /** fetch, который «зависает» и реджектится ровно на abort итогового signal

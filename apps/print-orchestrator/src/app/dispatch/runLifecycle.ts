@@ -217,6 +217,7 @@ export interface BedOperationsPort {
   openClearanceOperations(printerId: string): { id: string; bedCycleId: string | null }[];
   /** Confirms one, recording the actor — the same call the operator UI makes. */
   complete(operationId: string, options: { actor?: string; note?: string | null }): unknown;
+  retireSupersededRemovals?(printerId: string, bedCycleId: string, actor: string): void;
 }
 
 export class RunLifecycleService {
@@ -675,6 +676,7 @@ export class RunLifecycleService {
       confirmation: BedClearanceConfirmation;
       actor?: string;
       note?: string;
+      operationId?: string;
       /** The printer's verified auto-clearing capability; required for `auto_cleared`. */
       automaticContinuationAllowed?: boolean;
     }
@@ -700,6 +702,7 @@ export class RunLifecycleService {
         if (latest && latest.state === "CLEAR") {
           // Already recorded clear: a repeated confirmation (double click, the
           // launch tick after the card button) is not a second clearance.
+          this.closeClearanceOperations(printerId, latest.id, options.actor, options.note);
           return latest;
         }
         // No tracked cycle at all — the printer has never run under this model,
@@ -737,6 +740,7 @@ export class RunLifecycleService {
           ...bed.metadata,
           clearance: options.confirmation,
           clearedBy: options.actor ?? "operator",
+          ...(options.operationId ? { clearedByOperationId: options.operationId } : {}),
           ...(deviceLastJob ? { deviceLastJob } : {}),
           ...(options.note ? { clearanceNote: options.note } : {})
         }
@@ -748,6 +752,7 @@ export class RunLifecycleService {
         detail: {
           printerId,
           confirmation: options.confirmation,
+          ...(options.operationId ? { operationId: options.operationId } : {}),
           ...(options.note ? { note: options.note } : {})
         }
       });
@@ -772,6 +777,7 @@ export class RunLifecycleService {
       confirmation: BedClearanceConfirmation;
       actor?: string;
       note?: string;
+      operationId?: string;
       automaticContinuationAllowed?: boolean;
       deviceLastJob?: string | null;
     }
@@ -794,6 +800,7 @@ export class RunLifecycleService {
       metadata: {
         clearance: options.confirmation,
         clearedBy: options.actor ?? "operator",
+        ...(options.operationId ? { clearedByOperationId: options.operationId } : {}),
         // Distinguishes "an operator asserted a free bed on a printer we had no
         // history for" from "a tracked print finished and was cleared".
         established: true,
@@ -807,6 +814,7 @@ export class RunLifecycleService {
       detail: {
         printerId,
         confirmation: options.confirmation,
+        ...(options.operationId ? { operationId: options.operationId } : {}),
         ...(options.note ? { note: options.note } : {})
       }
     });
@@ -837,6 +845,7 @@ export class RunLifecycleService {
         if (op.bedCycleId !== null && op.bedCycleId !== bedCycleId) continue;
         operations.complete(op.id, { actor: actor ?? "operator", note: note ?? null });
       }
+      operations.retireSupersededRemovals?.(printerId, bedCycleId, actor ?? "operator");
     } catch (error) {
       this.logger.warn?.(
         { err: error, printer: printerId, bedCycle: bedCycleId },

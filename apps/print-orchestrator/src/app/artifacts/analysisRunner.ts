@@ -1,3 +1,4 @@
+import { PrintQueueContext } from "../printQueue/context";
 import { analysisBudgetMs } from "./analysisBudget";
 import { BoundedWorkerPool } from "../../shared/boundedWorkerPool";
 import { errorMessage, type ArtifactContext } from "./context";
@@ -204,6 +205,8 @@ export class AnalysisRunner {
         { verdict: result.verdict, format: result.detectedFormat }
       );
 
+      this.refreshDerivedMaterials(current, result);
+
       // A critical problem parks the still-draft task for the operator. The
       // reason is the sentence a person reads next to the task, so it carries
       // the blocker's own next-step hint rather than a bare technical phrase.
@@ -216,6 +219,38 @@ export class AnalysisRunner {
         }
       }
     });
+  }
+
+  /** Refresh copied analysis facts without changing operator choices or print history. */
+  private refreshDerivedMaterials(current: ArtifactAnalysis, result: AnalyzerResult): void {
+    const repos = this.ctx.store.repositories;
+    for (const task of repos.tasks.listReferencingArtifact(current.artifactId)) {
+      if (task.artifactId !== current.artifactId || task.sliceVariantId !== null) continue;
+      if (!["DRAFT", "QUEUED", "PLANNED", "ASSIGNED", "NEEDS_REVIEW"].includes(task.state)) continue;
+      if (repos.printRuns.findActiveByTask(task.id)) continue;
+      const derivedId = task.metadata.materialAnalysisId;
+      // Legacy enqueues copied the erroneous numeric count without provenance.
+      // Only repair that exact old result; never infer a type from the title.
+      const legacyId = derivedId === undefined && typeof task.material === "string" && /^\d+$/.test(task.material)
+        ? task.metadata.analysisId : null;
+      const previousId = derivedId ?? legacyId;
+      if (typeof previousId !== "string") continue;
+      const previous = repos.artifactAnalyses.getById(previousId);
+      if (!previous || previous.artifactId !== current.artifactId || previous.material !== task.material) continue;
+      const material = result.material ?? null;
+      repos.tasks.update({
+        ...task, material,
+        metadata: { ...task.metadata, analysisId: current.id, materialAnalysisId: current.id },
+        updatedAt: this.ctx.nowIso()
+      });
+      if (material === task.material) continue;
+      new PrintQueueContext(this.ctx.store, { now: () => new Date(this.ctx.nowIso()) })
+        .invalidatePlacementsFor(task.id, "материал уточнён повторным анализом файла", "analyzer");
+      this.ctx.recordAudit({
+        entityType: "print_task", entityId: task.id, action: "material_reanalyzed", actor: "analyzer",
+        detail: { previous: task.material, material, analysisId: current.id }
+      });
+    }
   }
 
   private failAnalysis(analysisId: string, message: string): void {

@@ -79,7 +79,7 @@ test("строка стола: подтвердить можно и деталь
   const { bedBlock } = await import("../render/printers.js");
   const awaiting = bedBlock({ id: "k2", bedCycle: { state: "AWAITING_CLEARANCE", awaitingClearance: true, confirmable: true, operationId: "op1" } });
   assert.match(awaiting, /data-act="clear-bed"/);
-  assert.match(awaiting, /Снять модель и освободить стол/);
+  assert.match(awaiting, /Модель снята — стол свободен/);
   assert.match(awaiting, /data-operation="op1"/);
 
   const unknown = bedBlock({ id: "k2", bedCycle: { state: "UNKNOWN", awaitingClearance: false, confirmable: true, operationId: null } });

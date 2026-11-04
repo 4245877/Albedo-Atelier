@@ -19,11 +19,6 @@ import { esc, setBusy, toast } from "./util.js";
  * состояние перезагружается через переданный `refresh`. `getState` даёт доступ
  * к текущему снимку фермы для поиска принтера по id.
  */
-/** Имя принтера по id из уже загруженного состояния — id оператору ничего не говорит. */
-function printerNameOf(state, printerId) {
-  return (state?.printers || []).find((p) => p.id === printerId)?.name || printerId;
-}
-
 export function installActions({ getState, refresh }) {
   // Модальные окна (детали принтера, форма задания, справка) используют то же
   // состояние и refresh, что и доска.
@@ -215,47 +210,19 @@ export function installActions({ getState, refresh }) {
       if (taskId) openLaunchModal(taskId);
       return;
     }
-    /* Снятие детали и освобождение стола.
-     *
-     * Ведёт в СУЩЕСТВУЮЩИЙ жизненный цикл, а не в параллельный: если сервер уже
-     * завёл операцию PART_REMOVAL, подтверждаем именно её (это единственный
-     * законный переход из AWAITING_CLEARANCE, и он записывает, кто и когда снял
-     * деталь). Операции нет — остаётся прямое подтверждение очистки стола, тот
-     * же аудируемый переход другим путём. */
+    // Подпись кнопки уже является явным физическим подтверждением. Сервер
+    // проверяет текущий цикл, закрывает его операции и отказывает при печати.
+    // Не отправляем старый operationId из карточки: между чтением и кликом
+    // принтер мог успеть закончить другую печать.
     if (act === "clear-bed") {
       const printerId = el.dataset.printer;
-      const operationId = el.dataset.operation;
       if (!printerId) return;
-      // Стол, который никто не проверял, — не «деталь снята»: спрашиваем ровно то,
-      // что человек может увидеть.
-      const unknownBed = el.dataset.bedState === "UNKNOWN";
-      void confirmAction({
-        title: unknownBed ? "Подтвердить пустой стол" : "Освободить стол",
-        object: printerNameOf(getState(), printerId),
-        body: unknownBed
-          ? "Система не знает, что сейчас на столе этого принтера. Подтвердите, что площадка пуста."
-          : "Подтвердите, что готовая модель снята с площадки и стол пуст.",
-        points: [
-          "Подтверждение записывается в журнал вместе с вашим именем",
-          "Пока стол не освобождён, следующее задание на этот принтер не пойдёт",
-          "Система не определяет это сама: принтер сообщает «свободен» и с деталью на столе"
-        ],
-        cta: "Стол свободен",
-        tone: "warn",
-        run: async () => {
-          if (operationId) {
-            await apiPost(`/api/print/operations/${encodeURIComponent(operationId)}/complete`, {});
-          } else {
-            await apiPost(`/api/printers/${encodeURIComponent(printerId)}/bed/clear`, {
-              confirmation: "part_removed"
-            });
-          }
-        }
-      }).then((ok) => {
-        if (!ok) return;
-        toast("Стол свободен — очередь может продолжаться, Владыка", "toast-ok");
-        void refresh({ silent: false });
-      });
+      void runAction(
+        `/api/printers/${encodeURIComponent(printerId)}/bed/clear`,
+        { confirmation: "part_removed" },
+        "Стол свободен — очередь может продолжаться, Владыка",
+        "toast-ok", `clear-bed:${printerId}`, el, "Подтверждаю…"
+      );
       return;
     }
     if (act === "rule") {

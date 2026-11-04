@@ -15,6 +15,7 @@
 
 import { apiGet, apiPost } from "./api.js";
 import { createPoller } from "./shared/polling.js";
+import { subscribePrintChanges } from "./shared/changes.js";
 import { installActions } from "./actions.js";
 import { reconcileCameras } from "./cameraPlayers.js";
 import { ensureReveal, renderNav, restoreMode, setupNav, setupStickyOffsets } from "./nav.js";
@@ -226,6 +227,7 @@ function refresh({ silent = true } = {}) {
 /* ── Старт ─────────────────────────────────────────────────── */
 
 installActions({ getState: () => state, refresh });
+subscribePrintChanges(["tasks", "printers", "operations"], () => { void refresh(); });
 
 /* ── Ленивый старт разделов «Работ» ────────────────────────────
    Каждый рабочий раздел — самостоятельный контроллер с собственным опросом
@@ -287,4 +289,9 @@ if (!document.hidden) startLeaseRenewal();
 window.addEventListener("pagehide", () => {
   dashboardPoller.stop();
   stopLeaseRenewal();
+});
+window.addEventListener("pageshow", (event) => {
+  if (!event.persisted) return;
+  dashboardPoller.start({ silent: true, wasReachable: backendReachable });
+  if (!document.hidden) startLeaseRenewal();
 });

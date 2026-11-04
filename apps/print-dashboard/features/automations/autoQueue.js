@@ -6,6 +6,7 @@
 
 import { apiGet, apiPost } from "../../api.js";
 import { $, esc, toast } from "../../util.js";
+import { isSectionVisible, subscribePrintChanges } from "../../shared/changes.js";
 import { autoQueueHtml } from "./autoQueueView.js";
 
 const POLL_MS = 15000;
@@ -25,10 +26,11 @@ export function setupAutoQueue() {
       if (btn.dataset.aqAction === "refresh") void load();
       if (btn.dataset.aqAction === "tick") void tick();
     });
-    // Переключатель правила живёт в общем списке автоматизаций — после него
-    // состояние автоочереди меняется; перечитываем, не дожидаясь опроса.
-    document.addEventListener("click", (e) => {
-      if (e.target.closest('[data-act="rule"][data-id="auto-queue"]')) setTimeout(() => void load(), 600);
+    subscribePrintChanges(["tasks", "printers", "operations"], () => {
+      if (!vm.busy && isSectionVisible("automations")) void load();
+    });
+    document.addEventListener("work-section-open", (e) => {
+      if (e.detail?.id === "automations") void load();
     });
     wired = true;
   }
@@ -79,7 +81,7 @@ function schedule() {
   if (timer !== null) clearTimeout(timer);
   timer = setTimeout(() => {
     timer = null;
-    if (document.getElementById("automations")?.hidden) schedule();
+    if (!isSectionVisible("automations")) schedule();
     else void load();
   }, POLL_MS);
 }

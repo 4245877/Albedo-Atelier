@@ -802,7 +802,8 @@ export class FarmRuntime implements PrintServices {
     const operation = awaiting
       ? (this.manualOperationServiceRef
           ?.openBlockingFor(printerId)
-          .find((op) => op.type === "PART_REMOVAL" || op.type === "PLATE_SERVICE") ?? null)
+          .find((op) => op.bedCycleId === latest?.id &&
+            (op.type === "PART_REMOVAL" || op.type === "PLATE_SERVICE")) ?? null)
       : null;
     return {
       state,
@@ -826,8 +827,8 @@ export class FarmRuntime implements PrintServices {
     if (!this.printQueueStoreRef) return null;
     const run = this.activeRunForPrinter(printerId);
     const operations = (this.manualOperationServiceRef?.openBlockingFor(printerId) ?? [])
-      // The bed line already speaks for a part removal / plate service.
-      .filter((op) => op.type !== "PART_REMOVAL" && op.type !== "PLATE_SERVICE")
+      // Awaiting clearance already takes precedence in describePrinterReadiness.
+      // On a CLEAR bed, an explicitly requested removal/service still blocks.
       .map((op) => OPERATION_LABELS[op.type] ?? op.type);
     const updatedMs = view.updatedAt ? Date.parse(view.updatedAt) : Number.NaN;
     const config = this.configs.find((c) => c.id === printerId);
@@ -839,6 +840,8 @@ export class FarmRuntime implements PrintServices {
       online: view.online,
       status: view.status,
       error: view.error ?? null,
+      faults: view.faults,
+      mediaPresent: view.mediaPresent,
       bedState: view.bedCycle?.state ?? null,
       bedExternal: view.bedCycle?.external === true,
       activeRun: run
@@ -893,7 +896,7 @@ export class FarmRuntime implements PrintServices {
     this.manualOperationServiceRef = new ManualOperationService(
       store,
       this.operatorScheduleServiceRef,
-      { logger }
+      { logger, getStatus: (printerId) => this.poller.getStatus(printerId) }
     );
     // The hardware inventory. Every committed edit re-materializes the config
     // into the live runtime — the poll loop reads it per tick, so a rotated

@@ -46,6 +46,25 @@ export const BATCH_RESETS = {
   result: { tasks: {}, queued: false }
 };
 
+/** A removed source must not erase the prepared/queued work for surviving models. */
+export function pruneBatchSelection(selection, availableIds) {
+  const previous = selection.artifactIds || [];
+  const artifactIds = previous.filter((id) => availableIds.has(id));
+  if (artifactIds.length === previous.length) return null;
+  if (!artifactIds.length) return { ...BATCH_RESET };
+  const keep = new Set(artifactIds);
+  const variants = Object.fromEntries(Object.entries(selection.variants || {}).filter(([id]) => keep.has(id)));
+  const variantIds = new Set(Object.values(variants));
+  const tasks = Object.fromEntries(Object.entries(selection.tasks || {}).filter(([id]) => variantIds.has(id)));
+  return {
+    artifactIds,
+    variants,
+    tasks,
+    refused: Object.fromEntries(Object.entries(selection.refused || {}).filter(([id]) => keep.has(id))),
+    queued: selection.queued === true && Object.keys(tasks).length > 0
+  };
+}
+
 /** Модели, которые вообще могут войти в пакет: проанализированная модель (не G-code). */
 export function batchCandidates(items) {
   return (items || []).filter((it) => it.artifact && fileKind(it) === "model");

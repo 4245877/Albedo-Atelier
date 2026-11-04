@@ -225,3 +225,42 @@ test("clearBed refuses an auto_cleared claim for a printer with no verified mech
 
   await store.stop();
 });
+
+
+test("the printer card confirms the current bed cycle after successive external prints", async () => {
+  const store = new FarmStore(file);
+  await store.start();
+  try {
+    for (const filename of ["first.gcode", "second.gcode"]) {
+      printStats = { state: "printing", filename };
+      await store.pollOnce();
+      printStats = { state: "complete", filename };
+      await store.pollOnce();
+    }
+    const operations = store.manualOperations.openClearanceOperations("k2");
+    assert.equal(operations.length, 2);
+    const printer = store.reads.getPrinter("k2");
+    assert.equal(printer.bedCycle?.operationId, operations.at(-1)?.id);
+    store.manualOperations.complete(printer.bedCycle!.operationId!, { actor: "user" });
+    assert.equal(store.reads.getPrinter("k2").bedCycle?.state, "CLEAR");
+    assert.equal(store.manualOperations.openClearanceOperations("k2").length, 0);
+    assert.equal(store.manualOperations.getOperation(operations[0].id).state, "CANCELLED");
+  } finally {
+    await store.stop();
+  }
+});
+
+test("a clear bed cannot hide a newly requested part-removal operation from readiness", async () => {
+  const store = new FarmStore(file);
+  await store.start();
+  try {
+    store.commands.clearBed("k2", "part_removed", { actor: "operator" });
+    const operation = store.manualOperations.open({ printerId: "k2", type: "PART_REMOVAL" });
+    assert.equal(store.reads.getPrinter("k2").readiness?.state, "maintenance");
+    assert.equal(store.reads.getPrinter("k2").readiness?.canAcceptJob, false);
+    store.manualOperations.complete(operation.id);
+    assert.equal(store.reads.getPrinter("k2").readiness?.canAcceptJob, true);
+  } finally {
+    await store.stop();
+  }
+});

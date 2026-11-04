@@ -12,6 +12,7 @@ import { apiDelete, apiGet, apiPost, uploadArtifact } from "../../api.js";
 import { confirmAction, createFocusTrap } from "../../shared/dialog.js";
 import { createInflightGuard } from "../../shared/inflight.js";
 import { createPoller } from "../../shared/polling.js";
+import { isSectionVisible, notifyMutation, subscribePrintChanges } from "../../shared/changes.js";
 import { $, cssEscape, esc, toast } from "../../util.js";
 import { itemHtml, listBarHtml } from "./view.js";
 import { plateTitle, readPlates } from "./plates.js";
@@ -54,10 +55,21 @@ const plateViewPrefs = new Map();
 const plateGuard = createInflightGuard();
 /* Свёрнут ли список целиком (кнопка в шапке блока). */
 let listCollapsed = false;
+let watching = false;
 
 export function setupUploads() {
   const body = $("#uploads-body");
   if (!body) return;
+  if (!watching) {
+    watching = true;
+    subscribePrintChanges(["artifacts", "tasks", "slicing"], () => {
+      if (isSectionVisible("uploads")) void syncExisting();
+    });
+    document.addEventListener("work-section-open", (e) => {
+      if (e.detail?.id === "uploads") void syncExisting();
+    });
+    window.addEventListener("pageshow", (e) => { if (e.persisted) void syncExisting(); });
+  }
   body.innerHTML = `
     <div class="upload-drop" id="upload-drop" tabindex="0" role="button"
          aria-label="Загрузить файлы: перетащите сюда или выберите">
@@ -514,6 +526,7 @@ async function removeArtifact(artifactId) {
           }
           throw err; // текст отказа показывает само окно подтверждения
         }
+        notifyMutation(`/api/print/artifacts/${encodeURIComponent(artifactId)}`, "DELETE");
       }
     }
   });
@@ -572,6 +585,7 @@ function deletionPoints(item, cascade = []) {
 /* Забыть всё, что раздел помнил об элементе вне модели списка. */
 function forget(item) {
   detailPrefs.delete(item.key);
+  plateViewPrefs.delete(item.key);
   fileStore.delete(item.key);
 }
 

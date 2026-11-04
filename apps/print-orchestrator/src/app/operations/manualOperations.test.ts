@@ -59,7 +59,7 @@ interface Harness {
   eligibilityFor: (taskId: string, mode: "manual" | "night") => ReturnType<EligibilityQueries["evaluate"]>;
 }
 
-function makeHarness(): Harness {
+function makeHarness(getStatus?: (id: string) => PrinterLiveStatus | undefined): Harness {
   const store = openPrintQueueStore(":memory:");
   // The operator has confirmed the plate empty — the only evidence of a free bed.
   for (const id of ["k2"]) establishClearBed(store, id);
@@ -69,9 +69,9 @@ function makeHarness(): Harness {
   const knobs: Harness["knobs"] = { status: "idle", online: true, autoContinuation: false };
 
   const schedule = new OperatorScheduleService(store, { now });
-  const operations = new ManualOperationService(store, schedule, { now });
+  const operations = new ManualOperationService(store, schedule, { now, getStatus });
   const queue = new PrintQueueService(store, { now, operations });
-  const lifecycle = new RunLifecycleService(store, { now, operations });
+  const lifecycle = new RunLifecycleService(store, { now, operations, getStatus });
 
   const printerRef = (): SchedulerPrinterRef => ({
     id: K2.id,
@@ -708,4 +708,84 @@ test("forced idle is measured from when the operation was opened, and only while
     null,
     "hands on the machine is work, not idle"
   );
+});
+
+test("a confirmed current empty bed retires superseded removals without fabricating historical clearance", () => {
+  const h = makeHarness();
+  const live = (status: "idle" | "printing", file: string) => ({
+    id: "k2", status, online: true, currentFile: file,
+    stateText: status === "idle" ? "complete" : "printing", updatedAt: h.clock.now.toISOString()
+  } as PrinterLiveStatus);
+  const first = live("printing", "first.gcode");
+  h.lifecycle.observe("k2", live("idle", ""), first);
+  h.lifecycle.observe("k2", first, live("idle", "first.gcode"));
+  const oldBed = h.store.repositories.bedCycles.latestByPrinter("k2")!;
+  const [oldRemoval] = h.operations.openFor("k2");
+  const calibration = h.operations.open({ printerId: "k2", type: "CALIBRATION" });
+  const second = live("printing", "second.gcode");
+  h.lifecycle.observe("k2", live("idle", "first.gcode"), second);
+  h.lifecycle.observe("k2", second, live("idle", "second.gcode"));
+  assert.equal(h.operations.getOperation(oldRemoval.id).state, "PENDING", "telemetry alone closes no removal");
+  h.lifecycle.clearBed("k2", { confirmation: "part_removed", actor: "user", note: "стол свободен" });
+  assert.equal(h.store.repositories.bedCycles.latestByPrinter("k2")?.state, "CLEAR");
+  assert.equal(h.operations.getOperation(oldRemoval.id).state, "CANCELLED");
+  assert.equal(h.store.repositories.bedCycles.getById(oldBed.id)?.state, "AWAITING_CLEARANCE", "past clearance time was never observed");
+  assert.equal(h.operations.getOperation(calibration.id).state, "PENDING", "unrelated safety work still blocks");
+  assert.equal(h.operations.openBlockingFor("k2").length, 1);
+});
+
+test("a removal opened by hand clears the current bed and settles duplicate clearance requests", async () => {
+  const h = makeHarness();
+  await printAndFinish(h);
+  const manual = h.operations.open({ type: "PART_REMOVAL", printerId: "k2" });
+  h.operations.complete(manual.id, { actor: "operator" });
+  assert.equal(h.store.repositories.bedCycles.latestByPrinter("k2")?.state, "CLEAR");
+  assert.equal(h.operations.openBlockingFor("k2").length, 0);
+});
+
+test("confirming a failed removal records the successful retry and releases the bed", async () => {
+  const h = makeHarness();
+  withSchedule(h);
+  h.clock.now = MORNING;
+  await printAndFinish(h);
+  const [op] = h.operations.openFor("k2");
+  h.operations.claim(op.id, h.schedule.primaryOperator()!.id);
+  h.operations.fail(op.id);
+  h.lifecycle.clearBed("k2", { confirmation: "part_removed", actor: "operator" });
+  assert.equal(h.operations.getOperation(op.id).state, "COMPLETED");
+  assert.equal(h.operations.openBlockingFor("k2").length, 0);
+});
+
+test("operation confirmation checks live printing and rolls back its completion", async () => {
+  let live: PrinterLiveStatus | undefined;
+  const h = makeHarness(() => live);
+  await printAndFinish(h);
+  const [op] = h.operations.openFor("k2");
+  live = { online: true, status: "printing", currentFile: "new.gcode" } as PrinterLiveStatus;
+  assert.throws(() => h.operations.complete(op.id), /сейчас печатает/);
+  assert.equal(h.operations.getOperation(op.id).state, "PENDING");
+  assert.equal(h.store.repositories.bedCycles.latestByPrinter("k2")?.state, "AWAITING_CLEARANCE");
+});
+
+test("operation clearance records the device's finished file so reconnect does not occupy the bed again", () => {
+  let live = { online: true, status: "printing", currentFile: null } as PrinterLiveStatus;
+  const h = makeHarness(() => live);
+  h.lifecycle.observe("k2", undefined, live);
+  const previous = live;
+  live = { ...live, status: "idle", stateText: "complete", currentFile: "external.gcode" };
+  h.lifecycle.observe("k2", previous, live);
+  const [op] = h.operations.openFor("k2");
+  h.operations.complete(op.id);
+  h.lifecycle.observe("k2", undefined, live);
+  assert.equal(h.store.repositories.bedCycles.latestByPrinter("k2")?.state, "CLEAR");
+  assert.equal(h.operations.openBlockingFor("k2").length, 0);
+});
+
+test("confirming an already-clear bed also settles leftover operations", () => {
+  const h = makeHarness();
+  const bed = h.store.repositories.bedCycles.latestByPrinter("k2")!;
+  const op = h.operations.open({ type: "PART_REMOVAL", printerId: "k2", bedCycleId: bed.id });
+  h.lifecycle.clearBed("k2", { confirmation: "part_removed" });
+  assert.equal(h.operations.getOperation(op.id).state, "COMPLETED");
+  assert.equal(h.operations.printerHold("k2").free, true);
 });

@@ -118,7 +118,10 @@ export class ExecutableEnqueue {
           // Read by the legacy queue projection and by `resolveDispatchFile`.
           file: onDeviceFile,
           executableKind: admission.kind satisfies ExecutableKind,
-          ...(analysis ? { analysisId: analysis.id } : {})
+          ...(analysis ? { analysisId: analysis.id } : {}),
+          ...(!input.material?.trim() && !task.material && analysis
+            ? { materialAnalysisId: analysis.id }
+            : {})
         },
         updatedAt: iso
       });

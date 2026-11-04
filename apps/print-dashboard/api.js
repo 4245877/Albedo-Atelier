@@ -3,6 +3,7 @@
    проксирует /api/print-orchestrator/* в сервис print-orchestrator. */
 
 export const API_BASE = "/api/print-orchestrator";
+import { notifyMutation } from "./shared/changes.js";
 
 async function apiError(res) {
   const body = await res.json().catch(() => null);
@@ -88,7 +89,9 @@ export async function apiPost(path, body, { signal, timeoutMs = 15000 } = {}) {
   try {
     const res = await fetch(`${API_BASE}${path}`, opts);
     if (!res.ok) throw await apiError(res);
-    return await res.json().catch(() => ({}));
+    const result = await res.json().catch(() => ({}));
+    notifyMutation(path, "POST");
+    return result;
   } finally {
     deadline.cleanup();
   }
@@ -109,7 +112,9 @@ export async function apiPatch(path, body, { signal, timeoutMs = 15000 } = {}) {
       signal: deadline.signal
     });
     if (!res.ok) throw await apiError(res);
-    return await res.json().catch(() => ({}));
+    const result = await res.json().catch(() => ({}));
+    notifyMutation(path, "PATCH");
+    return result;
   } finally {
     deadline.cleanup();
   }
@@ -129,7 +134,9 @@ export async function apiDelete(path, { signal, timeoutMs = 15000 } = {}) {
       signal: deadline.signal
     });
     if (!res.ok) throw await apiError(res);
-    return await res.json().catch(() => ({}));
+    const result = await res.json().catch(() => ({}));
+    notifyMutation(path, "DELETE");
+    return result;
   } finally {
     deadline.cleanup();
   }
@@ -142,12 +149,19 @@ export async function apiDelete(path, { signal, timeoutMs = 15000 } = {}) {
  * Токен управления подставляет nginx-прокси (как и для остальных действий),
  * Content-Type multipart XHR выставляет сам из FormData.
  */
-export function uploadArtifact(file, { onProgress, signal } = {}) {
+export function uploadArtifact(file, { onProgress, signal, timeoutMs = 300000 } = {}) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new DOMException("Отменено", "AbortError"));
+      return;
+    }
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${API_BASE}/api/print/artifacts`);
     xhr.responseType = "json";
+    xhr.timeout = timeoutMs;
     xhr.setRequestHeader("Accept", "application/json");
+    const abort = () => xhr.abort();
+    xhr.addEventListener("loadend", () => signal?.removeEventListener("abort", abort), { once: true });
 
     xhr.upload.addEventListener("progress", (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
@@ -156,22 +170,22 @@ export function uploadArtifact(file, { onProgress, signal } = {}) {
     xhr.addEventListener("load", () => {
       const body = xhr.response || {};
       if (xhr.status >= 200 && xhr.status < 300) {
+        notifyMutation("/api/print/artifacts", "POST");
         resolve(body);
       } else {
         const err = new Error(body?.error?.message || `HTTP ${xhr.status}`);
         err.code = body?.error?.code;
+        err.status = xhr.status;
+        err.details = body?.error?.details ?? null;
         reject(err);
       }
     });
     xhr.addEventListener("error", () => reject(new Error("Сеть недоступна")));
     xhr.addEventListener("abort", () => reject(new DOMException("Отменено", "AbortError")));
+    xhr.addEventListener("timeout", () => reject(new DOMException("Истекло ожидание загрузки файла", "TimeoutError")));
 
     if (signal) {
-      if (signal.aborted) {
-        xhr.abort();
-        return;
-      }
-      signal.addEventListener("abort", () => xhr.abort(), { once: true });
+      signal.addEventListener("abort", abort, { once: true });
     }
 
     const form = new FormData();

@@ -253,7 +253,7 @@ const API = {
  * @param {object} [options]
  * @param {Record<string, unknown>} [options.api]  ответы, замещающие таблицу API
  *        (по точному пути) — для сценариев, которым нужно не пустое состояние.
- * @param {(req, key) => ({ status: number, body: unknown } | null)} [options.handle]
+ * @param {(req, key) => ({ status: number, body: unknown } | null | Promise<unknown>)} [options.handle]
  *        перехватчик до таблицы: возвращает ответ или null, чтобы пропустить
  *        запрос дальше. Через него сценарий отвечает на мутации (DELETE и т. п.)
  *        и меняет своё состояние между запросами.
@@ -261,7 +261,7 @@ const API = {
 export function startMockServer(options = {}) {
   const api = { ...API, ...(options.api ?? {}) };
   const requests = [];
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://x");
     let p = url.pathname;
 
@@ -271,7 +271,7 @@ export function startMockServer(options = {}) {
       // маршрут по чистому пути, а сценарию бывает нужен именно флаг — например
       // `?cascade=true`, которым удаление файла уносит задание планировщика.
       requests.push({ method: req.method, path: key, query: url.search.slice(1) });
-      const handled = options.handle ? options.handle(req, key) : null;
+      const handled = options.handle ? await options.handle(req, key) : null;
       if (handled) {
         res.writeHead(handled.status, { "content-type": "application/json" });
         res.end(JSON.stringify(handled.body ?? {}));

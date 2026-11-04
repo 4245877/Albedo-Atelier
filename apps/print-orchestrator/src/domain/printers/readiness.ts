@@ -1,3 +1,5 @@
+import type { PrinterFault } from "./types";
+
 /**
  * **Can this printer take the next job — and if not, what stands in the way?**
  *
@@ -48,6 +50,8 @@ export interface PrinterReadinessInput {
   online: boolean;
   status: string;
   error: string | null;
+  faults?: readonly PrinterFault[];
+  mediaPresent?: boolean | null;
   /** The current bed occupancy (`resolveBedOccupancy`), or null when no store is wired. */
   bedState: string | null;
   bedExternal: boolean;
@@ -104,6 +108,15 @@ export function describePrinterReadiness(input: PrinterReadinessInput): PrinterR
       "Только наблюдение",
       "принтер подключён для мониторинга — задания на него не назначаются и не запускаются"
     );
+  }
+
+  const blockingFault = input.faults?.find(f => f.blocksStart);
+  if (blockingFault) {
+    return no("error", "Ошибка", `${blockingFault.title ?? "Ошибка принтера"} (${blockingFault.code})` +
+      (blockingFault.action ? `. ${blockingFault.action}` : ""));
+  }
+  if (input.mediaPresent === false) {
+    return no("error", "Нет карты памяти", "принтер не видит носитель, с которого запускается печать");
   }
 
   if (input.bedState === "AWAITING_CLEARANCE") {

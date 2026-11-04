@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { startMockServer } from "./mockServer.mjs";
+import { MOCK_DASHBOARD, startMockServer } from "./mockServer.mjs";
 
 const CDP_URL = process.env.CHROME_CDP_URL || "http://127.0.0.1:9222";
 
@@ -105,6 +105,47 @@ test("dashboard boots in a real browser and renders the board from the API", { s
 
     // No uncaught page errors while booting.
     assert.deepEqual(cdp.exceptions, [], "there should be no uncaught page errors");
+  } finally {
+    cdp.close();
+    await fetch(`${CDP_URL}/json/close/${target.id}`).catch(() => {});
+    await mock.close();
+  }
+});
+
+test("bed clearance is one explicit click, one request and an immediate board update", { skip: version ? false : `no CDP browser at ${CDP_URL}` }, async () => {
+  const dashboard = structuredClone(MOCK_DASHBOARD);
+  const mock = await startMockServer({ handle: (req, key) => {
+    if (key === "/api/dashboard" && dashboard) return { status: 200, body: dashboard };
+    if (key === "/api/printers/a1/bed/clear" && req.method === "POST") {
+      const p = dashboard.printers.find((p) => p.id === "a1");
+      p.bedCycle = { state: "CLEAR", awaitingClearance: false, confirmable: false };
+      p.readiness = { state: "ready", label: "Готов к печати", canAcceptJob: true, detail: null };
+      return { status: 200, body: { ok: true, bed: { state: "CLEAR" } } };
+    }
+    return null;
+  } });
+  const printer = dashboard.printers.find((p) => p.id === "a1");
+  printer.bedCycle = { state: "AWAITING_CLEARANCE", awaitingClearance: true, confirmable: true, operationId: "stale-operation" };
+  printer.readiness = { state: "needs_clearance", label: "Ждёт снятия детали", canAcceptJob: false, detail: null };
+  const target = await (await fetch(`${CDP_URL}/json/new?${encodeURIComponent(mock.url)}`, { method: "PUT" })).json();
+  const cdp = await connect(target.webSocketDebuggerUrl);
+  const evaluate = async (expression) => (await cdp.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result.value;
+  try {
+    await cdp.send("Runtime.enable");
+    await cdp.send("Page.navigate", { url: mock.url });
+    for (let i = 0; i < 80 && !await evaluate('Boolean(document.querySelector(\'[data-act="clear-bed"][data-printer="a1"]\'))'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    assert.equal(await evaluate('Boolean(document.querySelector(\'[data-act="clear-bed"][data-printer="a1"]\'))'), true);
+    await evaluate('(() => { const b = document.querySelector(\'[data-act="clear-bed"][data-printer="a1"]\'); b.click(); b.click(); })()');
+    assert.equal(await evaluate('Boolean(document.querySelector(".modal-confirm"))'), false, "the button itself is the confirmation");
+    for (let i = 0; i < 8 && await evaluate('Boolean(document.querySelector(\'[data-act="clear-bed"][data-printer="a1"]\'))'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    assert.equal(await evaluate('Boolean(document.querySelector(\'[data-act="clear-bed"][data-printer="a1"]\'))'), false);
+    assert.equal(mock.requests.filter((r) => r.method === "POST" && r.path.endsWith("/bed/clear")).length, 1);
+    assert.equal(mock.requests.some((r) => r.path.includes("stale-operation")), false, "current printer state is confirmed, not an obsolete operation");
+    assert.deepEqual(cdp.exceptions, []);
   } finally {
     cdp.close();
     await fetch(`${CDP_URL}/json/close/${target.id}`).catch(() => {});

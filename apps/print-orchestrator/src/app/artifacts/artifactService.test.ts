@@ -298,3 +298,46 @@ test("integration: the real analyzer reads a stored G-code blob", async () => {
     fs.rmSync(real.dir, { recursive: true, force: true });
   }
 });
+
+test("reanalysis repairs legacy numeric material copies and invalidates unstarted placements", async () => {
+  const { PrintQueueService } = await import("../printQueue/printQueueService");
+  const { ANALYZER_VERSION } = await import("./analyzers/types");
+  harness.setAnalyze(async () => ({ ...preparationResult(), detectedFormat: "gcode", verdict: "schedulable", material: "1" }));
+  const { artifact, task, analysis } = await upload("Shelf.gcode", "bytes");
+  await harness.service.whenIdle();
+  const queue = new PrintQueueService(harness.store);
+  queue.enqueueExecutableArtifact(task.id);
+  // The pre-fix schema copied material but had no provenance field.
+  const copied = harness.store.repositories.tasks.getById(task.id)!;
+  const { materialAnalysisId: _, ...legacyMetadata } = copied.metadata;
+  harness.store.repositories.tasks.update({ ...copied, metadata: legacyMetadata });
+  const placement = queue.assignTask(task.id, "k2");
+  harness.setAnalyze(async () => ({ ...preparationResult(), analyzerVersion: ANALYZER_VERSION,
+    detectedFormat: "gcode", verdict: "schedulable", material: "PETG" }));
+  const fresh = harness.service.reanalyze(artifact.id);
+  await harness.service.whenIdle();
+  const repaired = harness.store.repositories.tasks.getById(task.id)!;
+  assert.equal(repaired.material, "PETG");
+  assert.equal(repaired.metadata.materialAnalysisId, fresh.id);
+  assert.notEqual(fresh.id, analysis.id);
+  assert.ok(harness.store.repositories.assignments.getById(placement.id)?.invalidatedAt);
+  assert.ok(harness.store.repositories.audit.listByEntity("print_task", task.id).some(e => e.action === "material_reanalyzed"));
+});
+
+test("derived material refreshes while an explicit operator choice survives reanalysis", async () => {
+  const { PrintQueueService } = await import("../printQueue/printQueueService");
+  const queue = new PrintQueueService(harness.store);
+  harness.setAnalyze(async () => ({ ...preparationResult(), detectedFormat: "gcode", verdict: "schedulable", material: "PETG" }));
+  const { artifact, task } = await upload("Shelf.gcode", "bytes");
+  await harness.service.whenIdle();
+  queue.enqueueExecutableArtifact(task.id);
+  harness.setAnalyze(async () => ({ ...preparationResult(), detectedFormat: "gcode", verdict: "schedulable", material: "PETG-CF" }));
+  harness.service.reanalyze(artifact.id);
+  await harness.service.whenIdle();
+  assert.equal(harness.store.repositories.tasks.getById(task.id)?.material, "PETG-CF");
+  queue.setTaskScheduling(task.id, { material: "PETG-CF" }, "operator");
+  harness.setAnalyze(async () => ({ ...preparationResult(), detectedFormat: "gcode", verdict: "schedulable", material: "PLA" }));
+  harness.service.reanalyze(artifact.id);
+  await harness.service.whenIdle();
+  assert.equal(harness.store.repositories.tasks.getById(task.id)?.material, "PETG-CF");
+});

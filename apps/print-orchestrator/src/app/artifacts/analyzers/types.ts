@@ -36,7 +36,8 @@ import type { AnalysisFinding, AnalysisVerdict, DetectedFormat } from "../../../
  * STL or bare G-code, so their `1.3.0` rows stay current (see
  * {@link isAnalysisCurrent}); a `1.3.0` 3MF row is outdated.
  */
-export const ANALYZER_VERSION = "1.4.0";
+/** 1.5.0 corrects G-code material counts and total ETA, including 3MF payloads. */
+export const ANALYZER_VERSION = "1.5.0";
 
 /**
  * Per format, the oldest analyzer version whose result is still current.
@@ -49,8 +50,8 @@ export const ANALYZER_VERSION = "1.4.0";
  */
 const CURRENT_SINCE: Readonly<Record<string, string>> = {
   stl: "1.3.0",
-  gcode: "1.3.0",
-  "3mf": "1.4.0"
+  gcode: "1.5.0",
+  "3mf": "1.5.0"
 };
 
 /** Whether an analysis written by `analyzerVersion` still speaks for the current analyzer. */

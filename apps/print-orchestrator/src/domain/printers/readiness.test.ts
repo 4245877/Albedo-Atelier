@@ -83,3 +83,21 @@ test("a monitoring-only printer is never «Готов к печати», even id
   assert.equal(describePrinterReadiness({ ...base, jobsSupported: false, online: false }).state, "offline");
   assert.equal(describePrinterReadiness({ ...base, jobsSupported: true }).state, "ready");
 });
+
+
+test("an idle printer with a blocking device fault cannot advertise ready", () => {
+  const r = describePrinterReadiness({ ...base, faults: [{
+    code: "0500-C010", title: "Ошибка чтения/записи карты MicroSD", source: "print_error",
+    action: "Проверьте карту", blocksStart: true
+  }] });
+  assert.equal(r.state, "error");
+  assert.equal(r.canAcceptJob, false);
+  assert.match(r.detail ?? "", /0500-C010/);
+});
+
+test("missing media blocks readiness, advisory faults do not invent a blocker", () => {
+  assert.equal(describePrinterReadiness({ ...base, mediaPresent: false }).canAcceptJob, false);
+  assert.equal(describePrinterReadiness({ ...base, faults: [{
+    code: "info", title: null, source: "hms", action: null, blocksStart: false
+  }] }).state, "ready");
+});

@@ -881,8 +881,13 @@ export class LaunchService {
   /** What the device already holds for this (printer, task). */
   private deviceFileStateFor(task: PrintTask, printerId: string): DeviceFileState {
     const assignment = this.liveAssignment(task.id);
-    if (!assignment || assignment.printerId !== printerId) return "missing";
-    const record = this.deps.deviceArtifacts.forAssignment(assignment);
+    // A rejected start releases its assignment, but leaves the delivered file.
+    // The tracked device slot is still evidence; dispatch re-verifies it before use.
+    const record = assignment?.printerId === printerId
+      ? this.deps.deviceArtifacts.forAssignment(assignment)
+      : task.onDeviceFile
+        ? this.deps.store.repositories.deviceArtifacts.findBySlot(printerId, task.onDeviceFile)
+        : null;
     if (!record) return "missing";
     // The artifact the task points at *now* decides staleness: a copy verified
     // against a superseded slice is not a copy of this job.
