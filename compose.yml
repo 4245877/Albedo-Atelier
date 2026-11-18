@@ -242,6 +242,8 @@ services:
     logging: *default-logging
 
   print-dashboard:
+    image: atelier-print-dashboard
+    pull_policy: never
     build:
       # Build identity, forwarded into OCI labels (never into a filesystem
       # layer). deploy.sh exports these; a manual `docker compose build` simply

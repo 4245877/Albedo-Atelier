@@ -81,6 +81,30 @@ Terminal states, and the exit code that matches each: `0` DEPLOY SUCCESS,
 watchdog, `1` DEPLOY FAILED, `130`/`143` interrupted (check what had already been
 swapped).
 
+### Updating only the dashboard
+
+The Compose image name is `atelier-print-dashboard`. Builds write the local
+`:latest` tag using the version and digest pinned in the dashboard Dockerfile.
+Run these commands from the repository root. Include `compose.orca.yml` when
+the running deployment uses the Orca variant.
+
+```bash
+rollback_image=atelier-print-dashboard:rollback-dashboard-$(date -u +%Y%m%dT%H%M%SZ)
+docker image tag "$(docker inspect --format '{{.Image}}' atelier-print-dashboard)" "$rollback_image"
+docker compose -f compose.yml -f compose.orca.yml build print-dashboard
+docker compose -f compose.yml -f compose.orca.yml up -d --no-deps --no-build --pull never print-dashboard
+docker compose -f compose.yml -f compose.orca.yml exec -T print-dashboard nginx -v
+```
+
+Check the dashboard, the orchestrator readiness and read-only API through the
+dashboard, and the camera WebSocket. If the dashboard fails verification,
+restore the saved tag and repeat the same checks.
+
+```bash
+docker image tag "$rollback_image" atelier-print-dashboard:latest
+docker compose -f compose.yml -f compose.orca.yml up -d --no-deps --no-build --pull never print-dashboard
+```
+
 ## Deploying during a print
 
 A deploy never touches a printer — the printers keep printing across a container
