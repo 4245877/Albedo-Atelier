@@ -31,7 +31,18 @@ import type { PrinterLiveStatus } from "../infra/printers/status/types";
  *  - a completion that lands inside the restart window is observed by neither
  *    the old process nor the new one, so
  *    {@link file://./dispatch/runLifecycle.ts RunLifecycleService.reconcile}
- *    correctly refuses to guess and parks the run in `UNKNOWN` for an operator.
+ *    correctly refuses to guess and parks the run in `UNKNOWN` for an operator;
+ *  - a printer that answers without confirming a state — a Kobra X reports
+ *    `unknown` while feeding, purging and cooling around a print and while
+ *    cutting and purging on every colour change in it — cannot be told apart
+ *    from a print starting or ending. The poller keeps its last real state
+ *    across `unknown`, so the edge lands on the next real report; a restart in
+ *    between makes that report the new process's baseline, and the edge (the
+ *    start, or the completion and its filament debt) is never recorded;
+ *  - a printer that stopped answering while the poller held a print it saw
+ *    start has its ending reconciled on reconnect
+ *    ({@link file://./printerPoller.ts PrinterPoller.recoverRunAfterReconnect})
+ *    — from memory only, unless a canonical run backs it.
  *
  * Two costs are accepted rather than guarded, because they are bounded and
  * cosmetic next to what the guards above protect: a restart forfeits at most one
@@ -62,7 +73,12 @@ export type RestartRisk =
   /** The print is likely to finish inside the restart window. */
   | "finishing-soon"
   /** Neither remaining time nor progress is known, so the above cannot be ruled out. */
-  | "progress-unknown";
+  | "progress-unknown"
+  /**
+   * The device answers but confirms neither idle nor a print (status `unknown`):
+   * a start or an end may be in progress, and a restart would miss its edge.
+   */
+  | "state-unconfirmed";
 
 /** What a restart would do to one printer's accounting. */
 export type RestartVerdict =
@@ -95,6 +111,13 @@ export interface RestartSafetyInput {
    * and is reported as `runs-unavailable`.
    */
   run: CanonicalRunFacts | null | undefined;
+  /**
+   * Whether the poller holds a print on this printer that it saw start (or
+   * re-adopted) and has not seen end — memory a restart discards. Consulted only
+   * while the device is not reporting; an online printer speaks for itself.
+   * Absent means no.
+   */
+  printInFlight?: boolean;
 }
 
 export interface PrinterRestartAssessment {
@@ -118,7 +141,10 @@ export interface RestartSafetyAssessment {
   generatedAt: string;
   /** The outage this assessment was made against, in seconds. */
   restartWindowSeconds: number;
-  /** Printers currently printing or paused. */
+  /**
+   * Printers a restart would touch: printing or paused, in an unconfirmed state,
+   * or unreachable while a print is held for them.
+   */
   activePrints: number;
   /** Of those, the ones a restart would fully recover. */
   recoverable: number;
@@ -196,6 +222,11 @@ export function assessPrinterRestart(
   const run = input.run;
   const online = status?.online ?? false;
   const busy = status !== null && BUSY_STATES.has(status.status);
+  // Answering, but saying neither idle nor printing. A print starting, ending or
+  // changing filament (a Kobra X cuts, feeds and purges on every colour change)
+  // looks exactly like this, so it is never read as idle. Each such phase is
+  // short; a confirmed idle releases the hold on the next poll.
+  const unconfirmed = online && status?.status === "unknown";
 
   const base = {
     printerId: input.id,
@@ -210,9 +241,11 @@ export function assessPrinterRestart(
   // An active canonical run outlives the device that stopped answering, which is
   // exactly why it is tracked in SQLite — a printer that dropped off the network
   // mid-print is still a print in flight, and a restart still has to be able to
-  // re-adopt it when it comes back.
+  // re-adopt it when it comes back. A print the poller holds only in memory (one
+  // started on the printer itself) is in flight just the same, and is what a
+  // restart would forget.
   const runIsActive = run !== undefined && run !== null && ADOPTABLE_RUN_STATES.has(run.state);
-  const held = busy || (runIsActive && !online);
+  const held = busy || unconfirmed || (!online && (runIsActive || input.printInFlight === true));
 
   if (!held) {
     return {
@@ -225,13 +258,15 @@ export function assessPrinterRestart(
   }
 
   const risks: RestartRisk[] = [];
+  if (unconfirmed) risks.push("state-unconfirmed");
 
   if (run === undefined) {
     // The store could not be consulted. Not "there is no run" — unknowable, and
     // unknowable about a running print fails closed.
     risks.push("runs-unavailable");
   } else if (run === null) {
-    risks.push("untracked-print");
+    // An unconfirmed state is not known to be a print; it is held as such.
+    if (!unconfirmed) risks.push("untracked-print");
   } else {
     if (!ADOPTABLE_RUN_STATES.has(run.state)) risks.push("run-not-attached");
     // Identity is only checkable while the device is naming a file. An offline

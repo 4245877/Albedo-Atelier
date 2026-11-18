@@ -196,6 +196,102 @@ test("a printer that has never been polled is not treated as busy", () => {
   assert.equal(assess({ status: undefined, run: null }).verdict, "idle");
 });
 
+// ── Unconfirmed states and unreachable printers ──────────────────────────────
+
+/** What a Kobra X reports while purging the nozzle before a print (2026-11-18). */
+const KOBRA_PURGING = status({
+  id: "kobra-x",
+  status: "unknown",
+  stateText: "nozzle_purging",
+  currentFile: "plate_1.gcode",
+  progressPct: 3,
+  remainingMinutes: null,
+  nozzleTemp: 240,
+  nozzleTarget: 240
+});
+
+test("a printer answering `unknown` is unconfirmed, never idle (the Kobra X start/end gap)", () => {
+  // The bug: heating, purging and cooling around a print read as `unknown`,
+  // and `unknown` used to fall through to "idle" — a deploy could recreate
+  // the orchestrator across the very edge it needs to observe.
+  const verdict = assess({ protocol: "anycubic-lan", status: KOBRA_PURGING, run: null });
+  assert.equal(verdict.verdict, "at-risk");
+  assert.deepEqual(verdict.risks, ["state-unconfirmed"], "not called a print: it is not known to be one");
+  assert.equal(verdict.busy, false, "busy stays printing/paused only");
+  assert.equal(verdict.progressPct, 3);
+  assert.equal(
+    assessRestartSafety([input({ protocol: "anycubic-lan", status: KOBRA_PURGING, run: null })], { now })
+      .safeToRestart,
+    false
+  );
+});
+
+test("an unconfirmed state is held whatever the protocol, and a durable run is still checked", () => {
+  // Klipper starting up is the one `unknown` a K2 (moonraker) reports — seconds long.
+  const klippyStartup = status({ status: "unknown", stateText: "klippy:startup", currentFile: null });
+  assert.deepEqual(assess({ protocol: "moonraker", status: klippyStartup, run: null }).risks, ["state-unconfirmed"]);
+  // With a durable run the unconfirmed state alone holds it…
+  assert.deepEqual(assess({ protocol: "moonraker", status: klippyStartup }).risks, ["state-unconfirmed"]);
+  // …and the run's own defects are still named beside it.
+  assert.deepEqual(
+    assess({ status: status({ status: "unknown" }), run: run({ hasAmsBaseline: false }) }).risks,
+    ["state-unconfirmed", "no-ams-baseline"]
+  );
+  assert.deepEqual(assess({ status: status({ status: "unknown" }), run: undefined }).risks, [
+    "state-unconfirmed",
+    "runs-unavailable"
+  ]);
+});
+
+test("a confirmed idle after the unconfirmed phase releases the hold at once", () => {
+  const idle = status({ status: "idle", stateText: "finished", currentFile: null, progressPct: null });
+  const verdict = assess({ protocol: "anycubic-lan", status: idle, run: null, printInFlight: false });
+  assert.equal(verdict.verdict, "idle");
+  assert.deepEqual(verdict.risks, []);
+});
+
+test("an unreachable printer the poller saw start a print is still a print in flight", () => {
+  // Kobra X prints never have a canonical run (monitoring only), so the
+  // poller's memory is the only record — and exactly what a restart forgets.
+  const lost = status({ online: false, status: "offline", currentFile: null, remainingMinutes: null });
+  const verdict = assess({ protocol: "anycubic-lan", status: lost, run: null, printInFlight: true });
+  assert.equal(verdict.verdict, "at-risk");
+  assert.deepEqual(verdict.risks, ["untracked-print"]);
+
+  // Still waiting for the first state after a reconnect (`unknown`, not online): the same.
+  const connecting = status({ online: false, status: "unknown", currentFile: null });
+  assert.deepEqual(
+    assess({ protocol: "anycubic-lan", status: connecting, run: null, printInFlight: true }).risks,
+    ["untracked-print"]
+  );
+});
+
+test("an unreachable printer holding nothing in memory does not block a deploy forever", () => {
+  // Switched off, or lost before anything was seen printing: a restart costs
+  // nothing the running process has, so there is nothing to wait for.
+  const lost = status({ online: false, status: "offline", currentFile: null });
+  assert.equal(assess({ protocol: "anycubic-lan", status: lost, run: null, printInFlight: false }).verdict, "idle");
+  const connecting = status({ online: false, status: "unknown", currentFile: null });
+  assert.equal(assess({ protocol: "anycubic-lan", status: connecting, run: null }).verdict, "idle");
+});
+
+test("an unreachable printer with a durable run is judged on the run, in-memory print or not", () => {
+  const lost = status({ online: false, status: "offline", currentFile: null, remainingMinutes: null });
+  assert.equal(assess({ status: lost, printInFlight: true }).verdict, "recoverable");
+  assert.equal(assess({ status: lost, printInFlight: false }).verdict, "recoverable");
+});
+
+test("a reporting printer speaks for itself — the in-memory print does not override it", () => {
+  const idle = status({ status: "idle", currentFile: null });
+  assert.equal(assess({ status: idle, run: null, printInFlight: true }).verdict, "idle");
+  assert.equal(assess({ run: null, printInFlight: true }).verdict, "at-risk");
+});
+
+test("an error state is assessed as before: not held", () => {
+  const error = status({ status: "error", currentFile: null, error: "FAILED" });
+  assert.equal(assess({ status: error, run: null }).verdict, "idle");
+});
+
 test("the farm verdict is safe only when every active print is recoverable", () => {
   const safe = assessRestartSafety(
     [input(), input({ id: "k2", name: "K2", protocol: "moonraker" })],

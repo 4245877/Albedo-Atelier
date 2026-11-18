@@ -907,6 +907,7 @@ explain_restart_risks() {
         no-ams-baseline)  printf '        %s — no AMS baseline was persisted for this Bambu run, so the deduction would under-count\n' "$risk" >&2 ;;
         finishing-soon)   printf '        %s — the print is expected to finish inside the %ss restart window; neither the old\n          nor the new process would observe the completion\n' "$risk" "$RESTART_WINDOW_S" >&2 ;;
         progress-unknown) printf '        %s — neither remaining time nor progress is known, so a completion inside the\n          restart window cannot be ruled out\n' "$risk" >&2 ;;
+        state-unconfirmed) printf '        %s — the printer answers but confirms neither idle nor a print (heating, purging,\n          cooling): a start or an end may be under way and a restart would miss it\n' "$risk" >&2 ;;
         *)                printf '        %s\n' "$risk" >&2 ;;
       esac
     done < <(tr ',' '\n' <<<"$risks")

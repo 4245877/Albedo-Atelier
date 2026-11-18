@@ -131,6 +131,7 @@ These do, and each is named in the output:
 | `no-ams-baseline` | a Bambu run with no persisted AMS baseline — the deduction would under-count |
 | `finishing-soon` | the completion would land inside the restart window and be observed by neither process |
 | `progress-unknown` | neither ETA nor progress is known, so `finishing-soon` cannot be ruled out |
+| `state-unconfirmed` | the printer answers but confirms neither idle nor a print (status `unknown`: a Kobra X feeding, purging or cooling around a print or changing filament mid-print; Klipper starting up) — a start or an end may be under way, and a restart would miss it |
 | `runs-unavailable` | the canonical runs could not be read at all — fail closed |
 
 When one of those is in flight the orchestrator is **held back alone**: everything
@@ -552,7 +553,12 @@ Every Kobra X print is started at the printer, so to the farm it is an external
 print: the card follows it, the plate goes to «awaiting clearance» when it ends,
 and a completed print records a manual filament debt (the printer reports no
 consumption). While it prints, `restart-safety` reports it as `untracked-print`,
-so `deploy.sh` holds the orchestrator back until the print is over.
+so `deploy.sh` holds the orchestrator back until the print is over. The phases
+the printer does not call printing — filament feeding and cutting, nozzle
+purging (at the start and on every colour change mid-print), cooling down —
+read as status `unknown` and are held as `state-unconfirmed`; a connection lost
+mid-print stays `untracked-print` until the printer answers again. Only a
+confirmed idle (`free`, no job) releases the hold.
 
 ### Restart cost
 

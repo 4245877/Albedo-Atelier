@@ -731,8 +731,9 @@ export class FarmRuntime implements PrintServices {
   /**
    * May this process be restarted right now without losing print accounting?
    *
-   * Gathers the three facts the decision needs — what each printer is, what it
-   * reports, and what the canonical run says — and hands them to the pure rules
+   * Gathers the facts the decision needs — what each printer is, what it
+   * reports, what the canonical run says, and whether the poller holds a print
+   * in memory only — and hands them to the pure rules
    * in {@link file://../app/restartSafety.ts restartSafety}. Exposed over HTTP
    * at `GET /restart-safety` so `scripts/deploy.sh` can ask the running process
    * instead of re-deriving the same rules from telemetry and raw SQLite, which
@@ -765,7 +766,8 @@ export class FarmRuntime implements PrintServices {
         name: printer.name,
         protocol: printer.protocol,
         status: this.poller.getStatus(printer.id),
-        run
+        run,
+        printInFlight: this.poller.hasPrintInFlight(printer.id)
       };
     });
     return assessRestartSafety(inputs, options);

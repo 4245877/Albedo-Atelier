@@ -282,6 +282,15 @@ export class PrinterPoller {
     return this.statuses.get(id);
   }
 
+  /**
+   * Whether this process holds a print on `id` that it saw start (or re-adopted)
+   * and has not seen end. In memory only — what a restart forgets, which is why
+   * restart-safety asks while the printer is not answering.
+   */
+  hasPrintInFlight(id: string): boolean {
+    return this.printRuns.has(id);
+  }
+
   /** Applies a device observation, including its lifecycle transitions. */
   setStatus(id: string, status: PrinterLiveStatus): void {
     const printer = this.enabledConfigs().find((config) => config.id === id);
