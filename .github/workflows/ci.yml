@@ -113,7 +113,9 @@ jobs:
           printf '%s  %s\n' "$CHROME_SHA256" "$archive" | sha256sum --check
           unzip -q "$archive" -d "$browser_dir"
           "$browser_dir/chrome-headless-shell-linux64/chrome-headless-shell" \
-            --no-sandbox --disable-dev-shm-usage --user-data-dir="$browser_dir/profile" \
+            --no-sandbox --disable-dev-shm-usage --disable-background-timer-throttling \
+            --disable-backgrounding-occluded-windows --disable-renderer-backgrounding \
+            --user-data-dir="$browser_dir/profile" \
             --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 about:blank \
             >"$browser_dir/chrome.log" 2>&1 &
           chrome_pid=$!
