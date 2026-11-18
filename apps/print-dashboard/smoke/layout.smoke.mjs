@@ -19,7 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { CDP_URL, connect, probeCdp } from "./cdp.mjs";
+import { CDP_URL, closeTab, connect, openTab, probeCdp } from "./cdp.mjs";
 import { MOCK_DASHBOARD, startMockServer } from "./mockServer.mjs";
 
 const SHOTS = process.env.SMOKE_SCREENSHOTS_DIR || "";
@@ -364,7 +364,7 @@ test("раскладка: Зал, «Новая печать», «История�
 
   try {
     for (const vp of VIEWPORTS) {
-      const target = await (await fetch(`${CDP_URL}/json/new?${encodeURIComponent("about:blank")}`, { method: "PUT" })).json();
+      const target = await openTab("about:blank");
       const cdp = await connect(target.webSocketDebuggerUrl);
       const evalValue = async (expression) => {
         const { result } = await cdp.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
@@ -451,7 +451,7 @@ test("раскладка: Зал, «Новая печать», «История�
         assert.deepEqual(cdp.exceptions, [], `${vp.name}: no uncaught page errors`);
       } finally {
         cdp.close();
-        await fetch(`${CDP_URL}/json/close/${target.id}`).catch(() => {});
+        await closeTab(target.id).catch(() => {});
       }
     }
   } finally {

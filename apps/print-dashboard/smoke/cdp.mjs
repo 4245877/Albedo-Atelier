@@ -75,3 +75,17 @@ export async function connect(wsUrl) {
   };
   return { send, exceptions, close: () => ws.close() };
 }
+
+export async function openTab(url) {
+  const response = await fetch(`${CDP_URL}/json/new?${encodeURIComponent(url)}`, {
+    method: "PUT",
+    signal: AbortSignal.timeout(10000)
+  });
+  if (!response.ok) throw new Error(`Could not open CDP tab: HTTP ${response.status}`);
+  return response.json();
+}
+
+export async function closeTab(id) {
+  const response = await fetch(`${CDP_URL}/json/close/${id}`, { signal: AbortSignal.timeout(3000) });
+  await response.text();
+}

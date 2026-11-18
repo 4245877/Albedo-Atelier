@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CDP_URL, connect, probeCdp } from "./cdp.mjs";
+import { CDP_URL, closeTab, connect, openTab, probeCdp } from "./cdp.mjs";
 import { startMockServer } from "./mockServer.mjs";
 
 /** Один готовый артефакт в форме, которую отдаёт GET /api/print/artifacts. */
@@ -67,7 +67,7 @@ test("удаление файла: подтверждение, запрос на
     }
   });
 
-  const target = await (await fetch(`${CDP_URL}/json/new?${encodeURIComponent(mock.url)}`, { method: "PUT" })).json();
+  const target = await openTab(mock.url);
   const cdp = await connect(target.webSocketDebuggerUrl);
   let peerTarget;
   let peer;
@@ -101,7 +101,7 @@ test("удаление файла: подтверждение, запрос на
     await evalValue('document.querySelector(\'[data-np-action="pick-file"][data-id="art_free"]\').click(), 1');
     // Вторая настоящая вкладка того же origin: BroadcastChannel должен убрать
     // файл и там, без её собственного действия или фонового тика.
-    peerTarget = await (await fetch(`${CDP_URL}/json/new?${encodeURIComponent(mock.url)}`, { method: "PUT" })).json();
+    peerTarget = await openTab(mock.url);
     peer = await connect(peerTarget.webSocketDebuggerUrl);
     const peerEval = async (expression) => (await peer.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result.value;
     await peer.send("Page.navigate", { url: mock.url });
@@ -169,9 +169,9 @@ test("удаление файла: подтверждение, запрос на
     assert.deepEqual(cdp.exceptions, [], "there should be no uncaught page errors");
   } finally {
     peer?.close();
-    if (peerTarget) await fetch(`${CDP_URL}/json/close/${peerTarget.id}`).catch(() => {});
+    if (peerTarget) await closeTab(peerTarget.id).catch(() => {});
     cdp.close();
-    await fetch(`${CDP_URL}/json/close/${target.id}`).catch(() => {});
+    await closeTab(target.id).catch(() => {});
     await mock.close();
   }
 });
@@ -206,7 +206,7 @@ test("вкладка вернулась: список сверяется с се
     }
   });
 
-  const target = await (await fetch(`${CDP_URL}/json/new?${encodeURIComponent(mock.url)}`, { method: "PUT" })).json();
+  const target = await openTab(mock.url);
   const cdp = await connect(target.webSocketDebuggerUrl);
 
   const evalValue = async (expression) => {
@@ -263,7 +263,7 @@ test("вкладка вернулась: список сверяется с се
     assert.deepEqual(cdp.exceptions, [], "there should be no uncaught page errors");
   } finally {
     cdp.close();
-    await fetch(`${CDP_URL}/json/close/${target.id}`).catch(() => {});
+    await closeTab(target.id).catch(() => {});
     await mock.close();
   }
 });
@@ -305,7 +305,7 @@ test("каскад: кнопка жива, окно называет задан�
     }
   });
 
-  const target = await (await fetch(`${CDP_URL}/json/new?${encodeURIComponent(mock.url)}`, { method: "PUT" })).json();
+  const target = await openTab(mock.url);
   const cdp = await connect(target.webSocketDebuggerUrl);
 
   const evalValue = async (expression) => {
@@ -371,7 +371,7 @@ test("каскад: кнопка жива, окно называет задан�
     assert.deepEqual(cdp.exceptions, [], "there should be no uncaught page errors");
   } finally {
     cdp.close();
-    await fetch(`${CDP_URL}/json/close/${target.id}`).catch(() => {});
+    await closeTab(target.id).catch(() => {});
     await mock.close();
   }
 });
