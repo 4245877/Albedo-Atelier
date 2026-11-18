@@ -34,7 +34,7 @@
   "engines": {
     "node": ">=22"
   },
-  "packageManager": "pnpm@10.33.1",
+  "packageManager": "pnpm@10.34.9",
   "pnpm": {
     "overrides": {
       "@fastify/multipart>@fastify/busboy": "^3.2.2",

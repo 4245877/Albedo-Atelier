@@ -55,7 +55,7 @@ compose.orca.yml      runtime OrcaSlicer с хоста
 
 ## Локальная разработка
 
-Нужны Node.js ≥22 и pnpm 10.33.1 через corepack. Зависимости устанавливаются
+Нужны Node.js ≥22 и pnpm 10.34.9 через corepack. Зависимости устанавливаются
 в backend; у dashboard внешних зависимостей нет. В корне нет pnpm workspace.
 
 ```bash

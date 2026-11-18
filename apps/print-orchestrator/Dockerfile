@@ -1,32 +1,25 @@
-# Base image pinned by digest (tag kept for humans) for reproducible builds.
-# Refresh with: docker inspect --format '{{index .RepoDigests 0}}' node:22.23.5-alpine
-FROM node:22.23.5-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a AS build
+# Both dependency stages use the same verified Node release and lockfile.
+FROM node:22.23.5-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS dependency-base
 
 WORKDIR /app
-
-# Pin pnpm from the package.json "packageManager" field via corepack.
 RUN corepack enable
-
 COPY package.json pnpm-lock.yaml ./
+
+FROM dependency-base AS build
 RUN pnpm install --frozen-lockfile
 
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN pnpm run build
 
-# ── runtime dependencies (SOURCE-INDEPENDENT) ───────────────────────────────
-# The runtime stages run on Debian (glibc), NOT Alpine (musl), so a mounted
-# OrcaSlicer AppImage (a glibc binary) CAN run in the `production-orca` variant
-# below. The build stage stays on Alpine: it only emits portable JS (dist/),
-# copied in below. Pinned by digest like the build base; refresh with:
-#   docker inspect --format '{{index .RepoDigests 0}}' node:22.23.5-bookworm-slim
-#
-# EVERYTHING IN THIS STAGE AND IN `orca-deps` BELOW MUST STAY SOURCE-INDEPENDENT.
-# Their cache keys may depend only on this Dockerfile, the base image digest and
-# package.json/pnpm-lock.yaml — never on src/, config/ or dist/. That is what
-# keeps the 564 MB OrcaSlicer apt layer cached across ordinary commits; see the
-# "Layer order" note above the leaf stages for why it is load-bearing.
-FROM node:22.23.5-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS runtime-deps
+FROM dependency-base AS production-deps
+RUN pnpm install --prod --frozen-lockfile
+
+# Ship glibc for the optional Orca AppImage. Copy the Node executable and
+# locked application dependencies so npm, Corepack and pnpm stay in the
+# build stages. Keep these runtime layers independent of src/ and config/
+# so ordinary code changes reuse the Orca system library layer below.
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime-deps
 
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
@@ -34,16 +27,17 @@ ENV PORT=3100
 
 WORKDIR /app
 
-RUN corepack enable
-# gosu drops the entrypoint from root to the unprivileged node user after fixing
-# the data-volume ownership (Debian's equivalent of Alpine's su-exec).
-RUN DEBIAN_FRONTEND=noninteractive apt-get update \
+# Preserve the runtime UID and home for the entrypoint and mounted slicer.
+RUN groupadd --gid 1000 node \
+    && useradd --uid 1000 --gid node --shell /bin/bash --create-home node \
+    && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      gosu \
+      ca-certificates gosu libatomic1 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --prod --frozen-lockfile && pnpm store prune
+COPY --from=production-deps /usr/local/bin/node /usr/local/bin/node
+COPY --from=production-deps /app/package.json ./package.json
+COPY --from=production-deps /app/node_modules ./node_modules
 
 # ── OrcaSlicer system libraries (SOURCE-INDEPENDENT, 564 MB) ────────────────
 # The system libraries OrcaSlicer's Linux AppImage links against (it does not

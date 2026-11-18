@@ -9,7 +9,7 @@
 
 ## Окружение
 
-Нужны Node.js ≥22 (встроенный SQLite) и pnpm 10.33.1 через corepack.
+Нужны Node.js ≥22 (встроенный SQLite) и pnpm 10.34.9 через corepack.
 `corepack pnpm` работает и без `pnpm` в PATH. Устанавливайте зависимости только
 в `apps/print-orchestrator`: в корне нет pnpm workspace. Dashboard не требует install.
 

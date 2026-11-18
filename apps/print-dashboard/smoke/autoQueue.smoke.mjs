@@ -9,38 +9,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CDP_URL, probeCdp } from "./cdp.mjs";
-
+import { CDP_URL, connect, probeCdp } from "./cdp.mjs";
 import { MOCK_DASHBOARD, startMockServer } from "./mockServer.mjs";
-
-
-async function connect(wsUrl) {
-  const ws = new WebSocket(wsUrl);
-  const pending = new Map();
-  const exceptions = [];
-  let seq = 0;
-  ws.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
-    if (msg.id && pending.has(msg.id)) {
-      const { resolve, reject } = pending.get(msg.id);
-      pending.delete(msg.id);
-      msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result);
-    } else if (msg.method === "Runtime.exceptionThrown") {
-      const d = msg.params?.exceptionDetails;
-      exceptions.push(d?.exception?.description || d?.text || "uncaught exception");
-    }
-  };
-  await new Promise((resolve, reject) => {
-    ws.onopen = resolve;
-    ws.onerror = () => reject(new Error("CDP websocket failed"));
-  });
-  const send = (method, params = {}) => {
-    const id = ++seq;
-    ws.send(JSON.stringify({ id, method, params }));
-    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
-  };
-  return { send, exceptions, close: () => ws.close() };
-}
 
 const LOCK = "автоочередь выключена при развёртывании (AUTO_QUEUE_ENABLED=false)";
 
