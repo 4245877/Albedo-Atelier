@@ -4,7 +4,7 @@
 # (SSI use-after-free). Update deliberately: bump the tag AND refresh the
 # digest together (`docker inspect --format '{{index .RepoDigests 0}}' nginx:<tag>`),
 # then re-run `nginx -t` in CI.
-FROM nginx:1.30.4-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46
+FROM nginx:1.30.7-alpine-slim@sha256:e2fc266695cef82e3a686c7ed628d1f09c2a7bb5ffb2a718ae7f7c821f5583c1
 
 # Build identity — same rationale as the orchestrator: without it there is no way
 # to tell whether the dashboard was updated alongside the backend, and a partial
