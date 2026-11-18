@@ -28,6 +28,7 @@ corepack pnpm test                 # весь набор, изолирован �
 corepack pnpm run test:unit
 corepack pnpm run test:integration
 corepack pnpm run build            # dist/, без tests и testkit
+corepack pnpm audit --prod --audit-level moderate
 corepack pnpm run lint:complexity   # информационный отчёт, не gate
 ```
 
@@ -81,37 +82,25 @@ rm -r -- "$atelier_test_dir"
 ```bash
 cd apps/print-dashboard
 node --test 'tests/**/*.test.mjs'    # без браузера и зависимостей
-node --test 'smoke/**/*.smoke.mjs'   # требует Chrome CDP
+npm run test:smoke                 # при запущенном Chrome CDP
 ```
 
 Dashboard — ES-модули без TypeScript и bundler; отдельного typecheck/build JS
 нет. Проверки чистых view/model helpers, структуры nginx и browser smoke дополняют
 друг друга. Контейнер собирается из его Dockerfile.
 
-Browser smoke открывает настоящую статику против `smoke/mockServer.mjs`.
-API — fake, real hardware не используется. При недоступном `CHROME_CDP_URL`
-(по умолчанию `http://127.0.0.1:9222`) сценарии **skip**, что не считается
-успешной браузерной проверкой. На этом хосте браузер доступен как Docker image:
+Browser smoke открывает статику против `smoke/mockServer.mjs`. Если
+`CHROME_CDP_URL` задан, недоступность Chrome завершает тест с ошибкой. Без явно
+указанного URL discovery на `127.0.0.1:9222` допускает skip для локальной
+разработки. Передавайте адрес уже запущенного тестового браузера.
 
 ```bash
-docker run -d --name atelier-chrome --network host --shm-size=1g chromedp/headless-shell:latest \
-  --disable-background-timer-throttling --disable-backgrounding-occluded-windows \
-  --disable-renderer-backgrounding
-CHROME_CDP_URL=http://127.0.0.1:9223 node --test smoke/layout.smoke.mjs
-docker rm -f atelier-chrome
+CHROME_CDP_URL=http://127.0.0.1:9222 npm run test:smoke
 ```
 
-Это проверенная команда для layout на четырёх ширинах. У установленного image
-прямой CDP слушает 9223, proxy — 9222; при другом image проверьте entrypoint.
-Контейнер одноразовый; имя выбирайте свободное, существующий браузер не удаляйте.
-Host network нужна для mock-сервера на loopback, production mounts/env ему не
-передаются. Проверьте, что выбранный CDP endpoint принадлежит этому тестовому
-браузеру. Не передавайте `--remote-debugging-port`: entrypoint уже настраивает его.
-
-Прогоняйте файлы последовательно со свежим Chrome, если общий запуск зависает
-на CDP. Все восемь smoke-файлов используются: boot/API, auto queue, history,
-layout, menu, new print, batch и uploads delete. `SMOKE_SCREENSHOTS_DIR` позволяет
-сохранить layout-снимки во временный каталог, вне Git.
+CI использует закреплённый Chrome for Testing и выполняет smoke-файлы
+последовательно. `SMOKE_SCREENSHOTS_DIR` сохраняет layout-снимки вне Git,
+если указать временный каталог.
 
 ## Deploy script
 
@@ -144,11 +133,5 @@ change detection, restart-safety, deferral, config-only recreate, rollback,
 
 ## CI
 
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) запускает secret scan,
-backend typecheck + unit/integration + build + dependency audit, dashboard Node
-и browser tests + `nginx -t` + image/Trivy, deploy scenarios и сборку/скан backend image.
-Root `check` проверяет backend; dashboard и deploy запускаются отдельно.
-
-Перед завершением очистки также проверяйте `git diff --check`, локальные ссылки
-Markdown, состав Git diff и отсутствие секретов. Не обновляйте lockfile или DTO
-ради устранения предупреждения, не связанного с изменением.
+[Проверки GitHub Actions и сопровождение runner](ci.md).
+Перед отправкой проверяйте `git diff --check`, состав Git diff и ссылки Markdown.

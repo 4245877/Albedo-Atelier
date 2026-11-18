@@ -201,6 +201,8 @@ auto-deduction, no duration metric for them). With provenance off, running
 (The `build.provenance` key in `compose.yml` is silently ignored by Compose v5 —
 it has to be the CLI flag, which is why it lives in the script.)
 
+Review the [GitHub Actions checks](ci.md) for the release SHA before building on the farm.
+
 **Git is not part of a deploy.** Pull, review, then deploy — the script records
 the commit it built from and warns when the working tree is dirty.
 
