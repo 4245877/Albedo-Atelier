@@ -19,9 +19,10 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
+import { CDP_URL, probeCdp } from "./cdp.mjs";
+
 import { MOCK_DASHBOARD, startMockServer } from "./mockServer.mjs";
 
-const CDP_URL = process.env.CHROME_CDP_URL || "http://127.0.0.1:9222";
 const SHOTS = process.env.SMOKE_SCREENSHOTS_DIR || "";
 
 const VIEWPORTS = [
@@ -30,15 +31,6 @@ const VIEWPORTS = [
   { name: "tablet", width: 820, height: 1180, mobile: true },
   { name: "phone", width: 390, height: 844, mobile: true }
 ];
-
-async function probeCdp() {
-  try {
-    const res = await fetch(`${CDP_URL}/json/version`, { signal: AbortSignal.timeout(1500) });
-    return res.ok ? await res.json() : null;
-  } catch {
-    return null;
-  }
-}
 
 async function connect(wsUrl) {
   const ws = new WebSocket(wsUrl);

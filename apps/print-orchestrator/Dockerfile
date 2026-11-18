@@ -1,6 +1,6 @@
 # Base image pinned by digest (tag kept for humans) for reproducible builds.
-# Refresh with: docker inspect --format '{{index .RepoDigests 0}}' node:22-alpine
-FROM node:22-alpine@sha256:8ea2348b068a9544dae7317b4f3aafcdc032df1647bb7d768a05a5cad1a7683f AS build
+# Refresh with: docker inspect --format '{{index .RepoDigests 0}}' node:22.23.5-alpine
+FROM node:22.23.5-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a AS build
 
 WORKDIR /app
 
@@ -19,14 +19,14 @@ RUN pnpm run build
 # OrcaSlicer AppImage (a glibc binary) CAN run in the `production-orca` variant
 # below. The build stage stays on Alpine: it only emits portable JS (dist/),
 # copied in below. Pinned by digest like the build base; refresh with:
-#   docker inspect --format '{{index .RepoDigests 0}}' node:22-bookworm-slim
+#   docker inspect --format '{{index .RepoDigests 0}}' node:22.23.5-bookworm-slim
 #
 # EVERYTHING IN THIS STAGE AND IN `orca-deps` BELOW MUST STAY SOURCE-INDEPENDENT.
 # Their cache keys may depend only on this Dockerfile, the base image digest and
 # package.json/pnpm-lock.yaml — never on src/, config/ or dist/. That is what
 # keeps the 564 MB OrcaSlicer apt layer cached across ordinary commits; see the
 # "Layer order" note above the leaf stages for why it is load-bearing.
-FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS runtime-deps
+FROM node:22.23.5-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS runtime-deps
 
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0

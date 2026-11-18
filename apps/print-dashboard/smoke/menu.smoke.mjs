@@ -14,18 +14,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { CDP_URL, probeCdp } from "./cdp.mjs";
+
 import { startMockServer } from "./mockServer.mjs";
 
-const CDP_URL = process.env.CHROME_CDP_URL || "http://127.0.0.1:9222";
-
-async function probeCdp() {
-  try {
-    const res = await fetch(`${CDP_URL}/json/version`, { signal: AbortSignal.timeout(1500) });
-    return res.ok ? await res.json() : null;
-  } catch {
-    return null;
-  }
-}
 
 async function connect(wsUrl) {
   const ws = new WebSocket(wsUrl);
