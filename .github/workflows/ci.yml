@@ -97,6 +97,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Dashboard unit tests
+        id: unit
         run: npm test
 
       - name: Dashboard browser smoke tests
@@ -135,9 +136,13 @@ jobs:
           exit 1
 
       - name: Build the dashboard image
+        id: image-build
+        if: ${{ !cancelled() && steps.unit.outcome == 'success' }}
         run: docker build --tag atelier-print-dashboard:ci .
 
       - name: Validate nginx config in the built image
+        id: nginx
+        if: ${{ !cancelled() && steps.image-build.outcome == 'success' }}
         run: |
           docker run --rm --network none \
             --add-host go2rtc:127.0.0.1 --add-host print-orchestrator:127.0.0.1 \
@@ -145,6 +150,7 @@ jobs:
 
       - name: Image vulnerability scan (Trivy)
         id: scan
+        if: ${{ !cancelled() && steps.nginx.outcome == 'success' }}
         run: bash ../../.github/scripts/scan-images.sh atelier-print-dashboard:ci
 
       - name: Upload image scan report

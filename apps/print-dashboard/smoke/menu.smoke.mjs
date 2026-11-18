@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CDP_URL, connect, probeCdp } from "./cdp.mjs";
+import { CDP_URL, closeTab, connect, openTab, probeCdp } from "./cdp.mjs";
 import { startMockServer } from "./mockServer.mjs";
 
 /* ── Пробы, исполняемые в странице ─────────────────────────────
@@ -103,12 +103,14 @@ const PROBE = `
 
 const version = await probeCdp();
 
-test("меню «⋯» карточки принтера видно целиком — на десктопе и на телефоне", { skip: version ? false : `no CDP browser at ${CDP_URL}` }, async () => {
+test("меню «⋯» карточки принтера видно целиком — на десктопе и на телефоне", { skip: version ? false : `no CDP browser at ${CDP_URL}` }, async (t) => {
   const mock = await startMockServer();
+  t.after(() => mock.close());
   // Пустая вкладка, а размеры экрана подменяем уже ПОСЛЕ загрузки доски:
   // подмена до навигации иногда оставляла страницу фоновой, и опрос доски
   // растягивался на десятки секунд.
-  const target = await (await fetch(`${CDP_URL}/json/new?about:blank`, { method: "PUT" })).json();
+  const target = await openTab("about:blank");
+  t.after(() => closeTab(target.id).catch(() => {}));
   const cdp = await connect(target.webSocketDebuggerUrl);
 
   const evalValue = async (expression) => {
@@ -279,7 +281,5 @@ test("меню «⋯» карточки принтера видно целико
     // переиспользовать другие smoke-тесты.
     await cdp.send("Emulation.clearDeviceMetricsOverride").catch(() => {});
     cdp.close();
-    await fetch(`${CDP_URL}/json/close/${target.id}`).catch(() => {});
-    await mock.close();
   }
 });

@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CDP_URL, connect, probeCdp } from "./cdp.mjs";
+import { CDP_URL, closeTab, connect, openTab, probeCdp } from "./cdp.mjs";
 import { startMockServer } from "./mockServer.mjs";
 
 const ISO = "2026-10-14T10:00:00.000Z";
@@ -115,7 +115,7 @@ test("«Новая печать» пакетом: две модели → оди
     }
   });
 
-  const target = await (await fetch(`${CDP_URL}/json/new?${encodeURIComponent(mock.url)}`, { method: "PUT" })).json();
+  const target = await openTab(mock.url);
   const cdp = await connect(target.webSocketDebuggerUrl);
   const evalValue = async (expression) => {
     const { result } = await cdp.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
@@ -171,7 +171,7 @@ test("«Новая печать» пакетом: две модели → оди
     assert.deepEqual(cdp.exceptions, [], "no uncaught page errors");
   } finally {
     cdp.close();
-    await fetch(`${CDP_URL}/json/close/${target.id}`).catch(() => {});
+    await closeTab(target.id).catch(() => {});
     await mock.close();
   }
 });

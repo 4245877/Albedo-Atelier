@@ -319,7 +319,10 @@ export function startMockServer(options = {}) {
         port,
         url: `http://127.0.0.1:${port}/`,
         requests,
-        close: () => new Promise((r) => server.close(r))
+        close: () => new Promise((resolveClose) => {
+          server.close(resolveClose);
+          server.closeAllConnections();
+        })
       });
     });
   });

@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CDP_URL, connect, probeCdp } from "./cdp.mjs";
+import { CDP_URL, closeTab, connect, openTab, probeCdp } from "./cdp.mjs";
 import { MOCK_DASHBOARD, startMockServer } from "./mockServer.mjs";
 
 const version = await probeCdp();
@@ -18,7 +18,7 @@ const version = await probeCdp();
 test("dashboard boots in a real browser and renders the board from the API", { skip: version ? false : `no CDP browser at ${CDP_URL}` }, async () => {
   const mock = await startMockServer();
   // Open a fresh target for this page and talk to it directly.
-  const target = await (await fetch(`${CDP_URL}/json/new?${encodeURIComponent(mock.url)}`, { method: "PUT" })).json();
+  const target = await openTab(mock.url);
   const cdp = await connect(target.webSocketDebuggerUrl);
 
   try {
@@ -67,7 +67,7 @@ test("dashboard boots in a real browser and renders the board from the API", { s
     assert.deepEqual(cdp.exceptions, [], "there should be no uncaught page errors");
   } finally {
     cdp.close();
-    await fetch(`${CDP_URL}/json/close/${target.id}`).catch(() => {});
+    await closeTab(target.id).catch(() => {});
     await mock.close();
   }
 });
@@ -87,7 +87,7 @@ test("bed clearance is one explicit click, one request and an immediate board up
   const printer = dashboard.printers.find((p) => p.id === "a1");
   printer.bedCycle = { state: "AWAITING_CLEARANCE", awaitingClearance: true, confirmable: true, operationId: "stale-operation" };
   printer.readiness = { state: "needs_clearance", label: "Ждёт снятия детали", canAcceptJob: false, detail: null };
-  const target = await (await fetch(`${CDP_URL}/json/new?${encodeURIComponent(mock.url)}`, { method: "PUT" })).json();
+  const target = await openTab(mock.url);
   const cdp = await connect(target.webSocketDebuggerUrl);
   const evaluate = async (expression) => (await cdp.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result.value;
   try {
@@ -108,7 +108,7 @@ test("bed clearance is one explicit click, one request and an immediate board up
     assert.deepEqual(cdp.exceptions, []);
   } finally {
     cdp.close();
-    await fetch(`${CDP_URL}/json/close/${target.id}`).catch(() => {});
+    await closeTab(target.id).catch(() => {});
     await mock.close();
   }
 });
