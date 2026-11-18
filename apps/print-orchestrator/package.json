@@ -18,8 +18,8 @@
   },
   "dependencies": {
     "@fastify/multipart": "^9.0.3",
-    "fast-xml-parser": "^5.10.1",
-    "fastify": "^5.4.0",
+    "fast-xml-parser": "^5.12.1",
+    "fastify": "^5.12.8",
     "mqtt": "^5.10.1",
     "suncalc": "1.9.0",
     "ws": "^8.18.0"
@@ -34,5 +34,11 @@
   "engines": {
     "node": ">=22"
   },
-  "packageManager": "pnpm@10.33.1"
+  "packageManager": "pnpm@10.33.1",
+  "pnpm": {
+    "overrides": {
+      "@fastify/multipart>@fastify/busboy": "^3.2.2",
+      "socks>ip-address": "^10.7.4"
+    }
+  }
 }
